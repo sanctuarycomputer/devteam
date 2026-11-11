@@ -246,3 +246,147 @@ Branch `ooda-signals` off `ooda-loop-inspectable` (PR 1); GitHub base `ooda-loop
 6. **signalKeyOf** stays TRIAGE_KINDS-only; `fix-regressed`/`recurred` keep their own keys (they already ref the incident). Edit the spec's "every spike, qualify and regression" to "every qualify and spike".
 7. **Tests:** for `sensor ignore`, write a `settings.sensors` probe entry and `run/sensors/<name>/fingerprints.json` by hand (or reuse chain's probe fixture). For `ack`, hand-write two observations with `source_key: metrics:<kind>:<subject>` for a finding the fixture reliably has live, then `ack`. Test the 41 → 40 cut.
 8. `stageOf(act)` is always `act`, with or without `decision`.
+
+---
+
+## PR 3: lineage and a sidepeek for every stage
+
+Branch `ooda-lineage` off `ooda-signals` (PR 2); base `ooda-signals` until it merges. Consumes PR 2's `SCHEMA['x-ooda']`, `stageOf(o)`, `provenanceOf(o)`, `signalKeyOf(o)`, `orientClusters()` (with `ids` and `key`), `liveDecision`.
+
+### Task 1: `lineage(id)` in the kit
+
+**Files:** `docs/devteam/scripts/devteam.mjs` (new `linkIndex()` and `lineage()` near `historyOf`; `peekView` adds `v.lineage`; `cmdPeek` takes `--mermaid`), `test/ooda-lineage.test.mjs` (new).
+
+**Interfaces — produces:**
+- `linkIndex()` → `{ out: Map<id, [{to, why}]>, in: Map<id, [{from, why}]> }`, built once per `readLog()` (cache keyed on the `readLog()` object, as `FP_OBS` does). Edges, each `from` the earlier step `to` the later one, `why` a short word:
+  - observation → knowledge: `knowledge.evidence` contains it (`why: 'evidence'`)
+  - observation → problem: `problem.refs` contains it (`'refs'`)
+  - observation → decision: `decision.refs` contains it (`'refs'`; noise rulings)
+  - observation → set-aside/ignore observation: its `refs` contain it (`'set aside'`)
+  - observation → question: `question.evidence` (`'evidence'`)
+  - knowledge|problem → decision: `decision.knowledge` (PR 4; read it if present) or `decision.refs` (`'rests on'`)
+  - knowledge|problem → question: `question.evidence`/`blocks` (`'asks about'`)
+  - knowledge → act: `act.knowledge` (PR 4; read if present) (`'given'`)
+  - question → decision|act: `approved_by` (`'approved'`)
+  - decision → act: `act.decision` (`'carried out'`)
+  - act → observation: an outcome-kind observation (`stageOf === 'learn'`) whose `refs` contain the act or its decision (`'outcome'`)
+  - act → ticket: `act.class === 'add-ticket'` refs (`'made'`)
+  - observation → signal: `signal:<signalKeyOf(o)>` pseudo-node, for observations in an `orientClusters()` group (`'recurs'`)
+  - decision|act with `corrected` → pseudo-node `correction:<id>` (`'corrected'`), stage `learn`
+- `lineage(id, { up = 6, down = 4, max = 120 } = {})` → `{ nodes: [{ id, stage, type, kind, label, at, href }], edges: [{ from, to, why }], truncated }`. BFS up over `in`, down over `out`, both bounded; then collapse: siblings of one `type`+`kind` sharing one neighbour, more than 5, become one node `{ id: 'group:<neighbour>:<type>:<kind>', label: '<n> <kind> observations', members: [ids] }`. `label`: the record's short text (`what`, `statement`, `title`, `detail`), plain text, newlines to spaces, cut to 60 characters. `href`: the sidepeek hash (`#observation/<id>`, `#lesson/<id>`, `#problem/<id>`, `#decision/<id>`, `#act/<id>`, `#q/<id>`, `#signal/<key>`, `#ticket/<id>`, `#learning/<id>`), null for a correction (its call's href instead).
+- `lineageMermaid(L)` → Mermaid text: `flowchart LR`, a `subgraph` per stage in order Observe, Orient, Decide, Act, Learn (empty ones left out; work-graph nodes in a final unlabelled group), node ids `n0…`, labels as `n3["<label>"]` with `"` → `#quot;`, and characters outside `[A-Za-z0-9 .,:;!?()'/+-]` dropped; `classDef` per stage; `class nK current` for the opened record.
+- `peekView(...)` adds `v.lineage = lineage(id)` for any kind whose id is a log id or a signal key; `peek <kind> <id> --mermaid` prints `lineageMermaid(lineage(id))`.
+
+- [ ] Tests first (fixture log by commands and hand lines): an incident chain — three spikes on one fingerprint (hand lines, `detector: 'sensor'`), `sensor incident` (or a hand `problem` with `refs`), `decide --class incident-fix --refs <p> <ticket>`, `ticket add --decision`, a hand `fix-deployed` and `outcome` observation citing the decision. From the first spike: down reaches the incident, decision, act, ticket and outcome. From the outcome: up reaches the spikes. From the decision: both. A noise ruling: observation → decision. Six observations on one signal collapse to one group node with 6 members; `max: 5` sets `truncated`. A label holding `"]; click x call alert(1) %%` comes out without `]`, `;`, `%`. `--mermaid` output starts `flowchart LR` and has one `subgraph` per non-empty stage.
+- [ ] Implement; commit "Lineage: every OODA record's chain, both ways, bounded; Mermaid text".
+
+### Task 2: sidepeeks for observation, signal and learning; every Loop card opens one
+
+**Files:** `docs/devteam/dashboard/index.html` — `TYPE_META` (~2060: add `observation: ['eye', 'Observation']`, `signal: ['repeat', 'Recurring signal']`, `learning: ['trending-up', 'Learning']`), the route's sidepeek map (~3123), new `openObservation`, `openSignal`, `openLearning` (beside `openLesson` ~2876, same shape: `drawerFor`, `peekOf`, `attrs`, sections, `historySection`), `idLink` (~1030: `o-` → `#observation/`, `q-` → `#q/`), the Loop renderers (~1972-2000: `subj(...)` plus `data-open="<href>"` on every card, and one delegated click handler: a click on a card outside a link, button or input sets `location.hash`); `devteam.mjs` `peekView` for `signal` (its cluster: key, count, ids, first and latest, age, the `orient` command that would explain it) and `learning` (the record; PR 5 fills its figures).
+
+- [ ] **Where an observation sits:** a function `loopPlace(o, data)` in index.html returning one line, from the peek's lineage (in the sidepeek) or from `DATA.ooda` (on the card): "not oriented yet" / "part of a recurring signal (n of 3)" / "explained: became a lesson|problem|incident" / "ruled noise: <why>" / "ignored at triage: <reason>" / "set aside until <time>: <reason>" / "carried on: <furthest stage reached>". The card shows it under the detail; the server adds what the card needs to `collectOoda.observations[*]` as `place: { state, ref, why }` so the card doesn't need the full index.
+- [ ] Each new sidepeek: bar, attributes (an observation's provenance first: "From the g3d-stacks-logs sensor", "From your answer to …"), the place line, the lineage (Task 3), history.
+- [ ] Tests (`test/dashboard.test.mjs`'s harness, which drives Chrome when `canDrive()`; follow its existing sidepeek tests): an observation card click opens `#observation/<id>` with its provenance and place; a signal opens `#signal/<key>` with a key holding `/`; `o-` ids in text are links.
+- [ ] Commit "Sidepeeks for observations, recurring signals and learning; every Loop card opens".
+
+### Task 3: draw the lineage with Mermaid, clickable, with a list fallback
+
+**Files:** `index.html` — factor `renderMermaid`'s initialize/render/sanitize into `drawMermaid(src)` returning the sanitized SVG string (or throwing); `renderMermaid` calls it; new `lineageBlock(peek, selfId)` used by every OODA sidepeek (observation, signal, lesson, problem, decision, act, learning) after the attributes.
+
+- [ ] `lineageBlock`: `<h3>How it came about, and what came of it</h3>`, then a container. Async: `drawMermaid(peek.lineage_mermaid)` (the server sends the text as `v.lineage_mermaid`), insert the SVG, then for each node in `peek.lineage.nodes` (index i ↔ `n<i>`), find `g.node[data-id="n<i>"]` and wrap it in `<a href="<node.href>">` with `<title>` = its label and `tabindex`; the current node gets `aria-current`. On any failure (Mermaid didn't load, render threw): the list fallback, grouped by stage in order, each item `<a href>` with its label and kind. Never show the Mermaid source. A collapsed group lists its members under it in the sidepeek.
+- [ ] Redraw rule: the drawer redraws on refresh only when the lineage's node ids changed (compare a joined id string), so the graph doesn't flicker every refresh.
+- [ ] Tests: with Mermaid stubbed to fail (block the CDN in the test page, as the existing Mermaid test does if any; else override `MERMAID = Promise.reject()` before opening), the fallback lists every node as a link; with it available (`canDrive()` + network), a node click opens its sidepeek.
+- [ ] Commit "Lineage in every OODA sidepeek: Mermaid, clickable, with a list fallback".
+
+### Task 4: Orientation debt (signals part)
+
+**Files:** `devteam.mjs` `collectOoda` adds `debt: { signals: [...clusters older than a day, oldest first] }` (PR 4 adds resolved incidents); `index.html` Orient tab section "Orientation debt" above Recurring signals: each item a card that opens its signal; empty state "Nothing waiting: every recurring signal is explained or under a day old."
+
+- [ ] Test: a cluster whose oldest item is 25 hours old (hand lines with past `at`) is in `debt.signals`; a 2-hour-old one isn't.
+- [ ] Commit "Orient: orientation debt".
+
+### Task 5: docs and PR
+
+- [ ] `supervisor.md` §3: one paragraph on the lineage (`peek <kind> <id> --mermaid` for retros and PR bodies) and orientation debt. Merge `ooda-signals` (and main) in, full suite, push, PR with base `ooda-signals`; body says what the operator's review can read (`peek … --json`'s `lineage`, `dashboard-data`'s `ooda.debt`).
+
+### PR 3 review fixes (Fable, folded in; these win over the tasks above)
+
+1. **Edges by field, not by source type.** For each object `o`: for `k` of `evidence`, `refs`, `blocks`, `knowledge`: each `t` of `o[k]` that `logGet(t)` resolves is an edge `t → o` (`why` from the field: evidence `'evidence'`, refs `'about'`, blocks `'asks about'`, knowledge `'rests on'`); `o.approved_by` → `o` (`'approved'`); `o.decision` → `o` (`'carried out'`). Cited → citing is earlier → later for every field. Then the pseudo-edges (signal, correction). This covers `fix-deployed`/`recurred` (they ref the incident and ticket), knowledge evidence of any type, problems citing acts, and `worker-slots` → ticket.
+2. **Work-graph and conversation nodes are leaves** (`stageOf === null`, goals included): drawn, never expanded. **Collapse key** is `(neighbour, direction, type, kind)`.
+3. **Async insert vs `showDrawer`:** `LINEAGE_SVG = new Map()` keyed by the joined node ids. `lineageBlock` returns the cached, already-wrapped SVG inline when present; else a `<div data-lineage="<key>">` with the list fallback, and starts `drawMermaid`; on success it wraps the nodes in the string (build in a detached DOM, serialize), stores it, and calls `redraw()`. The list is the first paint.
+4. **Labels:** `label.replace(/\s+/g, ' ').replace(/[^A-Za-z0-9 .,:!?()'/+-]/g, '').slice(0, 60)` (no `"`, `;`, `#`, `%`); empty → the id. Wrapper `<a>` built with `setAttribute('href', …)`, ids `encodeURIComponent`-ed.
+5. **Select** `g.node[data-id="n<i>"]`; `n<i>` order is `lineage.nodes` order. Force the fallback in Chrome with `MERMAID = Promise.reject(new Error('blocked'))` evaluated in the page before opening. CI has no Chrome, so the CLI test also asserts the fallback's data (nodes by stage) and the `n<i>` order.
+6. **Whole-card click:** one delegated handler on `[data-open]` that ignores Shift/Meta/Ctrl, non-primary buttons, `TL.pin`, clicks inside `a, button, input, select, textarea, label, [data-correct-form], .untrusted`, and a text selection; remove the incidents' per-element `onclick` (~2580) so nothing double-fires.
+7. **`loopPlace` data:** `signalGroups()` returns every group (under three too) with its spread flag; `orientClusters()` is built on it. `collectOoda.observations[*].place` is computed for the 40 shown only, from `signalGroups()` and `linkIndex()`.
+8. `peekView` for `signal` sets `record: null` (no `recordView` die). `linkIndex` caches on the `readLog()` object.
+
+---
+
+## PR 4: knowledge in decisions and prompts; what resolved incidents taught
+
+Branch `ooda-knowledge` off `ooda-lineage`. **Adds two log fields** (`decision.knowledge`, `act.knowledge`), so it must not merge until PR 1 is released and adopted by every instance (the operator's adoption report says so; the PR body must say it too).
+
+### Task 1: a decision cites the knowledge it rests on
+
+**Files:** `schema/log.schema.json` (`decision.properties.knowledge`: `{ "type": "array", "items": { "type": "string", "pattern": "^(k|p)-" }, "description": "The knowledge or problems this decision rests on (decide --on); never copied into refs." }`), `devteam.mjs` `cmdDecide` (`--on <ids…>`: each must resolve to knowledge or a problem; a knowledge one must be `accepted` (a candidate or retired one is refused: "k-… is <status>: a decision rests only on accepted knowledge"); stored as `knowledge`, never added to `refs`), `orient`'s proposed `decide` commands include `--on` for the lesson or problem they came from, `index.html` decision sidepeek shows "Rests on" with links, `test/ooda-knowledge.test.mjs` (new).
+
+- [ ] Tests: `decide --on <accepted k> --class … -- "x"` stores `knowledge`; refs unchanged; `act --decision` refs-within-decision check unaffected; a candidate, a retired lesson and an observation id are refused; lineage (PR 3) draws k → decision.
+- [ ] Commit "Decisions cite the knowledge they rest on (decide --on)".
+
+### Task 2: a start records the lessons it was given
+
+**Files:** schema `act.properties.knowledge` (same shape, pattern `^k-`, "The accepted knowledge a worker-slots start put in the session's prompt."), `devteam.mjs` worker/planner start (~11455: `knowledge: knowledgeFor(target).map((k) => k.id)`, the same target `knowledgeBlock` used, omitted when empty), `index.html` act sidepeek "Given" list.
+
+- [ ] Tests: a worker started with one accepted lesson in its scope logs a `worker-slots` act with `knowledge: [k]`; with none, no field; a planner's act too; `LAUNCH_ACT` parsing of `what` unchanged (the existing worker tests pass); the line stays under 4,096 bytes with 60 lessons (cap at 60 ids, newest accepted first).
+- [ ] Commit "Starts record the knowledge they were given".
+
+### Task 3: resolved incidents nobody learned from are orientation debt
+
+**Files:** `devteam.mjs` `collectOoda.debt.incidents`: incidents (`isIncident`) with status `resolved` and an `outcome` observation citing them, not cited by any knowledge's `evidence` nor by a live `orient-noise` decision's refs, resolved in the last 30 days; `cmdOrient` prints them after the clusters: "<p-id> was fixed and verified (<title>): what did it teach? `knowledge add --kind lesson --scope … --evidence <p> <d> <outcome>` or `decide --class orient-noise --refs <p> -- \"nothing to keep\"`" (values through `shq`); the orient-noise check in `cmdDecide` also accepts a problem id; `index.html` Orientation debt lists them under the signals.
+- [ ] Tests: a resolved incident with an outcome appears; a lesson with it in evidence clears it; a noise ruling citing it clears it; an unverified resolution (no outcome) doesn't appear.
+- [ ] Commit "Orientation debt: what fixed incidents taught".
+
+### Task 4: docs and PR
+- [ ] `supervisor.md` §3 Decide: cite what a decision rests on with `--on`; Orient: clear incident debt. Merge, full suite, push, PR (base `ooda-lineage`), body: the adoption gate, and that the operator's review can read `decision.knowledge`, `act.knowledge` and `ooda.debt`.
+
+---
+
+## PR 5: the learning record and the chart
+
+Branch `ooda-learning` off `ooda-knowledge`. **Adds two observation fields** (`figures`, `week`); same adoption gate as PR 4.
+
+### Task 1: `learningFigures(cut)` and the weekly record
+
+**Files:** schema `observation.properties.figures` (object: `informed: { knowledge, signals_explained, signals_formed, starts_given, starts }`, `autonomous: { trusted_calls, ladder_calls, questions, merged }`, `trusted: { agreed, answered, corrections, calls }`, all integers; `additionalProperties: false`) and `observation.properties.week` (`"^\\d{4}-W\\d{2}$"`); `devteam.mjs`: `logAt(cut)` (fold only lines with `at <= cut`, reusing `fold`; cached per cut), `learningFigures(cut)` computing every count from `logAt(cut)` and the week before it, `writeLearning()` called from `cmdObserveMetrics` (supervisor only): for each ISO week since the log's first line that has ended and has no observation with `source_key: learning:<week>` (checked over all observations), append `{ type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week, figures, detail: '<one sentence of the numbers>', source_key: 'learning:<week>', refs: <≤60 ids: the corrections, accepted lessons and explained signals counted> }`. Counts, not percentages, are stored; shares are computed in the view.
+- [ ] Tests: a fixture log spanning three weeks (hand lines with past `at`) gets three learning records on the first `observe-metrics`, none on the second (idempotent), each with `week` and today's `at`; figures match hand-counted values for a small fixture; `dashboard-data` never writes one.
+- [ ] Commit "The weekly learning record".
+
+### Task 2: the chart at the top of the Loop, and the learning sidepeek
+
+**Files:** `index.html` — a section above the Loop tabs: three `lineChart` charts (Informed: accepted knowledge, share of signals explained; Autonomous: share of ladder calls on trust, questions per merged ticket; Trusted: agreement, corrections per 100 calls), weekly points from `DATA.ooda.learning` (the records, oldest first), hollow when the denominator is under 5 (title "too few to say (n = …)"), marks for retros and rung changes, each point an `<a href="#learning/<id>">`. Under three records: tiles "since <date>: n calls, n lessons kept, n corrections" and "The loop needs a few weeks of calls, answers and lessons before trends mean anything." `openLearning` (PR 3's) shows the figures as a table, the counted records (recomputed by the peek: `peekView('learning')` returns the full lists from `learningFigures`), and lesson efficacy: for each lesson in `act.knowledge` of starts, the observations on the keys of its evidence in the four weeks before it was first given and since (ids and counts).
+- [ ] Extend `lineChart` only if it can't take hollow points or link circles; keep its signature.
+- [ ] Tests: CLI — `dashboard-data` has `ooda.learning`; peek of a learning record has the lists and efficacy rows. Chrome (when available) — the chart renders three charts; with one record, tiles.
+- [ ] Commit "The Loop's learning chart, and what each week counted".
+
+### Task 3: docs and PR
+- [ ] `supervisor.md` §3: the weekly record and how to read it; `operator.md` mention for the daily review (coordinate with the upstream loop's follow-up to #190). Merge, full suite, push, PR (base `ooda-knowledge`).
+
+### PR 4 and 5 review fixes (Fable, folded in; these win over the tasks above)
+
+1. **Replaying the log at a cut:** `withLogAt(cut, fn)` swaps `logCache` for a fold of the lines with `at <= cut`, resets every log-derived global that isn't keyed on the `readLog()` object (grep `^let .* = null;`: `SENSOR_KEYS`, and any memo not built on `memo()`), runs `fn`, and restores them in `finally`. `fold` is one pass; no checkpoints. `mergedAt` reads git commit dates, which replay as they are.
+2. **Adoption gate, operational:** PR 4's and PR 5's bodies list every instance from the hub's `/instances.json` with its `upstream_base`, and say they merge only when each is at or past PR 1's release. Workers never write `decision` or `worker-slots` lines, so a stale worktree doesn't matter; only a whole instance on an older kit does.
+3. **`decide --on`:** a separate field from `approved_by`; `authorise` never reads it. Paste the reviewed check (each id resolves to knowledge or a problem; knowledge must be accepted; an id in both `--refs` and `--on` is refused); `knowledge: on.length ? on : undefined`. Test: `--on <owner standing rule>` leaves `authority` unchanged.
+4. **`worker-slots.knowledge` only on a fresh start** (the final `resume` value false): a resumed session never reads the new prompt. `knowledgeFor(id)` sorted by `created_at` desc, first 60 ids.
+5. **Figures, exactly** (ISO weeks, UTC; "in W" = the named time falls in W):
+   - `informed.knowledge`: knowledge with `status === 'accepted'` at the cut.
+   - `informed.signals_formed` / `signals_explained`: `signalGroups()` groups of 3+ at the cut before the explained exclusion; explained = any member cited by `knowledge.evidence`, `problem.refs` or a live decision's `refs`.
+   - `informed.starts` / `starts_given`: `worker-slots` acts created in W whose `what` starts `made `; given = `knowledge?.length > 0`.
+   - `autonomous.ladder_calls`: `calls()` created in W whose class is in `ladder().classes`; `trusted_calls`: of those, authority `rung` or `standing-rule` (a defaulted question counts as asked).
+   - `autonomous.questions`: questions created in W of kinds `owner-decision`, `one-way-door`, `proposal`, `trust`, `clarification` (not `owner-action`, `review`, `goal-definition`, `goal-approval`); check the schema's question `kind` enum and use exactly its decision kinds.
+   - `autonomous.merged`: tickets whose `mergedAt` falls in W.
+   - `trusted.answered` / `agreed`: answered questions with `answered_at` in W and a `recommendation` (`trustEvidence`'s filter); agreed = `matched`.
+   - `trusted.calls`: `calls()` created in W; `corrections`: `correctionOf(c).at` in W.
+   - Hollow when the line's denominator is under 5: `ladder_calls`, `questions`, `answered`, `calls`, `signals_formed`, `starts`.
+6. **`lineChart`:** extend compatibly. A point may be `[ts, v, { hollow, href, title }]` (hollow: `fill="none"` with a stroke; href: wrapped in `<a>`), and a new option `xmarks: [{ at, label }]` draws vertical dashed lines. Don't mix a count and a share on one chart: six small charts, two per column (Informed: accepted knowledge; share of signals explained. Autonomous: share of ladder calls on trust; questions per merged ticket. Trusted: agreement; corrections per 100 calls).
+7. **Incident debt:** an outcome citing it = `refs.includes(p.id)`; resolution time = the last `updates` entry setting `status: 'resolved'`; exclude an incident whose status the owner set (`ownerHolds(p, 'status')`); 30 days from resolution; a live noise decision clears it, so a corrected one re-lists it.
+8. Backfill starts at the week of the log's earliest `at` and skips the current week; the `source_key` check scans all observations. `detail` is cut to 300 characters. There are no `decide` commands in `orient`'s output today: the `--on` hint goes in the debt line's suggested `knowledge add` and in the decision sidepeek. Hand-written test lines go in time order. Keep CLI assertions on `ooda.learning`'s shape and the under-three tile rule, since CI has no Chrome.
