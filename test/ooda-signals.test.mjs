@@ -256,7 +256,7 @@ test('a kit lesson keeps its tag through Orient: stage orient, listed by knowled
   } finally { F.done(); }
 });
 
-test('an open incident holds its fingerprint; a noise ruling by key covers later observations; a hand reading is refused', () => {
+test('an open incident holds its fingerprint; a noise ruling by key covers its signal; a hand reading is refused', () => {
   const F = fleetFixture('ooda-held');
   const { old, ok, run } = F;
   try {
@@ -267,15 +267,42 @@ test('an open incident holds its fingerprint; a noise ruling by key covers later
     // an open incident that cites only the first observation still holds the whole fingerprint
     hand('supervisor', { type: 'problem', title: 'web errors', severity: 3, realized: true, status: 'open', refs: [ids[0]], fingerprints: [key], sensor: 'web' }, 1000);
     assert.ok(!JSON.stringify(signals()).includes(key), 'held by its open incident');
-    // a ruling naming the key covers spikes after it
+    // a ruling naming the key covers the signal's observations before it, cited or not
     const F2 = fleetFixture('ooda-ruled');
     try {
       const h2 = handFor(F2);
       const first = fingerprintLines(h2, 'web', 'log:L1', 3, 6 * 86400000, 86400000);
       F2.ok(F2.old, ['decide', '--class', 'orient-noise', '--refs', key, ...first, '--', 'bots'], SUP);
       fingerprintLines(h2, 'web', 'log:L1', 3, 2 * 86400000, 12 * 3600000).slice(1);
-      assert.ok(!JSON.stringify(json(F2.ok(F2.old, ['orient', '--json'], SUP))).includes(key), 'the ruling covers the signal, later spikes too');
+      assert.ok(!JSON.stringify(json(F2.ok(F2.old, ['orient', '--json'], SUP))).includes(key), 'the ruling covers every observation on the signal before it, cited or not');
     } finally { F2.done(); }
     assert.match(run(old, ['observe', '--subject', 'g-x', '--kind', 'reading', '--source', 'repo', '--detail', '5'], SUP).err, /goal's readings come from the kit/);
   } finally { F.done(); }
+});
+
+test('a noise ruling covers its signal up to the ruling: an escalation after it is untriaged again', () => {
+  const F = fleetFixture('ooda-ruling-window');
+  const F0 = fleetFixture('ooda-ruling-shape');
+  const { old, ok } = F;
+  const hand = handFor(F);
+  try {
+    sensorFixture(F);
+    const H = 3600000;
+    const esc = (ago) => hand('supervisor', { type: 'observation', source: 'fake', detector: 'sensor', subject: 'sensor:fake', kind: 'log-error', detail: 'fake: a error log line', severity: 3, valence: -1, source_key: 'sensor:fake:log:U7' }, ago);
+    const before = esc(5 * H);
+    // a ruling as decide writes it (its shape from another project), made four hours ago
+    const o0 = F0.ok(F0.old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'x'], SUP).trim();
+    const d0 = one(F0, F0.ok(F0.old, ['decide', '--class', 'orient-noise', '--refs', 'fake:log:U7', o0, '--', 'a health check'], SUP).match(/d-\S+/)[0]);
+    const shape = Object.fromEntries(Object.entries(d0).filter(([k]) => !['id', 'type', 'created_at', 'created_by', 'updates', 'stage', 'refs'].includes(k) && !k.startsWith('__')));
+    hand('supervisor', { ...shape, type: 'decision', refs: ['fake:log:U7', before] }, 4 * H);
+    fs.mkdirSync(path.join(old, 'docs/devteam/run/sensors'), { recursive: true });
+    fs.writeFileSync(path.join(old, 'docs/devteam/run/sensors/.wait-alive'), '');
+    const untriaged = () => json(ok(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'sensor-untriaged' && x.subject === 'fake:log:U7');
+    assert.deepEqual(untriaged(), [], 'the ruling covers what came before it');
+    const after = esc(3 * H);
+    const [f] = untriaged();
+    assert.ok(f, 'an escalation after the ruling gets a fresh look');
+    assert.match(f.detail, new RegExp(after));
+    assert.doesNotMatch(f.detail, new RegExp(before));
+  } finally { F.done(); F0.done(); }
 });

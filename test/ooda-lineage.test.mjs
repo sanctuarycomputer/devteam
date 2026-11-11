@@ -156,15 +156,18 @@ test('where an observation sits: on its card (dashboard-data) and in its peek; a
     hand('supervisor', { type: 'observation', source: 'ack', kind: 'finding-ack', subject: 'stale-worker w-01-a', detail: 'it is thinking', source_ref: 'metrics:stale-worker:w-01-a', refs: [waits] }, 1 * H);
     // a finding whose subject holds a /: three of it on two days, a recurring signal
     const slash = [26, 25, 1].map((h) => hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed then passed', source_key: 'metrics:flaky-gate:web/e2e' }, h * H + 500));
-    // what explains a whole signal (explained().keys) explains a later observation on it too: the
-    // incident that holds its fingerprint, the noise ruling that names its key
+    // what explains a whole signal (explained().keys, covered()) explains other observations on it:
+    // the incident that holds its fingerprint, a later one too; the noise ruling that names its key,
+    // those up to the ruling (one after it gets a fresh look)
     const later = spike(hand, 'log:L1', 3 * H + 7000);
+    const botBefore = hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'app', kind: 'note', detail: 'the bot, earlier', source_key: 'note:bot' }, 12 * H);
     const botAgain = ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the bot again', '--key', 'note:bot'], SUP).trim();
     const d = json(ok(old, ['dashboard-data']));
     const place = (id) => d.ooda.observations.find((o) => o.id === id)?.place;
     assert.deepEqual(place(later), { state: 'explained', ref: C.p, why: 'incident' });
-    assert.equal(place(botAgain).state, 'noise');
-    assert.equal(place(botAgain).why, 'a health check');
+    assert.equal(place(botBefore).state, 'noise');
+    assert.equal(place(botBefore).why, 'a health check');
+    assert.deepEqual(place(botAgain), { state: 'new', ref: null }, 'after the ruling: a fresh look');
     assert.deepEqual(place(fresh), { state: 'new', ref: null });
     assert.deepEqual(place(twice[0]), { state: 'signal', ref: 'note:twice', n: 2, recurring: false });
     assert.equal(place(taught).state, 'explained');

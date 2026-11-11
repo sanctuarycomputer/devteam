@@ -7731,21 +7731,25 @@ function cmdProblem() {
 const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
 // What explains an observation, one definition for Orient and for sensor-untriaged. ids: what
 // knowledge's evidence, a problem's refs, or a live decision's refs cite (any class: a decision
-// that cites an observation took it into account). keys: whole signals, those a live orient-noise
-// ruling names by key (a ruling covers the signal, later observations on it too) and the
-// fingerprints an open incident holds (in hand while it is worked). A corrected ruling explains
-// nothing, so the owner's correction brings its signal back.
+// that cites an observation took it into account). keys: signal key → until when it is explained.
+// A live orient-noise ruling naming a key covers that signal's observations up to the ruling, so a
+// chatty one needn't list them all, and an escalation after it gets a fresh look (a fingerprint that
+// is always noise is for sensor ignore). An open incident holds its fingerprints for as long as it is
+// open. A corrected ruling explains nothing, so the owner's correction brings its signal back.
+// covered(keys, key, at): whether an observation on key, made at at, is explained by its key.
 function explained() {
   const ids = new Set();
-  const keys = new Set();
+  const keys = new Map();
+  const upTo = (k, at) => { if (!(keys.get(k) >= at)) keys.set(k, at); };
   for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) ids.add(r);
   for (const d of logObjects('decision')) {
     if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
-    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) keys.add(r); }
+    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) upTo(r, d.created_at); }
   }
-  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) keys.add(f);
+  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) upTo(f, '9999');
   return { ids, keys };
 }
+const covered = (keys, key, at) => keys.has(key) && at <= keys.get(key);
 // The observations (and corrections) nothing explains yet (explained, above), grouped on the key
 // they recur on, each group with whether it spreads (two writers or two days): every group, however
 // small, so a card can say how near a signal one is; computed once per read of the log.
@@ -7758,7 +7762,7 @@ function signalGroups() {
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
-    if (keys.has(key)) continue;
+    if (covered(keys, key, o.created_at)) continue;
     add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
@@ -9242,7 +9246,7 @@ function collectMetrics(since) {
     for (const o of logObjects('observation')) {
       if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
       const id = fpIdOfObservation(o);
-      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || heldKeys.has(id) || openIncidentOf(id)) continue;
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || covered(heldKeys, id, o.created_at) || openIncidentOf(id)) continue;
       (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
     }
     for (const [id, obs] of byFp) {
@@ -14651,8 +14655,9 @@ function lineageMermaid(L) {
 // triage, set aside, carried on (the furthest stage it reached), explained (it became knowledge, a
 // problem or an incident), part of a signal (n of the 3 that make one), or not oriented yet. Null
 // for what isn't an observation for Orient (a reading, an outcome, a set-aside itself). What
-// explains a whole signal (explained().keys: a ruling that names its key, the open incident that
-// holds its fingerprint) explains a later observation on it as well.
+// explains a signal by its key (explained().keys, read with covered()) explains an observation on
+// it too: a ruling that names the key, the observations up to the ruling; the open incident that
+// holds the fingerprint, every one while it is open.
 const SET_ASIDE_KINDS = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'];
 let PLACE_CTX = null;
 function placeOf(o) {
@@ -14661,7 +14666,8 @@ function placeOf(o) {
   const C = PLACE_CTX;
   const after = (linkIndex().out.get(o.id) ?? []).map((e) => logGet(e.to)).filter(Boolean);
   const key = signalKeyOf(o);
-  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x)) ?? (C.keys.has(key) ? C.rulings.get(key) : null);
+  const rule = C.rulings.get(key);
+  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x)) ?? (covered(C.keys, key, o.created_at) && rule?.created_at >= o.created_at ? rule : null);
   if (noise) return { state: 'noise', ref: noise.id, why: noise.what ?? null };
   const fp = fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null;
   const ig = fp ? C.ignores.get(fp) : null;
@@ -14676,7 +14682,7 @@ function placeOf(o) {
   const word = (n) => (n.type === 'knowledge' ? n.kind ?? 'lesson' : n.type === 'problem' ? (isIncident(logGet(n.id)) ? 'incident' : 'problem') : n.type === 'question' ? 'your answer' : n.type === 'observation' ? String(n.kind ?? 'outcome').replace(/-/g, ' ') : n.type);
   if (firstAt.length === 1 && firstAt[0].stage === 'orient') return { state: 'explained', ref: firstAt[0].id, why: word(firstAt[0]) };
   if (firstAt.length) return { state: 'carried', ref: firstAt.at(-1).id, why: firstAt.map(word).join(' → ') };
-  const held = C.keys.has(key) ? openIncidentOf(key) : null;
+  const held = covered(C.keys, key, o.created_at) ? openIncidentOf(key) : null;
   if (held) return { state: 'explained', ref: held.id, why: 'incident' };
   const g = signalGroups().get(key);
   if (g && g.items.length > 1) return { state: 'signal', ref: g.key, n: g.items.length, recurring: g.items.length >= 3 && g.spread };
