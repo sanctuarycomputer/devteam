@@ -3003,7 +3003,7 @@ function wrapLineage(svg, L) {
 function drawLineage(key, peek) {
   if (LINEAGE_FLIGHT.has(key)) return;
   LINEAGE_FLIGHT.add(key);
-  drawMermaid(peek.lineage_mermaid).then((svg) => { LINEAGE_SVG.set(key, wrapLineage(svg, peek.lineage)); }, () => { LINEAGE_SVG.set(key, false); }).finally(() => { LINEAGE_FLIGHT.delete(key); redraw(); });
+  drawMermaid(peek.lineage_mermaid).then((svg) => { LINEAGE_SVG.set(key, wrapLineage(svg, peek.lineage)); while (LINEAGE_SVG.size > 50) LINEAGE_SVG.delete(LINEAGE_SVG.keys().next().value); }, () => { LINEAGE_SVG.set(key, false); }).finally(() => { LINEAGE_FLIGHT.delete(key); redraw(); });
 }
 function lineageBlock(peek) {
   const L = peek?.lineage;

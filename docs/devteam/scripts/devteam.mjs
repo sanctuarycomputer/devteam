@@ -14815,6 +14815,18 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   return res.slice(-limit);
 }
 // ---- lineage: what a record in the loop came from and what came of it ----
+// Whether a record's approved_by is an approval the owner gave, for the lineage's word: a decision whose
+// authority checks out (decisionAuthorityGap), an act carrying one out, or an act of its own resting
+// on an owner's accepted rule or an answered question. Anything else only cites it: a supervisor's
+// lesson is never the owner approving.
+function approvalHolds(o) {
+  if (o.type === 'decision') return !decisionAuthorityGap(o);
+  if (o.type !== 'act') return false;
+  if (o.decision) { const d = logGet(o.decision); return d?.type === 'decision' && !decisionAuthorityGap(d); }
+  const r = logGet(o.approved_by ?? '');
+  if (r?.type === 'knowledge') return writerClass(r.created_by) === 'owner' && r.status === 'accepted';
+  return r?.type === 'question' && ['answered', 'defaulted'].includes(questionView(r).status);
+}
 // One index of the links between records, built once per read of the log: an edge from each record
 // a field cites to the record citing it (cited before citing, for every field), read off the fields
 // that cite, never a walk over strings. The ticket an add-ticket act made comes after the act. Then
@@ -14842,7 +14854,7 @@ function linkIndex() {
       if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
       else edge(t, o.id, why);
     }
-    if (known(o.approved_by)) edge(o.approved_by, o.id, 'approved');
+    if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
     if (known(o.decision)) edge(o.decision, o.id, 'carried out');
   }
   // An incident holds what its fingerprints raise while it is open, not only what it cited when it
@@ -15678,7 +15690,7 @@ Goals and retros
 
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
-  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
   sensor status [--json] | sensor test <name> [--since t] | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
   sensor show <fingerprint> | sensor discover [--record] [--json] | sensor stream <name> (wait runs it) | sensor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   sensor triage [--all] [--peek] [--json] | sensor ignore|unignore <fingerprint> --reason r [--owner] | sensor incident <fingerprint…> --title t | sensor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)

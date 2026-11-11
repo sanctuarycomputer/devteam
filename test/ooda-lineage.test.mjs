@@ -348,3 +348,19 @@ test('orientation debt: recurring signals unexplained for more than a day, oldes
     assert.deepEqual(json(ok(old, ['dashboard-data'])).ooda.debt.signals.map((x) => x.key), ['note:a']);
   } finally { F.done(); }
 });
+
+test('lineage says approved only for the owner\'s approval: a supervisor\'s lesson is only cited', () => {
+  const F = fleetFixture('lineage-approved');
+  try {
+    const hand = handFor(F);
+    const mine = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'retry the payment call once', scope: 'class:incident-fix', status: 'accepted', evidence: [] }, 9 * H);
+    const yours = hand('owner', { type: 'knowledge', kind: 'preference', statement: 'fix payment errors without asking', scope: 'class:incident-fix', status: 'accepted', evidence: [] }, 8 * H);
+    // a decision claiming a standing rule that is the supervisor's own lesson: no owner rule, so it only cites it
+    const d1 = hand('supervisor', { type: 'decision', class: 'incident-fix', scope: 'sev:high', what: 'retry once', authority: 'standing-rule', approved_by: mine, refs: [] }, 7 * H);
+    // an act of its own resting on the owner's accepted rule: approved
+    const a1 = hand('supervisor', { type: 'act', class: 'merge-word', what: 'merged it', approved_by: yours, refs: [], reversible: true }, 6 * H);
+    const why = (id, from) => peek(F, 'decision', id).lineage.edges.find((e) => e.from === from && e.to === id)?.why;
+    assert.equal(why(d1, mine), 'cites');
+    assert.equal(peek(F, 'act', a1).lineage.edges.find((e) => e.from === yours && e.to === a1)?.why, 'approved');
+  } finally { F.done(); }
+});
