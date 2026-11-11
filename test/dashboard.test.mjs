@@ -1347,6 +1347,8 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   await p.click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
+  // thirty hours unexplained: orientation debt, whose card opens the same signal
+  assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
   await p.click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
   await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');

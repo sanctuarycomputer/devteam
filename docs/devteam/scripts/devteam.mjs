@@ -7552,6 +7552,12 @@ function orientClusters() {
   }
   return res.sort((a, b) => b.count - a.count);
 }
+// Recurring signals left unexplained for more than a day, oldest first: what Orient owes.
+function orientationDebt() {
+  const now = Date.now();
+  return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
+    .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
+}
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
 // supervisor runs what it pastes (L-SEC-5).
@@ -9406,6 +9412,9 @@ function collectOoda() {
     // each with where it sits in the loop, so its card can say so without the whole index
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
+    // orientation debt: recurring signals nothing has explained for more than a day, oldest first
+    // (resolved incidents nobody learned from join it in PR 4)
+    debt: { signals: orientationDebt() },
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),

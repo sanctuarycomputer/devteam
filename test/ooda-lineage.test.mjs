@@ -253,3 +253,26 @@ test('the lineage as the page draws it: n<i> is the i-th node, in its stage\'s s
     assert.match(list, new RegExp(`href="#decision/${C.d}" aria-current="page"`), 'the opened record is marked');
   } finally { F.done(); }
 });
+
+test('orientation debt: recurring signals unexplained for more than a day, oldest first', () => {
+  const F = fleetFixture('ooda-debt');
+  const { old, ok } = F;
+  try {
+    const hand = handFor(F);
+    const note = (key, ago, by = 'supervisor') => hand(by, { type: 'observation', source: 'supervisor', subject: 'app', kind: 'note', detail: `${key} again`, source_key: key }, ago);
+    // 25 hours old: debt; 30 hours old: debt, and first; 2 hours old, from two writers: a signal, not debt yet
+    const old25 = [25, 20, 1].map((h) => note('note:a', h * H));
+    [30, 10, 2].forEach((h) => note('note:b', h * H + 100));
+    note('note:c', 2 * H + 200); note('note:c', H + 300); note('note:c', H / 2, 'w-01-a');
+    const d = json(ok(old, ['dashboard-data']));
+    assert.deepEqual(d.ooda.clusters.map((c) => c.key).sort(), ['note:a', 'note:b', 'note:c']);
+    assert.deepEqual(d.ooda.debt.signals.map((x) => x.key), ['note:b', 'note:a'], 'over a day, oldest first');
+    const a = d.ooda.debt.signals[1];
+    assert.equal(a.count, 3);
+    assert.equal(a.hours, 25);
+    assert.equal(a.first_at, json(ok(old, ['log', '--id', old25[0], '--json']))[0].created_at);
+    // explained, it is no debt
+    ok(old, ['decide', '--class', 'orient-noise', '--refs', 'note:b', ...json(ok(old, ['orient', '--json'])).find((c) => c.key === 'note:b').ids, '--', 'a cron job'], SUP);
+    assert.deepEqual(json(ok(old, ['dashboard-data'])).ooda.debt.signals.map((x) => x.key), ['note:a']);
+  } finally { F.done(); }
+});

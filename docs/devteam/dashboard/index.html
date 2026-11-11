@@ -634,6 +634,9 @@
     </div>
     <div class="loop-panel" data-panel="orient" hidden>
       <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
+      <h3>Orientation debt</h3>
+      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise.</p>
+      <div id="debt"></div>
       <div class="two">
         <div><h3>Recurring signals</h3><div id="clusters"></div></div>
         <div><h3>Problems</h3><div id="problems"></div></div>
@@ -1991,6 +1994,9 @@ function renderOoda(o) {
       <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, <a class="linkish" href="#observation/${encodeURIComponent(x.id)}">${when(x.created_at)}</a></div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
+  const debt = o.debt?.signals || [];
+  $('debt').innerHTML = debt.length ? debt.map((x) => `
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><b>${esc(signalTitle(x.key))}</b> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
