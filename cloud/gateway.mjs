@@ -960,7 +960,9 @@ export function createGateway(opts = {}) {
   // A sandboxed artifact can't be told from another site's page by its headers, and its bytes use
   // relative URLs. So the frame's first load (same-origin, with the session) is redirected under
   // /c/<expiry>.<session>.<mac>/, good for that one artifact folder, and its files need no cookie.
-  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+)\/[^/]+\//;
+  // The folder is main's, a worktree's, or a published tree's (the owner's wrapper shows exactly the
+  // version the public sees: spec §8).
+  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;

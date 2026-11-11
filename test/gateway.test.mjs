@@ -2208,3 +2208,61 @@ test('the hub links the box\'s previews beside Passkeys', () => {
   assert.match(hub, /typeof b\.previews === 'string' && secure\(b\.previews\)/, 'only a URL the page would trust');
   assert.match(hub, /a\.textContent = 'Previews'/);
 });
+
+// A stand-in for a kit on an instance's port, for what the gateway does with its answers. It has a
+// hello (K.hello: an object; null cuts the socket; 'slow' never answers), a viewer page and an
+// artifact's files under the kit's own kinds of policy in its loopback origin, and a dashboard for
+// anything else. Every request it sees is kept.
+function fakeKit(port) {
+  const self = `http://127.0.0.1:${port}`;
+  const K = { hello: { devteam: 1, name: 'alpha', root: '/srv/alpha', port, viewer: 1 }, seen: [] };
+  K.srv = http.createServer((q, s) => {
+    K.seen.push({ url: q.url, h: q.headers });
+    const reply = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    if (q.url === '/api/hello') {
+      if (K.hello === 'slow') return undefined;
+      if (K.hello === null) return q.socket.destroy();
+      return reply('application/json', "default-src 'none'", JSON.stringify(K.hello));
+    }
+    const art = /^\/artifact\/((?:main|wt\/[^/]+|tree\/[0-9a-f]+)\/[^/]+)\//.exec(q.url);
+    if (art) return reply('text/html; charset=utf-8', `default-src 'none'; script-src 'unsafe-inline' ${self}/artifact/${art[1]}/; frame-ancestors ${self} http://127.0.0.1:${HUB}; sandbox allow-scripts`, '<p>an artifact');
+    if (q.url.startsWith('/view/')) return reply('text/html; charset=utf-8', `default-src 'none'; frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}`, '<p>a viewer');
+    return reply('text/html; charset=utf-8', `default-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB}`, 'the dashboard');
+  });
+  K.up = () => new Promise((r) => K.srv.listen(port, '127.0.0.1', r));
+  K.close = () => new Promise((r) => { K.srv.closeAllConnections(); K.srv.close(r); });
+  return K;
+}
+
+test('an artifact at a published tree goes under a capability, as main and a worktree do', async () => {
+  const gw = await gateway('artifact-tree');
+  const K = fakeKit(P + 20);
+  await K.up();
+  const T = 'b'.repeat(40);
+  const framed = { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' };
+  const opaque = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'script' };
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    let r = await gw.req('GET', `/artifact/tree/${T}/mock/?v=1`, { on: P + 20, headers: framed });
+    assert.equal(r.status, 302, r.body);
+    const cap = new RegExp(`^(/c/[^/]+)/artifact/tree/${T}/mock/\\?v=1$`).exec(r.headers.location)?.[1];
+    assert.ok(cap, r.headers.location);
+    // its files need no cookie, under its own policy pointed at the capability
+    r = await gw.req('GET', `${cap}/artifact/tree/${T}/mock/app.js`, { on: P + 20, cookie: '', headers: opaque });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(K.seen.at(-1).url, `/artifact/tree/${T}/mock/app.js`, 'the kit sees the plain path');
+    assert.equal(K.seen.at(-1).h.cookie, undefined);
+    assert.ok(r.headers['content-security-policy'].includes(`script-src 'unsafe-inline' ${gw.inst(P + 20)}${cap}/artifact/tree/${T}/mock/`), r.headers['content-security-policy']);
+    // that tree's folder only
+    for (const other of [`/artifact/tree/${'c'.repeat(40)}/mock/app.js`, '/artifact/main/mock/app.js', `/artifact/tree/${T}/other/app.js`, `/artifact/tree/${T}/mock/../../main/mock/app.js`])
+      assert.equal((await gw.req('GET', `${cap}${other}`, { on: P + 20, cookie: '', headers: opaque })).status, 403, other);
+    // a sha256 tree, and a top-level open, as main's
+    assert.equal((await gw.req('GET', `/artifact/tree/${'d'.repeat(64)}/mock/`, { on: P + 20, headers: framed })).status, 302);
+    assert.equal((await gw.req('GET', `/artifact/tree/${T}/mock/`, { on: P + 20, headers: { ...framed, 'sec-fetch-dest': 'document' } })).status, 302);
+    // not a tree id: no capability; the request goes to the kit as it came
+    for (const bad of [`/artifact/tree/${'b'.repeat(39)}/mock/`, `/artifact/tree/${'B'.repeat(40)}/mock/`, `/artifact/tree/${T}x/mock/`, `/artifact/tree/${'b'.repeat(41)}/mock/`]) {
+      r = await gw.req('GET', bad, { on: P + 20, headers: framed });
+      assert.deepEqual([r.status, r.headers.location], [200, undefined], bad);
+    }
+  } finally { await K.close(); await gw.close(); }
+});
