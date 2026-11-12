@@ -702,7 +702,7 @@ test('the dashboard: rotation needs no hub, one dashboard does it per interval, 
   } finally { await a.stop(); await b?.stop(); await new Promise((r) => { oldHub.close(r); oldHub.closeAllConnections?.(); }); A.done(); B.done(); }
 });
 
-test("the supervisor's own pane: a lost Enter is pressed once, never into a prompt, never while it works", { skip: !hasTmux }, async () => {
+test("the supervisor's own pane: a lost Enter is pressed, at most three times, never into a prompt, never while it works", { skip: !hasTmux }, async () => {
   const F = fixture('sup-enter');
   try {
     const text = '[devteam answer q-1 from owner] read it with: devteam.mjs questions --id q-1';
@@ -724,9 +724,20 @@ test("the supervisor's own pane: a lost Enter is pressed once, never into a prom
     deliver(3600);
     F.tick();
     await until(() => s.keys() === '\r', 'one Enter');
-    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, 1, 'kept for another try');
     F.tick();
-    assert.equal(s.keys(), '\r', 'a second tick presses nothing');
+    assert.equal(s.keys(), '\r', 'a second tick inside 30s presses nothing');
+    // that Enter was lost too (the stand-in never takes it): 30s on, another, up to three in all
+    const later = () => { const r = json(fs.readFileSync(sent, 'utf8')); write(sent, JSON.stringify({ ...r, at: new Date(Date.now() - 60 * 1000).toISOString() })); };
+    later();
+    F.tick();
+    await until(() => s.keys() === '\r\r', 'a second Enter');
+    later();
+    F.tick();
+    await until(() => s.keys() === '\r\r\r', 'a third Enter');
+    assert.ok(!fs.existsSync(sent), 'and then it stops');
+    F.tick();
+    assert.equal(s.keys(), '\r\r\r', 'never a fourth');
     for (const shown of [[`❯ ${text}`, '✻ Thinking… (esc to interrupt)'], [`❯ ${text}`, 'Do you want to proceed?', '❯ 1. Yes', '  2. No'], [...MENU, `❯ ${text}`]]) {
       s = pane(shown);
       await until(() => s.shows().includes('devteam answer'), 'the pane');

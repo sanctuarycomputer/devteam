@@ -2530,9 +2530,12 @@ function paneWaitingIn(window) {
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
 // window; when the pane's bottom lines still end with that text's tail, nothing on them says the
 // agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
-// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
-// so a delivery gets at most one Enter however many passes or processes look.
+// Enter and log it. That Enter can be lost the same way (seen on a loaded machine), so the text still
+// sitting there LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all. The
+// text is never retyped; the record is claimed (moved aside) before each key, so however many passes
+// or processes look, one press happens per claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
+const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
@@ -2550,12 +2553,19 @@ function resendLostEnter(key, target, lines) {
   const tail = squash(rec.text ?? '').slice(-40);
   if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
   const bottom = lines.slice(-8);
-  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
-  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  const claimed = `${file}.claim-${process.pid}`;
+  const claim = () => { try { fs.renameSync(file, claimed); return true; } catch { return false; } };
+  const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
+  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
   if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
-  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
+  if (!claim()) return;
+  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+  const tries = (Number(rec.tries) || 0) + 1;
+  // another try later, unless that was the last, the key failed, or a newer delivery took the slot
+  if (pressed && tries < LOST_ENTER_TRIES && !fs.existsSync(file)) { try { writeJson(claimed, { ...rec, tries, at: nowIso(), typed_at: rec.typed_at ?? rec.at }); fs.renameSync(claimed, file); } catch { drop(); } } else drop();
+  if (!pressed) return;
   const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
-  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(rec.typed_at ?? rec.at)) / 1000)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.typed_at ?? rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
 // The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
 // tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
