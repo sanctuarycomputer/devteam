@@ -4715,10 +4715,35 @@ function askLikeWarnings({ text, cls, kind }) {
   }
   for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
 }
+// Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
+// paragraphs reach the dashboard as written (supervisor.md §6).
+const ownerText = (t) => (t == null ? t : String(t).replace(/\\n/g, '\n'));
+// The owner reads every question cold, on the dashboard, without the fleet's context or its words
+// (supervisor.md §6, Ask less, act more). What ask refuses, and what it warns about.
+const META_ASK = /\b(?:should|shall|can|may|could|do you want|would you like|is it ok(?:ay)?(?: if)?|are you ok(?:ay)? with)\b[^?.]{0,40}\b(?:i|we|me|us)\b[^?.]{0,24}\b(?:ask|request|prompt)\b/i;
+const CRED_WORDS = /\b(?:passwords?|passphrases?|api[ _-]?keys?|access[ _-]?keys?|secret[ _-]?keys?|private[ _-]?keys?|(?:auth|access|api|bearer|personal access) tokens?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env\b)/i;
+const KIT_ID = /\b(?:q|[gkapmodt])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/;
+const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|run\/[\w./-]+)\b/i;
+function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, recommendation, L }) {
+  if (!q || KIT_WORDED(cls, kind)) return;
+  if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
+  if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
+  const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
+  const cw = classes.find((c) => c.includes('-') && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
+  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it`);
+  if (KIT_WORDS.test(q)) die(`the question uses the kit's own word "${q.match(KIT_WORDS)[0]}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself`);
+  if (q.length > 300) die(`the question is ${q.length} characters: lead with the decision in one or two sentences (300 at most) and put the rest in --context, as a list where it is one`);
+  if (context && KIT_ID.test(context)) warn(`--context names a kit id (${context.match(KIT_ID)[0]}): fine as a link, but say in words what it is`);
+  if (context && KIT_WORDS.test(context)) warn(`--context uses the kit's word "${context.match(KIT_WORDS)[0]}": say it in plain words, the owner hasn't got the fleet's vocabulary`);
+  if (context && context.length > 600 && !/\n\s*(?:[-*•]|\d{1,2}[.)])\s/.test(context)) warn(`--context is ${context.length} characters of prose: break it into short paragraphs or a list ("- " or "1. " lines) so it can be read at a glance`);
+  if (!secrets?.length && (CRED_WORDS.test(q) || (kind === 'owner-action' && CRED_WORDS.test(context ?? '')))) warn(`this looks like it needs a credential. Ask for it directly: --kind owner-action with --secrets naming each one and where it goes, so the owner pastes it on the dashboard (supervisor.md §6, Secrets)`);
+  if (['owner-decision', 'clarification', 'one-way-door'].includes(kind) && !recommendation) warn('no --recommendation: say what you would do and how sure you are (--confidence); the owner answers faster with a pick to agree or disagree with');
+  if (reasons.includes('low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
-  let q = flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question'));
+  let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const kind = flagStr('kind') ?? 'owner-decision';
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const cls = flagStr('class') ?? null;
@@ -4853,7 +4878,7 @@ function askLine({ thread } = {}) {
   // the owner said not to use this sensor: nothing asks about it again until they reverse that
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
-  let context = flagStr('context');
+  let context = ownerText(flagStr('context'));
   if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
@@ -4965,6 +4990,7 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence: flagNum('confidence'), recommendation, L });
   // what the owner may already have said about it: never in the way of asking
   try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({

@@ -24,7 +24,7 @@ Who decides what, how the supervisor earns the right to decide more, and the pri
 | How to build inside a ticket | the worker | Within the approved plan and the code style. |
 | Whether a review passes | the reviewer | A verdict is never transcribed by someone else. |
 
-The supervisor decides everything not reserved to the owner or delegated to it, logs each decision as an act, and asks the owner only about genuine blockers.
+The supervisor decides everything not reserved to the owner or delegated to it, logs each decision as an act, and asks the owner only about genuine blockers. Its default is to act: a correction after the fact costs the owner less than a question before it, so on anything reversible that is its to decide, it decides. When the work needs something only the owner can give (a credential, access, an account), it asks for that thing directly and early, never whether to ask (`process/supervisor.md` §6).
 
 ## 2. The trust ladder
 
@@ -39,10 +39,10 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
 ```json devteam
 {
   "classes": {
-    "new-feature": { "ceiling": 2, "start": 1, "about": "start planning a feature the owner hasn't asked for" },
-    "priority-change": { "ceiling": 3, "start": 1, "about": "reorder goals' work or move a feature between releases" },
-    "release-scope": { "ceiling": 3, "start": 1, "about": "move a story to a later release to ship the rest on time" },
-    "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" },
+    "new-feature": { "ceiling": 2, "start": 2, "about": "start planning a feature the owner hasn't asked for" },
+    "priority-change": { "ceiling": 3, "start": 2, "about": "reorder goals' work or move a feature between releases" },
+    "release-scope": { "ceiling": 3, "start": 2, "about": "move a story to a later release to ship the rest on time" },
+    "upstream-pr": { "ceiling": 3, "start": 2, "about": "open a PR on upstream devteam with a general improvement" },
     "release-production": { "ceiling": 3, "start": 1, "about": "ship a tagged release to production, with every gate passing at the tagged commit" },
     "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" },
     "incident-fix": { "ceiling": 3, "start": 2, "about": "open and run a ticket that fixes a production incident the sensors found" },
@@ -55,7 +55,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },
     { "id": "owner-only", "means": "the constitution reserves this to the owner" },
     { "id": "one-way-door", "means": "it can't be undone cheaply (§4)" },
-    { "id": "low-confidence", "means": "the supervisor could decide but isn't sure enough of its recommendation" },
+    { "id": "low-confidence", "means": "the supervisor could decide but isn't sure enough of its recommendation (under 0.7)" },
     { "id": "goals-conflict", "means": "two goals pull in different directions and only the owner can rank them" },
     { "id": "missing-info", "means": "it needs a fact only the owner has" },
     { "id": "goal-ambiguity", "means": "a goal isn't defined well enough to plan from" },
