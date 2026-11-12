@@ -380,6 +380,10 @@ test('supervisor-session: the supervisor\'s own conversation, read from disk, an
     assert.equal(id(), 'started\n', 'quoting the commands is not running them');
     save('adopted', `${user('be the supervisor')}\n${ran('DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs status')}`);
     assert.equal(id(), 'adopted\n', 'the newest that ran them');
+    save('setup', `${user('Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo')}\n${ran('cd /x/website; export DEVTEAM_ROLE=supervisor; D="node docs/devteam/scripts/devteam.mjs"; $D status')}`);
+    assert.equal(id(), 'setup\n', 'a session that set up its own fleet, exporting the role');
+    save('exported', `${user('look around')}\n${ran('export DEVTEAM_ROLE=supervisor; echo hi')}`);
+    assert.equal(id(), 'setup\n', 'exporting the role without running the kit is not running it');
     for (const n of ['a', 'b', 'c', 'd', 'e']) save(n, user('something else'));
     assert.equal(id(), '', 'past the newest five');
     save('started', user('You are the supervisor for this repository'));
