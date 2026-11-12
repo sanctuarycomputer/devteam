@@ -13,6 +13,24 @@ import { fileURLToPath } from 'node:url';
 import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
+// A wait on a condition in a page. Page.navigate answers before the new page is parsed, so an
+// evaluation that throws (the last page still there, or the new one half parsed) is "not yet"; timed
+// out, it says where the tab is and the last error, so a page that never became the one expected
+// reads as that.
+const soonIn = (p, ms = 30000) => async (expr, what) => {
+  const end = Date.now() + ms;
+  for (;;) {
+    let v, err = null;
+    try { v = await p.ev(expr); } catch (e) { err = e; }
+    if (v) return v;
+    if (Date.now() > end) {
+      const at = await p.ev('[location.href, document.title, document.readyState]').catch((e) => e.message);
+      assert.fail(`timed out: ${what}; the tab is at ${JSON.stringify(at)}${err ? `; last: ${err.message}` : ''}`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
+
 test('fleet drain: in-flight work finishes, nothing new starts, and a drained fleet moves with parity', () => {
   const F = fleetFixture('drain');
   const { org, old, neu, run, ok, g, base } = F;
@@ -410,7 +428,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
-  const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  const soon = soonIn(p, 15000);
   const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
   const hold = () => p.ev('void (window.__postHold = new Promise((r) => { window.__let = r; }))');
   const letGo = () => p.ev('window.__let(); window.__postHold = null; void 0');
@@ -524,7 +542,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
-    const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+    const soon = soonIn(p, 15000);
     await soon(`!!document.querySelector('${box}')`, 'the question card');
     // Answered by polls actually arriving, however long /api/data takes.
     const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
@@ -1056,7 +1074,7 @@ test('the artifact lens in Chrome: a framed artifact\'s own inline scripts run b
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `${B}/` });
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
   await soon(`document.readyState === 'complete'`, 'the dashboard page');
   // the dashboard frames the artifact as a viewer would: a real framed load, sec-fetch-dest: iframe
   await p.ev(`new Promise((resolve) => { window.__heard = []; const f = document.createElement('iframe'); f.id = 'art-frame'; f.style.cssText = 'position:fixed;left:0;top:0;width:800px;height:600px;border:0;z-index:99999'; addEventListener('message', (e) => { if (e.source === f.contentWindow) window.__heard.push({ data: e.data, origin: e.origin }); }); f.onload = () => resolve(true); f.src = '/artifact/main/inline-mock/'; document.body.appendChild(f); })`);
@@ -1173,7 +1191,7 @@ test('every item the dashboard draws says what it is; a question asked in a thre
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#inbox` });
-  const soon = async (expr, what) => { for (let i = 0; i < 400; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  const soon = soonIn(p, 20000);
   await soon(`!!document.querySelector('#questions [data-subject="question:${Q}"]')`, 'the Inbox card');
   const titleOf = (sel) => p.ev(`document.querySelector(${JSON.stringify(sel)})?.dataset.title ?? null`);
   assert.equal(await titleOf(`#goals-list [data-subject="goal:${F.goal}"]`), 'Launch checkout');
@@ -1463,12 +1481,20 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
+  // A navigation, done: the last page gone (it is marked first, so a page at the same URL can't stand
+  // in for the new one), the tab at that URL and loaded, and under /view/ the viewer booted.
+  const go = async (url) => {
+    await p.ev('window.__left = true').catch(() => {});
+    await p.send('Page.navigate', { url });
+    await soon(`!window.__left && location.href === ${JSON.stringify(url)} && document.readyState === 'complete'`, `the tab at ${url}`);
+    if (new URL(url).pathname.startsWith('/view/')) await soon(`document.documentElement.classList.contains('viewer') && !!document.getElementById('av-title') && typeof TS === 'object'`, `the viewer at ${url}`);
+  };
   // the viewer's own code, from its start to the line that runs it, without its comments
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   const boot = html.slice(html.indexOf('async function viewerBoot()'), html.indexOf('if (VIEWER) viewerBoot();')).replace(/^\s*\/\/.*$/gm, '');
   await t.test('landed: its title and the project in the bar, the page in the frame, nothing of the dashboard', async () => {
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock` });
+    await go(`${B}/view/artifact/viewer-mock`);
     await soon(`document.getElementById('av-title').textContent === 'Viewer mock' && document.getElementById('av-project').textContent === 'viewer-page'`, 'the bar');
     assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), '/artifact/main/viewer-mock/');
     assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
@@ -1488,17 +1514,17 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   });
 
   await t.test('the published version by its tree; a tree the repository lacks shows main, and says so', async () => {
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}` });
+    await go(`${B}/view/artifact/viewer-mock?at=tree:${T}`);
     await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/tree/${T}/viewer-mock/'`, 'the tree');
     assert.deepEqual(await p.ev(`[document.getElementById('av-where').textContent, document.getElementById('av-note').hidden, TS.at]`), ['the published version', true, `tree:${T}`]);
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}` });
+    await go(`${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}`);
     await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/main/viewer-mock/'`, 'main instead');
     assert.deepEqual(await p.ev(`[document.getElementById('av-note').hidden, document.getElementById('av-note').textContent, TS.at]`), [false, 'Not the published version: this is the one on main', 'main']);
   });
 
   await t.test("the wrapper's grant stays in the viewer's own URL, and never reaches the artifact's frame", async () => {
     const w = 'w=1767225600000.abcdefghijklmnopqrstuv';
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}&${w}` });
+    await go(`${B}/view/artifact/viewer-mock?at=tree:${T}&${w}`);
     await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/tree/${T}/viewer-mock/'`, 'the tree, with no query passed on');
     const th = F.owner(['thread', 'new', 'About the mock', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', at: `tree:${T}`, point: { x: 5, y: 5 } })]).split('\n')[0];
     await p.ev(`location.hash = '#talk/${th}'`);
@@ -1506,7 +1532,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     await p.ev('tlClose()');
     assert.equal(await p.ev('location.search'), `?at=tree:${T}&${w}`, 'opening and closing a card keeps it');
     // the fallback to main is shown in place: the URL, grant and all, stays as the wrapper gave it
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}&${w}` });
+    await go(`${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}&${w}`);
     await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/main/viewer-mock/'`, 'main instead');
     assert.equal(await p.ev('location.pathname + location.search'), `/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}&${w}`);
     // nothing in viewer mode moves the page to another URL
@@ -1530,7 +1556,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
 
   await t.test('a #talk/ link opens its card in a viewer tab, on load and by a hash change', async () => {
     const th = F.owner(['thread', 'new', 'On the viewer']).split('\n')[0];
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock#talk/${th}` });
+    await go(`${B}/view/artifact/viewer-mock#talk/${th}`);
     await soon(`!document.getElementById('tl-card').hidden && TL.open === '${th}'`, 'its card, on load');
     await p.ev('tlClose()');
     assert.equal(await p.ev('location.pathname + location.search + location.hash'), '/view/artifact/viewer-mock', 'closing it drops the hash only');
@@ -1542,7 +1568,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
 
   await t.test("Send and Resolve in a viewer tab read no /api/data, and the tab's title stays the viewer's", async () => {
     const th = F.owner(['thread', 'new', 'Said from the viewer']).split('\n')[0];
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock#talk/${th}` });
+    await go(`${B}/view/artifact/viewer-mock?at=main#talk/${th}`);
     await soon(`!document.getElementById('tl-card').hidden && TL.open === '${th}' && document.title === 'Viewer mock · devteam'`, 'its card, and the title');
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'one more thing'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); return true; })()`);
     await p.ev('Promise.all([...PRESSES.values()]).then(() => true)');
@@ -1556,8 +1582,17 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   });
 
   await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
-    await p.send('Page.navigate', { url: `${B}/api/hello` });
+    await go(`${B}/api/hello`);
     await soon(`document.readyState === 'complete'`, 'a page of the same origin');
+    // a real click, and what it should do: a headless tab can be left without the window's focus, so
+    // a click that didn't move the keyboard is tried once more with the tab brought to the front
+    const clickFor = async (x, y, expr, what) => {
+      await p.clickAt(x, y);
+      if (await soonIn(p, 5000)(expr, what).then(() => true, () => false)) return;
+      await p.send('Page.bringToFront');
+      await p.clickAt(x, y);
+      await soon(expr, what);
+    };
     await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock'; document.body.append(f); return true; })()`);
     await soon(`document.getElementById('v').contentDocument?.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
     await p.ev('document.body.focus(); window.focus(); true');
@@ -1565,15 +1600,12 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.equal(await p.ev(`document.getElementById('v').contentDocument.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
     // a real click on the framed viewer's bar, as the hint says
     const bar = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left + 450, y: r.top + 20 }; })()`);
-    await p.clickAt(bar.x, bar.y);
-    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+    await clickFor(bar.x, bar.y, `document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
     // a click on the top page, outside the viewer, takes the keyboard back: the hint again
-    await p.clickAt(1100, 700);
-    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
+    await clickFor(1100, 700, `!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
     // a click on the artifact itself, in the viewer's own frame, gives it to the viewer's page
     const art = await p.ev(`(() => { const v = document.getElementById('v').getBoundingClientRect(), f = document.getElementById('v').contentDocument.getElementById('av-frame').getBoundingClientRect(); return { x: v.left + f.left + 200, y: v.top + f.top + 200 }; })()`);
-    await p.clickAt(art.x, art.y);
-    await soon(`document.getElementById('v').contentDocument.activeElement === document.getElementById('v').contentDocument.getElementById('av-frame')`, 'the artifact has the keyboard');
+    await clickFor(art.x, art.y, `document.getElementById('v').contentDocument.activeElement === document.getElementById('v').contentDocument.getElementById('av-frame')`, 'the artifact has the keyboard');
     await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the artifact has it');
   });
 
@@ -1581,18 +1613,18 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     // the viewer's /api/view answered with a failure: a 500, then no answer at all
     for (const [fault, what] of [['new Response(\'{}\', { status: 500 })', 'a 500'], ['Promise.reject(new TypeError(\'Failed to fetch\'))', 'a network error']]) {
       const { identifier } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const f = window.fetch; window.fetch = (u, o) => (String(u).startsWith('/api/view') ? ${fault} : f(u, o)); })();` });
-      await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}` });
+      await go(`${B}/view/artifact/viewer-mock?at=tree:${T}`);
       await soon(`document.getElementById('av-note').textContent === 'This artifact could not be read'`, `the note, for ${what}`);
       assert.deepEqual(await p.ev(`[document.getElementById('av-note').hidden, document.getElementById('av-frame').getAttribute('src'), TS.at]`), [false, `/artifact/tree/${T}/viewer-mock/`, `tree:${T}`], `${what}: the version asked for, not main`);
       await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
     }
     // an artifact not there at all, even on main
-    await p.send('Page.navigate', { url: `${B}/view/artifact/no-such-mock` });
+    await go(`${B}/view/artifact/no-such-mock`);
     await soon(`document.getElementById('av-note').textContent === 'This artifact is not here'`, 'the note, for nothing there');
   });
 
   await t.test('Escape leaves it where it is: a viewer has nothing to go back to', async () => {
-    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock` });
+    await go(`${B}/view/artifact/viewer-mock`);
     await soon(`document.getElementById('av-title').textContent === 'Viewer mock'`, 'the viewer');
     // a listener added after the page's own runs after them: once it has seen the key, so have they
     await p.ev(`(() => { window.__esc = false; document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.__esc = true; }); return true; })()`);
@@ -1625,7 +1657,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: OWN_MESSAGES });
   await p.send('Page.navigate', { url: `${B}/#artifact/main/pin-mock` });
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   // the frame's own spot on the page, and a point inside it
   const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
@@ -1865,7 +1897,10 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
     await p.move(at.x, at.y, 8);
     await soon(`TS.hit?.anchor?.role === 'note'`, 'its answer');
-    assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), 'note "<img src=x onerror="window.__pwned=1">"', 'the chip shows its words as text');
+    // the chip is drawn on the next animation frame after the answer is taken
+    const chip = 'note "<img src=x onerror="window.__pwned=1">"';
+    await soon(`document.getElementById('tl-chip').textContent === ${JSON.stringify(chip)}`, 'the chip, drawn');
+    assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), chip, 'the chip shows its words as text');
     await p.clickAt(at.x, at.y, 8);
     await p.hold('Shift', false);
     await soon(`TL.draft?.subject?.slug === 'liar-mock'`, 'a thread about to start');
@@ -1913,7 +1948,7 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: OWN_MESSAGES });
   await p.send('Page.navigate', { url: `${B}/#artifact/main/pin-mock` });
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
   const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
   const keysHere = () => p.ev(`(() => { document.activeElement?.blur?.(); window.focus(); return document.activeElement === document.body; })()`);
   let said = 0;
@@ -2118,7 +2153,7 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
   await soon(`!!document.querySelector('[data-subject="artifact:viewer-mock"] a.av-open')`, 'the card\'s Open');
   assert.deepEqual(await link('[data-subject="artifact:viewer-mock"] a.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open']);
@@ -2156,7 +2191,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
   // 30 s, however long each look takes: a loaded runner's page answers slowly
-  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const soon = soonIn(p);
   // A step no poll may move: the page held still from finding what to press until it is pressed, so a
   // redraw (the Inbox growing above the goal, the card placed again as it grows) can't move it between.
   const still = async (f) => { await p.ev('window.__still()'); try { return await f(); } finally { await p.ev('window.__stir()'); } };
