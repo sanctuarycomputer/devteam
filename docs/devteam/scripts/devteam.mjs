@@ -10711,7 +10711,9 @@ function replacePaneProcess(target, wt) {
 // Which one is the supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
 // that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
 // Nothing else is taken for it, and a limit lasts a week at most.
-const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
+// `DEVTEAM_ROLE=supervisor node …`, after an optional `cd <dir> &&` or `cd <dir>;`, and the
+// `export DEVTEAM_ROLE=supervisor; …devteam.mjs …` form a session that set up its own fleet writes
+const SUPERVISOR_COMMAND = /^\s*(?:cd \S+\s*(?:&&|;)\s*)?(?:DEVTEAM_ROLE=supervisor node |export DEVTEAM_ROLE=supervisor\s*(?:;|&&)[^\n]*\bdevteam\.mjs\b)/;
 const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
 function supervisorTranscript() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
