@@ -573,5 +573,8 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const shown = F.sup(['thread', 'show', T]);
     assert.match(shown, /^ {2}first line\[2J\n {2}secondline\n {2}third$/m, 'its own line breaks kept, each line indented');
     assert.doesNotMatch(shown, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, 'nothing else a terminal acts on');
+    // a tab is a space between words, not nothing
+    F.hand('owner', { type: 'turn', thread: T, text: 'tabbed\twords\there' }, 0);
+    assert.match(F.sup(['thread', 'show', T]), /^ {2}tabbed words here$/m);
   });
 });

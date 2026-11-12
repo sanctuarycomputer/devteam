@@ -5468,8 +5468,9 @@ function cmdThread() {
     // the owner's words are theirs, as in your session; your own turns are yours
     for (const u of v.turns) {
       out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
-      // its own line breaks, and nothing else a terminal acts on (an escape, a bidi override, a CR)
-      out(u.text.replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
+      // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
+      // (an escape, a bidi override, a CR)
+      out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
       if (u.refs.length) out(`  refs: ${u.refs.join(', ')}`);
     }
     for (const q of v.questions) out(`question ${q.id}: ${q.status}${q.answer ? `, ${quoteData(q.answer)}` : ''}`);
