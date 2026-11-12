@@ -18,6 +18,9 @@ test('ask: plain words, no asking about asking, credentials straight to a paste 
     const refused = (question, re, why, ...opts) => { const r = run(old, ['ask', '--question', question, '--recommendation', 'yes', ...opts], SUP); assert.notEqual(r.status, 0, why); assert.match(r.err, re, why); };
     refused('Should I ask you for the Stripe API key?', /don't ask whether to ask/, 'a question about asking');
     refused('Do you want me to request access to the staging database?', /don't ask whether to ask/, 'the same, worded another way');
+    for (const q of ['Want me to ask for the Stripe key?', 'Would it help if I asked you for the password?', 'Is it okay to ask for the staging password?', 'Do you mind if I ask for the deploy token?', 'Should I ask you to review the design first?']) refused(q, /don't ask whether to ask/, q);
+    // a credential asked for in a decision's words would be typed into an answer: it is a paste box
+    for (const q of ['Can you share the Postgres password for staging?', 'May I have the API key?', 'Do you want to give me the API key, or should I skip it?']) refused(q, /don't ask for a credential in a decision's words/, q);
     refused('Is q-20261101-120000000-supervisor still the right call?', /kit id/, 'a kit id in the question');
     refused('Should we move this release-scope call to next week?', /class name/, 'a class name in the question');
     refused('Can the worker run in its own worktree for this?', /kit's own word "worktree"/, 'kit jargon in the question');
@@ -27,9 +30,11 @@ test('ask: plain words, no asking about asking, credentials straight to a paste 
     // what still goes through: plain words, the stakes spelled out, and "should I" about the work itself
     ok(old, ['ask', '--question', 'Should I ship the billing page this week, or wait for the design review?', '--recommendation', 'Ship it'], SUP);
     ok(old, ['ask', '--question', 'What is at stake if we skip the migration?', '--recommendation', 'Run it'], SUP);
+    // asking someone else, a product's own prompt, and the project's own paths are not the kit's business
+    for (const q of ['Should I ask the vendor for a refund on the unused seats?', 'Can we request a quota increase from AWS before launch?', 'Should we prompt users to log in again after the password change?', 'Should I request an API key from the vendor?', 'Should the app request access to contacts?', 'Would you give customers API keys on the free plan?', 'Should we send the API key in a header or a query param?', 'Do a dry-run/staging deploy first?']) ok(old, ['ask', '--question', q, '--recommendation', 'yes'], SUP);
 
     // a credential named in a decision gets a nudge to the paste box; one with --secrets doesn't
-    const r = run(old, ['ask', '--question', 'Can you share the Postgres password for staging?', '--recommendation', 'yes'], SUP);
+    const r = run(old, ['ask', '--question', 'Rotate the API keys after the leak?', '--recommendation', 'yes'], SUP);
     assert.equal(r.status, 0);
     assert.match(r.err, /needs a credential. Ask for it directly: --kind owner-action with --secrets/);
     const s = run(old, ['ask', '--kind', 'owner-action', '--question', 'Post the staging Postgres password', '--context', 'Workers need it to run the import against staging.', '--secrets', JSON.stringify([{ name: 'STAGING_DB_PASSWORD', sink: 'file:.devteam-secrets/staging-db' }])], SUP);
@@ -39,6 +44,12 @@ test('ask: plain words, no asking about asking, credentials straight to a paste 
     // a literal \n from a shell argument is a line break by the time it reaches the owner
     const id = ok(old, ['ask', '--question', 'Which way should sign-in go?', '--context', 'Two ways:\\n- email links\\n- passwords', '--recommendation', 'email links'], SUP);
     assert.equal(json(ok(old, ['questions', '--id', id, '--json']))[0].context, 'Two ways:\n- email links\n- passwords');
+    // only where it can be nothing else: not in code, a Windows path, an escaped backslash, or text with real breaks
+    const keep = (context) => assert.equal(json(ok(old, ['questions', '--id', ok(old, ['ask', '--question', 'Where should the build cache live?', '--context', context, '--recommendation', 'yes'], SUP), '--json']))[0].context, context);
+    keep('It is at C:\\new\\node_modules today.');
+    keep('The check is `grep "\\n" out.txt`.');
+    keep('Written \\\\n in the config.');
+    keep('Line one\nand a literal \\n in line two.');
     assert.match(run(old, ['ask', '--question', 'Ship it?', '--context', 'It is on q-20261101-120000000-supervisor.', '--recommendation', 'yes'], SUP).err, /--context names a kit id/);
   } finally { F.done(); }
 });

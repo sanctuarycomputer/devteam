@@ -4716,17 +4716,28 @@ function askLikeWarnings({ text, cls, kind }) {
   for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
 }
 // Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
-// paragraphs reach the dashboard as written (supervisor.md §6).
-const ownerText = (t) => (t == null ? t : String(t).replace(/\\n/g, '\n'));
+// paragraphs reach the dashboard as written (supervisor.md §6). Only where it can't be anything else:
+// text that already has real line breaks is left alone, and so are `code`, a Windows path
+// (C:\new\node_modules) and an escaped backslash (\\n).
+const ownerText = (t) => (t == null || String(t).includes('\n') ? t : String(t).split(/(`[^`]*`|\b[A-Za-z]:\\\S*)/).map((p, i) => (i % 2 ? p : p.replace(/(?<!\\)\\n/g, '\n'))).join(''));
 // The owner reads every question cold, on the dashboard, without the fleet's context or its words
 // (supervisor.md §6, Ask less, act more). What ask refuses, and what it warns about.
-const META_ASK = /\b(?:should|shall|can|may|could|do you want|would you like|is it ok(?:ay)?(?: if)?|are you ok(?:ay)? with)\b[^?.]{0,40}\b(?:i|we|me|us)\b[^?.]{0,24}\b(?:ask|request|prompt)\b/i;
+// A question about asking the owner: "should I ask you for…", "want me to request access?", "is it ok
+// to ask for the key?". Asking someone else ("should I ask the vendor for a refund?", "request a key
+// from Stripe?") or a product's own prompt ("should the app request access to contacts?") is not one.
+const OWNER_GIVES = String.raw`(?:access|permissions?|logins?|keys?|tokens?|secrets?|certificates?|passwords?|passphrases?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env)`;
+const META_ASK = new RegExp(String.raw`\b(?:should|shall|can|may|could|might|want|need|do you mind|would you (?:like|mind|prefer)|is it (?:ok(?:ay)?|fine|all ?right)|are you (?:ok(?:ay)?|fine|happy) (?:with|for)|would it (?:help|be (?:ok(?:ay)?|useful|helpful|better))|does it make sense)\b[^?.]{0,40}?(?:\b(?:i|we|me|us)\b[^?.]{0,24}?|\bto\s+)\b(?:ask(?:ing|ed)?|request(?:ing|ed)?|prompt(?:ing|ed)?)\s+(?:you\b|(?:for\s+)?(?:(?:the|a|an|your|some|more|those|these|that|this)\s+)?(?:[\w.-]+\s+){0,2}?${OWNER_GIVES}\b(?!\s+(?:from|of)\s+(?!you\b)))`, 'i');
 const CRED_WORDS = /\b(?:passwords?|passphrases?|api[ _-]?keys?|access[ _-]?keys?|secret[ _-]?keys?|private[ _-]?keys?|(?:auth|access|api|bearer|personal access) tokens?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env\b)/i;
 const KIT_ID = /\b(?:q|[gkapmodt])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/;
-const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|run\/[\w./-]+)\b/i;
+// A credential asked for in a decision's words ("can you share the staging password?", "may I have
+// the API key?"): the owner would have to type it into an answer. It is an owner-action with --secrets.
+const CRED_REQUEST = new RegExp(String.raw`\b(?:(?:share|send|give|provide|paste|post|supply)\s+(?:me|us)\b\s*(?:with\s+)?(?:(?:the|a|an|your|our|that|those)\s+)?|(?:(?:can|could|will|would) you|please|do you want to|would you like to|i need you to)\s+(?:\w+\s+){0,2}?(?:share|send|give|provide|paste|post|supply)\s+(?:the|a|an|your|that|those)\s+|(?:may|can|could) (?:i|we) (?:have|get)\s+(?:(?:the|a|an|your|that|those)\s+)?)(?:[\w.-]+\s+){0,3}?${CRED_WORDS.source}`, 'i');
+// "dry-run/staging" is the project's; run/… on its own is the kit's folder
+const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|(?<![\w/-])run\/[\w./-]+)\b/i;
 function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, recommendation, L }) {
   if (!q || KIT_WORDED(cls, kind)) return;
   if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
+  if (!secrets?.length && kind !== 'owner-action' && CRED_REQUEST.test(q)) die(`don't ask for a credential in a decision's words: the owner would have to type it into an answer. Ask with --kind owner-action and --secrets naming each one and where it goes, so the owner gets the paste box at once (supervisor.md §6, Secrets)`);
   if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
   const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
   const cw = classes.find((c) => c.includes('-') && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
@@ -4994,7 +5005,7 @@ function askLine({ thread } = {}) {
   // what the owner may already have said about it: never in the way of asking
   try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
