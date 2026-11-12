@@ -175,8 +175,9 @@ class Browser {
       const tree = await this.treeOf(s);
       if (!tree) continue;
       const f = walk(tree.frameTree, []).find((x) => x.unreachableUrl && pred(x.unreachableUrl));
-      // why it failed: only a CSP / frame-ancestors block counts as a refusal, not any load failure
-      if (f) { const why = s.failed.find((x) => x.url === f.unreachableUrl); return why && why.blockedReason !== 'csp' && !/frame-ancestors/i.test(why.blockedReason ?? '') ? null : f; }
+      // why it failed: Chrome reports a frame-ancestors block as ERR_BLOCKED_BY_RESPONSE (blockedReason
+      // "other"; "csp" for some builds), so a refusal is that, never a refused connection or a 404
+      if (f) { const why = s.failed.find((x) => x.url === f.unreachableUrl); return why && why.blockedReason !== 'csp' && why.errorText !== 'net::ERR_BLOCKED_BY_RESPONSE' ? null : f; }
     }
     return null;
   }
