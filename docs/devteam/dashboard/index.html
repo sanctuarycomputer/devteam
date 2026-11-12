@@ -4548,6 +4548,12 @@ tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsP
 tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
 // in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
 tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
+// What a lens says redraws the layer once a frame, however much of it comes.
+function tsDrawSoon() {
+  if (TS.pinsPending) return;
+  TS.pinsPending = true;
+  requestAnimationFrame(() => { TS.pinsPending = false; tlDraw(); });
+}
 // Each page the frame loads is asked what it is: its lens answers ready.
 tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
 window.addEventListener('message', (e) => {
@@ -4555,16 +4561,16 @@ window.addEventListener('message', (e) => {
   const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
   if (!m) return;
   // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
-  // and once it has, what it watches for the pins is asked of it afresh
-  if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); TS.watch = ''; tlDraw(); return; }
+  // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
+  // load lets it go): a page that says ready again and again would otherwise have every one redraw
+  // and ask its lens to watch again, and a loop of them would hold the owner's tab.
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); TS.watch = ''; tsDrawSoon(); return; }
   // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
   // up, constructor or __proto__ among them, is one); the pins, and an open card beside its pin,
-  // follow, drawn once a frame however many come
+  // follow
   if (m.type === 'rects') {
     for (const r of m.rects) if (TS.watching.has(r.key)) TS.rects.set(r.key, r);
-    if (TS.pinsPending) return;
-    TS.pinsPending = true;
-    requestAnimationFrame(() => { TS.pinsPending = false; tlDraw(); });
+    tsDrawSoon();
     return;
   }
   // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own

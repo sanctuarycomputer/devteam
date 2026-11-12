@@ -1953,6 +1953,29 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
     await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && b.style.left === '89px' && b.style.top === '129px'; })()`, 'back where the lens says');
   });
 
+  await t.test("a page that says ready 5,000 times is heard once a load: a redraw or none, no resolve again, and the tab answers", async () => {
+    const resolves = `window.__own.filter((m) => m.own === 'heard' && m.data.type === 'resolve').length`;
+    await p.ev(`(() => { window.__draws = 0; window.__draw = tlDraw; window.tlDraw = () => { window.__draws++; window.__draw(); }; return true; })()`);
+    const before = await p.ev(resolves);
+    const flood = Array.from({ length: 5000 }, (_, i) => ({ lens: 1, type: 'ready', path: 'more/page.html', title: `ready ${i}`, viewport: { w: 10, h: 10 } }));
+    const t0 = Date.now();
+    await tell({ own: 'forge', say: flood }, 'forged');
+    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+    assert.ok(Date.now() - t0 < 5000, `the tab answered in ${Date.now() - t0} ms`);
+    // what the parent posted reaches the page's own script after its flood: a beat for any to echo back
+    await new Promise((r) => setTimeout(r, 300));
+    const draws = await p.ev('window.__draws');
+    assert.ok(draws <= 2, `5,000 readies drawn ${draws} times`);
+    assert.equal(await p.ev(resolves), before, 'nothing asked of the lens again');
+    assert.equal(await p.ev('TS.path'), 'index.html', 'the page its lens named first, this load');
+    // the next load is heard again, once: one resolve for it
+    await p.ev(`(() => { window.tlDraw = window.__draw; const f = document.getElementById('av-frame'); f.src = f.getAttribute('src'); return true; })()`);
+    await soon(`${resolves} > ${before}`, 'asked to watch on the new load');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev(resolves), before + 1, 'once for that load');
+    await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && b.style.left === '89px' && b.style.top === '129px'; })()`, 'its pin');
+  });
+
   await t.test('a stage pin pressed or focused stays through a redraw that drops it; let go, it goes', async () => {
     await p.ev(`document.querySelector('#av-pins .tl-pin').focus()`);
     await p.ev('TS.rects.clear(); tsPins(); true');
