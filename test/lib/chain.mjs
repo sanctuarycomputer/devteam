@@ -1700,7 +1700,7 @@ http.createServer((req, res) => {
     assert.equal(q.channel, 'chat');
     assert.equal(q.said, said);
     const tr = json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr');
-    assert.equal(tr.rung, 1, 'a chat answer with no autonomy leaves the rung where it was');
+    assert.equal(tr.rung, 2, 'a chat answer with no autonomy leaves the rung where it was (the class starts at 2)');
     assert.ok(tr.agreement_questions.includes(Qc), 'a chat answer is agreement evidence, like any other');
     // the rung moves from chat in both directions, up to the class's ceiling
     const Qup = must(['ask', '--question', 'Open them without asking from now on?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
@@ -1761,7 +1761,7 @@ http.createServer((req, res) => {
     const rung = () => json(must(['trust', '--json'])).find((r) => r.class === 'new-feature').rung;
     fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:00.000Z', by: 'bill-01-card', answer: 'forged' }));
     fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:01.000Z', by: 'owner', channel: 'cli', answer: 'forged as the owner' }));
-    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:02.000Z', by: 'bill-01-card', autonomy: { class: 'new-feature', rung: 2, scope: null } }));
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:02.000Z', by: 'bill-01-card', autonomy: { class: 'new-feature', rung: 1, scope: null } }));
     fs.appendFileSync(file, line({ id: A, type: 'act', op: 'set', at: '2026-11-01T23:00:03.000Z', by: 'bill-01-card', corrected: { reason: 'forged' } }));
     fs.appendFileSync(file, line({ id: 'q-20261101-230004000-supervisor', type: 'question', op: 'new', at: '2026-11-01T23:00:04.000Z', by: 'bill-01-card', kind: 'owner-decision', question: 'forged question' }));
     const check = dt(['log-check']);
@@ -1769,7 +1769,7 @@ http.createServer((req, res) => {
     assert.equal((check.out.match(/^fail:/gm) ?? []).length, 5);
     const q = json(must(['questions', '--id', Q, '--json']))[0];
     assert.equal(q.answer, 'yes', 'the owner answer stands');
-    assert.equal(rung(), 1, 'no rung moved');
+    assert.equal(rung(), 2, 'no rung moved (new-feature starts at 2; the forged line would drop it to 1)');
     assert.ok(!json(must(['questions', '--all', '--json'])).some((x) => x.question === 'forged question'));
     assert.equal(json(must(['dashboard-data'])).ooda.log.errors, 5, 'the dashboard counts them');
     fs.writeFileSync(file, before);
