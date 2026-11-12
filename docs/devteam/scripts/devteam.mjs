@@ -1363,7 +1363,9 @@ const supervisorPaneFile = (run) => path.join(run, 'supervisor-pane');
 // made for the supervisor (rememberSupervisorPane, recover). A pane counts only when the two agree:
 // an older kit took a role-less command's pane, perhaps the owner's own, and that bare record reads
 // as no pane here, in this repo and in any other (machine status and tell), so nothing is typed into
-// it and ownerWriter doesn't refuse the owner there. The cost: a supervisor on an older kit has no
+// it and ownerWriter doesn't refuse the owner there. A repo on a kit from before recover is the
+// exception (notedPaneOf): nothing there ever marks a pane, legacyRecover included, so its bare
+// record is the only one it has. The cost: a supervisor on an older kit has no
 // pane this kit uses until its kit is upgraded and it runs a command as the supervisor.
 const supervisorPaneMark = (run) => path.join(run, 'supervisor-pane-role');
 function markedPane(run) {
@@ -11153,6 +11155,14 @@ const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, a
 // Whether a repo's kit has recover, from its own help: what it says it does, however a later kit
 // is written inside. help reads nothing of the repo's and writes nothing.
 const kitHasRecover = (root) => /^\s+recover \[/m.test(projectKit(root, ['help']) ?? '');
+// The supervisor's pane a repo noted, for the machine's commands: marked, on a kit with recover;
+// bare, as it is written, on a kit older than recover, which never marks it (nor does legacyRecover,
+// which writes only what that kit writes). Its supervisor has no role-less pane to take but by its
+// own kit's rules, and supervisorPaneIn still holds it to its root and server.
+function notedPaneOf(root) {
+  const run = path.join(root, 'docs', 'devteam', 'run');
+  return kitHasRecover(root) ? markedPane(run) : readText(supervisorPaneFile(run))?.trim() || null;
+}
 // A window name tmux takes as it is: a dot or a colon in a target means a pane or a window.
 const tmuxName = (s) => s.replace(/[^\w.~-]/g, '-');
 // The box's list of what was up before a restart (cloud/Dockerfile keeps it from what it saw each
@@ -11267,7 +11277,9 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     fs.writeFileSync(promptFile, `${msg}\n`);
     const pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', window, '-c', root]);
     if (!pane) return 'NOT started (tmux would not open its window)';
-    recordSupervisorPane(run, pane);
+    // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
+    // its fleet status says holds a move
+    fs.writeFileSync(paneFile, pane);
     // by pane id: a dot in a window name reads as a pane to tmux
     if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
@@ -11361,7 +11373,7 @@ function machineTell(words) {
   if (!text) die(machineUsage, 2);
   let rec = null;
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
-  const p = supervisorPaneIn(root, markedPane(path.join(root, 'docs', 'devteam', 'run')), rec && typeof rec === 'object' ? rec : null, { strict: true });
+  const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
   const s = paneState(p);
   if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
@@ -11490,7 +11502,7 @@ async function machineStatus() {
     let rec = null;
     try { rec = readJson(runAt('supervisor-up.json')); } catch {}
     if (!rec || typeof rec !== 'object') rec = null;
-    const noted = markedPane(runAt(''));
+    const noted = notedPaneOf(root);
     const sup = supervisorPaneIn(root, noted, rec) ? 'up' : 'down';
     const p = supervisorPaneIn(root, noted, rec, { strict: true });
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
