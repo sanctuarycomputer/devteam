@@ -440,7 +440,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     await hold();
     await p.click(`${'#questions'} [data-qcard="${Q1}"] input[data-pick][value="Left"]`);
     await p.click(`#questions [data-qcard="${Q1}"] [data-answer]`);
-    assert.match(await p.ev(`${card(Q1)}.textContent`), /Answered: Left/, 'drawn while the post is held');
+    await soon(`/Answered: Left/.test(${card(Q1)}?.textContent ?? '')`, 'drawn while the post is held');
     assert.equal(await p.ev(`$('saving').hidden`), false, 'the page says it is saving');
     assert.equal(answeredOnServer(Q1), false, 'and the server has not got it yet');
     await polls(2);
@@ -461,7 +461,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
       await soon(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]')?.value === 'not this week'`, 'the note typed');
       await hold();
       await p.click(`#questions [data-qcard="${Q2}"] [data-answer]`);
-      assert.match(await p.ev(`${card(Q2)}.textContent`), /Answered: No — not this week/);
+      await soon(`/Answered: No — not this week/.test(${card(Q2)}?.textContent ?? '')`, 'the card answered while the post is held');
       dt(['withdraw', Q2, '--reason', 'moot'], SUP);
       await letGo();
       await soon(`/Not saved:/.test(document.getElementById('e-${Q2}')?.textContent ?? '')`, 'the refusal, on the card');
