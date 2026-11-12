@@ -453,6 +453,10 @@ test('a repo on a kit from before recover comes back from the box\'s list, the w
       assert.match(claudeCalls(r)[0], new RegExp(`^supervisor\\|--resume ${SID} --dangerously-skip-permissions The box restarted`), 'its own resume_command, on its own conversation, as the supervisor');
       assert.match(claudeCalls(r)[0], /Nothing about this restart came from the owner/);
       assert.match(fs.readFileSync(path.join(r, 'docs/devteam/run/supervisor-pane'), 'utf8'), /^%\d+$/);
+      assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane-role')), 'only what its own kit writes: a file it doesn\'t know would hold a move (fleet status)');
+      const st = dtIn(r, ['fleet', 'status', '--json', '--no-fetch']);
+      assert.equal(st.status, 0, st.stderr);
+      assert.ok(!JSON.parse(st.stdout).blockers.some((b) => /didn't make/.test(b)), `its own kit's fleet status: ${st.stdout}`);
     }
     assert.match(fs.readFileSync(path.join(old['v0.25.0'], 'docs/devteam/run/supervisor-prompt.txt'), 'utf8'), /missing: config\/master\.key.*Inbox.*--secrets.*file:<path>/s);
     assert.match(claudeCalls(fresh)[0], /^supervisor\|--dangerously-skip-permissions .*supervisor/, 'its agent_command, with its own kit\'s prompt');
@@ -475,6 +479,35 @@ test('a repo on a kit from before recover comes back from the box\'s list, the w
     assert.equal(none.status, 1);
     assert.match(none.stderr, /no adopted repo "no-such"/);
   } finally { tmuxSh(['kill-session', '-t', '=home']); fs.rmSync(upList, { force: true }); }
+});
+
+test("a repo on a kit from before recover: status and tell go by the pane its kit noted, bare as that kit writes it", { skip: !hasTmux || skipOld() }, async () => {
+  const dir = path.join(tmp, 'box-code-noted');
+  const r = repo('noted-old', { tag: 'v0.28.0', dir });
+  const noted = path.join(r, 'docs/devteam/run/supervisor-pane');
+  fs.mkdirSync(path.dirname(noted), { recursive: true });
+  const status = () => machine(['machine', 'status', '--in', dir]);
+  // a pane at its root running no agent: up only by the note
+  const quiet = agent({ screens: ['x'], cwd: r, window: 'sup-noted-old', command: 'exec sleep 3600' });
+  try {
+    assert.match(status().stdout, /^noted-old sup=down /m, 'nothing noted, nothing agent-shaped');
+    fs.writeFileSync(noted, quiet.pane);
+    assert.match(status().stdout, /^noted-old sup=up /m, 'the pane its kit noted');
+  } finally { quiet.kill(); }
+  // two agents at its root, the one first in tmux's list not the noted one: tell types into the noted one
+  const decoy = agent({ screens: [box(prompt)], cwd: r, window: 'a-decoy' });
+  const sup = agent({ screens: [box(prompt)], cwd: r, window: 'sup-noted-old' });
+  try {
+    await shown(decoy.pane, 'status');
+    await shown(sup.pane, 'status');
+    fs.writeFileSync(noted, sup.pane);
+    const x = machine(['machine', 'tell', '--in', dir, '--', 'noted-old', 'hello']);
+    assert.equal(x.status, 0, x.stdout + x.stderr);
+    assert.match(x.stdout, new RegExp(`^noted-old: told \\(pane ${sup.pane}\\)`, 'm'));
+    await until(() => sup.keys().includes('\r'), 'the Enter');
+    assert.equal(decoy.keys(), '', 'never the other agent');
+    assert.match(status().stdout, new RegExp(`^noted-old sup=up .* pane=${sup.pane} `, 'm'));
+  } finally { decoy.kill(); sup.kill(); }
 });
 
 test('the box\'s list: a repo that couldn\'t start stays listed, two at once start one, and a current kit uses its own recover', { skip: !hasTmux || skipOld() }, async () => {

@@ -189,22 +189,46 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const R = F.owner(['thread', 'reply', T, 'A reply with no role set']);
     assert.match(R, /^u-\d{8}-\d{9}-supervisor$/);
     assert.deepEqual([show(T).turns.at(-1).id, show(T).turns.at(-1).by], [R, 'supervisor']);
-    // in the supervisor's own pane (recorded by its last command there), the owner's verbs are refused
+    // in the supervisor's own pane (recorded by its last command there, as the supervisor), the owner's verbs are refused
     const paneFile = path.join(F.old, 'docs/devteam/run/supervisor-pane');
     const IN_PANE = { TMUX: 'x', TMUX_PANE: '%4242' };
+    const OWN = { TMUX: 'x', TMUX_PANE: '%7' };
+    const markFile = path.join(F.old, 'docs/devteam/run/supervisor-pane-role');
+    const noted = (file = paneFile) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null);
+    const target = (env) => F.owner(['whoami'], env).match(/^DEVTEAM_SUPERVISOR=(.*)$/m)[1];
     try {
-      F.owner(['thread', 'reply', T, 'From my pane'], IN_PANE);
-      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242', "the reply recorded its pane as the supervisor's");
+      // a role-less command is the supervisor's, but it claims no pane: the owner's own terminal is role-less too
+      F.owner(['thread', 'reply', T, 'Role-less, in a pane'], OWN);
+      assert.notEqual(noted(), '%7', 'a role-less command records no pane');
+      F.owner(['thread', 'say', T, 'still my own terminal'], OWN);
+      assert.equal(show(T).turns.at(-1).by, 'owner', "and the owner's commands there still work");
+      // an older kit's record, made the old way by a role-less command in the owner's own pane, is no pane:
+      // the owner isn't refused there, and nothing is typed into it
+      fs.writeFileSync(paneFile, '%7');
+      assert.equal(target(OWN), '', 'no nudge or owner turn goes to the bare record');
+      F.owner(['thread', 'say', T, 'mine, in a pane an older kit took'], OWN);
+      assert.equal(show(T).turns.at(-1).by, 'owner', "written, as the owner's");
+      assert.equal(noted(), '%7', 'and the owner left it as it was');
+      F.sup(['thread', 'reply', T, 'From my pane'], IN_PANE);
+      assert.deepEqual([noted(), noted(markFile)], ['%4242', '%4242'], "the supervisor's reply, by its role, recorded its pane, marked as made for it");
+      assert.equal(target(OWN), '%4242', 'where nudges and owner turns now go');
       const n = show(T).turns.length;
       for (const args of [['thread', 'say', T, 'x'], ['thread', 'new', 'x'], ['thread', 'resolve', T], ['thread', 'reopen', T]]) assert.match(F.fails(args, IN_PANE), /this is the supervisor's session: reply with thread reply/, args.join(' '));
       // every owner command, not only a thread's: the supervisor never writes as the owner from its pane
       assert.match(F.fails(['answer', 'q-20261110-100000000-supervisor', 'yes'], IN_PANE), /this is the supervisor's session; the owner's commands run in their own terminal or on the dashboard/);
+      // and it says how to tell, and how to clear a wrong record
+      const said = F.fails(['thread', 'say', T, 'x'], IN_PANE);
+      assert.ok([markFile, fs.realpathSync(markFile)].some((f) => said.includes(`(This pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${f}: the supervisor records its own pane again with its next command.)`)), said);
+      assert.match(F.fails(['thread', 'say', T, 'x'], { ...OWN, DEVTEAM_SUPERVISOR: '%7' }), /\(DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor's\. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set\.\)/);
       assert.equal(show(T).turns.length, n, 'nothing written');
       assert.equal(show(T).status, 'open');
       // the owner's own terminal, in another pane, is the owner's
-      F.owner(['thread', 'say', T, 'from my own terminal'], { TMUX: 'x', TMUX_PANE: '%7' });
+      F.owner(['thread', 'say', T, 'from my own terminal'], OWN);
       assert.equal(show(T).turns.at(-1).by, 'owner');
-    } finally { fs.rmSync(paneFile, { force: true }); }
+      // and a role-less command there afterwards doesn't take the pane from the supervisor
+      F.owner(['thread', 'reply', T, 'Role-less again'], OWN);
+      assert.deepEqual([noted(), noted(markFile)], ['%4242', '%4242']);
+    } finally { fs.rmSync(paneFile, { force: true }); fs.rmSync(markFile, { force: true }); }
     // a reply at the encoded cap fits alone; with eight long links its line would not, and is refused in words
     const longRefs = Array.from({ length: 8 }, (_, i) => `act:a-${i}${'x'.repeat(110)}`);
     const before7 = show(T).turns.length;
@@ -223,6 +247,64 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.fails(['thread', 'new', 'x', '--subject', '{not json']), /--subject is JSON/);
     assert.match(F.fails(['thread', 'new', 'x', '--title', 'a'.repeat(121)]), /--title is at most 120 characters/);
     assert.match(F.fails(['thread', 'new', 'x', '--title', 'two\nlines']), /--title is one line/);
+  });
+
+  await t.test("an artifact subject's at is one of the viewer's forms: main, a worktree name, a published tree", () => {
+    const art = (at) => JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at });
+    for (const at of ['main', 'Feature-X', 'ticket-04', `tree:${'a'.repeat(40)}`, `tree:${'b'.repeat(64)}`]) {
+      const [T] = F.owner(['thread', 'new', 'x', '--subject', art(at)]).split('\n');
+      assert.equal(show(T).subject.at, at);
+      F.owner(['thread', 'resolve', T]);
+    }
+    assert.match(F.fails(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at: 'main', anchor: { rect: { x: { y: 1 }, y: 0, w: 0, h: 0 } } })]), /--subject: a subject nests at most 2 deep/, 'nothing deeper than a rect');
+    for (const at of [`tree:${'a'.repeat(41)}`, 'tree:abc', '../main', 'a/b', '-x', '.x', 'x'.repeat(101), '']) assert.match(F.fails(['thread', 'new', 'x', '--subject', art(at)]), /--subject: at is main, a worktree name, or tree:<id>|at is \d+ bytes/, JSON.stringify(at));
+  });
+
+  await t.test("a subject never keeps a box's capability, in whatever encoding the page wrote it: a marker in its place", () => {
+    // the gateway's /c/<expiry>.<session>.<mac>: digits, 16 and 22 base64url characters
+    const lit = '/c/1762900000000.AbCdEfGh_jKl-nOp.abcdefghijklmnopqrstuv';
+    const pct = encodeURIComponent(lit);
+    const pctDots = lit.replaceAll('/', '%2f').replaceAll('.', '%2E');
+    const twice = encodeURIComponent(pct);
+    const esc = lit.replaceAll('/', '\\/');
+    const uni = lit.replaceAll('/', '\\u002f');
+    const ent = lit.replaceAll('/', '&#x2F;');
+    const dec = lit.replaceAll('/', '&#47;').replaceAll('.', '&#46;');
+    const forms = [lit, pct, pctDots, twice, esc, uni, ent, dec];
+    const forged = (f) => ({
+      kind: 'artifact', slug: 'pricing-mock', at: 'main', path: `share${f}.html`,
+      anchor: { selector: `a[href="${f}"]`, tag: 'a', role: 'link', text: `Share http://box.example${f}/artifact/main/x/`, name: `{"u":"${f}"}`, html: `<a href="http://box.example${f}/artifact/">${f}</a>` },
+    });
+    const removed = (f) => JSON.parse(JSON.stringify(forged(f)).replaceAll(JSON.stringify(f).slice(1, -1), '[link removed]'));
+    for (const f of forms) {
+      const [T] = F.owner(['thread', 'new', 'Make it green', '--title', `Share ${f}`, '--subject', JSON.stringify(forged(f))]).split('\n');
+      const v = show(T);
+      assert.deepEqual(v.subject, removed(f), f);
+      assert.equal(v.title, 'Share [link removed]', `the title too: ${f}`);
+      assert.doesNotMatch(JSON.stringify(v), /AbCdEfGh_jKl-nOp|abcdefghijklmnopqrstuv/, f);
+      F.owner(['thread', 'resolve', T]);
+    }
+    // a preview's route and errors, which its page wrote
+    const [V] = F.owner(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'preview', name: 'cool-tiger', route: `/x?back=${pct}`, errors: [`fetch ${esc} failed`] })]).split('\n');
+    assert.deepEqual([show(V).subject.route, show(V).subject.errors], ['/x?back=[link removed]', ['fetch [link removed] failed']]);
+    F.owner(['thread', 'resolve', V]);
+    // one a cap cut short at the end of a string, the page's ellipsis after it
+    const [S] = F.owner(['thread', 'new', 'x', '--title', `Share http://box.example${lit.slice(0, 26)}`, '--subject', JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at: 'main', anchor: { text: `Share ${pct.slice(0, 30)}\u2026` } })]).split('\n');
+    assert.deepEqual([show(S).title, show(S).subject.anchor.text], ['Share http://box.example[link removed]', 'Share [link removed]']);
+    F.owner(['thread', 'resolve', S]);
+    // a run of backslashes or 25s costs a line, not its square: this returns (the title is refused for its length)
+    assert.match(F.fails(['thread', 'new', 'x', '--title', `${'\\'.repeat(19000)}${'%25'.repeat(3000)}`]), /--title is at most 120 characters/);
+    // ordinary text is never taken for one: nothing short of the gateway's whole form
+    const plainText = 'A/C units, see /c/docs, /c/123.abc.def, 3/c/4 and /c/1762900000000.AbCdEfGh.abcdefghijklmnopqrstuv';
+    // nor a path or version that ends in /c/<n>.<more>: the gateway's expiry is 13 digits of milliseconds
+    for (const ok of ['/blog/c/2.html', '/docs/c/1.md', '/products/c/12.json', 'Fix /c/3.0']) {
+      const [O] = F.owner(['thread', 'new', 'x', '--title', ok, '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: ok })]).split('\n');
+      assert.deepEqual([show(O).title, show(O).subject.quote], [ok, ok]);
+      F.owner(['thread', 'resolve', O]);
+    }
+    const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: plainText })]).split('\n');
+    assert.deepEqual([show(P).title, show(P).subject.quote], [plainText.slice(0, 100), plainText]);
+    F.owner(['thread', 'resolve', P]);
   });
 
   await t.test('a 201st open thread is refused: resolve some first', () => {
@@ -483,5 +565,16 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
       F.sup(['thread', 'reply', old, 'Sorry, here now.']);
       assert.ok(!JSON.parse(F.owner(['metrics', '--json'])).findings.some((f) => f.kind === 'thread-waiting' && f.subject === old), 'a reply settles it');
     } finally { F.restoreLog(snap); }
+  });
+  await t.test("thread show prints a turn's lines as written, without a control character a terminal would act on", () => {
+    const T = F.owner(['thread', 'new', 'Show me']).split('\n')[0];
+    // as a line written by hand could hold them: an escape, a bidi override, a CR, a bell
+    F.hand('owner', { type: 'turn', thread: T, text: 'first line\u001b[2J\nsecond\u202eline\r\nthird\u0007' }, 0);
+    const shown = F.sup(['thread', 'show', T]);
+    assert.match(shown, /^ {2}first line\[2J\n {2}secondline\n {2}third$/m, 'its own line breaks kept, each line indented');
+    assert.doesNotMatch(shown, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, 'nothing else a terminal acts on');
+    // a tab is a space between words, not nothing
+    F.hand('owner', { type: 'turn', thread: T, text: 'tabbed\twords\there' }, 0);
+    assert.match(F.sup(['thread', 'show', T]), /^ {2}tabbed words here$/m);
   });
 });

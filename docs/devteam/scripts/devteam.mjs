@@ -463,7 +463,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -1334,13 +1334,18 @@ function logWriter() {
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
 // visibility measure, not a wall: appendLog stamps every owner line with its channel. The supervisor
-// with no DEVTEAM_ROLE set is caught by its pane: the one its own commands recorded (rememberSupervisorPane),
-// or the one DEVTEAM_SUPERVISOR names. The dashboard's children run with no TMUX_PANE, wherever it
-// was started. hint: what the supervisor does instead, for the command at hand.
+// with no DEVTEAM_ROLE set on a command is caught by its pane: the one its own commands as the
+// supervisor recorded (rememberSupervisorPane), or the one DEVTEAM_SUPERVISOR names. The dashboard's
+// children run with no TMUX_PANE, wherever it was started. hint: what the supervisor does instead,
+// for the command at hand.
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   const pane = process.env.TMUX_PANE;
-  if (pane && process.env.TMUX && [process.env.DEVTEAM_SUPERVISOR, readText(supervisorPaneFile())?.trim()].includes(pane)) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard`);
+  if (!pane || !process.env.TMUX) return { by: 'owner' };
+  const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
+    : markedPane(runDir) === pane ? `This pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${supervisorPaneMark(runDir)}: the supervisor records its own pane again with its next command`
+    : null;
+  if (how) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard. (${how}.)`);
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
@@ -1352,13 +1357,34 @@ const supervisorOnly = (what) => {
 // The supervisor is the owner's foreground agent session. When it runs inside tmux, its pane is
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
 // in the log for its next tick.
-const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+const supervisorPaneFile = (run) => path.join(run, 'supervisor-pane');
+// supervisor-pane keeps the bare pane id, as older kits and the box's up-list read it, so its form
+// never changes. supervisor-pane-role, beside it, holds the same id and is written only with a record
+// made for the supervisor (rememberSupervisorPane, recover). A pane counts only when the two agree:
+// an older kit took a role-less command's pane, perhaps the owner's own, and that bare record reads
+// as no pane here, in this repo and in any other (machine status and tell), so nothing is typed into
+// it and ownerWriter doesn't refuse the owner there. A repo on a kit from before recover is the
+// exception (notedPaneOf): nothing there ever marks a pane, legacyRecover included, so its bare
+// record is the only one it has. The cost: a supervisor on an older kit has no
+// pane this kit uses until its kit is upgraded and it runs a command as the supervisor.
+const supervisorPaneMark = (run) => path.join(run, 'supervisor-pane-role');
+function markedPane(run) {
+  const p = readText(supervisorPaneFile(run))?.trim();
+  return p && readText(supervisorPaneMark(run))?.trim() === p ? p : null;
+}
+function recordSupervisorPane(run, pane) {
+  fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(supervisorPaneFile(run), pane);
+  fs.writeFileSync(supervisorPaneMark(run), pane);
+}
+// Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
+// records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
+// terminal runs role-less, and taking its pane would have ownerWriter refuse the owner there.
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
-  if (!pane || !process.env.TMUX || (process.env.DEVTEAM_ROLE && process.env.DEVTEAM_ROLE !== 'supervisor')) return;
-  if (readText(supervisorPaneFile()) === pane) return;
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  if (!pane || !process.env.TMUX || process.env.DEVTEAM_ROLE !== 'supervisor') return;
+  if (markedPane(runDir) === pane) return;
+  recordSupervisorPane(runDir, pane);
 }
 
 function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
@@ -5133,11 +5159,38 @@ const SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], ar
 const SUBJECT_NEEDS = { item: ['ref'], page: ['view'], artifact: ['slug', 'at'], preview: ['name'] };
 const SUBJECT_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
 const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+// a preview's console errors, the last few and each cut; an artifact's at, as text
+const SUBJECT_ERRORS = 3;
+const SUBJECT_ERROR_MAX = 200;
+const SUBJECT_AT_MAX = 100;
+// A box's capability, as the gateway mints it (capFor in cloud/gateway.mjs): /c/<expiry>.<session>.<mac>,
+// the expiry in milliseconds, the session 16 base64url characters and the MAC 22. It is a live bearer
+// token for the owner's session, and an artifact framed on a box has it in its own address. The lens
+// never tells it, but a hostile artifact can speak as its lens, so whatever a subject or a title holds
+// is cut of it here, as it is written: as written, percent-encoded (once or more), JSON- or
+// \u-escaped, or as HTML entities. Only the whole form is cut, so no ordinary text is touched. A
+// marker in its place, not a refusal: the owner's words still save, and a page can't stop its own
+// thread by holding one. A page can still spell it some other way; this is the backstop, not the wall.
+// Each repeat is bounded, so a page's run of backslashes or 25s costs a line, never its square. A
+// token cut short at a string's end (a cap fell inside it) is cut too: /c/<expiry>. and what follows.
+// index.html's T_CAP_SLASH, T_CAP_DOT and T_BOX_CAPABILITY(_TAIL) are the same (a test holds them).
+const CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
+const CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
+const BOX_CAPABILITY = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}[\\w-]{16}${CAP_DOT}[\\w-]{22}`, 'gi');
+const BOX_CAPABILITY_TAIL = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{13,15}${CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${CAP_DOT}[\\w-]{0,21})?)\u2026?$`, 'i');
+// A subject's strings are at most two deep (subject.anchor.text, subject.errors[0]), its objects and
+// lists too (subject.anchor.rect): subjectProblem refuses one nested deeper before anything else,
+// and uncapped walks no deeper, so a body of thousands of nested objects never reaches the stack.
+const SUBJECT_DEPTH = 3;
+const nestedPast = (v, depth = 0) => !!v && typeof v === 'object' && (depth >= SUBJECT_DEPTH || Object.values(v).some((x) => nestedPast(x, depth + 1)));
+const uncapped = (v, depth = 0) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]').replace(BOX_CAPABILITY_TAIL, '[link removed]') : depth >= SUBJECT_DEPTH ? v : Array.isArray(v) ? v.map((x) => uncapped(x, depth + 1)) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x, depth + 1)])) : v);
 // Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
 function subjectProblem(s) {
   if (!isObj(s)) return 'a subject is a JSON object with a kind';
-  const keys = SUBJECT_KEYS[s.kind];
+  // own keys only: a kind of constructor or __proto__ is no kind
+  const keys = typeof s.kind === 'string' && Object.hasOwn(SUBJECT_KEYS, s.kind) ? SUBJECT_KEYS[s.kind] : null;
   if (!keys) return `a subject's kind is one of ${Object.keys(SUBJECT_KEYS).join(', ')}`;
+  if (nestedPast(s)) return `a subject nests at most ${SUBJECT_DEPTH - 1} deep (subject.anchor.rect)`;
   const bytes = Buffer.byteLength(JSON.stringify(s));
   if (bytes > SUBJECT_MAX) return `the subject is ${bytes} bytes encoded; at most ${SUBJECT_MAX}`;
   const extra = Object.keys(s).filter((k) => k !== 'kind' && !keys.includes(k));
@@ -5149,10 +5202,10 @@ function subjectProblem(s) {
   for (const [k, v] of Object.entries(s)) {
     if (k === 'kind') continue;
     let p;
-    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (/^(main|tree:[0-9a-f]{40}|[a-z0-9][a-z0-9._-]*)$/.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
+    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, SUBJECT_AT_MAX) ?? (ARTIFACT_AT.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
     else if (k === 'point') p = box('point', v, ['x', 'y']);
     else if (k === 'viewport') p = box('viewport', v, ['w', 'h']);
-    else if (k === 'errors') p = !Array.isArray(v) || v.length > 3 ? 'errors is a list of at most 3' : v.map((e, i) => text(`errors[${i}]`, e, 200)).find(Boolean) ?? null;
+    else if (k === 'errors') p = !Array.isArray(v) || v.length > SUBJECT_ERRORS ? `errors is a list of at most ${SUBJECT_ERRORS}` : v.map((e, i) => text(`errors[${i}]`, e, SUBJECT_ERROR_MAX)).find(Boolean) ?? null;
     else if (k === 'anchor') p = anchorProblem(v);
     else p = text(k, v, SUBJECT_CAPS[k]);
     if (!p && k === 'ref' && !SUBJECT_REF.test(v)) p = `ref is <type>:<id>, the type one of ${SUBJECT_TYPES.join(', ')}`;
@@ -5171,8 +5224,11 @@ function anchorProblem(a) {
       if (!(isObj(v) && Object.keys(v).length === names.length && names.every((n) => Number.isFinite(v[n])))) return `anchor.${k} is {${names.join(', ')}}`;
       continue;
     }
-    if (!ANCHOR_CAPS[k]) return `anchor has no ${k}`;
+    if (!Object.hasOwn(ANCHOR_CAPS, k)) return `anchor has no ${k}`;
     if (typeof v !== 'string') return `anchor.${k} is text`;
+    // its words, as the page sends them (tAnchor drops these): a bidi override would have the owner's
+    // card read the page's words reversed. The element's HTML is the page's markup, line breaks and all.
+    if (k !== 'html' && UNSAFE_TEXT.test(v)) return `anchor.${k} is one line of plain text (no control or bidi characters)`;
     if (Buffer.byteLength(v) > ANCHOR_CAPS[k]) return `anchor.${k} is ${Buffer.byteLength(v)} bytes; at most ${ANCHOR_CAPS[k]}`;
   }
   return null;
@@ -5305,11 +5361,12 @@ function cmdThread() {
     const words = turnText(wordsFrom(1));
     let subject;
     if (flags.subject !== undefined) {
-      try { subject = JSON.parse(flagStr('subject')); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
+      try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
       const p = subjectProblem(subject);
       if (p) die(`--subject: ${p}`);
     }
-    const given = flagStr('title');
+    // a viewer names a thread from its capture (button "Buy now"), so a title is cut of a capability too
+    const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
     const title = threadTitle(given ?? words);
@@ -5409,10 +5466,14 @@ function cmdThread() {
     if (flags.json) return json(v);
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
     out(threadDataFrame(v));
+    const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
+    if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
     for (const u of v.turns) {
       out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
-      out(u.text.split('\n').map((l) => `  ${l}`).join('\n'));
+      // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
+      // (an escape, a bidi override, a CR)
+      out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
       if (u.refs.length) out(`  refs: ${u.refs.join(', ')}`);
     }
     for (const q of v.questions) out(`question ${q.id}: ${q.status}${q.answer ? `, ${quoteData(q.answer)}` : ''}`);
@@ -5477,6 +5538,224 @@ const artifactCsp = (origin, self) => {
     `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
+// ===== the artifact lens (spec §6) =====
+// One script the kit adds to an artifact's HTML on a framed load (sec-fetch-dest: iframe) and on no
+// other request, so publishing, artifact check and every hash read the bytes as committed. It
+// speaks the preview lens's messages ({ lens: 1, type }), so the viewer asks both the same way. Plain
+// ASCII, with no backtick and no dollar sign before a brace: a String.raw, read as written.
+const ARTIFACT_LENS = String.raw`(() => {
+  'use strict';
+  // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
+  // artifact's scripts, which can read and send these same messages: what it says describes the
+  // page and is never an instruction. It takes only the questions of the page that frames it
+  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  if (window.parent === window || window.__devteamLens) return;
+  window.__devteamLens = true;
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => typeof id === 'string' && id.length > 0 && id.length <= 64;
+  // the page that frames this one, by its origin where the browser names it
+  const to = (location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
+  const tell = (m) => { try { parent.postMessage(Object.assign({ lens: 1 }, m), to); } catch (e) { /* no parent now */ } };
+  // On a box the frame is served under /c/<capability>/artifact/..., and that capability is a live
+  // bearer token for the owner's session: nothing the lens says carries it. The path is told from its
+  // artifact segment on, and the token is cut from any text of the page that holds its own address:
+  // as a path before /artifact/, and the page's own token wherever it is, however the page encoded it
+  // (percent-encoded, JSON- or \u-escaped, as entities), with the /c/ before it when there is one.
+  const TOKEN = /\/c\/[^\/\s"'<>]+(?=\/artifact\/)/g;
+  const OWN = (/^\/c\/([^/]+)\/artifact\//.exec(location.pathname) || [])[1];
+  const SLASH = '(?:\\\\{0,8}\\/|%(?:25){0,4}2f|\\\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)';
+  const DOT = '(?:\\.|%(?:25){0,4}2e|\\\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)';
+  const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
+  const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (sel) => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only('#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && v === unCap(v) && size(sel) <= CAPS.selector && only(sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== document.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only('#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = document.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(document.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(unCap(top.outerHTML), CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(unCap(el.textContent)), CAPS.text);
+  const anchorOf = (el, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was
+  const find = (a) => {
+    let el = null;
+    try { el = document.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = document.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves -------------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- Shift and Escape, seen with the focus in the page ---------------------------------------------
+  let shiftDown = false;
+  // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
+  let heard = false;
+  const onKey = (e) => {
+    if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+
+  // --- the viewer's questions ------------------------------------------------------------------------
+  // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
+  // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
+  const pathOf = () => {
+    const p = unCap(location.pathname);
+    const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
+    return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
+  };
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      let el = document.elementFromPoint(m.x, m.y);
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === document.documentElement || el === document.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = document.elementFromPoint(at.x, at.y); el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+        const s = window.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      window.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const a = m.anchor;
+      if (!a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+  };
+  addEventListener('message', (e) => {
+    if (!e.isTrusted || e.source !== parent) return;
+    // from the parent's own origin where the browser names it, as the preview lens checks
+    if (location.ancestorOrigins && location.ancestorOrigins.length && e.origin !== location.ancestorOrigins[0]) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  addEventListener('blur', onBlur);
+  addEventListener('scroll', soon, true);
+  addEventListener('resize', soon);
+  try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+})();`;
+// The page with the lens after it, at the very end: the parser takes a script there into the body
+// and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
+// <script>, <style>, <textarea>, <title> or comment swallows it as text: then no lens answers, and
+// the viewer pins the point alone (decision 3). Its policy needs nothing more: the
+// artifact policy's script-src already has 'unsafe-inline', and a hash there would turn that off
+// for the artifact's own inline scripts.
+const withArtifactLens = (bytes) => Buffer.concat([bytes, Buffer.from(`<script>${ARTIFACT_LENS}</script>`)]);
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
 // The permanent copy of the owner's result, in the PR that asked: project/questions/<qid>/, or
@@ -5912,6 +6191,9 @@ async function cmdPreview() {
 // it). Landed is what main has, read from git; a draft is a session worktree's copy under
 // .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
+// Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
+// it is one), or a published version by its tree id. The same forms a thread's artifact subject records.
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
@@ -6043,6 +6325,25 @@ function artifactSource(at, slug) {
   if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
   return { entries: diskEntries(dir), dir };
 }
+// An artifact's files where a viewer shows it: as artifactSource has them, or an artifact folder's
+// tree by its id (a published version, which never changes). Any other id is nothing (decision 12).
+function artifactAt(at, slug) {
+  if (!String(at).startsWith('tree:')) return artifactSource(at, slug);
+  const tree = at.slice(5);
+  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree)) return null;
+  const entries = treeIdEntries(tree);
+  return entries.length ? { entries } : null;
+}
+// Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
+// any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
+// can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
+// Remembered once true: a tree id never changes.
+const artifactTrees = new Set();
+const artifactTreeOk = (id) => (artifactTrees.has(id) ? Promise.resolve(true) : new Promise((resolve) => execFile('git', ['cat-file', '-t', id], { cwd: mainRoot, encoding: 'utf8' }, (e1, type) => {
+  if (e1 || type.trim() !== 'tree') return resolve(false);
+  return execFile('git', ['cat-file', '-e', `${id}:artifact.json`], { cwd: mainRoot }, (e2) => { if (!e2) artifactTrees.add(id); resolve(!e2); });
+})));
+const artifactTreeOkSync = (id) => artifactTrees.has(id) || (git(['cat-file', '-t', id], mainRoot) === 'tree' && git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) !== null && !!artifactTrees.add(id));
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -6155,6 +6456,17 @@ function publicManifest(slug) {
 // channel, or null. A forged line can look exactly like a real one (the dashboard's route writes
 // it for anything that reaches it), so none of this is proof the owner published.
 const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
+// What a thread's artifact subject is now, for thread show (decision 21): null when its fingerprint
+// is still the one the thread began on (or it recorded none); else a line saying so. A published
+// tree never changes, so for one, "changed since" means main has moved on from it (spec §5).
+function artifactSubjectNow(s) {
+  if (!isObj(s) || !LINK_ID.test(s.slug ?? '') || typeof s.fp !== 'string') return null;
+  const tree = String(s.at).startsWith('tree:');
+  const src = artifactAt(tree ? 'main' : s.at, s.slug);
+  if (!src) return `the artifact ${s.slug} is no longer ${tree ? 'on main' : `at ${quoteData(s.at)}`}`;
+  if (fingerprint(src.entries) === s.fp) return null;
+  return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
+}
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -6213,7 +6525,23 @@ function cmdArtifact() {
     }
     return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact describe <slug> [--at main|<worktree>|tree:<id>]: what a viewer shows of it (its title,
+  // its fingerprint) and main's, for "changed since"; the dashboard's /api/view runs it
+  if (sub === 'describe') {
+    const slugName = args[0] ?? die('usage: artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]');
+    const at = flagStr('at') ?? 'main';
+    if (!LINK_ID.test(slugName) || !ARTIFACT_AT.test(at)) die('artifact describe: a slug, and --at main, a worktree name or tree:<id>');
+    // exit 3: nothing there, which /api/view tells apart from describe failing
+    const src = artifactAt(at, slugName) ?? die(`${slugName}: no artifact at ${at}`, 3);
+    const d = describeArtifact(slugName, at, src);
+    const main = at === 'main' ? src : artifactAt('main', slugName);
+    const ref = mainRef();
+    const mainTree = ref ? /^040000 tree ([0-9a-f]+)\t/.exec(git(['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slugName}`], mainRoot) ?? '')?.[1] ?? null : null;
+    const r = { slug: slugName, at, title: d.error ? null : d.title, summary: d.error ? null : d.summary, error: d.error, fp: d.fp, main_fp: main ? fingerprint(main.entries) : null, main_tree: mainTree };
+    if (flags.json) return json(r);
+    return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -10578,7 +10906,7 @@ const tmuxServerPid = () => sh('tmux', ['list-sessions', '-F', '#{pid}'])?.split
 const SUPERVISOR_NOT_WINDOW = /^(dev~|dash-|dashboard$|operator$)/;
 // What an agent's process is called in tmux: Claude Code shows as its version (2.1.307).
 const AGENT_PANE_CMD = /claude|node|codex|opencode|bun|^\d+\.\d+/;
-function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, readText(supervisorPaneFile())?.trim() || null, rec, opts); }
+function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, markedPane(runDir), rec, opts); }
 // Any repo's, for the machine's commands: its root, the pane it noted, its supervisor-up record.
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
@@ -10607,6 +10935,16 @@ function supervisorRunningNow(rec) {
   if (supervisorPaneNow(rec)) return true;
   return rec?.kind === 'foreground' && !!rec.pid && !!rec.start && processStart(rec.pid) === rec.start;
 }
+// Just after an upgrade, a running supervisor's pane is still recorded bare, as its older kit wrote it,
+// until its next command with the role. Read as no pane, the tick would write it stopped, and a
+// restart in that window would leave it down. A bare pane started at the root whose agent runs as the
+// supervisor is its pane, whoever recorded it: marked here, it counts from this tick on. Only the
+// mark is written: the bare record is the one just read, and rewriting it could race a newer one.
+function markUpgradedPane() {
+  if (markedPane(runDir)) return;
+  const bare = readText(supervisorPaneFile(runDir))?.trim();
+  if (bare && paneStartedIn(bare, realPath(mainRoot)) && isSupervisorProcess(paneAgentProcess(bare))) fs.writeFileSync(supervisorPaneMark(runDir), bare);
+}
 // From the dashboard's minute tick. It doesn't touch a record once the machine or the tmux server has
 // changed under it, so a dashboard that comes up after a restart, before recover has run, can't erase
 // what recover needs. Nor does it say "stopped" when tmux doesn't answer: not knowing isn't a stop.
@@ -10618,6 +10956,7 @@ function noteSupervisorFromTick() {
     if (!machine) return;
     // only the pane the supervisor noted: an ad-hoc agent at the repo's root isn't it, though it's
     // reason enough not to start a second one (supervisorRunningNow)
+    markUpgradedPane();
     const pane = supervisorPaneNow(rec, { notedOnly: true });
     if (pane) {
       const agent = paneAgentProcess(pane);
@@ -10745,7 +11084,7 @@ function recoverOne() {
   else if (sessionFlag) return notStarted(`NOT started (no tmux session ${sessionFlag})`);
   else pane = sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', window, '-c', mainRoot], { env: tmuxServerEnv() });
   if (!pane) return notStarted('NOT started (tmux would not open its window)');
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  recordSupervisorPane(runDir, pane);
   if (!typeInto(pane, line)) return notStarted(`NOT started (its window opened but could not be typed into: pane ${pane})`);
   writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
   return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
@@ -10820,6 +11159,14 @@ const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, a
 // Whether a repo's kit has recover, from its own help: what it says it does, however a later kit
 // is written inside. help reads nothing of the repo's and writes nothing.
 const kitHasRecover = (root) => /^\s+recover \[/m.test(projectKit(root, ['help']) ?? '');
+// The supervisor's pane a repo noted, for the machine's commands: marked, on a kit with recover;
+// bare, as it is written, on a kit older than recover, which never marks it (nor does legacyRecover,
+// which writes only what that kit writes). Its supervisor has no role-less pane to take but by its
+// own kit's rules, and supervisorPaneIn still holds it to its root and server.
+function notedPaneOf(root) {
+  const run = path.join(root, 'docs', 'devteam', 'run');
+  return kitHasRecover(root) ? markedPane(run) : readText(supervisorPaneFile(run))?.trim() || null;
+}
 // A window name tmux takes as it is: a dot or a colon in a target means a pane or a window.
 const tmuxName = (s) => s.replace(/[^\w.~-]/g, '-');
 // The box's list of what was up before a restart (cloud/Dockerfile keeps it from what it saw each
@@ -10896,8 +11243,9 @@ function recoverMachine() {
 const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it.';
 function legacyRecover(root, name, { dry, force, session, window }) {
   const run = path.join(root, 'docs', 'devteam', 'run');
-  const paneFile = path.join(run, 'supervisor-pane');
+  const paneFile = supervisorPaneFile(run);
   const go = () => {
+    // bare, as that kit writes it: only to see whether its supervisor is up, never to type into it
     const noted = readText(paneFile)?.trim() || null;
     if (supervisorPaneIn(root, noted, null)) return 'already running';
     // A window this opened moments ago is still a shell until the agent execs. Only if that pane
@@ -10933,6 +11281,8 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     fs.writeFileSync(promptFile, `${msg}\n`);
     const pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', window, '-c', root]);
     if (!pane) return 'NOT started (tmux would not open its window)';
+    // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
+    // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
     // by pane id: a dot in a window name reads as a pane to tmux
     if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
@@ -11027,7 +11377,7 @@ function machineTell(words) {
   if (!text) die(machineUsage, 2);
   let rec = null;
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
-  const p = supervisorPaneIn(root, readText(path.join(root, 'docs', 'devteam', 'run', 'supervisor-pane'))?.trim() || null, rec && typeof rec === 'object' ? rec : null, { strict: true });
+  const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
   const s = paneState(p);
   if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
@@ -11156,7 +11506,7 @@ async function machineStatus() {
     let rec = null;
     try { rec = readJson(runAt('supervisor-up.json')); } catch {}
     if (!rec || typeof rec !== 'object') rec = null;
-    const noted = readText(runAt('supervisor-pane'))?.trim() || null;
+    const noted = notedPaneOf(root);
     const sup = supervisorPaneIn(root, noted, rec) ? 'up' : 'down';
     const p = supervisorPaneIn(root, noted, rec, { strict: true });
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
@@ -11307,6 +11657,8 @@ async function cmdDashboard() {
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(kitDir, 'dashboard', 'index.html');
+  // The page's policy, at / and at /view/: its frames are its own pages, and only it and the hub frame it.
+  const PAGE_CSP = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
@@ -11317,7 +11669,15 @@ async function cmdDashboard() {
   delete ownerEnv.DEVTEAM_FEATURE;
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
-  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
+  // An argument execFile refuses (a NUL in it) throws as it is called, not to the callback: that is a
+  // failed run too, never a rejection, which would end the dashboard.
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => {
+    try {
+      execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr }));
+    } catch (e) { resolve({ ok: false, code: 1, stdout: '', stderr: `devteam: ${args.slice(0, 2).join(' ')} could not start: ${e.code ?? e.message}` }); }
+  });
+  // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
+  const describing = new Map();
   // An owner action: replied to as soon as the child says it is done (its reply pipe, fd 3), before
   // it types into the supervisor's pane; what it says on stderr after that goes to this log. A child
   // that exits without replying (refused, or an older script) is answered from its exit, as run is.
@@ -11350,9 +11710,10 @@ async function cmdDashboard() {
     child.stdin.end(input ?? undefined);
   });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
-  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
+  // no string an action puts in argv holds a NUL: no process can be given one
+  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
-  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
+  const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
   const ACTIONS = {
     answer: (b) => {
@@ -11381,10 +11742,13 @@ async function cmdDashboard() {
     'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
     // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
     // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
-    // is checked here before anything is spawned, and thread new checks it again. The dashboard
-    // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
-    // subjects here (the log takes all four already).
-    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
+    // is checked here before anything is spawned (any kind the log takes: an item or a spot on the
+    // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
+    // A capability is cut from the title and subject first, so not even the argv holds one.
+    'thread-new': (b) => {
+      const [title, subject] = [uncapped(b.title), uncapped(b.subject)];
+      return lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), '--', b.text.trim()] : null;
+    },
     'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
@@ -11394,9 +11758,10 @@ async function cmdDashboard() {
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
-  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
+  // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
   let hello = null;
   let kit = null;
   let kitAt = { main: null, at: 0 };
@@ -11409,7 +11774,7 @@ async function cmdDashboard() {
     execFile('git', ['rev-parse', '--verify', '--quiet', mainRef() ?? 'HEAD'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (gerr, gout) => {
       const main = mainRef() && !gerr ? gout.trim() || null : null;
       const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
-      execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         helloRunning = false;
         if (err) return;
         try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
@@ -11418,7 +11783,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -11472,7 +11837,7 @@ async function cmdDashboard() {
     const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
     const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
     const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
-    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true };
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key };
     for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
     for (const [f, k] of keyed) {
       if (threadFiles.get(f)?.k === k) continue;
@@ -11485,28 +11850,11 @@ async function cmdDashboard() {
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
     const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
     threadsMemo = { key, body };
-    return { body, cached: false };
+    return { body, cached: false, key };
   };
-  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet".
-  // Checked in the background, at most every 10 s, and served from the last check: a sync tmux call
-  // here held every request the server had while tmux answered. One display-message resolves the
-  // window by name or index, as resolvePane does, and says whether an agent (not a shell) runs there.
-  let paneSeen = { at: 0, pane: false };
-  let paneChecking = false;
-  const checkPane = async () => {
-    const target = supervisorTarget();
-    const info = target ? await tmuxAsync(['display-message', '-p', '-t', target, '#{pane_dead} #{pane_current_command}']) : null;
-    const [dead, cmd = ''] = (info ?? '').trim().split(' ');
-    return info !== null && dead !== '1' && !!cmd && !SHELLS.has(cmd.replace(/^-/, ''));
-  };
-  const supervisorPane = () => {
-    if (Date.now() - paneSeen.at > 10000 && !paneChecking) {
-      paneChecking = true;
-      checkPane().then((pane) => { paneSeen = { at: Date.now(), pane }; }, () => {}).finally(() => { paneChecking = false; });
-    }
-    return paneSeen.pane;
-  };
-  supervisorPane();
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": what
+  // the 10 s hello child found (hello --pane), so a read never waits on tmux.
+  const supervisorPane = () => hello?.supervisor_pane === true;
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -11518,7 +11866,7 @@ async function cmdDashboard() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': PAGE_CSP });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
@@ -11533,6 +11881,34 @@ async function cmdDashboard() {
       return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
+    // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
+    // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
+    // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
+    // owner wrapper, and leaves every other header as it is.
+    const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
+    if (vw) {
+      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': PAGE_CSP });
+      return res.end(fs.readFileSync(page));
+    }
+    // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
+    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
+    // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
+    // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
+    // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+    if (req.method === 'GET' && u.pathname === '/api/view') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      const at = u.searchParams.get('at') || 'main';
+      if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
+      const key = `${slug}|${at}`;
+      let job = describing.get(key);
+      if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+    }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
     if (req.method === 'GET' && u.pathname === '/api/threads') {
@@ -11540,8 +11916,15 @@ async function cmdDashboard() {
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       let r;
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) });
-      return res.end(`{"supervisor":${JSON.stringify({ pane: supervisorPane() })},"threads":${r.body}}`);
+      const pane = supervisorPane();
+      // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
+      // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
+      // this process's work is saved.
+      const tag = `"${sha256(`${r.key}|${pane}`).slice(0, 20)}"`;
+      const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
+      if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
+      res.writeHead(200, { 'content-type': 'application/json', ...head });
+      return res.end(`{"supervisor":${JSON.stringify({ pane })},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -11613,8 +11996,9 @@ async function cmdDashboard() {
       const r = await run(['review', 'show', id, '--json', '--contents']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
-    // An artifact's files: landed from main's tree, a draft off its worktree's disk. Matched on the
-    // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
+    // An artifact's files: landed from main's tree, a published version from its tree by id (what the
+    // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
+    // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
     // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
     const rawPath = req.url.split('?')[0];
     // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
@@ -11628,29 +12012,41 @@ async function cmdDashboard() {
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
     if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-      const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
-      const at = am ? am[1] ?? 'main' : null;
-      if (!am || (at !== 'main' && !draftWorktree(at)) || !LINK_ID.test(am[2])) return send(res, 404, 'text/plain', 'not found');
-      if (am[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-      const rel = am[3] === '/' ? 'index.html' : am[3].slice(1);
+      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
       if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
       let bytes = null;
       if (at === 'main') {
         const ref = mainRef();
-        if (ref) bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${ref}:${ARTIFACTS_REL}/${am[2]}/${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+      } else if (am[2]) {
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2])) bytes = await blobAt(`${am[2]}:${rel}`);
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {
           const root = draftWorktree(at);
-          const dir = path.join(root, ARTIFACTS_REL, am[2]);
-          const real = draftDirOk(root, am[2]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          const dir = path.join(root, ARTIFACTS_REL, am[3]);
+          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
           if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
         } catch {}
       }
       if (!bytes) return send(res, 404, 'text/plain', 'not found');
       const base = `http://${req.headers.host}`;
-      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[3].length)}/`) });
-      return res.end(bytes);
+      // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
+      // name to this list for a published tree, and an X-Frame-Options would still refuse it
+      // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
+      // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
+      // an answer, though no-store already keeps none.
+      const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
+      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+      return res.end(framed ? withArtifactLens(bytes) : bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
     // under a policy that allows no network (reviewPageCsp). Under a question's path the server
@@ -11721,22 +12117,26 @@ async function cmdDashboard() {
       if (!isReview || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
+    // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
+    // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
+    // ends the dashboard.
+    const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
     const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
         body = '';
         if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
         parsed = null;
-      });
+      }));
     }
     if (isReview) {
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
@@ -11753,12 +12153,16 @@ async function cmdDashboard() {
         const textOut = JSON.stringify(parsed.result);
         if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
         ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
-      });
+      }));
     }
     req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-      const args = action(parsed);
+      // a body no check foresaw (one nested thousands deep) is a bad request, never a crash: a throw
+      // here is an unhandled rejection, and that ends the dashboard
+      let args;
+      try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
+      if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
@@ -11838,7 +12242,7 @@ function tmuxServerEnv() {
 }
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? markedPane(runDir);
 const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
 // Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
 // into a shell would execute the text).
@@ -14570,7 +14974,9 @@ function cmdHello() {
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}) };
+  // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
+  // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -15282,6 +15688,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
+  artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)

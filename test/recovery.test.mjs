@@ -306,7 +306,7 @@ const AS_SUPERVISOR = 'env DEVTEAM_ROLE=supervisor ';
 const SKIP = ' --dangerously-skip-permissions';
 const supervisorPane = (F, shown = MENU, { cwd = F.root, prefix = AS_SUPERVISOR, args = '', shell = false } = {}) => {
   const pane = F.agent('sup-pane', shown, cwd, { prefix, args, shell });
-  write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-pane`);
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:sup-pane`);
   return pane;
 };
 const withCswap = (F) => ({ DEVTEAM_CSWAP: F.cswap });
@@ -626,6 +626,9 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     const did = recover(F, [], server.env);
     assert.equal(did.status, 0, did.stderr);
     assert.match(did.stdout, new RegExp(`^resumed session ${SID}`));
+    const noted = ['supervisor-pane', 'supervisor-pane-role'].map((n) => fs.readFileSync(path.join(F.root, 'docs/devteam/run', n), 'utf8'));
+    assert.match(noted[0], /^%\d+$/);
+    assert.equal(noted[1], noted[0], 'recorded for the supervisor, marked as made for it');
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
     assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
@@ -638,6 +641,37 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     const logged = json(F.run(['log', '--tail', '5', '--json'], { DEVTEAM_ROLE: '' }).stdout);
     assert.ok(!logged.some((o) => /recover/i.test(JSON.stringify(o))), 'it logs nothing as anyone');
   } finally { server.done(); F.done(); }
+});
+
+test("the tick after an upgrade: a bare pane record whose agent runs as the supervisor is marked and kept up; one whose agent doesn't is no pane", { skip: !hasTmux }, async () => {
+  const F = fixture('recupgrade', { resume: CLAUDE_RESUME });
+  const run = path.join(F.root, 'docs/devteam/run');
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    assert.equal(upRecord(F).up, true);
+    // an older kit's record: the bare file only, and the supervisor hasn't run a command since the upgrade
+    const bare = fs.readFileSync(path.join(run, 'supervisor-pane'), 'utf8').trim();
+    write(path.join(run, 'supervisor-pane'), `${bare}\n`);
+    fs.rmSync(path.join(run, 'supervisor-pane-role'));
+    F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(fs.readFileSync(path.join(run, 'supervisor-pane-role'), 'utf8'), bare, "marked by the tick: the pane's agent is the supervisor's");
+    assert.equal(fs.readFileSync(path.join(run, 'supervisor-pane'), 'utf8'), `${bare}\n`, 'the bare record as the older kit wrote it: only the mark is written');
+    assert.equal(upRecord(F).up, true, 'still up, so a restart in this window brings it back');
+    // an agent running as the supervisor but started in another directory, recorded bare: not this repo's
+    F.agent('elsewhere', ['ELSEWHERE'], path.join(F.base, 'elsewhere'), { prefix: 'DEVTEAM_ROLE=supervisor ', shell: true });
+    write(path.join(run, 'supervisor-pane'), `=${F.session}:elsewhere`);
+    fs.rmSync(path.join(run, 'supervisor-pane-role'));
+    await until(() => /ELSEWHERE/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:elsewhere`], { encoding: 'utf8' }).stdout), 'the agent in another directory');
+    F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(fs.existsSync(path.join(run, 'supervisor-pane-role')), false, 'not marked: its pane started outside the repo');
+    // an agent not running as the supervisor (the owner's own, say), recorded bare by an older kit
+    F.agent('own-pane', ['OWN'], F.root, { prefix: '', shell: true });
+    write(path.join(run, 'supervisor-pane'), `=${F.session}:own-pane`);
+    await until(() => /OWN/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:own-pane`], { encoding: 'utf8' }).stdout), 'the agent at the root');
+    F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(fs.existsSync(path.join(run, 'supervisor-pane-role')), false, 'not marked');
+  } finally { F.done(); }
 });
 
 test('recover: a parked or drained fleet stays stopped; --force starts it', { skip: !hasTmux }, async () => {
