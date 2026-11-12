@@ -1609,6 +1609,15 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the artifact has it');
   });
 
+  await t.test("framed, as the owner wrapper frames it, a published tree this checkout lacks isn't swapped for main: the gateway grants only that tree", async () => {
+    await go(`${B}/api/hello`);
+    const gone = '0'.repeat(40);
+    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock?at=tree:${gone}'; document.body.append(f); return true; })()`);
+    const inV = (e) => `(() => { const d = document.getElementById('v').contentDocument; return ${e}; })()`;
+    await soon(inV(`!d.getElementById('av-note').hidden && !!d.getElementById('av-frame').getAttribute('src')`), 'the framed viewer, its note');
+    assert.deepEqual(await p.ev(inV(`[d.getElementById('av-note').textContent, d.getElementById('av-frame').getAttribute('src'), d.defaultView.eval('TS.at')]`)), ["The published version isn't in this checkout; open it from the Library.", `/artifact/tree/${gone}/viewer-mock/`, `tree:${gone}`]);
+  });
+
   await t.test("an artifact /api/view can't read says so, and shows the version asked for: only nothing there falls back to main", async () => {
     // the viewer's /api/view answered with a failure: a 500, then no answer at all
     for (const [fault, what] of [['new Response(\'{}\', { status: 500 })', 'a 500'], ['Promise.reject(new TypeError(\'Failed to fetch\'))', 'a network error']]) {

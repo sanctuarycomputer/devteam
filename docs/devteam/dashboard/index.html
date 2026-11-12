@@ -4993,9 +4993,15 @@ async function viewerBoot() {
   // (spec §8), shown in place. A describe that failed says so, and shows the version asked for.
   // Nothing here navigates or rewrites the URL: inside the owner wrapper it carries the gateway's
   // grant (w=), which a reload needs, and which nothing passes on to the frame.
-  if (got.status === 404 && at !== 'main') { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; got = await info(VIEWER.name, at); }
+  // Framed (the owner wrapper), it stays on the version asked for: the gateway lets a frame show
+  // only the published tree it granted, so main's would be an empty frame under a note saying it is main.
+  let held = null;
+  if (got.status === 404 && at !== 'main') {
+    if (window.parent !== window) held = String(at).startsWith('tree:') ? "The published version isn't in this checkout; open it from the Library." : "This draft isn't here any more; open it from the Library.";
+    else { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; got = await info(VIEWER.name, at); }
+  }
   const d = got.d;
-  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read', fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
   document.title = `${$('av-title').textContent} · devteam`;
   const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
   hello();
