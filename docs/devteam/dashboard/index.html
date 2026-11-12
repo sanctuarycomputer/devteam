@@ -1298,36 +1298,55 @@ function qtext(text, links) {
   }).join('');
 }
 // Owner-facing prose (a question's context, a choice's detail) as blocks: paragraphs, "- " bullets
-// and "1." numbered lists, a run of "1) … 2) …" on one line too, with **bold** and `code`. Every
-// piece goes through qtext, so it is escaped and its ids and [[links]] work as anywhere else.
-const qinline = (text, links) => qtext(text, links).replace(/\*\*([^*\n]+?)\*\*/g, '<b>$1</b>').replace(/`([^`\n]+?)`/g, '<code>$1</code>');
+// and "1." numbered lists, a run of "1) … 2) …" on one line too, with **bold** and `code`. The marks
+// are read from the raw text and each piece goes through qtext on its own, so everything is escaped,
+// ids and [[links]] work as anywhere else, and a mark never lands inside a link's href or its title.
+// "2**10" and "src/**/x" stay as written: bold opens after a space and closes before one.
+function qinline(text, links) {
+  return String(text ?? '').split(/(`[^`\n]+`|(?<![\w*])\*\*(?=\S)[^*\n]+?(?<=\S)\*\*(?![\w*]))/).map((seg, i) => (i % 2 === 0 ? qtext(seg, links) : seg[0] === '`' ? `<code>${qtext(seg.slice(1, -1), links)}</code>` : `<b>${qinline(seg.slice(2, -2), links)}</b>`)).join('');
+}
 // "Two ways: 1) wait 2) ship it" → the lead, then each numbered item. Only a run that counts up from
-// 1 with at least two items, each marker after a space or a colon, so "version 2) of" stays prose.
+// 1 with at least two items in one style, each marker after a space or a colon, so "version 2) of"
+// stays prose. A number that closes a parenthesis ("(phase 1) and (phase 2)") is prose. So is a
+// number that ends a sentence ("on Nov 1. Then Nov 2. Done"): "1." opens a run only at the start
+// of the line or straight after a colon.
 function inlineList(line) {
-  const ms = [...line.matchAll(/(^|[\s:])\(?(\d{1,2})[.)]\s+/g)];
+  const ms = [...line.matchAll(/(^|[\s:])(\()?(\d{1,2})([.)])\s+/g)];
   let run = [];
   for (const m of ms) {
-    const n = Number(m[2]);
-    if (n === 1) run = [m];
-    else if (run.length && n === run.length + 1) run.push(m);
+    const n = Number(m[3]);
+    const before = line.slice(0, m.index + m[1].length);
+    if (m[4] === ')' && !m[2] && before.split('(').length > before.split(')').length) continue;
+    if (n === 1) run = m[4] === ')' || !before.trim() || before.trimEnd().endsWith(':') ? [m] : [];
+    else if (run.length && n === run.length + 1 && m[4] === run[0][4] && !m[2] === !run[0][2]) run.push(m);
   }
   if (run.length < 2) return null;
   const at = (m) => m.index + m[1].length;
   const items = run.map((m, i) => line.slice(m.index + m[0].length, i + 1 < run.length ? at(run[i + 1]) : undefined).trim().replace(/[;,]\s*(and|or)?$/i, '').trim());
   return { lead: line.slice(0, at(run[0])).trim(), items };
 }
+const NUMBERED = /^\(?(\d{1,2})[.)]\s+(.*)$/;
 function qblock(text, links) {
   const out = [];
   let para = [], list = null;
   const flushPara = () => { if (para.length) out.push(`<p>${para.map((l) => qinline(l, links)).join('<br>')}</p>`); para = []; };
-  const flushList = () => { if (list) out.push(`<${list.tag}>${list.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</${list.tag}>`); list = null; };
-  const item = (tag, t) => { flushPara(); if (list?.tag !== tag) flushList(); list = list ?? { tag, items: [] }; list.items.push(t); };
-  for (const raw of String(text ?? '').replace(/\r\n?/g, '\n').split('\n')) {
-    const line = raw.trim();
+  // a list that starts at 3 says 3: the owner may be told "do step 3"
+  const flushList = () => { if (list) out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ''}>${list.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</${list.tag}>`); list = null; };
+  const item = (tag, t, n = 1) => { flushPara(); if (list?.tag !== tag) flushList(); list = list ?? { tag, items: [], start: n }; list.items.push(t); };
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const raw = lines[k], line = raw.trim();
     let m;
     if (!line) { flushPara(); flushList(); continue; }
     if ((m = line.match(/^[-*•]\s+(.*)$/))) { item('ul', m[1]); continue; }
-    if ((m = line.match(/^\(?\d{1,2}[.)]\s+(.*)$/))) { const il = inlineList(line); for (const t of il && !il.lead ? il.items : [m[1]]) item('ol', t); continue; }
+    if ((m = line.match(NUMBERED))) {
+      // one line holding the whole list ("1) a 2) b") is split; a line of a list written one per
+      // line is one item, whatever numbers its own words hold
+      const alone = list?.tag !== 'ol' && !NUMBERED.test((lines[k + 1] ?? '').trim());
+      const il = alone ? inlineList(line) : null;
+      if (il && !il.lead) for (const t of il.items) item('ol', t); else item('ol', m[2], Number(m[1]));
+      continue;
+    }
     if (list && /^\s{2,}\S/.test(raw)) { list.items[list.items.length - 1] += ` ${line}`; continue; }
     flushList();
     const il = inlineList(line);
@@ -3072,7 +3091,7 @@ function openQuestion(id) {
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
     ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
-    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
+    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
     ${answeredCard(q)}
     ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
@@ -4171,13 +4190,13 @@ function tlQuestion(q, reasonText) {
   if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
   const open = (DATA?.questions || []).find((x) => x.id === q.id);
   if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
-  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${qinline(q.question, q.links)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
 }
 // A turn's words, or the question it asks.
 function tlTurnBody(u, t) {
   const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
-  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : u.by === 'owner' ? `<div class="tl-text">${linkify(u.text)}</div>` : `<div class="tl-text ctx">${qblock(u.text)}</div>`;
 }
 function tlTurns(t) {
   return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');

@@ -63,7 +63,7 @@ function dashboardFns() {
   const take = (name) => { const at = pick(name); let depth = 0, i = src.indexOf('{', at); const arrow = src.startsWith(`const ${name} =`, at); if (arrow) return src.slice(at, src.indexOf(';\n', at) + 1); for (; i < src.length; i++) { if (src[i] === '{') depth++; else if (src[i] === '}' && --depth === 0) break; } return src.slice(at, i + 1); };
   const ctx = { NAME_REF: /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/ };
   vm.createContext(ctx);
-  vm.runInContext(`${take('esc')}\nfunction linkify(t) { return esc(t ?? ''); }\nconst artNameLink = () => '';\nconst linkOf = () => '';\n${take('qtext')}\n${take('qinline')}\n${take('inlineList')}\n${take('qblock')}\nthis.qblock = qblock; this.qinline = qinline;`, ctx);
+  vm.runInContext(`${take('esc')}\nfunction linkify(t) { return esc(t ?? ''); }\nconst artNameLink = () => '';\nconst linkOf = (l) => '<a href="' + esc(l.url) + '">' + esc(l.title) + '</a>';\n${take('qtext')}\n${take('qinline')}\n${take('inlineList')}\n${take('NUMBERED')}\n${take('qblock')}\nthis.qblock = qblock; this.qinline = qinline;`, ctx);
   return ctx;
 }
 
@@ -77,4 +77,14 @@ test('dashboard: a question\'s context is laid out as paragraphs and lists, esca
   assert.equal(qblock('one\ntwo', []), '<p>one<br>two</p>');
   assert.equal(qblock('<img src=x onerror=alert(1)> **b** `c`', []), '<p>&lt;img src=x onerror=alert(1)&gt; <b>b</b> <code>c</code></p>', 'escaped first, then formatted');
   assert.equal(qinline('Ship `v2` **now**?', []), 'Ship <code>v2</code> <b>now</b>?');
+  // numbers in prose are prose: a sentence that ends in one, a date, a parenthesis, a version, a time
+  for (const prose of ['We finished step 1. Then we moved to step 2. Finally we shipped.', 'We deploy on Nov 1. Marketing emails go out Nov 2. Is that OK?', 'The plan (phase 1) and the follow-up (phase 2) both need a database.', 'It runs at 10.30, costs $1.50 on v2.1. Then 3.5x faster.']) assert.equal(qblock(prose, []), `<p>${prose}</p>`, prose);
+  assert.equal(qblock('Options: 1. wait 2. ship', []), '<p>Options:</p><ol><li>wait</li><li>ship</li></ol>', '"1." opens a run after a colon');
+  assert.equal(qblock('1. Raise the limit to 2. Then restart\n2. Watch the queue', []), '<ol><li>Raise the limit to 2. Then restart</li><li>Watch the queue</li></ol>', 'a list written one per line keeps its lines whole');
+  assert.equal(qblock('Do this next:\n3. Rotate the key\n4. Redeploy', []), '<p>Do this next:</p><ol start="3"><li>Rotate the key</li><li>Redeploy</li></ol>', 'a list keeps the number it starts at');
+  // marks are read before escaping and never reach into a link: its href stays whole
+  const links = [{ name: 'a', title: 'A', url: 'https://x.test/src/**/a' }, { name: 'b', title: 'B', url: 'https://x.test/src/**/b`c' }];
+  assert.equal(qinline('Compare [[a]] with `x` [[b]]', links), 'Compare <span class="qref"><a href="https://x.test/src/**/a">A</a></span> with <code>x</code> <span class="qref"><a href="https://x.test/src/**/b`c">B</a></span>');
+  assert.equal(qinline('`a**b**c`, 2**10 and 3**2, src/**/*.js and test/**/*.js', []), '<code>a**b**c</code>, 2**10 and 3**2, src/**/*.js and test/**/*.js', 'code is literal, and ** inside words is not bold');
+  assert.equal(qinline('**run `x` now** and **<i>', []), '<b>run <code>x</code> now</b> and **&lt;i&gt;', 'code inside bold; an unclosed mark stays as written');
 });
