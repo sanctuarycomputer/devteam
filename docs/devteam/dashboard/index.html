@@ -3675,7 +3675,10 @@ const T_ENC = new TextEncoder();
 const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
 const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
 // One line of plain text, at most n UTF-16 units (what the log's schema counts), never half a pair.
-const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// What a terminal or a reader's eye acts on (a control, a bidi override): the kit's UNSAFE_TEXT, held
+// equal by a test. Only ever used to replace (it is global).
+const T_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -3716,11 +3719,13 @@ const T_SHRINK = [['anchor', 'html'], ['errors'], ['quote'], ['route'], ['path']
 // pixels unless it is a page's fractions; else null.
 const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k]) && ((k !== 'w' && k !== 'h') || v[k] >= 0)) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
 // An anchor as a lens described it: the kit's keys only, each cut to its cap, its rect and point
-// only when whole; null when there is nothing of one.
+// only when whole; null when there is nothing of one. Its words (all but the element's HTML) drop
+// what T_UNSAFE matches, as the kit refuses them: a bidi override would have the owner's card read
+// the page's words reversed. Dropped before the capability is cut, so none can hide one in two.
 function tAnchor(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
   const x = {};
-  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(tUncap(a[k]), T_ANCHOR_CAPS[k]);
+  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(tUncap(k === 'html' ? a[k] : a[k].replace(T_UNSAFE, '')), T_ANCHOR_CAPS[k]);
   const rect = tBox(a.rect, ['x', 'y', 'w', 'h']);
   if (rect) x.rect = rect;
   const point = tBox(a.point, ['x', 'y']);

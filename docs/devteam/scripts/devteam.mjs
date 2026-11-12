@@ -5226,6 +5226,9 @@ function anchorProblem(a) {
     }
     if (!Object.hasOwn(ANCHOR_CAPS, k)) return `anchor has no ${k}`;
     if (typeof v !== 'string') return `anchor.${k} is text`;
+    // its words, as the page sends them (tAnchor drops these): a bidi override would have the owner's
+    // card read the page's words reversed. The element's HTML is the page's markup, line breaks and all.
+    if (k !== 'html' && UNSAFE_TEXT.test(v)) return `anchor.${k} is one line of plain text (no control or bidi characters)`;
     if (Buffer.byteLength(v) > ANCHOR_CAPS[k]) return `anchor.${k} is ${Buffer.byteLength(v)} bytes; at most ${ANCHOR_CAPS[k]}`;
   }
   return null;

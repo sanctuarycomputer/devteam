@@ -1398,6 +1398,29 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tFrameOn({ kind: 'item', ref: 'goal:g' }, { kind: 'artifact' }), false);
   assert.equal(A.T_LENS_SAYS.includes('go'), false);
 });
+
+test("an anchor's words keep no control or bidi character: the page drops them, the kit refuses them, by one character class", (t) => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  const ctx = vm.createContext({ TextEncoder });
+  vm.runInContext(`${src}\n;globalThis.api = { T_UNSAFE, tAnchor, tFit };`, ctx);
+  const A = ctx.api;
+  const kitSrc = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const kitUnsafe = vm.runInContext(`${/^const UNSAFE_TEXT = .*$/m.exec(kitSrc)[0]}\n;UNSAFE_TEXT`, vm.createContext({}));
+  assert.equal(A.T_UNSAFE.source, kitUnsafe.source, "the page's class is the kit's");
+  // a page that would have the owner's card read "won‮yub" backwards, and the like in each word
+  const raw = { selector: '#buy⁦', tag: 'butt‎on', role: 'li\u0007nk', text: 'Buy ‮won yub', name: 'a b', html: '<b>\n  Buy now</b>' };
+  const a = JSON.parse(JSON.stringify(A.tAnchor(raw)));
+  assert.deepEqual(a, { selector: '#buy', tag: 'button', role: 'link', text: 'Buy won yub', name: 'ab', html: '<b>\n  Buy now</b>' }, 'each word without them; the element\'s HTML as it is');
+  const F = threadsFixture('anchor-bidi');
+  t.after(() => F.done());
+  const subject = (anchor) => JSON.stringify({ kind: 'artifact', slug: 'some-mock', at: 'main', path: 'index.html', anchor, point: { x: 1, y: 2 } });
+  assert.match(F.fails(['thread', 'new', 'Reversed', '--subject', subject({ text: 'Buy ‮won yub' })]), /anchor\.text is one line of plain text/);
+  for (const k of ['selector', 'tag', 'role', 'name']) assert.match(F.fails(['thread', 'new', 'Odd', '--subject', subject({ [k]: 'x⁦y' })]), new RegExp(`anchor\\.${k} is one line of plain text`), k);
+  // what the page sends, the kit takes
+  const fitted = JSON.parse(JSON.stringify(A.tFit({ kind: 'artifact', slug: 'some-mock', at: 'main', path: 'index.html', anchor: raw, point: { x: 1, y: 2 } })));
+  assert.match(F.owner(['thread', 'new', 'Fitted', '--subject', JSON.stringify(fitted)]), /^t-/);
+});
 test("an artifact subject started on the dashboard reaches the supervisor's pane as its kind and slug: no title, no capture", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('threads-art-pane');
   t.after(() => F.done());
