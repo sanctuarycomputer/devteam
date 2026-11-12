@@ -4543,6 +4543,8 @@ tsOver.addEventListener('pointermove', (e) => {
   requestAnimationFrame(() => { TS.rafPending = false; const l = TS.last; if (l && TS.raised) tsPost({ type: 'hit', id: tsMint(l.x, l.y), x: l.x, y: l.y }); });
 });
 tsOver.addEventListener('pointerleave', () => { TS.last = null; TS.hit = null; tlHide(); });
+// a press without Shift lowers the overlay at once, but is still its own: the frame never saw the
+// press, so its click can't fall through (spec §4 step 4), and the next one reaches the page
 tsOver.addEventListener('pointerdown', (e) => { TS.via = e.pointerType; e.preventDefault(); if (!e.shiftKey && !TL.pin) tsRaise(false); });
 tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsPick(e); });
 tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
