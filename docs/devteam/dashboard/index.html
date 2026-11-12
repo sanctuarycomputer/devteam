@@ -4658,6 +4658,9 @@ function drawOrHold(d, force = false) {
 
 let loading = null;
 async function load({ force = false } = {}) {
+  // a viewer tab has no dashboard to read for: press() reads after every send (the layer's Send and
+  // Resolve go through it), and drawing the hidden page would put its title over the viewer's
+  if (VIEWER) return;
   // one refresh at a time; a forced one waits for the one in flight, then runs
   if (loading) { if (!force) return; await loading.catch(() => {}); }
   loading = loadNow();

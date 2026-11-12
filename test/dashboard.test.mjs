@@ -1540,6 +1540,21 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev('[DATA, ROUTED]'), [null, false], 'a hash change routes nothing of the dashboard');
   });
 
+  await t.test("Send and Resolve in a viewer tab read no /api/data, and the tab's title stays the viewer's", async () => {
+    const th = F.owner(['thread', 'new', 'Said from the viewer']).split('\n')[0];
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock#talk/${th}` });
+    await soon(`!document.getElementById('tl-card').hidden && TL.open === '${th}' && document.title === 'Viewer mock · devteam'`, 'its card, and the title');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'one more thing'; ta.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('[data-tl-send]').click(); return true; })()`);
+    await p.ev('Promise.all([...PRESSES.values()]).then(() => true)');
+    await until(() => JSON.parse(F.owner(['thread', 'show', th, '--json'])).turns.some((u) => u.text === 'one more thing'), 'sent');
+    assert.equal(await p.ev(`tlAct('thread-resolve', { id: '${th}' })`), true, 'resolved');
+    assert.equal(JSON.parse(F.owner(['thread', 'show', th, '--json'])).status, 'resolved');
+    // a read begun would have landed by now
+    await new Promise((r) => setTimeout(r, 1000));
+    assert.deepEqual(await p.ev(`window.__asked.filter((u) => u === '/api/data')`), [], 'no read of the dashboard');
+    assert.deepEqual(await p.ev('[DATA, document.title]'), [null, 'Viewer mock · devteam']);
+  });
+
   await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
     await p.send('Page.navigate', { url: `${B}/api/hello` });
     await soon(`document.readyState === 'complete'`, 'a page of the same origin');
