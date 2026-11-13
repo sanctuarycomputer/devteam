@@ -448,7 +448,8 @@ exit 0
       }
     ],
     "debt": {
-      "signals": []
+      "signals": [],
+      "incidents": []
     },
     "knowledge": [
       {

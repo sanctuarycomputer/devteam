@@ -998,6 +998,9 @@ const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 const SCHEMA = readJson(path.join(kitDir, 'schema', 'log.schema.json'));
 const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 const LINE_MAX = 4096;
+// The most knowledge ids a decision (--on) or a start (the lessons its prompt carried) records, so its
+// line stays under LINE_MAX.
+const KNOWLEDGE_IDS_MAX = 60;
 const TYPES = Object.keys(SCHEMA.$defs.types);
 const RANK = SCHEMA['x-authority'].rank;
 
@@ -7833,12 +7836,24 @@ const citing = () => flagStr('decision') ?? undefined;
 function cmdDecide() {
   const what = rest ? rest.join(' ') : flagStr('what');
   const cls = flagStr('class');
-  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what you decided>"');
+  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--on k-…|p-…] [--irreversible] -- "<what you decided>"');
   supervisorOnly('decide');
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   let scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
   const refs = asList(flags.refs);
+  // --on: the knowledge or problems the call rests on, a link for the lineage and the learning
+  // record, apart from refs (an act stays within refs) and from approved_by (authorise reads only
+  // that). Knowledge must be accepted: a candidate isn't the project's yet, and a retired one no
+  // longer is. An id in both would read as what the call is about and what it rests on at once.
+  const on = flags.on === true ? die('--on names the knowledge or problems the decision rests on: --on <k-…|p-…>…') : [...new Set(asList(flags.on))];
+  if (on.length > KNOWLEDGE_IDS_MAX) die(`--on takes at most ${KNOWLEDGE_IDS_MAX} ids (a log line is at most ${LINE_MAX} bytes): cite the ones the call turns on`);
+  for (const k of on) {
+    const o = logGet(k) ?? die(`--on ${k}: no such knowledge or problem`);
+    if (!['knowledge', 'problem'].includes(o.type)) die(`--on ${k} is ${o.type === 'observation' ? 'an' : 'a'} ${o.type}: a decision rests on knowledge or a problem (cite what it is about in --refs)`);
+    if (o.type === 'knowledge' && o.status !== 'accepted') die(`${k} is ${o.status}: a decision rests only on accepted knowledge`);
+    if (refs.includes(k)) die(`${k} is in both --refs and --on: --refs is what the decision is about, --on what it rests on`);
+  }
   // a remediation decision names the remediation it runs
   if (cls === 'production-remediation') {
     upkeepAllows('a remediation', { noForce: true });
@@ -7881,12 +7896,13 @@ function cmdDecide() {
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'goal-readiness') readinessGoal(refs);
   // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
-  if (cls === 'orient-noise' && !refs.some((r) => logGet(r)?.type === 'observation')) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>…');
+  // (or the fixed incident it rules there is nothing to learn from: incidentDebt)
+  if (cls === 'orient-noise' && !refs.some((r) => { const x = logGet(r); return x?.type === 'observation' || (x?.type === 'problem' && isIncident(x) && x.status === 'resolved'); })) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>… (or a fixed incident with nothing to keep: --refs <p-…>)');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
     type: 'decision', class: cls, scope: scope ?? undefined, what, rationale: flagStr('rationale'), options: flags.options !== undefined ? listFlag('options') : undefined,
-    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined,
+    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined, knowledge: on.length ? [...new Set(on)] : undefined,
   }, 'supervisor');
   out(line.id);
 }
@@ -8649,6 +8665,28 @@ function orientationDebt() {
   return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
     .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
 }
+// Resolved incidents nobody learned from, oldest first: fixed and verified (an outcome cites the
+// incident) in the last 30 days, with no knowledge citing it in its evidence and no live noise
+// ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is nothing to
+// keep (a corrected ruling owes it again). Resolved when the last change setting its status said so.
+// One whose status the owner set is the owner's call, and owes nothing.
+function incidentDebt() {
+  const now = Date.now();
+  // a lesson the owner retired taught nothing, so the incident is owed one again
+  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
+  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
+    const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
+    // verified only: an unverified resolution (valence 0, seen too few times) proved nothing to learn from
+    const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id) && (o.valence ?? 0) > 0).pop();
+    if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
+    const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
+    const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
+    const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
+    return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
+  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
 // supervisor runs what it pastes (L-SEC-5).
@@ -8722,10 +8760,14 @@ function orientLinks() {
 }
 function cmdOrient() {
   const cl = orientClusters();
+  const inc = incidentDebt();
   const lk = orientLinks();
+  // --json stays the signals and the link proposals its readers count; incident debt is dashboard-data's ooda.debt.incidents
   if (flags.json) return json([...cl, ...lk]);
-  if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
+  if (!cl.length && !inc.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
+  for (const x of inc) out(`${x.id} was fixed and verified (${x.title}): what did it teach? ${x.explain[0]} or ${x.explain[1]}`);
+  if (inc.length) out('  (once a lesson is accepted, a decision it informs cites it: decide … --on <k-…>)');
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
@@ -10525,9 +10567,9 @@ function collectOoda() {
     // each with where it sits in the loop, so its card can say so without the whole index
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
-    // orientation debt: recurring signals nothing has explained for more than a day, oldest first
-    // (resolved incidents nobody learned from join it in PR 4)
-    debt: { signals: orientationDebt() },
+    // orientation debt: recurring signals nothing has explained for more than a day, and resolved
+    // incidents nobody learned from, each oldest first
+    debt: { signals: orientationDebt(), incidents: incidentDebt() },
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
@@ -12970,6 +13012,10 @@ function makeSession(role) {
   seedWorktree(wt, { repo: R });
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
+  // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
+  // from it): only on a fresh start, since a resumed session never reads the new prompt; the newest
+  // first, as many as fit a line.
+  const given = resume ? [] : knowledgeFor(id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, KNOWLEDGE_IDS_MAX).map((k) => k.id);
   const links = linksBlock(id);
   const arts = artifactsBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
@@ -13031,7 +13077,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {
@@ -15489,6 +15535,7 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
 // authority checks out (decisionAuthorityGap), an act carrying one out, or an act of its own resting
 // on an owner's accepted rule or an answered question. Anything else only cites it: a supervisor's
 // lesson is never the owner approving.
+const restsOnHolds = (x) => x?.type === 'problem' || (x?.type === 'knowledge' && x.status === 'accepted');
 function approvalHolds(o) {
   if (o.type === 'decision') return !decisionAuthorityGap(o);
   if (o.type !== 'act') return false;
@@ -15522,7 +15569,10 @@ function linkIndex() {
     for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
       if (!known(t)) continue;
       if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
-      else edge(t, o.id, why);
+      // a start's knowledge was what its prompt carried, whatever became of it since; what a decision
+      // rests on is only what decide --on would take, a problem or accepted knowledge (a hand-written
+      // line citing anything else only cites it)
+      else edge(t, o.id, k !== 'knowledge' ? why : o.type === 'act' ? 'given' : restsOnHolds(logGet(t)) ? why : 'cites');
     }
     if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
     if (known(o.decision)) edge(o.decision, o.id, 'carried out');
@@ -15683,7 +15733,7 @@ function peekView(kind, id) {
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
   // where a record sits in the loop, and where an observation came from
   if (v.record) { const o = logGet(v.record.id); v.stage = stageOf(o); if (o.type === 'observation') v.provenance = provenanceOf(o); }
-  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
+  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, status: o.status ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
   if (kind === 'ticket') {
     gitReadCache = new Map();
     const t = tickets().get(id) ?? die(`no ticket ${id}`);
@@ -15765,7 +15815,7 @@ function peekView(kind, id) {
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
-    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : [])]);
+    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : []), ...(Array.isArray(o.knowledge) ? o.knowledge : [])]);
     if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
     // an incident: its view, what its fingerprints raised, and the latest event of each
     // (production data, scrubbed; the drawer frames it as untrusted)

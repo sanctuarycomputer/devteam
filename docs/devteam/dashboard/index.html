@@ -649,7 +649,7 @@
     <div class="loop-panel" data-panel="orient" hidden>
       <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
       <h3>Orientation debt</h3>
-      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise.</p>
+      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise. Then incidents fixed and verified in the last 30 days that nobody has learned from: each wants a lesson, or a ruling that there is nothing to keep.</p>
       <div id="debt"></div>
       <div class="two">
         <div><h3>Recurring signals</h3><div id="clusters"></div></div>
@@ -2106,8 +2106,10 @@ function renderOoda(o) {
 
   // Orient
   const debt = o.debt?.signals || [];
-  $('debt').innerHTML = debt.length ? debt.map((x) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><a class="linkish" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old.');
+  const taught = o.debt?.incidents || [];
+  $('debt').innerHTML = debt.length || taught.length ? debt.map((x) => `
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><a class="linkish" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
+    <div class="card small"${subj('problem', x.id, x.title)} data-open="problem/${esc(encodeURIComponent(x.id))}"><span class="badge">incident</span><a class="linkish" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><a class="linkish" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
@@ -2290,8 +2292,8 @@ const ATTR = {
     hide: ['review', 'result', 'secrets', 'secrets_posted', 'choices', 'status'],
     fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v), re: (v) => linkify(v) },
   },
-  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v) } },
-  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'reversible'], fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}` } },
+  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
+  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'knowledge', 'reversible'], label: { knowledge: 'Given' }, fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}`, knowledge: linkList } },
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
@@ -2922,6 +2924,7 @@ function openAct(id) {
     ] })}
     ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
     ${lineageBlock(p)}
+    ${knowledgeCited(p, 'What its instructions carried')}
     ${d ? `<h3>The decision it carried out</h3><div class="card small"><div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div></div>` : ''}
     ${citedBlock(p, a)}
     ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}
@@ -2934,9 +2937,16 @@ function restsOn(approvedBy) {
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === approvedBy);
   return k ? `<h3>The standing rule it rests on</h3><div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span></div>` : '';
 }
-// Records an object cites, in their own words (from its peek).
+// The knowledge a decision rests on (decide --on), or a start's prompt carried, in its own words
+// (from its peek): what the call or the session had to go on.
+function knowledgeCited(p, title) {
+  const ks = p?.record?.fields?.knowledge || [];
+  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}${x.type === 'knowledge' && x.status && x.status !== 'accepted' ? `, ${esc(x.status)}` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
+}
+// Records an object cites, in their own words (from its peek); what it rests on or was given has its own list.
 function citedBlock(p, o) {
-  const c = Object.entries(p?.cited || {}).filter(([id]) => !id.startsWith('q-') || !o?.approved_by || id !== o.approved_by);
+  const given = new Set(p?.record?.fields?.knowledge || []);
+  const c = Object.entries(p?.cited || {}).filter(([id]) => (!id.startsWith('q-') || !o?.approved_by || id !== o.approved_by) && !given.has(id));
   return c.length ? `<h3>What it cites</h3><ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>` : '';
 }
 function openDecision(id) {
@@ -2953,6 +2963,7 @@ function openDecision(id) {
     ] })}
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
+    ${knowledgeCited(p, 'What it drew on (not its authority)')}
     ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
     ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
     ${historySection(p, id)}`);
