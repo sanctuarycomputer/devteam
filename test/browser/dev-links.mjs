@@ -338,6 +338,7 @@ async function previewThreads({ DASH, name, previewPort, app }) {
   const lensUrl = await browser.evalIn(viewer, `document.getElementById('pv-frame').src`);
   assert.match(lensUrl, /^http:\/\/127\.0\.0\.1:48\d\d\/\.devteam\/lens\?route=%2F$/);
   const relay = new URL(lensUrl);
+  assert.notEqual(relay.port, String(previewPort), 'the relay is not Vite\'s own port');
   assert.equal(await browser.evalMain(viewer, 'TS.origin'), relay.origin, 'what goes to the lens goes to the relay only');
   const inApp = (expr) => browser.evalIn(lensUrl, `(() => { const o = document.getElementById('app').getBoundingClientRect(), d = document.getElementById('app').contentDocument; return ${expr}; })()`);
   await until(() => inApp(`d && d.getElementById('app') && d.getElementById('app').textContent`), 'the Vite page inside the lens');
@@ -402,6 +403,7 @@ async function previewThreads({ DASH, name, previewPort, app }) {
   assert.equal(await inApp('d.location.pathname'), '/next');
   await until(() => browser.evalIn(viewer, `!document.querySelector('#av-pins .tl-pin')`), 'the pin, on /, gone from /next');
   stepOk('a click on a link inside the app took it to /next: the stage\'s route and its bar say so, and the pin on / is not drawn there');
+  assert.ok(!tab.sockets.some((w) => w.url.startsWith(`ws://127.0.0.1:${previewPort}/`)), 'still no socket straight to Vite');
   await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId });
 }
 
@@ -529,9 +531,16 @@ async function threads({ DASH, pane }) {
   stepOk(`the supervisor's turn showed in the card after ${ms} ms`);
   const Q = dt(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', G, '--stake', '2', '--urgency', '1'], SUP);
   await until(() => browser.evalIn(dash, `!!document.getElementById('t-q-${Q}')`), 'the question in the card', 30000);
-  await browser.click(dash, dash, `#t-q-${Q} input[value="Yes"]`);
-  await browser.click(dash, dash, `#t-q-${Q} button[data-answer="${Q}"]`);
-  await until(() => JSON.parse(dt(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer in the log');
+  // the card rebuilds every 10 s, so each attempt finds its elements again; a click that lands on a rebuilt card is tried again
+  const answered = () => JSON.parse(dt(['questions', '--id', Q, '--json']))[0].status === 'answered';
+  await until(async () => {
+    if (answered()) return true;
+    await browser.click(dash, dash, `#t-q-${Q} input[value="Yes"]`);
+    if (!(await browser.evalIn(dash, `!!document.querySelector('#t-q-${Q} input[value="Yes"]')?.checked`))) return false;
+    try { await browser.click(dash, dash, `#t-q-${Q} button[data-answer="${Q}"]`); } catch (e) { if (!/^no /.test(e.message)) throw e; }
+    await sleep(300);
+    return answered();
+  }, 'the answer in the log', 30000);
   await until(() => browser.evalIn(dash, `!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`), 'the Inbox copy answered', 20000);
   stepOk('a question asked in the thread, answered in the card, is answered in the Inbox');
   const pinAt = () => browser.evalIn(dash, `(() => { const p = document.querySelector('.tl-pin'), g = document.querySelector('${card}'); if (!p || !g) return null; const a = p.getBoundingClientRect(), b = g.getBoundingClientRect(); return Math.round(a.left + a.width / 2 - b.right) + ',' + Math.round(a.top + a.height / 2 - b.top); })()`);
