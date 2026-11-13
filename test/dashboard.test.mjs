@@ -709,6 +709,34 @@ test('a slow data run: a read with data to fall back on has it at once, marked s
   await until(async () => (await read()).asked.includes('Second?'), 'the run landing');
 });
 
+test('a stale read is said on the page: a note at the top with the time of what is shown, on a phone too', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-stale-note-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  // waiting no time at all on a run: every read after the first is the last good data, marked stale
+  const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_HUB_PORT: String(PORTS + 42), DEVTEAM_PORT_BASE: String(PORTS + 43), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'stale');
+  const port = await freePort();
+  const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => dash.stop());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
+  const soon = soonIn(p, 30000, () => dash.out());
+  await soon(`DATA && window.__reads?.length >= 1 && window.__reads[0].ms !== null`, 'the first read drawn');
+  assert.equal(await p.ev(`$('stale').hidden`), true, 'the first read waits for its run, so nothing is stale');
+  await soon(`!$('stale').hidden`, 'the note, once a read is stale');
+  const note = await p.ev(`(() => { const n = $('stale'), r = n.getBoundingClientRect(); return { text: n.textContent, shown: getComputedStyle(n).display !== 'none', inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0, at: new Date(DATA.generated_at).toLocaleTimeString() }; })()`);
+  assert.ok(note.shown && note.inside, "shown, inside a phone's width");
+  assert.equal(note.text, `Showing data from ${note.at}. The latest is taking a while; this page updates when it's ready.`);
+});
+
 test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {
   for (const page of ['index.html', 'hub.html']) {
     const html = fs.readFileSync(path.join(kit, 'dashboard', page), 'utf8');

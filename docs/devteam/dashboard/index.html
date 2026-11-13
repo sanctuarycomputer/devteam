@@ -47,6 +47,9 @@
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
   .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
+  /* fixed, so it never moves what is under the cursor; at the top, as both bottom corners are taken,
+     over the content, not the nav (below it on a phone), and never in the way of a click */
+  .stale-note { position: fixed; top: 12px; left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 30; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -78,6 +81,7 @@
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
     .side .foot { display: none; }
+    .stale-note { top: 60px; left: 16px; }
     .nav a { white-space: nowrap; }
     /* a long URL or id wraps; it doesn't widen the page */
     main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
@@ -581,6 +585,7 @@
   <div class="banner" id="banner" role="alert" hidden></div>
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
+  <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
   <section id="overview">
     <div id="fleet-strip" class="fleet-strip"></div>
@@ -4003,6 +4008,7 @@ function render(d) {
 // load there is nothing else to see, and after it the page would otherwise show old data as current.
 function showFailure(message) {
   const b = $('banner');
+  $('stale').hidden = true; // the banner says what is shown, and why
   $('loading').hidden = true;
   const first = !DATA;
   const fix = /needs Node 18|is not a function|SyntaxError|Unexpected token/.test(message)
@@ -5065,7 +5071,15 @@ async function loadNow() {
   $('banner').hidden = true;
   $('loading').hidden = true;
   document.querySelector('main').classList.remove('waiting');
+  staleNote(d);
   drawOrHold(d);
+}
+// The server answers a slow read with the last data it had, marked stale: say so where it shows on
+// any screen, with the time of what is shown, until a fresh read lands.
+function staleNote(d) {
+  const n = $('stale');
+  n.hidden = !STALE;
+  if (STALE) n.textContent = `Showing data from ${new Date(d.generated_at).toLocaleTimeString()}. The latest is taking a while; this page updates when it's ready.`;
 }
 
 // The tab title carries the Inbox count. Notifications are the hub's, for every instance.
