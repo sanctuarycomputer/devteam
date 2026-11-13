@@ -90,6 +90,12 @@ test('an edited, removed or renamed gate is refused without the owner, alone or 
     // the same value written with its fields in another order is not byte-identical
     chore(F, 'refield', (j) => { j.gates.test = { paths: ['src/**'], cmd: 'true' }; j.gates.shellcheck = 'true'; });
     refused(merge(F, 'refield', '--dry-run'), /gates \(gate-change\) \(gates: it changes test/);
+    // main's gates in another order and nothing else: they run in order, so that is the owner's too
+    chore(F, 'reorder-only', (j) => { j.gates = { test: j.gates.test, lint: j.gates.lint }; });
+    refused(merge(F, 'reorder-only', '--dry-run'), /changes owner settings: gates \(gate-change\) \(gates: it reorders the gates main has/);
+    // a field reordered inside one gate and nothing else
+    chore(F, 'refield-only', (j) => { j.gates.test = { paths: ['src/**'], cmd: 'true' }; });
+    refused(merge(F, 'refield-only', '--dry-run'), /gates \(gate-change\) \(gates: it changes test/);
     // nothing lands, and no gate-add act was written
     assert.ok(!liveLog(F).some((o) => o.class === 'gate-add'));
   } finally { F.done(); }
@@ -105,6 +111,9 @@ test('an added gate whose name repeats a key under gates is refused: JSON.parse 
     // a repeated key elsewhere in settings is not this rule's business; a repeated gates is
     chore(F, 'dup-gates', (j) => { j.gates.shellcheck = 'true'; }, (t) => t.replace(/\n}$/, `,\n  "gates": ${JSON.stringify({ ...MAIN_GATES, shellcheck: 'true' })}\n}`));
     refused(merge(F, 'dup-gates', '--dry-run'), /gates \(gate-change\) \(gates: it repeats gates in settings\.md/);
+    // a key repeated inside one of main's gates
+    chore(F, 'dup-field', (j) => { j.gates.shellcheck = 'true'; }, (t) => t.replace('"cmd": "true",', '"cmd": "true",\n      "cmd": "true",'));
+    refused(merge(F, 'dup-field', '--dry-run'), /gates \(gate-change\) \(gates: it repeats gates\.test\.cmd in settings\.md/);
   } finally { F.done(); }
 });
 
@@ -159,5 +168,18 @@ test('worktree_setup and worktree_files stay the owner\'s, even beside an added 
     refused(merge(F, 'setup', '--dry-run'), /changes owner settings: worktree_setup \(gate-change\)/);
     chore(F, 'files', (j) => { j.gates.shellcheck = 'true'; j.worktree_files = [...j.worktree_files, 'config/master.key']; });
     refused(merge(F, 'files', '--dry-run'), /changes owner settings: worktree_files \(gate-change\)/);
+  } finally { F.done(); }
+});
+
+test('the first gate on a main with none, or no gates key at all, is an addition too', () => {
+  const F = fleetFixture('gate-add-first');
+  try {
+    editSettings(F.old, (j) => { delete j.gates; });
+    F.g(['commit', '-qam', 'no gates key'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    chore(F, 'first', (j) => { j.gates = { shellcheck: 'true' }; });
+    const r = merge(F, 'first');
+    assert.equal(r.status, 0, r.text);
+    assert.ok(liveLog(F).some((o) => o.type === 'act' && o.class === 'gate-add' && o.reversible === false));
   } finally { F.done(); }
 });
