@@ -20,7 +20,8 @@ function choreOf(F, slug, files) {
   write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
   return (...extra) => { const r = run(old, ['merge', '--chore', slug, '--dry-run', ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
 }
-const answered = (F, opts, answer, role) => { const q = F.ok(F.old, ['ask', ...opts], SUP); F.ok(F.old, ['answer', q, answer, ...(role ?? [])], role ? SUP : undefined); return q; };
+// the same words asked in several classes on purpose: each is asked again past ask's re-ask refusal
+const answered = (F, opts, answer, role) => { const q = F.ok(F.old, ['ask', ...opts, '--new-because', 'the test asks it in another class'], SUP); F.ok(F.old, ['answer', q, answer, ...(role ?? [])], role ? SUP : undefined); return q; };
 const asked = (question, cls) => ['--question', question, '--recommendation', 'yes', ...(cls ? ['--class', cls, '--reasons', cls === 'release-scope' ? 'below-rung' : 'owner-only'] : [])];
 
 test('a chore that changes a real kit file needs a kit-class answer; outside the kit, the chore rule is as it was', () => {

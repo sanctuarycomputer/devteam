@@ -3051,6 +3051,93 @@ http.createServer((req, res) => {
     git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
 
+  step('a one-way door asked in class one-way-door, whatever its kind, is the owner\'s one-way-door answer: cited, never re-asked', (t) => {
+    const sup = { role: 'sup' };
+    const logDir = path.join(repo, 'docs/devteam/run/log');
+    // the lines written by hand here would be forgeries to every later test: put the log back
+    const snap = new Map(fs.readdirSync(logDir).map((f) => [f, fs.readFileSync(path.join(logDir, f))]));
+    t.after(() => { for (const f of fs.readdirSync(logDir)) if (snap.has(f)) fs.writeFileSync(path.join(logDir, f), snap.get(f)); else fs.rmSync(path.join(logDir, f), { recursive: true, force: true }); });
+    const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => /^supervisor-/.test(f)));
+    // a line the supervisor writes into its own file, after the file's last line (as a kit before ask
+    // normalised the kind wrote it, or as a session could write it by hand)
+    const lastAt = () => fs.readFileSync(supFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l).at).sort().pop();
+    const next = () => new Date(Math.max(Date.parse(lastAt()) + 1, Date.now()));
+    const hand = (o) => {
+      const d = next();
+      const id = o.op === 'set' ? o.id : `q-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-supervisor`;
+      fs.appendFileSync(supFile, line({ type: 'question', op: 'new', ...o, id, at: d.toISOString(), by: 'supervisor' }));
+      return id;
+    };
+    const tk = { title: 'shared gate', feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'high', serves: ['BILL-S1'], depends_on: [], touches: ['billing/gate/**'], done_when: ['gate test passes in CI'], one_way_doors: ['move the proposal gate into a shared package'] };
+    must(['ticket', 'add', 'bill-09-door', '--json', JSON.stringify(tk)], sup);
+    // the owner's yes to a goal-level question asked as an owner-decision in class one-way-door
+    const Dc = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Move the proposal gate into a shared package?', recommendation: 'yes' });
+    must(['answer', Dc, 'yes']);
+    // the same kind of question, defaulted by the supervisor; and one "answered" by lines the supervisor wrote
+    const Dd = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Share the gate across apps?', recommendation: 'yes', default: 'yes' });
+    hand({ op: 'set', id: Dd, status: 'defaulted' });
+    const Df = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Ship the shared gate now?', recommendation: 'yes' });
+    hand({ op: 'set', id: Df, status: 'answered', answer: 'yes' }); // the supervisor may not set answer: the fold drops the line
+    hand({ op: 'set', id: Df, status: 'answered' });
+    fs.appendFileSync(supFile, line({ id: Df, type: 'question', op: 'set', at: next().toISOString(), by: 'owner', channel: 'cli', answer: 'yes' })); // "the owner" in the supervisor's file
+    // and an owner-decision the owner did answer, which a later line of the supervisor's tries to make a door
+    const Dp = hand({ kind: 'owner-decision', goal: G, question: 'Name the shared package billing-gate?', recommendation: 'yes' });
+    must(['answer', Dp, 'yes']);
+    hand({ op: 'set', id: Dp, class: 'one-way-door' });
+    const qs = json(must(['questions', '--json', '--all']));
+    const st = (id) => qs.find((q) => q.id === id)?.status;
+    assert.deepEqual([st(Dc), st(Dd), st(Df), st(Dp)], ['answered', 'defaulted', 'open', 'answered'], "only the owner's own line answers");
+    assert.equal(qs.find((q) => q.id === Dp).class, null, "the supervisor never sets a question's class");
+    git(['worktree', 'add', '-q', '-b', 'ticket/bill-09-door', wt('bill-09-door'), 'HEAD']);
+    t.after(() => git(['worktree', 'remove', '--force', wt('bill-09-door')]));
+    const tdir = path.join(wt('bill-09-door'), 'docs/devteam/project/tickets/bill-09-door');
+    const commit = (msg) => { git(['add', '-A'], wt('bill-09-door')); git(['commit', '-qm', msg], wt('bill-09-door')); return git(['rev-parse', 'HEAD'], wt('bill-09-door')); };
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- move the gate into packages/gate\n\n## Tasks\n\n- T1 gate\n');
+    const p1 = commit('bill-09-door: plan');
+    const covers = (...ids) => { write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n${ids.map((id) => `- Goal-level door: ${id} covers this plan`).join('\n')}\n\n|`)); commit('plan review'); };
+    covers(Dc, Dd, Df, Dp);
+    const ap = (...extra) => dt(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', ...extra, '--', 'plan ok'], sup);
+    assert.match(ap().err, /lists one-way doors; /, 'nothing cited, nothing answered for the ticket');
+    assert.match(ap('--approved', Dd).err, /never a default|not approval there/, 'a defaulted door approves nothing');
+    assert.match(ap('--approved', Df).err, /is not an answered question/, "the supervisor's own lines answer nothing");
+    assert.match(ap('--approved', Dp).err, /was asked in class \(none\), not approve-plan/, 'a class set by the supervisor counts for nothing');
+    // a decision the supervisor writes by hand on the defaulted door carries nothing either
+    const fid = `d-${next().toISOString().slice(0, 10).replace(/-/g, '')}-235959500-supervisor`;
+    fs.appendFileSync(supFile, line({ id: fid, type: 'decision', op: 'new', at: next().toISOString(), by: 'supervisor', class: 'approve-plan', what: 'plan ok', refs: ['bill-09-door'], authority: 'answer', approved_by: Dd, reversible: true }));
+    assert.match(dt(['act', '--decision', fid, '--', 'plan ok'], sup).err, /records authority it doesn't have \(no answered approve-plan question/);
+    // the plan review must still say the plan stays inside the answer
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1));
+    commit('review without the door line');
+    assert.match(ap('--approved', Dc).err, new RegExp(`must say "- Goal-level door: ${Dc} covers this plan"`));
+    covers(Dc);
+    // decided on the owner's yes, then carried out: the decision's authority checks out too
+    const d = must(['decide', '--class', 'approve-plan', '--refs', 'bill-09-door', '--approved', Dc, '--', 'approve the gate plan'], sup);
+    must(['act', '--decision', d, '--', 'plan ok'], sup);
+    assert.equal(json(must(['log', '--type', 'decision', '--json'])).find((x) => x.id === d).approved_by, Dc, 'the earlier yes approves the plan; no second question');
+    // asked for the ticket, the same holds without a review line
+    fs.rmSync(path.join(tdir, 'reviews'), { recursive: true });
+    commit('no reviews');
+    must(['ticket', 'set', 'bill-09-door', '--json', JSON.stringify({ one_way_doors: ['move the proposal gate into a shared package', 'drop the old gate'] })], sup);
+    const Dt = hand({ kind: 'owner-decision', class: 'one-way-door', ticket: 'bill-09-door', question: 'Drop the old gate?', recommendation: 'yes' });
+    assert.match(ap().err, /lists one-way doors/, 'an open ticket-level door is not an answer');
+    must(['answer', Dt, 'yes']);
+    must(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', '--', 'plan ok'], sup);
+    // ask: class one-way-door is asked as a one-way door, never as another kind, and never with a default
+    // the same decision again is refused, with the answer to cite; something material changed lets it through, said first
+    const again = ['ask', '--class', 'one-way-door', '--goal', G, '--question', 'Move the proposal gate into a shared package?', '--recommendation', 'yes'];
+    assert.match(dt(again, sup).err, new RegExp(`the owner already decided this: ${Dc} .*cite the answer instead \\(--approved ${Dc} .*"- Goal-level door: ${Dc} covers this plan".*--new-because`));
+    const r = dt([...again, '--new-because', 'the package now ships to a second app'], sup);
+    assert.equal(r.status, 0, r.err);
+    const asked = json(must(['questions', '--id', r.out, '--json']))[0];
+    assert.equal(asked.kind, 'one-way-door', 'left without --kind, it is asked as a one-way door');
+    assert.equal(asked.new_because, 'the package now ships to a second app');
+    assert.match(r.err, new RegExp(`answered a similar one-way door before: ${Dc}.*never ask it again \\(supervisor\\.md §6\\): act --class approve-plan --approved ${Dc}`), 'the warning still points at citing it');
+    must(['withdraw', r.out, '--reason', 'test'], sup);
+    assert.match(dt(['ask', '--class', 'one-way-door', '--kind', 'owner-decision', '--goal', G, '--question', 'x?', '--recommendation', 'yes'], sup).err, /a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind owner-decision/);
+    assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door never has a default/);
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door never has a default/);
+  });
+
   step('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', async () => {
     const sup = { role: 'sup' };
     const tk = (title) => JSON.stringify({ title, feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['billing/shared/**'], done_when: ['tests pass in CI'] });

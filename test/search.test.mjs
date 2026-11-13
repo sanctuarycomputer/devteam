@@ -149,15 +149,55 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     const q1 = ok(old, ['ask', '--question', 'Should we adopt new devteam releases without asking?', '--class', 'governance-edit', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP).trim();
     ok(old, ['answer', q1, 'Yes']);
     ok(old, ['knowledge', 'add', '--kind', 'preference', '--statement', 'Always adopt new devteam releases without asking', '--scope', 'class:governance-edit', '--owner']);
-    const near = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'governance-edit'], SUP);
+    // the same decision the owner already made is refused, pointing at the answer to cite
+    const reask = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'governance-edit'], SUP);
+    assert.notEqual(reask.status, 0, 'a decision the owner made is not asked again');
+    assert.match(reask.err, new RegExp(`the owner already decided this: ${q1} "Should we adopt new devteam releases without asking\\?" \\(answered "Yes" on \\d{4}-\\d{2}-\\d{2}\\)\\. .*cite the answer instead \\(--approved ${q1} on decide or act\\)\\. .*--new-because`));
+    assert.match(run(old, ['ask', '--question', 'x?', '--new-because', '  '], SUP).err, /--new-because .*can't be blank/);
+    const near = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'governance-edit', '--new-because', 'the releases now change the merge gate'], SUP);
     assert.equal(near.status, 0, near.err);
+    const nv = JSON.parse(ok(old, ['questions', '--id', near.out.trim(), '--json']))[0];
+    assert.equal(nv.new_because, 'the releases now change the merge gate', 'recorded on the question');
+    assert.match(ok(old, ['questions', '--id', near.out.trim()]), /\n {2}Asked again because: the releases now change the merge gate\n {2}Adopt the new/, 'and read before the question');
     assert.match(near.out.trim(), /^q-\S+$/, 'stdout is still the id alone');
     assert.match(near.err, /a standing rule may settle this: k-\S+ "Always adopt/, near.err);
     assert.match(near.err, new RegExp(`answered a similar question before: ${q1} .*otherwise it approves nothing here`));
     const far = run(old, ['ask', '--question', 'Which colour should the login button be?'], SUP);
     assert.doesNotMatch(far.err, /standing rule|answered a similar|may bear/, far.err);
-    const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP);
+    // asked in another class, it is still the decision the owner made: refused without --new-because
+    assert.match(run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP).err, /already decided this/, 'another type is the same question');
+    const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design', '--new-because', 'a design question now'], SUP);
     assert.match(other.err, /an accepted rule may bear on this: k-\S+ .*It approves nothing here/, 'a rule for another class only bears on it');
+  } finally { F.done(); }
+});
+
+test('ask refuses only a decision the owner answered: not a defaulted or open one, nor one about other work', () => {
+  const F = fleetFixture('search-reask');
+  const { old, ok, run } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    // open, then defaulted: the supervisor's own status line, never the owner's answer
+    const qo = ok(old, ['ask', '--question', 'Should the nightly export include archived invoices?', '--recommendation', 'yes'], SUP).trim();
+    const qd = ok(old, ['ask', '--question', 'Should the weekly digest list every failed payment retry?', '--recommendation', 'yes', '--default', 'yes'], SUP).trim();
+    const log = path.join(old, 'docs/devteam/run/log');
+    const sf = path.join(log, fs.readdirSync(log).find((f) => f.startsWith('supervisor-')));
+    fs.appendFileSync(sf, `${JSON.stringify({ v: 1, id: qd, type: 'question', op: 'set', at: '2099-01-01T00:00:00.000Z', by: 'supervisor', status: 'defaulted' })}\n`);
+    assert.equal(JSON.parse(ok(old, ['questions', '--id', qd, '--json']))[0].status, 'defaulted');
+    for (const [q, near] of [[qo, 'Should the nightly export include the archived invoices too?'], [qd, 'Should the weekly digest list each failed payment retry?']]) {
+      const r = run(old, ['ask', '--question', near, '--recommendation', 'yes'], SUP);
+      assert.equal(r.status, 0, `${q}: ${r.err}`);
+      assert.doesNotMatch(r.err, /already decided/);
+    }
+    // answered, about one goal: the same words about another goal are another decision
+    const g1 = ok(old, ['goal', 'add', '--title', 'Exports'], SUP).trim();
+    const g2 = ok(old, ['goal', 'add', '--title', 'Imports'], SUP).trim();
+    const qa = ok(old, ['ask', '--goal', g1, '--question', 'Should files be written as UTF-8 CSV with a header row?', '--recommendation', 'yes'], SUP).trim();
+    ok(old, ['answer', qa, 'yes']);
+    const same = ['ask', '--question', 'Should the files be written as UTF-8 CSV with a header row?', '--recommendation', 'yes'];
+    assert.match(run(old, [...same, '--goal', g1], SUP).err, new RegExp(`already decided this: ${qa} `), 'the same goal: refused');
+    const r2 = run(old, [...same, '--goal', g2], SUP);
+    assert.equal(r2.status, 0, r2.err);
+    assert.match(r2.err, new RegExp(`answered a similar question before: ${qa}`), 'another goal: asked, with the earlier answer for the recommendation');
   } finally { F.done(); }
 });
 
