@@ -2036,7 +2036,8 @@ function cmdLog() {
   if (flagStr('id')) objs = objs.filter((o) => o.id === flagStr('id'));
   objs.sort(byTime);
   objs = objs.slice(-Number(flagStr('tail') ?? 50));
-  if (flags.json) return json(objs);
+  // each record's stage in the loop, and an observation's provenance (computed: x-ooda)
+  if (flags.json) return json(objs.map(withOoda));
   for (const o of objs) {
     const what = o.question ?? o.statement ?? o.title ?? o.what ?? o.detail ?? o.text ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'} ${o.ms}ms` : '');
     out(`${o.created_at} ${o.id} [${o.type}${o.kind ? ` ${o.kind}` : ''}${o.status ? ` ${o.status}` : ''}] ${String(what).slice(0, 160)}`);
@@ -7879,6 +7880,8 @@ function cmdDecide() {
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'goal-readiness') readinessGoal(refs);
+  // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
+  if (cls === 'orient-noise' && !refs.some((r) => logGet(r)?.type === 'observation')) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>…');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -8015,6 +8018,57 @@ function cmdRepair() {
 
 // --- observe and orient ---
 
+// Where a record sits in the loop and where an observation came from (schema x-ooda), computed
+// when it is read and never stored: `source` and `detector` already mean things every kit reads (a
+// sensor's name, repo or prod on a goal reading, detector sensor on the kit's own lines), so a
+// rewrite would have an older kit on a mixed fleet misread a newer kit's lines.
+const OODA = SCHEMA['x-ooda'];
+// observe, learn, decide, act, orient, measurement or inbox; null for the work graph and conversation.
+// An act is always Act, whether or not a decision stands behind it.
+const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? OODA.stages[o.type] : null; return !s ? null : typeof s === 'string' ? s : Object.hasOwn(s.kind, o.kind ?? '') ? s.kind[o.kind] : s.kind['*']; };
+// The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
+// kit's own, read off its own lines, never given. The supervisor records what the owner said (an
+// answer, a thread, the chat), but never speaks as the owner.
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+// An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
+// only when its ref is the record that holds them: an answered question (the owner's answer) for
+// owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
+// doesn't check out reads as its writer's (provenanceOf); observe refuses it.
+function ownerRefHolds(from, ref) {
+  const o = ref ? logGet(ref) : null;
+  if (!o) return false;
+  const answered = o.type === 'question' && questionView(o).status === 'answered';
+  const spoke = (o.type === 'turn' && o.created_by === 'owner') || o.type === 'thread';
+  return from === 'owner-answer' ? answered : from === 'owner-thread' ? spoke : from === 'owner-chat' ? answered || spoke : true;
+}
+// { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
+// a question, a thread, a retro's file). First match wins.
+function provenanceOf(o) {
+  if (o?.type !== 'observation') return null;
+  const cls = writerClass(o.created_by);
+  const ref = o.source_ref ?? null;
+  // a set-aside (an ack, a triage ignore) is the call of whoever made it, not the check it sets
+  // aside: it falls to its writer below, though an ignore carries detector sensor
+  const setAside = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'].includes(o.kind);
+  // the kit's own lines, as the readers already trust them: a sensor's from the supervisor's process
+  // (fromSensor, which also takes a supervisor's hand line, as it always has), the findings pass's
+  // and the pane check's from the supervisor alone
+  if (!setAside && fromSensor(o)) return { from: 'sensor', ref: o.source ?? null };
+  if (!setAside && o.detector === 'metrics' && cls === 'supervisor') return { from: o.kind === 'cost-hotspot' ? 'spend' : 'metrics', ref: o.kind };
+  if (o.detector === 'pane' && cls === 'supervisor') return { from: 'metrics', ref: 'pane' };
+  // a goal reading (goal reading, by the supervisor or the owner): a repo or prod measure is read like a
+  // sensor's; an owner measure is the owner's yes to a goal-met question
+  const reading = o.kind === 'reading' && ['owner', 'supervisor'].includes(cls);
+  if (reading && ['repo', 'prod'].includes(o.source)) return { from: 'sensor', ref: 'goal-measure' };
+  if (reading && o.source === 'owner' && ownerRefHolds('owner-answer', o.approved)) return { from: 'owner-answer', ref: o.approved };
+  if (o.kind === 'thread-resolved' && cls === 'owner') return { from: 'owner-thread', ref: o.refs?.[0] ?? null };
+  if (o.kind === 'retro' && cls === 'supervisor') return { from: 'retro', ref };
+  if (!setAside && (SOURCE_FOR[cls] ?? []).includes(o.source) && (cls === 'owner' || !o.source.startsWith('owner-') || ownerRefHolds(o.source, ref))) return { from: o.source, ref };
+  if (cls === 'owner') return { from: o.channel === 'chat' ? 'owner-chat' : o.channel === 'thread' ? 'owner-thread' : 'owner', ref };
+  return { from: cls === 'ticket' ? 'worker' : cls, ref };
+}
+// A record as the views show it: its stage, and an observation's provenance.
+const withOoda = (o) => (o?.type === 'observation' ? { ...o, stage: stageOf(o), provenance: provenanceOf(o) } : { ...o, stage: stageOf(o) });
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   // the sensors write their own lines; a hand-made one could fake an outage or hide an error
@@ -8022,10 +8076,19 @@ function cmdObserve() {
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   // the kit's own detectors write their own lines: a hand-written one could pass for a poll's
   if (['sensor', 'metrics', 'pane'].includes(flagStr('detector'))) die(`observe --detector ${flagStr('detector')}: those lines come from the kit itself (sensor poll, observe-metrics, the pane check); use another detector name`);
+  // --source in the loop's words is the writer's own; older free text is still written as given,
+  // and reads as its writer's (provenanceOf)
+  const src = flagStr('source');
+  if (['sensor', 'metrics', 'spend'].includes(src)) die(`observe --source ${src}: those lines come from the kit itself (sensor poll, observe-metrics, observe-spend)`);
+  // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
+  if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
+  const mine = SOURCE_FOR[writerClass(by)];
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
     detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
-    source_key: flagStr('key'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
+    source_key: flagStr('key'), source_ref: flagStr('ref'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
     measure: flagStr('value') !== undefined ? { value: Number(flagStr('value')), unit: flagStr('unit') } : undefined,
   }, by);
   out(line.id);
@@ -8048,6 +8111,12 @@ function cmdObserveLink() {
   out(line.id);
 }
 const SEV = { low: 1, medium: 2, high: 3 };
+// The most observations a set-aside (an ack, a triage ignore) cites: 40 ids keep its line well under
+// LINE_MAX; the finding's key or the fingerprint, in source_ref, joins the rest.
+const SET_ASIDE_REFS = 40;
+// A set-aside's refs, the newest kept, trimmed so its line (with the envelope's ~250 bytes) fits LINE_MAX:
+// a long reason costs refs, never the line.
+const fitRefs = (fields, refs) => { const r = [...refs]; while (r.length && JSON.stringify({ ...fields, refs: r }).length + 250 > LINE_MAX) r.shift(); return r; };
 // Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
   const recent = new Map();
@@ -8516,16 +8585,43 @@ function cmdProblem() {
   if (flags.json) return json(ps);
   for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}${(p.threatens ?? []).length ? ` (threatens ${p.threatens.join(', ')})` : ''}`);
 }
-// Recurring signals no knowledge or problem explains yet: three or more observations (or
+// The key an observation recurs on: a sensor's escalation its fingerprint's id, so each qualify and
+// spike on one fingerprint is one signal (a spike's source_key carries its hour, and would never
+// recur); anything else its source_key (a finding's metrics:<kind>:<subject>), else kind:subject.
+// A fix-regressed or recurred line keeps its own key: it already cites its incident.
+const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
+// What explains an observation, one definition for Orient and for sensor-untriaged. ids: what
+// knowledge's evidence, a problem's refs, or a live decision's refs cite (any class: a decision
+// that cites an observation took it into account). keys: signal key → until when it is explained.
+// A live orient-noise ruling naming a key covers that signal's observations up to the ruling, so a
+// chatty one needn't list them all, and an escalation after it gets a fresh look (a fingerprint that
+// is always noise is for sensor ignore). An open incident holds its fingerprints for as long as it is
+// open. A corrected ruling explains nothing, so the owner's correction brings its signal back.
+// covered(keys, key, at): whether an observation on key, made at at, is explained by its key.
+function explained() {
+  const ids = new Set();
+  const keys = new Map();
+  const upTo = (k, at) => { if (!(keys.get(k) >= at)) keys.set(k, at); };
+  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) ids.add(r);
+  for (const d of logObjects('decision')) {
+    if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
+    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) upTo(r, d.created_at); }
+  }
+  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) upTo(f, '9999');
+  return { ids, keys };
+}
+const covered = (keys, key, at) => keys.has(key) && at <= keys.get(key);
+// Recurring signals nothing explains yet (explained, above): three or more observations (or
 // corrections) on one key, from at least two writers or on at least two days.
 function orientClusters() {
-  const linked = new Set();
-  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
+  const { ids: linked, keys } = explained();
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
-    add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
+    const key = signalKeyOf(o);
+    if (covered(keys, key, o.created_at)) continue;
+    add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
     const c = correctionOf(a);
@@ -10007,6 +10103,27 @@ function collectMetrics(since) {
     const sev = incidentSeverity(p);
     if (sev >= 3 && !incidentDecisions(p.id).length) add('medium', 'incident-unowned', p.id, `severity ${sev}, open since ${p.created_at}, no incident-fix decision`, 'decide a fix (decide --class incident-fix --refs <p-id> <ticket-id> …), or watch it with a reason');
   }
+  // a sensor's escalation of severity 3 or more nobody has triaged, triage_overdue_hours (default 2)
+  // after the first, while the supervisor runs: no incident holds it (once one does, incident-unowned
+  // above takes over), it isn't ignored, and no live noise ruling cites it. Per fingerprint, over
+  // the last 7 days, so an upgrade doesn't raise every escalation the log ever held.
+  if (supervisorRunning) {
+    const overdue = (Number(loadSettings().sensor_defaults?.triage_overdue_hours) || 2) * 3600000;
+    const sensorsNow = new Set(sensorList().map((x) => x.name));
+    const { ids: handled, keys: heldKeys } = explained();
+    const byFp = new Map();
+    for (const o of logObjects('observation')) {
+      if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
+      const id = fpIdOfObservation(o);
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || covered(heldKeys, id, o.created_at) || openIncidentOf(id)) continue;
+      (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
+    }
+    for (const [id, obs] of byFp) {
+      const sev = Math.max(...obs.map((o) => o.severity ?? 0));
+      const first = obs.map((o) => o.created_at).sort()[0];
+      if (sev >= 3 && now - Date.parse(first) > overdue) add('medium', 'sensor-untriaged', id, `severity ${sev}, ${obs.length} observation(s) since ${first} (${obs.slice(-3).map((o) => o.id).join(', ')}), not triaged`, 'triage it: fold it into an incident, ignore it, or rule it noise (sensor incident, sensor ignore, decide --class orient-noise)');
+    }
+  }
   if (sensorList().length || logObjects('observation').some((o) => o.kind === 'discovery')) {
     const last = logObjects('observation').filter((o) => o.kind === 'discovery' && o.subject === 'sensors').sort(byTime).pop();
     const changed = last?.source_ref && last.source_ref !== discoveryKey();
@@ -10316,7 +10433,12 @@ function cmdAck() {
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
-  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs: [] }, by);
+  // it cites what it sets aside: the finding's observations (observeFindings'), the newest 40 so the
+  // line stays under LINE_MAX; the finding's key, in source_ref, joins the rest
+  const key = `metrics:${kind}:${subject}`;
+  const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
+  const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
+  const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
@@ -10387,7 +10509,7 @@ function collectOoda() {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map(withOoda),
     clusters: orientClusters(),
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
@@ -13661,6 +13783,8 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
   let st = sensorState(m.name);
   if (m.kind === 'http' && fresh) st = { ...st, ...sensorStateFromLog(m.name) };
   const r = m.kind === 'http' ? await pollHttp(m, st) : await pollProbe(m, st);
+  // a check that ran is an hour the sensor heard, events or not (a quiet hour counts toward a median)
+  if (r.sample?.ok) markListened(m.name);
   // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
   const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
   if (rollupDay || st.rollup_day !== yesterday) {
@@ -13687,11 +13811,14 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
       if (live.length !== Object.keys(fps).length) writeJsonAtomic(fpsPath, Object.fromEntries(live));
     }
     const counts = jsonOr(path.join(sensorDir(m.name), 'counts.json'), null);
+    const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
     if (counts) {
-      const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
       for (const fp of Object.keys(counts)) { for (const h of Object.keys(counts[fp])) if (h < cut) delete counts[fp][h]; if (!Object.keys(counts[fp]).length) delete counts[fp]; }
       writeJsonAtomic(path.join(sensorDir(m.name), 'counts.json'), counts);
     }
+    // the hours it heard, with the counts they are a median of
+    const heard = jsonOr(listenedFile(m.name), null);
+    if (heard) writeJsonAtomic(listenedFile(m.name), Object.fromEntries(Object.entries(heard).filter(([h]) => h >= cut)));
     if (st.days) for (const d of Object.keys(st.days)) if (d < dateOnly(new Date(Date.now() - 8 * 86400000).toISOString())) delete st.days[d];
     st.pruned = dateOnly(nowIso());
   }
@@ -14241,12 +14368,23 @@ function repoPath(file) {
   return null;
 }
 const frameWords = (fr) => `${fr.file}${fr.line != null ? `:${fr.line}` : ''}${fr.fn ? ` ${fr.fn}` : ''}`;
+// The hours a sensor heard: a check that ran, or events that arrived (listened.json, { "<yyyy-mm-ddThh>":
+// true }, beside counts.json, whose keys are fingerprints). A spike's median is over these alone,
+// so hours a box was down (nobody listening) never read as quiet ones.
+const listenedFile = (name) => path.join(sensorDir(name), 'listened.json');
+function markListened(name, hour = nowIso().slice(0, 13)) {
+  const l = jsonOr(listenedFile(name), {});
+  if (!l[hour]) { l[hour] = true; fs.mkdirSync(sensorDir(name), { recursive: true }); writeJsonAtomic(listenedFile(name), l); }
+  return l;
+}
 function ingestEvents(m, events, st, at = nowIso()) {
   if (!events.length) return [];
   const dir = sensorDir(m.name);
   const fps = jsonOr(path.join(dir, 'fingerprints.json'), {});
   const counts = jsonOr(path.join(dir, 'counts.json'), {});
   const hour = at.slice(0, 13);
+  // events arrived: it heard this hour
+  const listened = markListened(m.name, hour);
   const day = dayStats(st, at.slice(0, 10));
   const tri = { min_level: 'error', min_count: 1, min_users: 0, ...(m.triage ?? {}) };
   const spike = { factor: 5, min: 20, ...(m.spike ?? {}) };
@@ -14301,21 +14439,25 @@ function ingestEvents(m, events, st, at = nowIso()) {
     }
   }
   // spikes: a known fingerprint (a day of the kit's own counts, not the provider's first_seen,
-  // which can be months back with nothing counted) this hour against its 7-day hourly median
+  // which can be months back with nothing counted) this hour against its 7-day hourly median, over
+  // the hours the sensor heard (a sensor just upgraded has none yet: a day of them before a spike)
   for (const fp of touched) {
     const f = fps[fp];
     if (levelRank(f.level) < levelRank('warning')) continue;
     const c = counts[fp][hour];
     const start = Math.max(Date.parse(f.seen_at) || Date.now(), Date.now() - 7 * 86400000);
     const hours = [];
-    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) hours.push(counts[fp][new Date(t).toISOString().slice(0, 13)] ?? 0);
+    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) { const h = new Date(t).toISOString().slice(0, 13); if (listened[h]) hours.push(counts[fp][h] ?? 0); }
     if (hours.length < 24) continue;
     const median = quantile(hours, 0.5);
     const prev = new Date(Date.parse(`${hour}:00:00.000Z`) - 3600000).toISOString().slice(0, 13);
     if (c >= Math.max(spike.min, spike.factor * median)) {
       if (f.spike_hour !== hour && f.spike_hour !== prev) {
         const sev = Math.min(4, (LEVEL_SEV[f.level] ?? 1) + 1);
-        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${m.name}: ${f.class ?? f.code ?? 'a log line'} is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.round(hours.length / 24)} day(s)`.slice(0, 900), severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
+        // which line: its class or code and its id; a log line's template is production text, framed
+        // (the head is cut first, so the cut never reaches the frame's end marker)
+        const tpl = f.kind === 'log' && isStr(f.template) ? `\n${untrusted('the line', f.template.slice(0, 300))}` : '';
+        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${`${m.name}: ${f.class ?? f.code ?? 'a log line'} (${fpIdOf(m.name, fp)}) is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.floor(hours.length / 24)} day(s)`.slice(0, 400)}${tpl}`, severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
         if (o && sev >= 4) alerts.push(`${m.name}: a ${f.kind} is spiking (${o.id}; sensor show ${fp})`);
       }
       f.spike_hour = hour;
@@ -14640,7 +14782,10 @@ function cmdSensorIgnore(sub) {
   if (sub === 'ignore') {
     if (ignored) die(`${fp.id} is already ignored`);
     const reason = flagStr('reason') ?? die('sensor ignore needs --reason "…" (why it isn\'t worth fixing)');
-    const o = appendLog({ type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` }, by);
+    // it cites what it sets aside: the fingerprint's observations, the newest 40 (source_ref joins the rest)
+    const refs = [...fpObservations(fp.id)].sort(byTime).slice(-SET_ASIDE_REFS).map((x) => x.id);
+    const fields = { type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` };
+    const o = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
     return out(`${o.id}: ignored ${fp.id}; triage skips it until sensor unignore`);
   }
   if (!ignored) die(`${fp.id} is not ignored`);
@@ -15329,6 +15474,8 @@ const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--f
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
+  // where a record sits in the loop, and where an observation came from
+  if (v.record) { const o = logGet(v.record.id); v.stage = stageOf(o); if (o.type === 'observation') v.provenance = provenanceOf(o); }
   const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
   if (kind === 'ticket') {
     gitReadCache = new Map();
@@ -15970,7 +16117,7 @@ Decide and act (supervisor.md, constitution.md)
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
-  observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
+  observe --subject s --kind k --detail d [--source owner-chat|owner-answer|owner-thread|retro|…] [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)

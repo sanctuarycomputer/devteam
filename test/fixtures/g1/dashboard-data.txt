@@ -349,7 +349,12 @@ exit 0
         "source_key": "note:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        }
       },
       {
         "id": "o-<sha>-<sha>-owner",
@@ -363,7 +368,12 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -376,7 +386,12 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -389,7 +404,12 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        }
       }
     ],
     "clusters": [

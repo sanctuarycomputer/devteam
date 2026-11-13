@@ -2139,6 +2139,8 @@ function decisionUnder(r) {
 // A routine act (a merge the gates passed, a worker started, a default applied) is its own call under
 // the constitution; it is in the Act tab, and here only on request, so judgment calls stay in view.
 const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution';
+// A decision that is complete in itself: a noise ruling explains a signal, and no act carries it out.
+const NO_ACT_CLASSES = ['orient-noise'];
 function renderDecisions(o) {
   const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
   const sel = $('dec-class');
@@ -2159,7 +2161,7 @@ function renderDecisions(o) {
     <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)}>
       <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
-        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
+        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
         ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
         ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
       </div>
