@@ -2605,6 +2605,7 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie'], r.headers['cross-origin-opener-policy']], ['no-store, private', 'cookie, sec-fetch-dest', 'DENY', 'no-referrer', undefined, 'same-origin'], 'the opener policy on the wrapper and the plain index alike: a popup\'s window says nothing of who is visiting');
     assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${gw.inst(P + 20)}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to');
     assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
+    assert.match(r.body, /<iframe [^>]*\bautofocus\b/, 'the viewer has the keyboard from the start, so Shift reaches it');
     assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
     const src = /<iframe src="([^"]+)"/.exec(r.body)[1].replace(/&#38;|&amp;/g, '&');
     assert.match(src, new RegExp(`^${gw.inst(P + 20).replace(/\./g, '\\.')}/view/artifact/hello\\?at=tree:${tree}&w=\\d+\\.[\\w-]{22}$`), src);

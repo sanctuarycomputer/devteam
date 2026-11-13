@@ -1463,6 +1463,10 @@
             "type": "array",
             "description": "The remediation entries a governance-edit question would approve (name, script, sha, entry_hash; ask --remediations). merge lands a change only if it is one of these, exactly."
           },
+          "new_because": {
+            "type": "string",
+            "description": "What materially changed since the owner answered the same decision, when a question asks it again (ask --new-because). The owner reads it first: \"Asked again because: …\"."
+          },
           "owner_said": {
             "type": "string",
             "description": "The owner's words, verbatim, when a question asks again after their no. Checked against the transcript like a chat answer's said."
