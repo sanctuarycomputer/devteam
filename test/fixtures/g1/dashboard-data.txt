@@ -109,6 +109,7 @@ exit 0
       "approves": [],
       "evidence": [],
       "note": null,
+      "new_because": null,
       "why_asked": {
         "reasons": []
       },
@@ -696,10 +697,10 @@ exit 0
       {
         "class": "new-feature",
         "about": "start planning a feature the owner hasn't asked for",
-        "rung": 1,
-        "rung_name": "ask",
-        "ceiling": 2,
-        "start": 1,
+        "rung": 2,
+        "rung_name": "ask with a default",
+        "ceiling": 3,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -712,10 +713,10 @@ exit 0
       {
         "class": "priority-change",
         "about": "reorder goals' work or move a feature between releases",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -728,10 +729,10 @@ exit 0
       {
         "class": "release-scope",
         "about": "move a story to a later release to ship the rest on time",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -744,10 +745,10 @@ exit 0
       {
         "class": "upstream-pr",
         "about": "open a PR on upstream devteam with a general improvement",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -824,28 +825,28 @@ exit 0
     ],
     "classes": {
       "new-feature": {
-        "ceiling": 2,
-        "start": 1,
+        "ceiling": 3,
+        "start": 2,
         "about": "start planning a feature the owner hasn't asked for",
-        "rung": 1
+        "rung": 2
       },
       "priority-change": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "reorder goals' work or move a feature between releases",
-        "rung": 1
+        "rung": 2
       },
       "release-scope": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "move a story to a later release to ship the rest on time",
-        "rung": 1
+        "rung": 2
       },
       "upstream-pr": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "open a PR on upstream devteam with a general improvement",
-        "rung": 1
+        "rung": 2
       },
       "release-production": {
         "ceiling": 3,
@@ -893,7 +894,7 @@ exit 0
       },
       {
         "id": "low-confidence",
-        "means": "the supervisor could decide but isn't sure enough of its recommendation"
+        "means": "the supervisor could decide but isn't sure enough of its recommendation (under 0.7)"
       },
       {
         "id": "goals-conflict",

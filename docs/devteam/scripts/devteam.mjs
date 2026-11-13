@@ -463,7 +463,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -864,6 +864,19 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// The project's .gitleaks.toml as init writes it: it only extends the kit's gitleaks.toml (gitleaks'
+// default rules, plus the allowlist for the log's source_key). gitleaks reads an extend path from the
+// folder it runs in, the repository root. isGitleaksStub: a file that does only that, comments and
+// blank lines aside, so a sync PR may add it where main has none (upstreamSyncCheck).
+const GITLEAKS_FILE = '.gitleaks.toml';
+const KIT_GITLEAKS = `${kitRel ? `${kitRel}/` : ''}gitleaks.toml`;
+const gitleaksExtend = () => `[extend]\npath = "${KIT_GITLEAKS}"`;
+const gitleaksStub = () => `# gitleaks reads this file. It extends devteam's config: gitleaks' default rules, plus an allowlist
+# for one field of the kit's own log (${KIT_GITLEAKS} says which, and why). Add this project's
+# own rules and allowlists below it (governance/quality.md, Secrets).
+${gitleaksExtend()}
+`;
+const isGitleaksStub = (text) => typeof text === 'string' && text.split('\n').map((l) => l.replace(/#.*/, '').trim()).filter(Boolean).join('\n') === gitleaksExtend();
 // A real kit file: under the kit's own path, other than project/ and run/ (a project's own files, and
 // its machine state). Everything else a chore changes is the project's.
 const isKitFile = (f) => { if (kitRel.startsWith('..')) return false; const rel = kitRel ? (f.startsWith(`${kitRel}/`) ? f.slice(kitRel.length + 1) : null) : f; return rel !== null && !/^(project|run)\//.test(rel); };
@@ -1321,13 +1334,18 @@ function logWriter() {
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
 // visibility measure, not a wall: appendLog stamps every owner line with its channel. The supervisor
-// with no DEVTEAM_ROLE set is caught by its pane: the one its own commands recorded (rememberSupervisorPane),
-// or the one DEVTEAM_SUPERVISOR names. The dashboard's children run with no TMUX_PANE, wherever it
-// was started. hint: what the supervisor does instead, for the command at hand.
+// with no DEVTEAM_ROLE set on a command is caught by its pane: the one its own commands as the
+// supervisor recorded (rememberSupervisorPane), or the one DEVTEAM_SUPERVISOR names. The dashboard's
+// children run with no TMUX_PANE, wherever it was started. hint: what the supervisor does instead,
+// for the command at hand.
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   const pane = process.env.TMUX_PANE;
-  if (pane && process.env.TMUX && [process.env.DEVTEAM_SUPERVISOR, readText(supervisorPaneFile())?.trim()].includes(pane)) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard`);
+  if (!pane || !process.env.TMUX) return { by: 'owner' };
+  const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
+    : markedPane(runDir) === pane ? `This pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${supervisorPaneMark(runDir)}: the supervisor records its own pane again with its next command`
+    : null;
+  if (how) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard. (${how}.)`);
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
@@ -1339,13 +1357,34 @@ const supervisorOnly = (what) => {
 // The supervisor is the owner's foreground agent session. When it runs inside tmux, its pane is
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
 // in the log for its next tick.
-const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+const supervisorPaneFile = (run) => path.join(run, 'supervisor-pane');
+// supervisor-pane keeps the bare pane id, as older kits and the box's up-list read it, so its form
+// never changes. supervisor-pane-role, beside it, holds the same id and is written only with a record
+// made for the supervisor (rememberSupervisorPane, recover). A pane counts only when the two agree:
+// an older kit took a role-less command's pane, perhaps the owner's own, and that bare record reads
+// as no pane here, in this repo and in any other (machine status and tell), so nothing is typed into
+// it and ownerWriter doesn't refuse the owner there. A repo on a kit from before recover is the
+// exception (notedPaneOf): nothing there ever marks a pane, legacyRecover included, so its bare
+// record is the only one it has. The cost: a supervisor on an older kit has no
+// pane this kit uses until its kit is upgraded and it runs a command as the supervisor.
+const supervisorPaneMark = (run) => path.join(run, 'supervisor-pane-role');
+function markedPane(run) {
+  const p = readText(supervisorPaneFile(run))?.trim();
+  return p && readText(supervisorPaneMark(run))?.trim() === p ? p : null;
+}
+function recordSupervisorPane(run, pane) {
+  fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(supervisorPaneFile(run), pane);
+  fs.writeFileSync(supervisorPaneMark(run), pane);
+}
+// Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
+// records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
+// terminal runs role-less, and taking its pane would have ownerWriter refuse the owner there.
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
-  if (!pane || !process.env.TMUX || (process.env.DEVTEAM_ROLE && process.env.DEVTEAM_ROLE !== 'supervisor')) return;
-  if (readText(supervisorPaneFile()) === pane) return;
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  if (!pane || !process.env.TMUX || process.env.DEVTEAM_ROLE !== 'supervisor') return;
+  if (markedPane(runDir) === pane) return;
+  recordSupervisorPane(runDir, pane);
 }
 
 function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
@@ -1583,6 +1622,16 @@ function ratingHistory(q) {
 const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
+// A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
+// whatever its kind (ask now records those as kind one-way-door; older lines may not). Only the
+// question is classified here: what it approves is still the owner's own answer on the fold
+// (questionView's status "answered", bound to the question's hash), never a default or a line the
+// supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
+const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
+// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
+// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+const doorAgreed = (v) => !v.recommendation || v.matched === true;
+
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
   const hash = questionHash(q);
@@ -1617,7 +1666,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
@@ -1970,6 +2019,13 @@ function cmdLogCheck() {
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
+  // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
+  // rung 1, however its lines were written. A call that stands on one fails; the default alone warns.
+  const voidDefaults = new Map();
+  for (const q of logObjects('question')) { const v = questionView(q); const why = v.status === 'defaulted' ? defaultGap(v) : null; if (why) voidDefaults.set(v.id, why); }
+  const standing = new Set();
+  for (const c of calls()) if (voidDefaults.has(c.approved_by)) { standing.add(c.approved_by); fails.push(`${c.id} stands on ${c.approved_by}'s default, which approves nothing: ${voidDefaults.get(c.approved_by)}`); }
+  for (const [id, why] of voidDefaults) if (!standing.has(id)) out(`warn: ${id}'s default approves nothing: ${why}`);
   report(fails, `${n} log line(s)`);
 }
 
@@ -2491,33 +2547,82 @@ function paneWaitingIn(window) {
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
 // window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
-// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
-// so a delivery gets at most one Enter however many passes or processes look.
+// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
+// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
+// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
+// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
+// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
+// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
+// is claimed (moved aside) and read again before each key, so however many passes or processes look,
+// and however stale their first read, one press happens per claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
+const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
-const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+const squash = (t) => t.replace(/[\s─-╿]+/g, '');
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
   try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
 }
+// A claim left by a process that died between its claim and its writeback: dropped, so the
+// sent directory doesn't collect them (that delivery's rescue ends with it).
+function dropDeadClaims(file) {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.claim-`;
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.startsWith(prefix)); } catch { return; }
+  for (const n of names) {
+    const pid = /^\d+$/.test(n.slice(prefix.length)) ? Number(n.slice(prefix.length)) : 0; // not a writeback's .tmp
+    if (!pid || pid === process.pid) continue;
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') { try { fs.unlinkSync(path.join(dir, n)); } catch {} } }
+  }
+}
 function resendLostEnter(key, target, lines) {
   const file = sentFile(key);
+  dropDeadClaims(file);
+  const ripe = (r) => typeof r?.text === 'string' && (Date.now() - Date.parse(r.at)) / 1000 >= LOST_ENTER_SECONDS;
   let rec;
   try { rec = readJson(file); } catch { return; }
-  const age = (Date.now() - Date.parse(rec.at)) / 1000;
   const tail = squash(rec.text ?? '').slice(-40);
-  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  if (!tail || !ripe(rec)) return;
   const bottom = lines.slice(-8);
-  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
-  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
+  const claimed = `${file}.claim-${process.pid}`;
+  const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
+  // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
+  // fails if the name is taken, where a rename would replace it): then the claim is just dropped.
+  const putBack = () => { try { fs.linkSync(claimed, file); } catch {} drop(); };
+  // Claimed, and read again: a pass whose first read is stale (another process pressed and wrote
+  // the record back since) finds a fresh time, or another text, and leaves it as it was.
+  const claim = () => {
+    try { fs.renameSync(file, claimed); } catch { return null; }
+    let now = null;
+    try { now = readJson(claimed); } catch {}
+    if (now?.text === rec.text && ripe(now)) return now;
+    putBack();
+    return null;
+  };
+  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
   if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
-  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
-  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
-  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
+  if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
+  // tests only: the pause a loaded machine can put between the first read and the claim
+  const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
+  if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
+  const cur = claim();
+  if (!cur) return;
+  const done = Math.max(0, Number(cur.tries) || 0);
+  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
+  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+  const tries = done + 1;
+  const typedAt = cur.typed_at ?? cur.at;
+  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
+  if (!pressed) return;
+  const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
 // The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
 // tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
@@ -4002,18 +4107,23 @@ function upstreamSyncCheck(chore, sha, changed) {
   const onDefault = tagSha && git(['fetch', '--quiet', '--no-tags', src, '+HEAD:refs/devteam-upstream-default/HEAD'], mainRoot) !== null
     && git(['merge-base', '--is-ancestor', tagSha, 'refs/devteam-upstream-default/HEAD'], mainRoot) !== null;
   if (!onDefault) return { problem: `standing approval for upstream syncs: tag "${tag}" is not on the default branch of ${redactUrl(s.upstream_repo)}, or that can't be confirmed. The owner's answer is needed: --approved <qid>` };
+  // The one file outside the kit a sync may carry: the .gitleaks.toml init writes, where main has
+  // none and the release ships the kit's gitleaks.toml it extends. Exactly that (isGitleaksStub), so
+  // the PR can't bring an allowlist of its own in with it.
+  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
+  const stub = changed.includes(GITLEAKS_FILE) && mb && !blob(mb, GITLEAKS_FILE) && blob(sha, KIT_GITLEAKS) && isGitleaksStub(git(['show', `${sha}:${GITLEAKS_FILE}`], mainRoot));
+  if (stub) changed = changed.filter((f) => f !== GITLEAKS_FILE);
   if (policy) {
     const problem = adoptProblem({ tag, sha, mb, main, changed, src });
     if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
   }
-  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
     if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
-  return { rule, policy, tag, tagSha };
+  return { rule, policy, tag, tagSha, stub: !!stub };
 }
 // What "adopt" needs beyond the standing rule; the reason it isn't met, else null. The PR starts at
 // main's tip, or the merge's 3-way result needn't be the files compared here. The tag is strictly
@@ -4352,7 +4462,7 @@ function cmdMerge() {
     let kitRule = null;
     if (outside.length && (!approved || !kitApproved) && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, outside);
-      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly${r.stub ? `, and ${GITLEAKS_FILE} only extends the kit's gitleaks.toml` : ''}; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
     }
     if (outside.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, outside);
@@ -4656,29 +4766,159 @@ function cmdAsk() { out(askLine().id); }
 // and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
 // (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
 const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
-function askLikeWarnings({ text, cls, kind }) {
-  if (!text.trim() || KIT_WORDED(cls, kind)) return;
+// A decision the owner has made is never put to them again (supervisor.md §6): ask refuses a
+// question as close as those above to one the owner answered (their own line, bound to the question
+// as asked; never a default or an open one) about the same work: a ticket or incident both name, or
+// the same goal or feature, and neither about other tickets; or neither about any work at all.
+// --new-because says what materially changed, and the owner reads it first. Not for the questions
+// whose answers lapse by design (a trust step's evidence, an incident's fix, a remediation's window,
+// a sensor's token, asked again only after the owner's own sensor reconsider),
+// nor for the kit's own wordings, nor for an answer already spent: one answer approves one call (one
+// per item it approves), so a yes that approved its call can't be cited again, and the next call of
+// the kind is a new question (the warning below still shows the earlier answer). A one-way door is
+// never spent: it covers each plan inside it.
+const REASK_EXEMPT = (cls, kind) => KIT_WORDED(cls, kind) || !['owner-decision', 'one-way-door', 'owner-action'].includes(kind) || ['incident-fix', 'production-remediation'].includes(cls);
+// An answer settles a question in its own class (an answer in another class can't be cited for this
+// one: the kit refuses it, so asking in the right class is no re-ask), or a one-way door's answer
+// settles a door asked again in any shape: what the owner was re-asked here.
+const settlesClass = (v, cls, kind) => (v.class ?? null) === (cls ?? null) || (isDoorQuestion(v) && (isDoorQuestion({ kind, class: cls }) || !cls || cls === 'approve-plan'));
+function sameWork(a, b) {
+  // a request for secrets is about what it asks for: the same secret to the same place, or not the same
+  const sinks = (x) => (x.secrets ?? []).map((y) => `${y.name}\n${y.sink}`);
+  if (sinks(a).length || sinks(b).length) return sinks(a).some((y) => sinks(b).includes(y));
+  // a question pinned to a text (a draft's blob, an artifact's hash) is about that text: a new draft is a new decision
+  const pins = (x) => ((x.id ? logGet(x.id)?.links : x.links) ?? []).filter(isObj).map((l) => l.blob ?? l.sha256).filter(Boolean);
+  if (pins(a).length || pins(b).length) { if (!pins(a).some((y) => pins(b).includes(y))) return false; }
+  const ta = [a.ticket, ...(a.blocks ?? [])].filter(Boolean);
+  const tb = [b.ticket, ...(b.blocks ?? [])].filter(Boolean);
+  if (ta.some((x) => tb.includes(x))) return true;
+  // about two different tickets: two decisions (a question that only blocks a ticket may still be the goal's)
+  if (a.ticket && b.ticket) return false;
+  if (!ta.length && !tb.length && !a.goal && !b.goal) return true;
+  if (a.goal && a.goal === b.goal) return true;
+  return sharesWork(questionAbout(a), questionAbout(b));
+}
+// The search above finds questions alike enough to mention; a refusal needs more: the two questions
+// themselves (not their context) share most of their words, every word counted whole ("v0.3.0" and
+// "v0.4.0", "UK" and "US" differ), only the glue words left out.
+const REASK_GLUE = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'for', 'in', 'on', 'at', 'is', 'it', 'be', 'we', 'i', 'you', 'should', 'would', 'could', 'can', 'do', 'does', 'shall', 'will', 'please', 'this', 'that']);
+const questionWords = (t) => new Set((String(t ?? '').toLowerCase().match(/[\p{L}\p{N}]+(?:[.'’-][\p{L}\p{N}]+)*/gu) ?? []).filter((w) => !REASK_GLUE.has(w)));
+function nearlySameQuestion(a, b) {
+  const x = questionWords(a);
+  const y = questionWords(b);
+  if (!x.size || !y.size) return false;
+  const both = [...x].filter((w) => y.has(w)).length;
+  return both / (x.size + y.size - both) >= 0.7;
+}
+function answerSpent(v) {
+  if (isDoorQuestion(v)) return false;
+  // a goal change records its answer on the goal line, not as a call
+  if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === v.id))) return true;
+  const used = calls().filter((c) => c.approved_by === v.id);
+  const declared = v.approves ?? [];
+  if (!declared.length) return used.length > 0;
+  const done = new Set(used.flatMap((c) => (c.refs ?? []).flatMap((x) => String(x).split(','))));
+  return declared.every((a) => done.has(a));
+}
+function reaskWords(v) {
+  const door = isDoorQuestion(v);
+  const cite = v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
+  return `the owner already decided this: ${v.id} ${quoteData(capBytes300(v.question))} (answered ${quoteData(capBytes300(v.answer))} on ${String(v.answered_at).slice(0, 10)}). Never ask the owner a decision they have made: ${cite}. If something material changed since, ask again with --new-because "<what changed>", which the owner reads first (supervisor.md §6)`;
+}
+// Returns the --new-because to record: left off when nothing the owner answered is like this.
+function askLikeWarnings({ text, question, cls, kind, about, newBecause }) {
+  if (!text.trim() || KIT_WORDED(cls, kind)) return newBecause;
   const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
   const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
   const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context, x.recommendation, (x.choices ?? []).map((c) => c?.label)) }] }))];
-  if (!docs.length) return;
+  if (!docs.length) return newBecause ? (warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'), null) : newBecause;
   const ix = searchIndex(docs);
   const close = ix.docs.map((d) => ({ d, ...searchSimilar(ix, text, d) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
   const line = (s) => quoteData(capBytes300(s));
+  const reaskable = (k, secrets) => !(k === 'owner-action' && !(secrets ?? []).length);
+  const like = (c) => c.d.q && c.d.q.answered_by === 'owner' && !REASK_EXEMPT(c.d.q.class, c.d.q.kind) && reaskable(c.d.q.kind, c.d.q.secrets) && settlesClass(c.d.q, cls, kind) && nearlySameQuestion(question, c.d.q.question) && sameWork(about, c.d.q) && !answerSpent(c.d.q);
+  const same = close.find(like);
+  if (same && !REASK_EXEMPT(cls, kind) && !about.sensor && reaskable(kind, about.secrets) && !newBecause) die(reaskWords(same.d.q));
+  // asked again: the owner reads why only on a question that asks again what they decided
+  if (newBecause && !same) { warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'); newBecause = null; }
   for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
     const k = c.d.rule;
     if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
     else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
   }
-  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  // An answered one-way door covers each plan inside it, whatever kind it was asked as: cited, never asked again.
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) {
+    if (isDoorQuestion(c.d.q)) warn(`the owner answered a similar one-way door before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it covers this decision, withdraw this and cite it, never ask it again (supervisor.md §6): act --class approve-plan --approved ${c.d.q.id}, with "- Goal-level door: ${c.d.q.id} covers this plan" in the plan review when it was asked for the goal`);
+    else warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  }
+  return newBecause;
+}
+// Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
+// paragraphs reach the dashboard as written (supervisor.md §6). Only where it can't be anything else:
+// text that already has real line breaks is left alone, and so are `code`, a Windows path
+// (C:\new\node_modules) and an escaped backslash (\\n).
+const ownerText = (t) => (t == null || String(t).includes('\n') ? t : String(t).split(/(`[^`]*`|\b[A-Za-z]:\\\S*)/).map((p, i) => (i % 2 ? p : p.replace(/(?<!\\)\\n/g, '\n'))).join(''));
+// The owner reads every question cold, on the dashboard, without the fleet's context or its words
+// (supervisor.md §6, Ask less, act more). What ask refuses, and what it warns about.
+// A question about asking the owner: "should I ask you for…", "want me to request access?", "is it ok
+// to ask for the key?". Asking someone else ("should I ask the vendor for a refund?", "request a key
+// from Stripe?") or a product's own prompt ("should the app request access to contacts?") is not one.
+const OWNER_GIVES = String.raw`(?:access|permissions?|logins?|keys?|tokens?|secrets?|certificates?|passwords?|passphrases?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env)`;
+// Someone other than the owner, before the verb ("let users request access", "require customers to
+// ask for access") or between it and the thing asked for: a question about the product, not about
+// asking the owner. And "ask you to <do something> each time / from now on" is about the owner's part
+// in the process, not whether to ask them once.
+const THIRD_PARTY = String.raw`(?:users?|customers?|clients?|members?|people|visitors?|guests?|admins?|them|they|anyone|everyone|someone)`;
+const NOT_THIRD = (n) => String.raw`(?:(?!\b${THIRD_PARTY}\b)[^?.]){0,${n}}?`;
+const META_ASK = new RegExp(String.raw`\b(?:should|shall|can|may|could|might|want|need|do you mind|would you (?:like|mind|prefer)|is it (?:ok(?:ay)?|fine|all ?right)|are you (?:ok(?:ay)?|fine|happy) (?:with|for)|would it (?:help|be (?:ok(?:ay)?|useful|helpful|better))|does it make sense)\b${NOT_THIRD(40)}(?:\b(?:i|we|me|us)\b${NOT_THIRD(24)}|\bto\s+)\b(?:ask(?:ing|ed)?|request(?:ing|ed)?|prompt(?:ing|ed)?)\s+(?:you\b(?!\s+to\s+(?!(?:share|send|give|provide|paste|post|supply|set|add|grant|create|generate|upload)\b)[^?.]*\b(?:each|every|always|from now on|going forward|in (?:the )?future|as well)\b)|(?:for\s+)?(?:(?:the|a|an|your|some|more|those|these|that|this)\s+)?(?:(?!${THIRD_PARTY}\b)[\w.-]+\s+){0,2}?${OWNER_GIVES}\b(?!\s+(?:from|of)\s+(?!you\b)))`, 'i');
+const CRED_WORDS = /\b(?:passwords?|passphrases?|api[ _-]?keys?|access[ _-]?keys?|secret[ _-]?keys?|private[ _-]?keys?|(?:auth|access|api|bearer|personal access) tokens?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env\b)/i;
+const KIT_ID = /\b(?:q|[gkapmodt])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/;
+// A credential asked for in a decision's words ("can you share the staging password?", "may I have
+// the API key?"): the owner would have to type it into an answer. It is an owner-action with --secrets.
+const CRED_REQUEST = new RegExp(String.raw`\b(?:(?:share|send|give|provide|paste|post|supply)\s+(?:me|us)\b\s*(?:with\s+)?(?:(?:the|a|an|your|our|that|those)\s+)?|(?:(?:can|could|will|would) you|please|do you want to|would you like to|i need you to)\s+(?:\w+\s+){0,2}?(?:share|send|give|provide|paste|post|supply)\s+(?:the|a|an|your|that|those)\s+|(?:may|can|could) (?:i|we) (?:have|get)\s+(?:(?:the|a|an|your|that|those)\s+)?)(?:[\w.-]+\s+){0,3}?${CRED_WORDS.source}(?!\s+from\s+(?!you\b))`, 'i');
+// "dry-run/staging" is the project's; run/… on its own is the kit's folder
+const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|(?<![\w/-])run\/[\w./-]+)\b/i;
+function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, recommendation, L }) {
+  if (!q || KIT_WORDED(cls, kind)) return;
+  if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
+  if (!secrets?.length && kind !== 'owner-action' && CRED_REQUEST.test(q)) die(`don't ask for a credential in a decision's words: the owner would have to type it into an answer. Ask with --kind owner-action and --secrets naming each one and where it goes, so the owner gets the paste box at once (supervisor.md §6, Secrets)`);
+  if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
+  const tid = [...tickets().keys()].find((t) => new RegExp(`(?<![\\w-])${escRe(t)}(?![\\w-])`, 'i').test(q));
+  if (tid) die(`the question names the ticket ${tid}: the owner doesn't know it by its id. Say what it is in words; --ticket or a link carries the id`);
+  // --plain-ok <word>…: the question is about that very thing (a git worktree, the trust ladder
+  // itself), so that word may stay. Only the words named; ids, asking about asking and credentials
+  // never pass.
+  // a word and its plural are one word: --plain-ok worktree covers "worktrees"
+  const stem = (w) => String(w).toLowerCase().replace(/s$/, '');
+  const plainOk = new Set(asList(flags['plain-ok']).map(stem));
+  const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
+  const cw = classes.find((c) => c.includes('-') && !plainOk.has(stem(c)) && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
+  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it (if the question is about that class itself, --plain-ok ${cw})`);
+  const jw = [...q.matchAll(new RegExp(KIT_WORDS.source, 'gi'))].map((m) => m[0]).find((w) => !plainOk.has(stem(w)));
+  if (jw) die(`the question uses the kit's own word "${jw}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself. If the question is about that very thing, keep the word and say so: --plain-ok ${shq(stem(jw))}`);
+  if (plainOk.size) warn(`--plain-ok ${[...plainOk].join(' ')}: the owner reads those words as they are, so make sure the question explains them`);
+  if (q.length > 300) die(`the question is ${q.length} characters: lead with the decision in one or two sentences (300 at most) and put the rest in --context, as a list where it is one`);
+  if (context && KIT_ID.test(context)) warn(`--context names a kit id (${context.match(KIT_ID)[0]}): fine as a link, but say in words what it is`);
+  if (context && KIT_WORDS.test(context)) warn(`--context uses the kit's word "${context.match(KIT_WORDS)[0]}": say it in plain words, the owner hasn't got the fleet's vocabulary`);
+  if (context && context.length > 600 && !/\n\s*(?:[-*•]|\d{1,2}[.)])\s/.test(context)) warn(`--context is ${context.length} characters of prose: break it into short paragraphs or a list ("- " or "1. " lines) so it can be read at a glance`);
+  if (!secrets?.length && (CRED_WORDS.test(q) || (kind === 'owner-action' && CRED_WORDS.test(context ?? '')))) warn(`this looks like it needs a credential. Ask for it directly: --kind owner-action with --secrets naming each one and where it goes, so the owner pastes it on the dashboard (supervisor.md §6, Secrets)`);
+  if (['owner-decision', 'clarification', 'one-way-door'].includes(kind) && !recommendation) warn('no --recommendation: say what you would do and how sure you are (--confidence); the owner answers faster with a pick to agree or disagree with');
+  // only when low confidence is the whole reason: a question asked for another reason too stands on that
+  if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
-  let q = flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question'));
-  const kind = flagStr('kind') ?? 'owner-decision';
-  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
+  let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const cls = flagStr('class') ?? null;
+  // A question in the owner-only class one-way-door is a one-way door: left without --kind it is
+  // asked as one, and asked as another kind it is refused, so the owner's answer is the one-way-door
+  // answer approve-plan and the plan review cite (and never re-asked as one), and the kind's own
+  // rules (no default, below; the Inbox's floor) hold. Refused, not rewritten: another kind given on purpose
+  // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
+  const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
+  if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
     const g = logGet(flagStr('goal') ?? '');
@@ -4752,6 +4992,11 @@ function askLine({ thread } = {}) {
   const reasons = asList(flags.reasons);
   const known = L.reasons.map((r) => r.id);
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
+  // silence is never a yes on a one-way door or on what is the owner's alone (constitution.md §1)
+  if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
+  // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
+  if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
+  if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
   // a remediation question names the remediation (and a rollback its release), so the answer
@@ -4776,8 +5021,6 @@ function askLine({ thread } = {}) {
     const rec = flagStr('recommendation');
     if (!rec) die('a production-remediation question needs --recommendation');
     if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
-    // at rung 1 a default can never fire, so it would only be a promise the kit can't keep
-    if (def && rungFor('production-remediation') < 2) die(`production-remediation is on rung ${rungFor('production-remediation')}: no --default until it's on rung 2`);
     // after the owner's no, not again for the same remediation and target, whichever incident is named
     const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
@@ -4810,7 +5053,7 @@ function askLine({ thread } = {}) {
   // the owner said not to use this sensor: nothing asks about it again until they reverse that
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
-  let context = flagStr('context');
+  let context = ownerText(flagStr('context'));
   if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
@@ -4825,6 +5068,9 @@ function askLine({ thread } = {}) {
     scope = want;
     if (releasesOnMerge()) context = [context, 'Merging deploys this fix to production (release: "merge").'].filter(Boolean).join('\n\n');
   }
+  // Below rung 2 a default can never fire, so it would only be a promise the kit can't keep; and the
+  // rung it was asked on is recorded (why_asked), so a later promotion never wakes it (defaultGap).
+  if (def !== null && onLadder && rungFor(cls, scope) < 2) die(`${cls}${scope ? ` (${scope})` : ''} is on rung ${rungFor(cls, scope)}: no --default until it's on rung 2`);
   // --deadline 15m|2h|<time>: the default may fire before question_default_after_hours
   const dl = flagStr('deadline');
   if (dl !== undefined && !def) die('--deadline goes with --default: it is when the default may be applied');
@@ -4922,10 +5168,14 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence: flagNum('confidence'), recommendation, L });
   // what the owner may already have said about it: never in the way of asking
-  try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
+  // and a decision they already made is refused, unless something material changed (--new-because)
+  let newBecause = flagStr('new-because');
+  if (newBecause !== undefined && !newBecause.trim()) die('--new-because says what materially changed since the owner answered; it can\'t be blank');
+  try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
@@ -4977,8 +5227,8 @@ function cmdAnswer() {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
-    // an incident fix's default fires at its deadline, not before
-    if (['incident-fix', 'production-remediation'].includes(v.class) && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
+    // a default fires at its deadline, not before, and only where it could fire when asked (defaultGap)
+    { const why = defaultGap(v, new Date().toISOString()); if (why) die(why); }
     // a default never overrides the owner's later no on the same remediation and target
     if (v.class === 'production-remediation') {
       const rem = (v.blocks ?? []).find((b) => b.startsWith('remediation:'));
@@ -5116,11 +5366,38 @@ const SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], ar
 const SUBJECT_NEEDS = { item: ['ref'], page: ['view'], artifact: ['slug', 'at'], preview: ['name'] };
 const SUBJECT_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
 const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+// a preview's console errors, the last few and each cut; an artifact's at, as text
+const SUBJECT_ERRORS = 3;
+const SUBJECT_ERROR_MAX = 200;
+const SUBJECT_AT_MAX = 100;
+// A box's capability, as the gateway mints it (capFor in cloud/gateway.mjs): /c/<expiry>.<session>.<mac>,
+// the expiry in milliseconds, the session 16 base64url characters and the MAC 22. It is a live bearer
+// token for the owner's session, and an artifact framed on a box has it in its own address. The lens
+// never tells it, but a hostile artifact can speak as its lens, so whatever a subject or a title holds
+// is cut of it here, as it is written: as written, percent-encoded (once or more), JSON- or
+// \u-escaped, or as HTML entities. Only the whole form is cut, so no ordinary text is touched. A
+// marker in its place, not a refusal: the owner's words still save, and a page can't stop its own
+// thread by holding one. A page can still spell it some other way; this is the backstop, not the wall.
+// Each repeat is bounded, so a page's run of backslashes or 25s costs a line, never its square. A
+// token cut short at a string's end (a cap fell inside it) is cut too: /c/<expiry>. and what follows.
+// index.html's T_CAP_SLASH, T_CAP_DOT and T_BOX_CAPABILITY(_TAIL) are the same (a test holds them).
+const CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
+const CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
+const BOX_CAPABILITY = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}[\\w-]{16}${CAP_DOT}[\\w-]{22}`, 'gi');
+const BOX_CAPABILITY_TAIL = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{13,15}${CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${CAP_DOT}[\\w-]{0,21})?)\u2026?$`, 'i');
+// A subject's strings are at most two deep (subject.anchor.text, subject.errors[0]), its objects and
+// lists too (subject.anchor.rect): subjectProblem refuses one nested deeper before anything else,
+// and uncapped walks no deeper, so a body of thousands of nested objects never reaches the stack.
+const SUBJECT_DEPTH = 3;
+const nestedPast = (v, depth = 0) => !!v && typeof v === 'object' && (depth >= SUBJECT_DEPTH || Object.values(v).some((x) => nestedPast(x, depth + 1)));
+const uncapped = (v, depth = 0) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]').replace(BOX_CAPABILITY_TAIL, '[link removed]') : depth >= SUBJECT_DEPTH ? v : Array.isArray(v) ? v.map((x) => uncapped(x, depth + 1)) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x, depth + 1)])) : v);
 // Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
 function subjectProblem(s) {
   if (!isObj(s)) return 'a subject is a JSON object with a kind';
-  const keys = SUBJECT_KEYS[s.kind];
+  // own keys only: a kind of constructor or __proto__ is no kind
+  const keys = typeof s.kind === 'string' && Object.hasOwn(SUBJECT_KEYS, s.kind) ? SUBJECT_KEYS[s.kind] : null;
   if (!keys) return `a subject's kind is one of ${Object.keys(SUBJECT_KEYS).join(', ')}`;
+  if (nestedPast(s)) return `a subject nests at most ${SUBJECT_DEPTH - 1} deep (subject.anchor.rect)`;
   const bytes = Buffer.byteLength(JSON.stringify(s));
   if (bytes > SUBJECT_MAX) return `the subject is ${bytes} bytes encoded; at most ${SUBJECT_MAX}`;
   const extra = Object.keys(s).filter((k) => k !== 'kind' && !keys.includes(k));
@@ -5132,10 +5409,10 @@ function subjectProblem(s) {
   for (const [k, v] of Object.entries(s)) {
     if (k === 'kind') continue;
     let p;
-    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (/^(main|tree:[0-9a-f]{40}|[a-z0-9][a-z0-9._-]*)$/.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
+    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, SUBJECT_AT_MAX) ?? (ARTIFACT_AT.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
     else if (k === 'point') p = box('point', v, ['x', 'y']);
     else if (k === 'viewport') p = box('viewport', v, ['w', 'h']);
-    else if (k === 'errors') p = !Array.isArray(v) || v.length > 3 ? 'errors is a list of at most 3' : v.map((e, i) => text(`errors[${i}]`, e, 200)).find(Boolean) ?? null;
+    else if (k === 'errors') p = !Array.isArray(v) || v.length > SUBJECT_ERRORS ? `errors is a list of at most ${SUBJECT_ERRORS}` : v.map((e, i) => text(`errors[${i}]`, e, SUBJECT_ERROR_MAX)).find(Boolean) ?? null;
     else if (k === 'anchor') p = anchorProblem(v);
     else p = text(k, v, SUBJECT_CAPS[k]);
     if (!p && k === 'ref' && !SUBJECT_REF.test(v)) p = `ref is <type>:<id>, the type one of ${SUBJECT_TYPES.join(', ')}`;
@@ -5154,8 +5431,11 @@ function anchorProblem(a) {
       if (!(isObj(v) && Object.keys(v).length === names.length && names.every((n) => Number.isFinite(v[n])))) return `anchor.${k} is {${names.join(', ')}}`;
       continue;
     }
-    if (!ANCHOR_CAPS[k]) return `anchor has no ${k}`;
+    if (!Object.hasOwn(ANCHOR_CAPS, k)) return `anchor has no ${k}`;
     if (typeof v !== 'string') return `anchor.${k} is text`;
+    // its words, as the page sends them (tAnchor drops these): a bidi override would have the owner's
+    // card read the page's words reversed. The element's HTML is the page's markup, line breaks and all.
+    if (k !== 'html' && UNSAFE_TEXT.test(v)) return `anchor.${k} is one line of plain text (no control or bidi characters)`;
     if (Buffer.byteLength(v) > ANCHOR_CAPS[k]) return `anchor.${k} is ${Buffer.byteLength(v)} bytes; at most ${ANCHOR_CAPS[k]}`;
   }
   return null;
@@ -5288,11 +5568,12 @@ function cmdThread() {
     const words = turnText(wordsFrom(1));
     let subject;
     if (flags.subject !== undefined) {
-      try { subject = JSON.parse(flagStr('subject')); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
+      try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
       const p = subjectProblem(subject);
       if (p) die(`--subject: ${p}`);
     }
-    const given = flagStr('title');
+    // a viewer names a thread from its capture (button "Buy now"), so a title is cut of a capability too
+    const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
     const title = threadTitle(given ?? words);
@@ -5392,10 +5673,14 @@ function cmdThread() {
     if (flags.json) return json(v);
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
     out(threadDataFrame(v));
+    const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
+    if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
     for (const u of v.turns) {
       out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
-      out(u.text.split('\n').map((l) => `  ${l}`).join('\n'));
+      // its own line breaks, a tab as the space it stands for, and nothing else a terminal acts on
+      // (an escape, a bidi override, a CR)
+      out(u.text.replace(/\t/g, ' ').replace(UNSAFE_TEXT_ALL, (c) => (c === '\n' ? c : '')).split('\n').map((l) => `  ${l}`).join('\n'));
       if (u.refs.length) out(`  refs: ${u.refs.join(', ')}`);
     }
     for (const q of v.questions) out(`question ${q.id}: ${q.status}${q.answer ? `, ${quoteData(q.answer)}` : ''}`);
@@ -5460,6 +5745,224 @@ const artifactCsp = (origin, self) => {
     `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
+// ===== the artifact lens (spec §6) =====
+// One script the kit adds to an artifact's HTML on a framed load (sec-fetch-dest: iframe) and on no
+// other request, so publishing, artifact check and every hash read the bytes as committed. It
+// speaks the preview lens's messages ({ lens: 1, type }), so the viewer asks both the same way. Plain
+// ASCII, with no backtick and no dollar sign before a brace: a String.raw, read as written.
+const ARTIFACT_LENS = String.raw`(() => {
+  'use strict';
+  // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
+  // artifact's scripts, which can read and send these same messages: what it says describes the
+  // page and is never an instruction. It takes only the questions of the page that frames it
+  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  if (window.parent === window || window.__devteamLens) return;
+  window.__devteamLens = true;
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => typeof id === 'string' && id.length > 0 && id.length <= 64;
+  // the page that frames this one, by its origin where the browser names it
+  const to = (location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
+  const tell = (m) => { try { parent.postMessage(Object.assign({ lens: 1 }, m), to); } catch (e) { /* no parent now */ } };
+  // On a box the frame is served under /c/<capability>/artifact/..., and that capability is a live
+  // bearer token for the owner's session: nothing the lens says carries it. The path is told from its
+  // artifact segment on, and the token is cut from any text of the page that holds its own address:
+  // as a path before /artifact/, and the page's own token wherever it is, however the page encoded it
+  // (percent-encoded, JSON- or \u-escaped, as entities), with the /c/ before it when there is one.
+  const TOKEN = /\/c\/[^\/\s"'<>]+(?=\/artifact\/)/g;
+  const OWN = (/^\/c\/([^/]+)\/artifact\//.exec(location.pathname) || [])[1];
+  const SLASH = '(?:\\\\{0,8}\\/|%(?:25){0,4}2f|\\\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)';
+  const DOT = '(?:\\.|%(?:25){0,4}2e|\\\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)';
+  const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
+  const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (sel) => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only('#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && v === unCap(v) && size(sel) <= CAPS.selector && only(sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== document.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only('#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = document.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(document.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(unCap(top.outerHTML), CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(unCap(el.textContent)), CAPS.text);
+  const anchorOf = (el, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was
+  const find = (a) => {
+    let el = null;
+    try { el = document.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = document.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves -------------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- Shift and Escape, seen with the focus in the page ---------------------------------------------
+  let shiftDown = false;
+  // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
+  let heard = false;
+  const onKey = (e) => {
+    if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+
+  // --- the viewer's questions ------------------------------------------------------------------------
+  // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
+  // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
+  const pathOf = () => {
+    const p = unCap(location.pathname);
+    const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
+    return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
+  };
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      let el = document.elementFromPoint(m.x, m.y);
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === document.documentElement || el === document.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = document.elementFromPoint(at.x, at.y); el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+        const s = window.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      window.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const a = m.anchor;
+      if (!a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+  };
+  addEventListener('message', (e) => {
+    if (!e.isTrusted || e.source !== parent) return;
+    // from the parent's own origin where the browser names it, as the preview lens checks
+    if (location.ancestorOrigins && location.ancestorOrigins.length && e.origin !== location.ancestorOrigins[0]) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  addEventListener('blur', onBlur);
+  addEventListener('scroll', soon, true);
+  addEventListener('resize', soon);
+  try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+})();`;
+// The page with the lens after it, at the very end: the parser takes a script there into the body
+// and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
+// <script>, <style>, <textarea>, <title> or comment swallows it as text: then no lens answers, and
+// the viewer pins the point alone (decision 3). Its policy needs nothing more: the
+// artifact policy's script-src already has 'unsafe-inline', and a hash there would turn that off
+// for the artifact's own inline scripts.
+const withArtifactLens = (bytes) => Buffer.concat([bytes, Buffer.from(`<script>${ARTIFACT_LENS}</script>`)]);
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
 // The permanent copy of the owner's result, in the PR that asked: project/questions/<qid>/, or
@@ -5895,6 +6398,9 @@ async function cmdPreview() {
 // it). Landed is what main has, read from git; a draft is a session worktree's copy under
 // .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
+// Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
+// it is one), or a published version by its tree id. The same forms a thread's artifact subject records.
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
@@ -6026,6 +6532,25 @@ function artifactSource(at, slug) {
   if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
   return { entries: diskEntries(dir), dir };
 }
+// An artifact's files where a viewer shows it: as artifactSource has them, or an artifact folder's
+// tree by its id (a published version, which never changes). Any other id is nothing (decision 12).
+function artifactAt(at, slug) {
+  if (!String(at).startsWith('tree:')) return artifactSource(at, slug);
+  const tree = at.slice(5);
+  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree)) return null;
+  const entries = treeIdEntries(tree);
+  return entries.length ? { entries } : null;
+}
+// Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
+// any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
+// can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
+// Remembered once true: a tree id never changes.
+const artifactTrees = new Set();
+const artifactTreeOk = (id) => (artifactTrees.has(id) ? Promise.resolve(true) : new Promise((resolve) => execFile('git', ['cat-file', '-t', id], { cwd: mainRoot, encoding: 'utf8' }, (e1, type) => {
+  if (e1 || type.trim() !== 'tree') return resolve(false);
+  return execFile('git', ['cat-file', '-e', `${id}:artifact.json`], { cwd: mainRoot }, (e2) => { if (!e2) artifactTrees.add(id); resolve(!e2); });
+})));
+const artifactTreeOkSync = (id) => artifactTrees.has(id) || (git(['cat-file', '-t', id], mainRoot) === 'tree' && git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) !== null && !!artifactTrees.add(id));
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -6138,6 +6663,17 @@ function publicManifest(slug) {
 // channel, or null. A forged line can look exactly like a real one (the dashboard's route writes
 // it for anything that reaches it), so none of this is proof the owner published.
 const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
+// What a thread's artifact subject is now, for thread show (decision 21): null when its fingerprint
+// is still the one the thread began on (or it recorded none); else a line saying so. A published
+// tree never changes, so for one, "changed since" means main has moved on from it (spec §5).
+function artifactSubjectNow(s) {
+  if (!isObj(s) || !LINK_ID.test(s.slug ?? '') || typeof s.fp !== 'string') return null;
+  const tree = String(s.at).startsWith('tree:');
+  const src = artifactAt(tree ? 'main' : s.at, s.slug);
+  if (!src) return `the artifact ${s.slug} is no longer ${tree ? 'on main' : `at ${quoteData(s.at)}`}`;
+  if (fingerprint(src.entries) === s.fp) return null;
+  return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
+}
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -6196,7 +6732,23 @@ function cmdArtifact() {
     }
     return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact describe <slug> [--at main|<worktree>|tree:<id>]: what a viewer shows of it (its title,
+  // its fingerprint) and main's, for "changed since"; the dashboard's /api/view runs it
+  if (sub === 'describe') {
+    const slugName = args[0] ?? die('usage: artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]');
+    const at = flagStr('at') ?? 'main';
+    if (!LINK_ID.test(slugName) || !ARTIFACT_AT.test(at)) die('artifact describe: a slug, and --at main, a worktree name or tree:<id>');
+    // exit 3: nothing there, which /api/view tells apart from describe failing
+    const src = artifactAt(at, slugName) ?? die(`${slugName}: no artifact at ${at}`, 3);
+    const d = describeArtifact(slugName, at, src);
+    const main = at === 'main' ? src : artifactAt('main', slugName);
+    const ref = mainRef();
+    const mainTree = ref ? /^040000 tree ([0-9a-f]+)\t/.exec(git(['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slugName}`], mainRoot) ?? '')?.[1] ?? null : null;
+    const r = { slug: slugName, at, title: d.error ? null : d.title, summary: d.error ? null : d.summary, error: d.error, fp: d.fp, main_fp: main ? fingerprint(main.entries) : null, main_tree: mainTree };
+    if (flags.json) return json(r);
+    return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -7099,7 +7651,7 @@ function cmdQuestions() {
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
-    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
+    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}${q.new_because ? `\n  Asked again because: ${q.new_because}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
@@ -7152,21 +7704,23 @@ function authorise(cls, scope, approved, refs, verb) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    if (approval.status === 'defaulted') { const why = defaultGap(approval); if (why) die(`${why}: its default approves nothing; ask again`); }
     reviewApproves(approval, `${verb} --approved`);
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
   // the act checks it against the ticket's goals and its plan review, not as an approve-plan answer.
-  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  const doorCited = cls === 'approve-plan' && isDoorQuestion(approval);
   if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     const declared = approval.approves ?? [];
     if (declared.length) {
       const part = refs.flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
       if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this ${verb === 'decide' ? 'decision' : 'act'} is for in --refs`);
-      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part));
+      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part) && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} for ${part} (${used.id}); ask again for another`);
     } else {
-      const used = calls().find((a) => a.approved_by === approved);
+      // a door's answer cited for the plans it covers (approve-plan) never uses it up for its own class
+      const used = calls().find((a) => a.approved_by === approved && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} (${used.id}); ask again for another`);
     }
   }
@@ -7207,12 +7761,25 @@ function decisionFor(id) {
   if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
   return d;
 }
+// Whether an applied default stands in for the owner. Only where it could fire when the owner saw the
+// question: its class on rung 2 or above as asked (why_asked.rung, in the line the question's hash
+// covers, so a class promoted later doesn't wake an old rung-1 default), and only once its deadline
+// passed with no answer. answer --defaulted asks it of now; authorise, a decision's authority and
+// log-check ask it of when the default was applied, so a defaulted line written by hand approves
+// nothing either. A question from before defaults had deadlines is judged on its rung alone.
+function defaultGap(v, now = null) {
+  const rung = v.why_asked?.rung;
+  if (typeof rung === 'number' && rung < 2) return `${v.id} was asked on rung ${rung} (${RUNG[rung] ?? '?'}), where a default never stands in for the owner`;
+  const at = now ?? v.answered_at;
+  if (v.deadline && at && Date.parse(at) < Date.parse(v.deadline)) return now ? `${v.id}'s default fires at ${v.deadline}; until then it is the owner's to answer` : `${v.id} was defaulted before its deadline (${v.deadline})`;
+  return null;
+}
 function decisionAuthorityGap(d) {
   const L = ladder();
   const ownerOnly = (L.owner_only ?? []).includes(d.class);
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
-  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && isDoorQuestion(v)));
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
@@ -7222,8 +7789,7 @@ function decisionAuthorityGap(d) {
     case 'default': {
       if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
       if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
-      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
-      return answerUseGap(d, v);
+      return defaultGap(v) ?? answerUseGap(d, v);
     }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
@@ -7238,11 +7804,11 @@ function decisionAuthorityGap(d) {
 function answerUseGap(d, v) {
   const refs = (d.refs ?? []).flatMap((x) => String(x).split(','));
   if (v.ticket && !refs.includes(v.ticket) && !(v.approves ?? []).some((a) => refs.includes(a))) return `${v.id} was asked about ${v.ticket}, not ${refs.join(', ') || 'nothing'}`;
-  if (d.class === 'approve-plan' && v.kind === 'one-way-door') return null; // a goal-level door covers each plan it names (approve-plan's own check)
+  if (d.class === 'approve-plan' && isDoorQuestion(v)) return null; // a goal-level door covers each plan it names (approve-plan's own check)
   const declared = v.approves ?? [];
   const part = declared.length ? refs.find((r) => declared.includes(r)) : null;
   if (declared.length && !part) return `${v.id} approves ${declared.join(', ')}, and this names none of them`;
-  const first = calls().filter((c) => c.approved_by === v.id && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
+  const first = calls().filter((c) => c.approved_by === v.id && !(c.class === 'approve-plan' && isDoorQuestion(v)) && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
   return first && first.id !== d.id ? `${v.id} already approved ${first.type === 'decision' ? 'a decision' : 'an act'}${part ? ` for ${part}` : ''} (${first.id})` : null;
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
@@ -7355,7 +7921,7 @@ function cmdAct() {
   if (decision) {
     const q = approved?.startsWith('q-') ? logGet(approved) : null;
     const approval = q?.type === 'question' ? questionView(q) : null;
-    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && approval?.kind === 'one-way-door' };
+    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && isDoorQuestion(approval) };
   } else auth = authorise(cls, scope, approved, refs, 'act');
   const { approval, doorCited } = auth;
   // Classes that are about one ticket name it first in refs; checkTicket finds approvals by it.
@@ -7367,13 +7933,16 @@ function cmdAct() {
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
       if (approval.ticket !== t.id) {
+        // a question asked for one ticket is that ticket's door, never a goal-level one for another
+        if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
         const goals = features().get(t.feature)?.goals ?? [];
         if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
@@ -8337,6 +8906,25 @@ function goalReadings(gid) {
     return true;
   });
 }
+// The readings taken under the measure as it stands: from the latest goal set that changed what it
+// reads (its source, check, question, unit or link) on. One taken before was of another measure, so
+// it is no baseline; a change to the measure's wording, target or direction keeps them.
+const MEASURE_DEFINING = ['source', 'check', 'question', 'unit', 'link'];
+let bornMeasures = null;
+function currentReadings(gid) {
+  const g = logGet(gid);
+  const log = readLog();
+  if (bornMeasures?.log !== log) bornMeasures = { log, m: new Map(log.lines.filter((l) => l.type === 'goal' && l.op === 'new').map((l) => [l.id, l.measure ?? {}])) };
+  let prev = bornMeasures.m.get(gid) ?? {};
+  let since = null;
+  for (const u of g?.updates ?? []) {
+    if (!u.measure) continue;
+    if (MEASURE_DEFINING.some((k) => (u.measure[k] ?? null) !== (prev[k] ?? null))) since = u.at;
+    prev = u.measure;
+  }
+  const all = goalReadings(gid);
+  return since ? all.filter((r) => r.created_at >= since) : all;
+}
 const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ?? []).includes(gid)).map((f) => f.id);
 
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
@@ -8391,7 +8979,7 @@ function goalCheck(g) {
   if (typeof g.priority !== 'number') definition.push('no priority');
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
-  if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
+  if (m.source !== 'owner' && !currentReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
   const unmarked = registryWording(g);
   if (unmarked) definition.push(`precondition ${unmarked.n} ("${unmarked.text}") reads as the registry being complete, and ${g.id} has no registry_precondition: goal set ${g.id} --registry-precondition ${unmarked.n} (goal-readiness then waits for the owner's registry-attest yes; planning.md §7)`);
   const approval = milestoneGaps(g);
@@ -8418,7 +9006,7 @@ function milestoneGaps(g) {
   if (!ms.length) return ['no milestones: the outcome in order, each a usable slice with a target on the measure, its preconditions and a size in tickets (goal set --milestones; one is fine for a goal one loop can meet)'];
   const gaps = [];
   const seen = new Map();
-  const base = goalReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
+  const base = currentReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
   const up = measureOf(g).direction !== 'down';
   let prevT = base;
   let prevBy = null;
@@ -8499,10 +9087,12 @@ function forecastText(g, f) {
 }
 function goalView(g) {
   const readings = goalReadings(g.id);
-  const first = readings[0];
-  const last = readings[readings.length - 1];
+  // the track runs from the baseline under the measure as it stands (currentReadings)
+  const current = currentReadings(g.id);
+  const first = current[0];
+  const last = current[current.length - 1];
   let track = null;
-  if (readings.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
+  if (current.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
     // Expected value now, on the line from the baseline through each dated milestone to the horizon.
     const pts = [[Date.parse(first.created_at), first.measure.value], ...(g.milestones ?? []).filter((m) => m.by && !Number.isNaN(Date.parse(m.by)) && typeof m.target === 'number').map((m) => [Date.parse(m.by), m.target]), [Date.parse(g.horizon), g.measure.target]].sort((a, b) => a[0] - b[0]);
     const now = Date.now();
@@ -10504,7 +11094,9 @@ function replacePaneProcess(target, wt) {
 // Which one is the supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
 // that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
 // Nothing else is taken for it, and a limit lasts a week at most.
-const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
+// `DEVTEAM_ROLE=supervisor node …`, after an optional `cd <dir> &&` or `cd <dir>;`, and the
+// `export DEVTEAM_ROLE=supervisor; …devteam.mjs …` form a session that set up its own fleet writes
+const SUPERVISOR_COMMAND = /^\s*(?:cd \S+\s*(?:&&|;)\s*)?(?:DEVTEAM_ROLE=supervisor node |export DEVTEAM_ROLE=supervisor\s*(?:;|&&)[^\n]*\bdevteam\.mjs\b)/;
 const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
 function supervisorTranscript() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
@@ -10699,7 +11291,7 @@ const tmuxServerPid = () => sh('tmux', ['list-sessions', '-F', '#{pid}'])?.split
 const SUPERVISOR_NOT_WINDOW = /^(dev~|dash-|dashboard$|operator$)/;
 // What an agent's process is called in tmux: Claude Code shows as its version (2.1.307).
 const AGENT_PANE_CMD = /claude|node|codex|opencode|bun|^\d+\.\d+/;
-function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, readText(supervisorPaneFile())?.trim() || null, rec, opts); }
+function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, markedPane(runDir), rec, opts); }
 // Any repo's, for the machine's commands: its root, the pane it noted, its supervisor-up record.
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
@@ -10728,6 +11320,16 @@ function supervisorRunningNow(rec) {
   if (supervisorPaneNow(rec)) return true;
   return rec?.kind === 'foreground' && !!rec.pid && !!rec.start && processStart(rec.pid) === rec.start;
 }
+// Just after an upgrade, a running supervisor's pane is still recorded bare, as its older kit wrote it,
+// until its next command with the role. Read as no pane, the tick would write it stopped, and a
+// restart in that window would leave it down. A bare pane started at the root whose agent runs as the
+// supervisor is its pane, whoever recorded it: marked here, it counts from this tick on. Only the
+// mark is written: the bare record is the one just read, and rewriting it could race a newer one.
+function markUpgradedPane() {
+  if (markedPane(runDir)) return;
+  const bare = readText(supervisorPaneFile(runDir))?.trim();
+  if (bare && paneStartedIn(bare, realPath(mainRoot)) && isSupervisorProcess(paneAgentProcess(bare))) fs.writeFileSync(supervisorPaneMark(runDir), bare);
+}
 // From the dashboard's minute tick. It doesn't touch a record once the machine or the tmux server has
 // changed under it, so a dashboard that comes up after a restart, before recover has run, can't erase
 // what recover needs. Nor does it say "stopped" when tmux doesn't answer: not knowing isn't a stop.
@@ -10739,6 +11341,7 @@ function noteSupervisorFromTick() {
     if (!machine) return;
     // only the pane the supervisor noted: an ad-hoc agent at the repo's root isn't it, though it's
     // reason enough not to start a second one (supervisorRunningNow)
+    markUpgradedPane();
     const pane = supervisorPaneNow(rec, { notedOnly: true });
     if (pane) {
       const agent = paneAgentProcess(pane);
@@ -10866,7 +11469,7 @@ function recoverOne() {
   else if (sessionFlag) return notStarted(`NOT started (no tmux session ${sessionFlag})`);
   else pane = sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', window, '-c', mainRoot], { env: tmuxServerEnv() });
   if (!pane) return notStarted('NOT started (tmux would not open its window)');
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  recordSupervisorPane(runDir, pane);
   if (!typeInto(pane, line)) return notStarted(`NOT started (its window opened but could not be typed into: pane ${pane})`);
   writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
   return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
@@ -10941,6 +11544,14 @@ const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, a
 // Whether a repo's kit has recover, from its own help: what it says it does, however a later kit
 // is written inside. help reads nothing of the repo's and writes nothing.
 const kitHasRecover = (root) => /^\s+recover \[/m.test(projectKit(root, ['help']) ?? '');
+// The supervisor's pane a repo noted, for the machine's commands: marked, on a kit with recover;
+// bare, as it is written, on a kit older than recover, which never marks it (nor does legacyRecover,
+// which writes only what that kit writes). Its supervisor has no role-less pane to take but by its
+// own kit's rules, and supervisorPaneIn still holds it to its root and server.
+function notedPaneOf(root) {
+  const run = path.join(root, 'docs', 'devteam', 'run');
+  return kitHasRecover(root) ? markedPane(run) : readText(supervisorPaneFile(run))?.trim() || null;
+}
 // A window name tmux takes as it is: a dot or a colon in a target means a pane or a window.
 const tmuxName = (s) => s.replace(/[^\w.~-]/g, '-');
 // The box's list of what was up before a restart (cloud/Dockerfile keeps it from what it saw each
@@ -11017,8 +11628,9 @@ function recoverMachine() {
 const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it.';
 function legacyRecover(root, name, { dry, force, session, window }) {
   const run = path.join(root, 'docs', 'devteam', 'run');
-  const paneFile = path.join(run, 'supervisor-pane');
+  const paneFile = supervisorPaneFile(run);
   const go = () => {
+    // bare, as that kit writes it: only to see whether its supervisor is up, never to type into it
     const noted = readText(paneFile)?.trim() || null;
     if (supervisorPaneIn(root, noted, null)) return 'already running';
     // A window this opened moments ago is still a shell until the agent execs. Only if that pane
@@ -11054,6 +11666,8 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     fs.writeFileSync(promptFile, `${msg}\n`);
     const pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', window, '-c', root]);
     if (!pane) return 'NOT started (tmux would not open its window)';
+    // bare, as that kit writes it: a supervisor-pane-role there is a file its kit doesn't know, which
+    // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
     // by pane id: a dot in a window name reads as a pane to tmux
     if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
@@ -11148,7 +11762,7 @@ function machineTell(words) {
   if (!text) die(machineUsage, 2);
   let rec = null;
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
-  const p = supervisorPaneIn(root, readText(path.join(root, 'docs', 'devteam', 'run', 'supervisor-pane'))?.trim() || null, rec && typeof rec === 'object' ? rec : null, { strict: true });
+  const p = supervisorPaneIn(root, notedPaneOf(root), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
   const s = paneState(p);
   if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
@@ -11277,7 +11891,7 @@ async function machineStatus() {
     let rec = null;
     try { rec = readJson(runAt('supervisor-up.json')); } catch {}
     if (!rec || typeof rec !== 'object') rec = null;
-    const noted = readText(runAt('supervisor-pane'))?.trim() || null;
+    const noted = notedPaneOf(root);
     const sup = supervisorPaneIn(root, noted, rec) ? 'up' : 'down';
     const p = supervisorPaneIn(root, noted, rec, { strict: true });
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
@@ -11428,6 +12042,8 @@ async function cmdDashboard() {
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(kitDir, 'dashboard', 'index.html');
+  // The page's policy, at / and at /view/: its frames are its own pages, and only it and the hub frame it.
+  const PAGE_CSP = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
@@ -11438,7 +12054,15 @@ async function cmdDashboard() {
   delete ownerEnv.DEVTEAM_FEATURE;
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
-  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
+  // An argument execFile refuses (a NUL in it) throws as it is called, not to the callback: that is a
+  // failed run too, never a rejection, which would end the dashboard.
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => {
+    try {
+      execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr }));
+    } catch (e) { resolve({ ok: false, code: 1, stdout: '', stderr: `devteam: ${args.slice(0, 2).join(' ')} could not start: ${e.code ?? e.message}` }); }
+  });
+  // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
+  const describing = new Map();
   // An owner action: replied to as soon as the child says it is done (its reply pipe, fd 3), before
   // it types into the supervisor's pane; what it says on stderr after that goes to this log. A child
   // that exits without replying (refused, or an older script) is answered from its exit, as run is.
@@ -11471,9 +12095,10 @@ async function cmdDashboard() {
     child.stdin.end(input ?? undefined);
   });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
-  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
+  // no string an action puts in argv holds a NUL: no process can be given one
+  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
-  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
+  const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
   const ACTIONS = {
     answer: (b) => {
@@ -11502,10 +12127,13 @@ async function cmdDashboard() {
     'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
     // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
     // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
-    // is checked here before anything is spawned, and thread new checks it again. The dashboard
-    // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
-    // subjects here (the log takes all four already).
-    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
+    // is checked here before anything is spawned (any kind the log takes: an item or a spot on the
+    // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
+    // A capability is cut from the title and subject first, so not even the argv holds one.
+    'thread-new': (b) => {
+      const [title, subject] = [uncapped(b.title), uncapped(b.subject)];
+      return lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), '--', b.text.trim()] : null;
+    },
     'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
@@ -11515,9 +12143,10 @@ async function cmdDashboard() {
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
-  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
+  // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
   let hello = null;
   let kit = null;
   let kitAt = { main: null, at: 0 };
@@ -11530,7 +12159,7 @@ async function cmdDashboard() {
     execFile('git', ['rev-parse', '--verify', '--quiet', mainRef() ?? 'HEAD'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (gerr, gout) => {
       const main = mainRef() && !gerr ? gout.trim() || null : null;
       const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
-      execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         helloRunning = false;
         if (err) return;
         try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
@@ -11539,7 +12168,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -11593,7 +12222,7 @@ async function cmdDashboard() {
     const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
     const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
     const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
-    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true };
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key };
     for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
     for (const [f, k] of keyed) {
       if (threadFiles.get(f)?.k === k) continue;
@@ -11606,28 +12235,11 @@ async function cmdDashboard() {
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
     const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
     threadsMemo = { key, body };
-    return { body, cached: false };
+    return { body, cached: false, key };
   };
-  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet".
-  // Checked in the background, at most every 10 s, and served from the last check: a sync tmux call
-  // here held every request the server had while tmux answered. One display-message resolves the
-  // window by name or index, as resolvePane does, and says whether an agent (not a shell) runs there.
-  let paneSeen = { at: 0, pane: false };
-  let paneChecking = false;
-  const checkPane = async () => {
-    const target = supervisorTarget();
-    const info = target ? await tmuxAsync(['display-message', '-p', '-t', target, '#{pane_dead} #{pane_current_command}']) : null;
-    const [dead, cmd = ''] = (info ?? '').trim().split(' ');
-    return info !== null && dead !== '1' && !!cmd && !SHELLS.has(cmd.replace(/^-/, ''));
-  };
-  const supervisorPane = () => {
-    if (Date.now() - paneSeen.at > 10000 && !paneChecking) {
-      paneChecking = true;
-      checkPane().then((pane) => { paneSeen = { at: Date.now(), pane }; }, () => {}).finally(() => { paneChecking = false; });
-    }
-    return paneSeen.pane;
-  };
-  supervisorPane();
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": what
+  // the 10 s hello child found (hello --pane), so a read never waits on tmux.
+  const supervisorPane = () => hello?.supervisor_pane === true;
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -11639,7 +12251,7 @@ async function cmdDashboard() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': PAGE_CSP });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
@@ -11654,6 +12266,34 @@ async function cmdDashboard() {
       return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
+    // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
+    // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
+    // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
+    // owner wrapper, and leaves every other header as it is.
+    const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
+    if (vw) {
+      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': PAGE_CSP });
+      return res.end(fs.readFileSync(page));
+    }
+    // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
+    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
+    // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
+    // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
+    // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
+    if (req.method === 'GET' && u.pathname === '/api/view') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      const at = u.searchParams.get('at') || 'main';
+      if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
+      const key = `${slug}|${at}`;
+      let job = describing.get(key);
+      if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+    }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
     if (req.method === 'GET' && u.pathname === '/api/threads') {
@@ -11661,8 +12301,15 @@ async function cmdDashboard() {
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       let r;
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) });
-      return res.end(`{"supervisor":${JSON.stringify({ pane: supervisorPane() })},"threads":${r.body}}`);
+      const pane = supervisorPane();
+      // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
+      // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
+      // this process's work is saved.
+      const tag = `"${sha256(`${r.key}|${pane}`).slice(0, 20)}"`;
+      const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
+      if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
+      res.writeHead(200, { 'content-type': 'application/json', ...head });
+      return res.end(`{"supervisor":${JSON.stringify({ pane })},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -11734,8 +12381,9 @@ async function cmdDashboard() {
       const r = await run(['review', 'show', id, '--json', '--contents']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
-    // An artifact's files: landed from main's tree, a draft off its worktree's disk. Matched on the
-    // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
+    // An artifact's files: landed from main's tree, a published version from its tree by id (what the
+    // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
+    // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
     // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
     const rawPath = req.url.split('?')[0];
     // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
@@ -11749,29 +12397,41 @@ async function cmdDashboard() {
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
     if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-      const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
-      const at = am ? am[1] ?? 'main' : null;
-      if (!am || (at !== 'main' && !draftWorktree(at)) || !LINK_ID.test(am[2])) return send(res, 404, 'text/plain', 'not found');
-      if (am[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-      const rel = am[3] === '/' ? 'index.html' : am[3].slice(1);
+      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
       if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
       let bytes = null;
       if (at === 'main') {
         const ref = mainRef();
-        if (ref) bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${ref}:${ARTIFACTS_REL}/${am[2]}/${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+      } else if (am[2]) {
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2])) bytes = await blobAt(`${am[2]}:${rel}`);
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {
           const root = draftWorktree(at);
-          const dir = path.join(root, ARTIFACTS_REL, am[2]);
-          const real = draftDirOk(root, am[2]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          const dir = path.join(root, ARTIFACTS_REL, am[3]);
+          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
           if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
         } catch {}
       }
       if (!bytes) return send(res, 404, 'text/plain', 'not found');
       const base = `http://${req.headers.host}`;
-      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[3].length)}/`) });
-      return res.end(bytes);
+      // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
+      // name to this list for a published tree, and an X-Frame-Options would still refuse it
+      // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
+      // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
+      // an answer, though no-store already keeps none.
+      const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
+      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+      return res.end(framed ? withArtifactLens(bytes) : bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
     // under a policy that allows no network (reviewPageCsp). Under a question's path the server
@@ -11842,22 +12502,26 @@ async function cmdDashboard() {
       if (!isReview || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
+    // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
+    // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
+    // ends the dashboard.
+    const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
     const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
         body = '';
         if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
         parsed = null;
-      });
+      }));
     }
     if (isReview) {
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
@@ -11874,12 +12538,16 @@ async function cmdDashboard() {
         const textOut = JSON.stringify(parsed.result);
         if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
         ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
-      });
+      }));
     }
     req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-      const args = action(parsed);
+      // a body no check foresaw (one nested thousands deep) is a bad request, never a crash: a throw
+      // here is an unhandled rejection, and that ends the dashboard
+      let args;
+      try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
+      if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
@@ -11903,7 +12571,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -11959,7 +12627,7 @@ function tmuxServerEnv() {
 }
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? markedPane(runDir);
 const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
 // Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
 // into a shell would execute the text).
@@ -14274,8 +14942,8 @@ function verifyIncidents() {
       const prob = logObjects('problem').find((x) => (x.refs ?? []).includes(o.id) && !isIncident(x)) ?? appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
       const q = logObjects('question').find((x) => (x.evidence ?? []).includes(prob.id)) ?? appendLog({
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
-        context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
-        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
+        context: `The same errors came back after the fix was deployed (${recurred.join(', ')}).\n\n- **Sound call, failed fix**: deciding to fix it was right and the fix was not. It stays an open problem (${prob.id}), and nothing changes in what I decide alone.\n- **Wrong call**: fixing it this way was the wrong decision. You record that yourself (\`devteam.mjs correct ${dec?.id ?? '<decision>'} --reason "…"\`), and from then on I ask you before every production fix.\n\nErrors can come back for innocent reasons too: stale dynos, cached client bundles, replayed jobs, or a second cause that looks the same.`,
+        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: 'Keep the problem open and fix forward. Nothing changes in what I decide alone.' }, { label: 'Wrong call', detail: 'You correct the decision yourself. From then on I ask you before every production fix.' }],
         blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
@@ -14424,7 +15092,7 @@ async function cmdRemediate() {
   // (never a standing rule or the class's rung); the question was asked about this remediation (and
   // this release), and the answer is its recommendation, or its default applied at or after its deadline.
   if (!['answer', 'default'].includes(d.authority) || !q) die(`${d.id} rests on ${d.authority ?? 'nothing'}${d.approved_by ? ` (${d.approved_by})` : ''}: a remediation runs only on the owner's answer to a production-remediation question, or its default`);
-  if (q.class !== 'production-remediation' && !(q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
+  if (q.class !== 'production-remediation' && !(isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
   if (!(q.blocks ?? []).includes(remediationRef(action))) die(`${q.id} was asked about ${(q.blocks ?? []).filter((x) => String(x).startsWith('remediation:')).join(', ') || 'no remediation'}, not ${remediationRef(action)}`);
   const qrel = (q.blocks ?? []).find((x) => String(x).startsWith('release:')) ?? null;
   const drel = (d.refs ?? []).find((x) => String(x).startsWith('release:')) ?? null;
@@ -14452,7 +15120,7 @@ async function cmdRemediate() {
     if (to !== rel) die(`${d.id} decided a rollback to ${rel ?? 'no release'}, not ${to}`);
     const crossed = migrationsSince(to);
     if (!crossed) die(`no deploy of release ${to} was observed by a sensor: a rollback goes to a release the sensors saw`);
-    if (crossed.length && !(q && q.status === 'answered' && !q.default && (q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
+    if (crossed.length && !(q && q.status === 'answered' && !q.default && (isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
   }
   const m = { name: `remediation-${action}`, kind: 'probe', probe: r.script, params: { ...r.params, ...(to ? { to } : {}) }, uses: r.uses, credentials: r.credentials };
   let env, redact, src;
@@ -14714,7 +15382,9 @@ function cmdHello() {
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}) };
+  // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
+  // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -15576,6 +16246,12 @@ function cmdInit() {
   const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/', ...HARNESS_RUNTIME];
   const add = want.filter((w) => !giText.split('\n').includes(w));
   if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
+  // gitleaks over the history (quality.md, Secrets) would read the log's source_key as a key: a
+  // project with no gitleaks config gets one that extends the kit's; one it has already is its own.
+  const leaks = path.join(root, GITLEAKS_FILE);
+  const leaksText = readText(leaks);
+  if (leaksText === null && fs.existsSync(path.join(devteamDir, 'gitleaks.toml'))) put(leaks, gitleaksStub());
+  else if (leaksText !== null && !leaksText.includes(KIT_GITLEAKS)) out(`${GITLEAKS_FILE} is this project's and doesn't extend ${KIT_GITLEAKS}, so gitleaks will read the log's source_key values as keys: extend it (governance/quality.md, Secrets)`);
   const agents = path.join(root, 'AGENTS.md');
   if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
@@ -15635,6 +16311,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
+  artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
