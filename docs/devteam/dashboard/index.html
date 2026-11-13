@@ -8,6 +8,20 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lucide-static@0.460.0/font/lucide.css">
+<script>
+// Framed by a page of its own origin (frameElement is null under any other parent, so the hub and the
+// owner's wrapper are untouched): a preview's app or an artifact's page that sent its frame here. The
+// owner's pointer is under it and this page has the owner's powers, so it draws one line and stops:
+// window.stop ends the parser, so nothing below runs, and nothing is fetched.
+try {
+  // (a test that frames the viewer under a page of its own origin, as the owner's wrapper does from another one, sets this on the
+  // parent: a frame's own page can't, and the dashboard's never does)
+  if (window.frameElement && !(() => { try { return parent.__devteamTestFraming === true; } catch { return false; } })()) {
+    window.stop();
+    document.documentElement.innerHTML = '<head><meta charset="utf-8"><title>devteam</title></head><body style="font:16px system-ui,sans-serif;padding:24px">Open the dashboard in its own tab</body>';
+  }
+} catch {}
+</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
 <style>
@@ -753,7 +767,7 @@
     <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
     <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
     <!-- a preview's lens: its own origin, so it can read the app it frames. The sandbox here is advisory: the app can navigate its lens
-         as itself, and no frame attribute stops that. What bounds it is this page's frame-src (the lens's origin only) and the server's
+         as itself, and no frame attribute stops that. What bounds it is this page's frame-src (the lens's origin and this page's own, which is why a page framed by one of its own origin draws one line and stops, at the top of the head) and the server's
          `sandbox` policy on the agent's HTML responses. Widening frame-src ('self' or another origin) or dropping those headers
          changes what a preview can reach, and is sandbox-relevant. -->
     <iframe id="pv-frame" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads" referrerpolicy="no-referrer" hidden></iframe>

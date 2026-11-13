@@ -6106,8 +6106,13 @@ function previewPort(v) {
   const ok = previewPortOk(port);
   if (ok !== true) die(`preview: ${v}: ${ok}`);
   if (RELAY_PORTS.includes(port)) die(`preview: ${v}: ${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`);
+  // this checkout's own dashboard, when its port was saved: a relay for it would serve the dashboard under the owner's pointer
+  if (port === readNum(path.join(runDir, 'dashboard-port'))) die(`preview: ${v}: ${port} is this checkout's own dashboard`);
   return port;
 }
+// A dashboard of any checkout answering on the port (its hello), which is never a preview's app: a
+// registration refuses it, and the relay won't serve it. One timed probe, a few hundred ms at most.
+async function previewPortIsDashboard(port) { return !!(await probeHello(port, 500)); }
 // What other instances on this machine list, from the hub (one agent-written list among others,
 // used only to pick a clear name). Two seconds at most: no hub, or a slow one, means no clash.
 function previewNamesElsewhere() {
@@ -6647,6 +6652,7 @@ async function cmdPreview() {
     let port;
     if (flags.port !== undefined) {
       port = previewPort(flagStr('port'));
+      if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
       if (!(await previewPortQuiet(port))) die(`preview: something already answers on port ${port}; stop it, or leave out --port and the kit picks one`);
     } else if (had?.run && PREVIEW_PICK.includes(had.port) && (await previewPortQuiet(had.port))) port = had.port;
     else port = await previewPickPort(name);
@@ -6654,6 +6660,7 @@ async function cmdPreview() {
   }
   if (sub !== undefined && !listing) {
     const port = previewPort(sub);
+    if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
     const session = logWriter();
     const label = previewLabel();
     const { name, had } = await previewClaim(session, label);
@@ -12646,7 +12653,10 @@ async function cmdDashboard() {
   // localhost as Host and Origin, the app's loopback origin mapped to the relay's, and its framing
   // headers given way for one load only, the app framed from its own origin, which is how its lens
   // holds it. No session (it is loopback, like the dev server) and no cookie rules (no cookie of the
-  // owner's to protect): decision 1.
+  // owner's to protect): decision 1. Where it differs from the gateway, knowingly: it forwards a
+  // non-GET with a foreign Origin as it is (the app refuses it, or doesn't) and cross-site
+  // non-navigate fetches, which the gateway refuses; it passes clear-site-data on; and it answers a
+  // plain 502 when the app is down, where the gateway serves an HTML 503.
   const relays = new Map();
   // who may hold the lens here: the hub, every instance in the block, and this dashboard (its port may
   // be pinned outside the block), each once (decision 4)
@@ -12760,10 +12770,15 @@ async function cmdDashboard() {
         // ways; anything else is the answer to one request, so it and its body (by content-length,
         // else until the app ends it) are all the page gets, and both sides end after it.
         let held = Buffer.alloc(0);
+        // an app that takes the socket and never answers holds two sockets for nothing: both go after 10 s without a head
+        const noHead = setTimeout(() => { up.destroy(); socket.destroy(); }, Number(process.env.DEVTEAM_RELAY_HEAD_MS) || 10000);
+        up.once('close', () => clearTimeout(noHead));
+        socket.once('close', () => clearTimeout(noHead));
         const onHead = (chunk) => {
           held = Buffer.concat([held, chunk]);
           const end = held.indexOf('\r\n\r\n');
           if (end < 0) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+          clearTimeout(noHead);
           up.off('data', onHead);
           const top = held.subarray(0, end).toString('latin1');
           const rest = held.subarray(end + 4);
@@ -12800,8 +12815,12 @@ async function cmdDashboard() {
     const had = relays.get(rec.name);
     if (had?.app === rec.port) return had.ready;
     if (had) relayClose(rec.name);
+    // a record (written by hand, or before this rule) naming this dashboard: never relayed
+    if (rec.port === port) return Promise.resolve(null);
     const R = { name: rec.name, app: rec.port, port: null, own: null, server: null, sockets: new Set() };
     R.ready = (async () => {
+      // any dashboard answering there (this one's own port aside, another checkout's, or a record that names one): not an app
+      if (await previewPortIsDashboard(rec.port)) { log(`previews: ${rec.name}: port ${rec.port} answers as a devteam dashboard, not relayed`); if (relays.get(rec.name) === R) relays.delete(rec.name); return null; }
       const held = new Set(readPreviews().map((r) => r.port));
       for (const p of RELAY_PORTS) {
         // nothing answering there on either family (a dev server on ::1 would take localhost), and no record's
