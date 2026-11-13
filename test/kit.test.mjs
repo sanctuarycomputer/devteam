@@ -568,13 +568,14 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
   });
   await t.test("thread show prints a turn's lines as written, without a control character a terminal would act on", () => {
     const T = F.owner(['thread', 'new', 'Show me']).split('\n')[0];
-    // as a line written by hand could hold them: an escape, a bidi override, a CR, a bell
-    F.hand('owner', { type: 'turn', thread: T, text: 'first line\u001b[2J\nsecond\u202eline\r\nthird\u0007' }, 0);
+    // as a line written by hand could hold them: an escape, a bidi override, a CR, a bell. A few ms
+    // ahead, so its id never lands on the same millisecond as the thread's first turn (a duplicate id is ignored)
+    F.hand('owner', { type: 'turn', thread: T, text: 'first line\u001b[2J\nsecond\u202eline\r\nthird\u0007' }, -5);
     const shown = F.sup(['thread', 'show', T]);
     assert.match(shown, /^ {2}first line\[2J\n {2}secondline\n {2}third$/m, 'its own line breaks kept, each line indented');
     assert.doesNotMatch(shown, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/, 'nothing else a terminal acts on');
     // a tab is a space between words, not nothing
-    F.hand('owner', { type: 'turn', thread: T, text: 'tabbed\twords\there' }, 0);
+    F.hand('owner', { type: 'turn', thread: T, text: 'tabbed\twords\there' }, -10);
     assert.match(F.sup(['thread', 'show', T]), /^ {2}tabbed words here$/m);
   });
 });
