@@ -6303,7 +6303,14 @@ const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
 const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 // Where a laptop dashboard's preview relays listen, one per preview its viewer has opened (spec §7):
 // off the instance block and PREVIEW_PICK, and no new preview may take one (previewPort).
-const RELAY_PORTS = Array.from({ length: 100 }, (_, i) => 4800 + i);
+// DEVTEAM_RELAY_PORTS (low-high) is for tests, each in a range of its own.
+const RELAY_PORTS = (() => {
+  const m = /^(\d{4,5})-(\d{4,5})$/.exec(process.env.DEVTEAM_RELAY_PORTS ?? '');
+  const [lo, hi] = m && Number(m[1]) >= 1024 && Number(m[1]) <= Number(m[2]) && Number(m[2]) <= 65535 ? [Number(m[1]), Number(m[2])] : [4800, 4899];
+  return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+})();
+// The frames a page may be loaded in: a preview's is refused in another site's, as the gateway refuses it.
+const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
 // The dashboard's own: the last probe of each name. A preview command has no tick to ask, and
 // dashboard-data is a child process, so the dashboard hands it over in the environment.
 const previewUp = new Map();
@@ -12116,6 +12123,8 @@ async function cmdDashboard() {
     try { url = new URL(req.url, R.own); } catch { return say(400, 'bad request'); }
     // A service worker registered here would outlive this preview, and answer for the next one given its port.
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return say(403, 'no service workers on a preview');
+    // framed only by a page of this machine, the lens too, so no other site lays the app under its own page
+    if (PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return say(403, 'not in another site\'s frame');
     // the lens: static, the gateway's bytes, and never the app's; any other method or path is the app's
     if (req.method === 'GET' && url.pathname === '/.devteam/lens') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': relayLensCsp(), 'referrer-policy': 'no-referrer' });
@@ -12143,8 +12152,44 @@ async function cmdDashboard() {
     };
     return attempt(['127.0.0.1', '::1']);
   };
-  // Task 3 fills this in; until then a socket to a relay is refused
-  const relayUpgrade = (R, req, socket) => socket.end('HTTP/1.1 501 Not Implemented\r\nconnection: close\r\ncontent-length: 0\r\n\r\n');
+  // A preview's sockets (HMR, mostly), as previewUpgrade carries them on a box: on the relay's own
+  // address, from a page of its own origin under that name (a page elsewhere can't open the app's
+  // socket through it), a cap per preview so a client's reconnect loop can't exhaust the dashboard,
+  // and the bytes relayed raw after the request, both ways. No cookie rules here (decision 1), so the
+  // app's answer to the handshake passes as it is.
+  const RELAY_SOCKETS = 32;
+  const relayUpgrade = (R, req, socket, head) => {
+    const refuse = (code, msg) => socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`);
+    socket.on('error', () => {});
+    if (!relayOwnHost(R, req)) return refuse(421, 'Misdirected Request');
+    if (req.headers.origin !== `http://${req.headers.host}`) return refuse(403, 'Forbidden');
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
+    if (R.sockets.size >= RELAY_SOCKETS) return refuse(429, 'Too Many Requests');
+    R.sockets.add(socket);
+    socket.once('close', () => R.sockets.delete(socket));
+    // 127.0.0.1, then ::1 when that is refused, as a request's
+    const connect = (hosts) => {
+      const up = net.connect(R.app, hosts[0]);
+      let open = false;
+      let next = false;
+      up.on('error', (e) => { if (!open && e.code === 'ECONNREFUSED' && hosts.length > 1) next = true; else socket.destroy(); });
+      up.once('close', () => { if (next && !socket.destroyed) connect(hosts.slice(1)); else socket.destroy(); });
+      up.once('connect', () => {
+        open = true;
+        if (socket.destroyed) return up.destroy();
+        socket.on('close', () => up.destroy());
+        const h = relayUpHeaders(req, R);
+        h.connection = 'Upgrade';
+        h.upgrade = req.headers.upgrade;
+        up.write(`GET ${req.url} HTTP/1.1\r\n${Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\r\n')}\r\n\r\n`);
+        if (head?.length) up.write(head);
+        pipeline(up, socket, () => {});
+        pipeline(socket, up, () => {});
+        return undefined;
+      });
+    };
+    return connect(['127.0.0.1', '::1']);
+  };
   const relayCloseOne = (R) => { for (const s of R.sockets) s.destroy(); R.server?.closeAllConnections?.(); R.server?.close(); };
   const relayClose = (name) => { const R = relays.get(name); if (!R) return; relays.delete(name); relayCloseOne(R); };
   // A relay for this preview, on the first port of the range nothing holds; null when none is free.
@@ -12188,8 +12233,10 @@ async function cmdDashboard() {
     const had = relays.get(rec.name);
     if (had?.app === rec.port && had.port) return { origin: had.own, opened: false };
     if (!open) return { origin: null, opened: false };
+    // one still opening was another ask's: this one waits for it, but didn't open it
+    const mine = had?.app !== rec.port;
     const p = await relayFor(rec);
-    return p ? { origin: `http://127.0.0.1:${p}`, opened: true } : { origin: null, opened: false };
+    return p ? { origin: `http://127.0.0.1:${p}`, opened: mine } : { origin: null, opened: false };
   };
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,

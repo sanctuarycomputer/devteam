@@ -1487,9 +1487,10 @@ addEventListener('message', (e) => { const m = e.data; if (e.source === parent &
 const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); }); })();";
 // A dev server of the test's own: what it was asked (method, url, Host, Origin) is kept; its framing
 // headers are the test's (none, as dev servers send by default); it redirects /go to its own origin,
-// and answers a WebSocket upgrade by echoing one line.
+// and answers a WebSocket upgrade with one line, then echoes what it is sent until the other end
+// ends. sockets: those open now.
 async function fakeApp(headers = {}) {
-  const A = { seen: [], headers };
+  const A = { seen: [], headers, sockets: new Set() };
   A.srv = http.createServer((q, s) => {
     A.seen.push({ method: q.method, url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
     if (q.url === '/go') { s.writeHead(302, { location: `http://localhost:${A.port}/there` }); return s.end(); }
@@ -1499,10 +1500,16 @@ async function fakeApp(headers = {}) {
   A.srv.on('upgrade', (q, socket) => {
     A.seen.push({ method: 'UPGRADE', url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
     socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\nhello from the app\n');
+    A.sockets.add(socket);
+    socket.on('close', () => A.sockets.delete(socket));
+    socket.on('error', () => {});
+    socket.on('data', (d) => socket.write(d));
+    // as a WebSocket server does: the other end gone, it ends its own
+    socket.on('end', () => socket.end());
   });
   await new Promise((r) => A.srv.listen(0, '127.0.0.1', r));
   A.port = A.srv.address().port;
-  A.close = () => { A.srv.closeAllConnections?.(); A.srv.close(); };
+  A.close = () => { for (const s of A.sockets) s.destroy(); A.srv.closeAllConnections?.(); A.srv.close(); };
   return A;
 }
 // An HTTP/1.1 request by hand (fetch can't set Host or keep a socket open): the status line and headers.
@@ -1515,6 +1522,20 @@ function rawRequest(port, lines) {
     setTimeout(() => { c.destroy(); resolve(got); }, 3000);
   });
 }
+// A socket by hand, kept open: what it has been sent so far, and closed once either end has closed it.
+function rawSocket(port, lines) {
+  const c = net.connect(port, '127.0.0.1', () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
+  const S = { c, got: '', closed: false };
+  c.once('close', () => { S.closed = true; });
+  c.on('data', (d) => { S.got += d; });
+  c.on('error', () => {});
+  return S;
+}
+// The laptop's relays, in a range of this file's own block of ports (lib/ports.mjs), off every other
+// test file's and checkout's: the ports test holds all of it.
+const RELAY_LO = PORTS + 62;
+const RELAY_HI = PORTS + 79;
+const RELAY_ENV = { DEVTEAM_RELAY_PORTS: `${RELAY_LO}-${RELAY_HI}` };
 test('the viewer: one artifact on a stage the size of the tab, the threads and hello polled, never /api/data', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
@@ -2239,17 +2260,20 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'relay']))[1];
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500' }), ['--port', String(port)]);
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
   t.after(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   // another site's page can't open one, and a GET of anything else here opens none
   assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'another site\'s page can\'t open one');
   assert.equal((await fetch(`${B}/api/view?kind=preview&name=quiet-otter`)).status, 404, 'no such preview');
-  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
-  assert.equal(v.opened, true, 'this ask opened it');
+  // asked several times at once: one ask opened it, and only that one says so
+  const asks = await Promise.all(Array.from({ length: 6 }, async () => (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()));
+  const v = asks.find((a) => a.opened) ?? asks[0];
+  assert.deepEqual(asks.map((a) => a.opened).sort(), [false, false, false, false, false, true], 'exactly one ask opened it');
+  assert.ok(asks.every((a) => a.origin === v.origin), 'all of them the one relay');
   assert.deepEqual(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json(), { origin: v.origin, opened: false }, 'the next finds it open');
   const R = Number(/^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin)?.[1]);
-  assert.ok(R >= 4800 && R <= 4899, `a relay in 4800-4899: ${v.origin}`);
+  assert.ok(R >= RELAY_LO && R <= RELAY_HI, `a relay in the range it was given: ${v.origin}`);
   const rel = `http://127.0.0.1:${R}`;
   // the lens, as the gateway serves it, under a policy for the hub and every instance here
   let r = await fetch(`${rel}/.devteam/lens?route=%2F`);
@@ -2287,7 +2311,19 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
   assert.equal(r.headers.get('x-frame-options'), null);
   assert.equal(r.headers.get('content-security-policy'), `default-src 'self'; frame-ancestors ${ancestors}; connect-src ws://127.0.0.1:${R}`);
-  for (const h of [{ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site' }, { 'sec-fetch-dest': 'frame', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' }]) assert.equal((await fetch(`${rel}/`, { headers: h })).headers.get('x-frame-options'), 'DENY', JSON.stringify(h));
+  for (const h of [{ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site' }, { 'sec-fetch-dest': 'frame', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' }]) assert.equal((await fetch(`${rel}/`, { headers: h })).headers.get('x-frame-options'), 'DENY', JSON.stringify(h));
+  // another site's frame (or one that doesn't say whose it is) is refused outright, the lens too, as the gateway refuses it
+  const before = app.seen.length;
+  for (const dest of ['iframe', 'frame', 'object', 'embed', 'fencedframe']) {
+    for (const site of ['cross-site', 'none', null]) {
+      for (const p of ['/', '/.devteam/lens']) {
+        r = await fetch(`${rel}${p}`, { headers: { 'sec-fetch-dest': dest, ...(site ? { 'sec-fetch-site': site } : {}) } });
+        assert.equal(r.status, 403, `${dest} ${site} ${p}`);
+        assert.equal(await r.text(), 'not in another site\'s frame');
+      }
+    }
+  }
+  assert.equal(app.seen.length, before, 'none of those reached the app');
   // an app that says nothing of frames gets that policy as its own, on that load only
   app.headers = {};
   r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
@@ -2300,8 +2336,11 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'service-worker': 'script' }), 403);
   assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'sec-fetch-dest': 'serviceworker' }), 403);
   assert.equal(app.seen.length, seen, 'none of those reached the app');
-  // a dev server can't take a relay's port
+  // a dev server can't take a relay's port: 4800-4899 unless told otherwise, and then the range it's given
   assert.match(F.fails(['preview', '4801'], F.SUP), /4801 is where the dashboard's preview relays listen \(4800-4899\)/);
+  assert.match(F.fails(['preview', String(RELAY_LO + 1)], { ...F.SUP, ...RELAY_ENV }), new RegExp(`${RELAY_LO + 1} is where the dashboard's preview relays listen \\(${RELAY_LO}-${RELAY_HI}\\)`));
+  const moved = /preview (\S+) /.exec(F.sup(['preview', '4801', '--label', 'moved'], RELAY_ENV))[1];
+  F.sup(['preview', 'stop', moved]);
   // a record from before the range stays a preview: only a new registration is refused
   const old = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
   write(old, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-http', session: 'supervisor', label: 'old', port: 4802, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
@@ -2319,7 +2358,7 @@ test("the laptop's relay: a port anything holds is passed over, none free keeps 
   const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ports']))[1];
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500' }), ['--port', String(port)]);
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
   t.after(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   const view = async () => (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
@@ -2327,8 +2366,8 @@ test("the laptop's relay: a port anything holds is passed over, none free keeps 
   const hold = (p, h) => new Promise((resolve) => { const s = net.createServer(); s.once('error', () => resolve(null)); s.listen(p, h, () => resolve(s)); });
   const held = new Map();
   t.after(() => { for (const s of held.values()) s.close(); });
-  for (let p = 4800; p <= 4899; p++) { const s = await hold(p, '127.0.0.1'); if (s) held.set(p, s); }
-  assert.ok(held.size >= 3, `three ports of 4800-4899 free to test with: ${held.size}`);
+  for (let p = RELAY_LO; p <= RELAY_HI; p++) { const s = await hold(p, '127.0.0.1'); if (s) held.set(p, s); }
+  assert.ok(held.size >= 3, `three ports of ${RELAY_LO}-${RELAY_HI} free to test with: ${held.size}`);
   assert.deepEqual(await view(), { origin: null, opened: false }, 'none free');
   assert.deepEqual(await view(), { origin: null, opened: false }, 'and asked again, it looks again');
   // three let go: the first now a dev server's on ::1 alone (localhost), the second an old record's
@@ -2352,6 +2391,79 @@ test("the laptop's relay: a port anything holds is passed over, none free keeps 
   assert.equal(v2.opened, true);
   await fetch(`${v2.origin}/moved`);
   assert.equal(app2.seen.at(-1).url, '/moved');
+});
+test("the laptop's relay carries a preview's WebSockets: from its own Origin only, with localhost as the app's Host and Origin", async (t) => {
+  const F = threadsFixture('relay-ws');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ws']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const R = Number(/:(\d+)$/.exec(v.origin)[1]);
+  const ask = (origin, host = `127.0.0.1:${R}`, url = '/hmr?token=1') => ['GET ' + url + ' HTTP/1.1', `Host: ${host}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', ...(origin ? [`Origin: ${origin}`] : [])];
+  const upgrade = (origin, host) => rawRequest(R, ask(origin, host));
+  const got = await upgrade(v.origin);
+  assert.match(got, /^HTTP\/1\.1 101 /);
+  assert.match(got, /hello from the app/, 'the app\'s bytes after the handshake');
+  assert.deepEqual(app.seen.at(-1), { method: 'UPGRADE', url: '/hmr?token=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  // the relay's other name for itself, from a page on that name
+  assert.match(await upgrade(`http://localhost:${R}`, `localhost:${R}`), /^HTTP\/1\.1 101 /);
+  assert.deepEqual(app.seen.at(-1), { method: 'UPGRADE', url: '/hmr?token=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  const n = app.seen.length;
+  assert.match(await upgrade('http://evil.example'), /^HTTP\/1\.1 403 /, 'another page\'s socket');
+  assert.match(await upgrade(B), /^HTTP\/1\.1 403 /, 'the dashboard\'s page');
+  assert.match(await upgrade(null), /^HTTP\/1\.1 403 /, 'no Origin');
+  assert.match(await upgrade(`http://localhost:${R}`), /^HTTP\/1\.1 403 /, 'a page on its other name, to this one');
+  assert.match(await rawRequest(R, ['GET /hmr HTTP/1.1', `Host: rebound.example:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', `Origin: ${v.origin}`]), /^HTTP\/1\.1 421 /, 'DNS rebinding');
+  assert.match(await rawRequest(R, ask(v.origin, `127.0.0.1:${R}`, 'http://elsewhere.example/hmr')), /^HTTP\/1\.1 400 /, 'origin-form only');
+  assert.equal(app.seen.length, n, 'none of those reached the app');
+  // both ways, after the handshake
+  const one = rawSocket(R, ask(v.origin));
+  await until(() => /hello from the app\n/.test(one.got), 'the handshake');
+  await until(() => app.sockets.size === 1, 'the app holds it');
+  one.c.write('ping from the page\n');
+  await until(() => /ping from the page\n/.test(one.got), 'the app\'s echo');
+  // the app ends it: so does the relay, and the dashboard carries on
+  for (const s of app.sockets) s.destroy();
+  await until(() => one.closed, 'the page\'s side closed with the app\'s');
+  // the page ends it: so does the relay, to the app
+  const two = rawSocket(R, ask(v.origin));
+  await until(() => app.sockets.size === 1, 'the app holds the next');
+  two.c.destroy();
+  await until(() => app.sockets.size === 0, 'the app\'s side closed with the page\'s');
+  // 32 at once, and no more; one let go makes room
+  const held = [];
+  t.after(() => { for (const s of held) s.c.destroy(); });
+  for (let i = 0; i < 32; i++) held.push(rawSocket(R, ask(v.origin)));
+  await until(() => held.every((s) => /hello from the app/.test(s.got)), 'thirty-two sockets');
+  const n2 = app.seen.length;
+  assert.match(await upgrade(v.origin), /^HTTP\/1\.1 429 /, 'a thirty-third');
+  assert.equal(app.seen.length, n2, 'which never reached the app');
+  held.shift().c.destroy();
+  await until(async () => /^HTTP\/1\.1 101 /.test(await upgrade(v.origin)), 'room once one closed');
+  // the app gone: the socket is closed, unanswered, and the dashboard still answers
+  const app2 = await fakeApp();
+  const gone = app2.port;
+  app2.close();
+  const file = path.join(F.old, 'docs/devteam/run/previews', `${name}.json`);
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // the relay closes with its record: every socket it carries goes with it, to the page and to the app
+  F.sup(['preview', 'stop', name]);
+  await until(() => held.every((s) => s.closed), 'the pages\' sides closed with the relay');
+  await until(() => app.sockets.size === 0, 'the app\'s sides closed with the relay');
+  write(file, JSON.stringify({ ...rec, port: gone }));
+  const v2 = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  assert.equal(v2.opened, true);
+  const R2 = Number(/:(\d+)$/.exec(v2.origin)[1]);
+  const lost = rawSocket(R2, ask(v2.origin, `127.0.0.1:${R2}`));
+  await until(() => lost.closed, 'closed, with nothing to carry it to');
+  assert.equal(lost.got, '', 'nothing to answer it');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`)).status, 200, 'the dashboard carries on');
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
