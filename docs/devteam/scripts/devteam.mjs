@@ -12432,23 +12432,28 @@ const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
 // The machine's memory in bytes, { inUse, max, source }, or null when nothing says (macOS: no cgroup
-// and no /proc/meminfo). The cgroup's cap first, since a platform caps the container there: in use
-// is what the kernel can't drop (memory.current less the page cache, memory.stat's file). With no
-// cap (no cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
+// and no /proc/meminfo) or a file can't be read. The cgroup's cap first, since a platform caps the
+// container there (cgroup v2's files: on v1, or a cap set on a parent cgroup, this reads the host's):
+// in use is what the kernel can't drop, memory.current less the page cache it can (memory.stat's
+// file, less its shmem, which lives in tmpfs and /dev/shm and can't be dropped). With no cap (no
+// cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
 // DEVTEAM_CGROUP and DEVTEAM_MEMINFO point both elsewhere (tests).
 function machineMemory() {
-  const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
-  const max = readNum(path.join(cg, 'memory.max'));
-  const current = readNum(path.join(cg, 'memory.current'));
-  if (max > 0 && current !== null) {
-    const file = Number(/^file (\d+)$/m.exec(readText(path.join(cg, 'memory.stat')) ?? '')?.[1] ?? 0);
-    return { inUse: Math.max(0, current - file), max, source: 'cgroup' };
-  }
-  const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
-  const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
-  const total = kb('MemTotal'), avail = kb('MemAvailable');
-  if (!(total > 0) || !Number.isFinite(avail)) return null;
-  return { inUse: Math.max(0, total - avail) * 1024, max: total * 1024, source: 'meminfo' };
+  try {
+    const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
+    const max = readNum(path.join(cg, 'memory.max'));
+    const current = readNum(path.join(cg, 'memory.current'));
+    if (max > 0 && current !== null) {
+      const stat = readText(path.join(cg, 'memory.stat')) ?? '';
+      const field = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1] ?? 0);
+      return { inUse: Math.max(0, current - Math.max(0, field('file') - field('shmem'))), max, source: 'cgroup' };
+    }
+    const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
+    const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
+    const total = kb('MemTotal'), avail = kb('MemAvailable');
+    if (!(total > 0) || !Number.isFinite(avail)) return null;
+    return { inUse: Math.max(0, total - avail) * 1024, max: total * 1024, source: 'meminfo' };
+  } catch { return null; }
 }
 const GiB = (b) => (b / 1073741824).toFixed(1);
 const MEMORY_CEILING_DEFAULT = 0.8;
@@ -12460,7 +12465,7 @@ function memoryFull(s = loadSettings()) {
   const ceiling = memoryCeilingProblem(s.machine_memory_ceiling) ? MEMORY_CEILING_DEFAULT : s.machine_memory_ceiling;
   const m = machineMemory();
   if (!m || m.inUse < ceiling * m.max) return null;
-  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%), over its ${Math.round(ceiling * 100)}% ceiling` };
+  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
@@ -13812,8 +13817,11 @@ function makeSession(role) {
   // The machine is shared with other fleets: a new session doesn't start while its memory is at the
   // supervisor's ceiling (supervisor.md §5). A resume of one that already ran always does, so a
   // dead machine's sessions all come back; --resume on one that never ran is a new start.
-  const memFull = flags.resume && started ? null : memoryFull();
-  if (memFull && !flags.force) die(`${memFull.words}: start this ${role} when some finish, or pass --force (it is logged)`);
+  // A planner moved from another machine has its plan branch on origin only, and continues from it.
+  const ran = started || (role === 'planner' && !!resolveCommit(`refs/remotes/origin/plan/${id}`));
+  const memNow = memoryFull();
+  const memFull = flags.resume && ran ? null : memNow;
+  if (memFull && !flags.force) die(`${memFull.words}: start this ${role} when some sessions finish, or pass --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
   // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
@@ -13922,7 +13930,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused || memFull ? ` while ${[refused && `its goal is ${holdWords(mode)}`, memFull?.words].filter(Boolean).join(' and ')}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused || memFull ? ` while ${[refused && `its goal is ${holdWords(mode)}`, memFull?.words].filter(Boolean).join(' and ')}, with --force` : memNow && !resume ? `, a resume that started fresh while ${memNow.words}` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {

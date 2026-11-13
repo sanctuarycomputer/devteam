@@ -40,32 +40,40 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     use(27.2 * G);
     const r = run(old, ['worker', 'ch-01-a'], M);
     assert.notEqual(r.status, 0);
-    assert.match(r.err, /the machine's memory is at 27\.2 of 32\.0 GB \(85%\), over its 80% ceiling: start this worker when some finish, or pass --force/);
+    assert.match(r.err, /the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling: start this worker when some sessions finish, or pass --force/);
     assert.equal(starts().length, 0);
     assert.ok(!fs.existsSync(path.join(old, '.worktrees/ch-01-a')), 'no worktree made');
     // --resume on a ticket that never ran is a new start, so it is refused too
     assert.match(run(old, ['worker', 'ch-01-a', '--resume'], M).err, /over its 80% ceiling/);
     // a planner as well
     const goal = ok(old, ['goal', 'add', '--title', 'Tidy', '--outcome', 'tidy', '--measure', 'untidy files', '--target', '0', '--unit', 'files', '--direction', 'down', '--source', 'prod', '--check', 'echo 0', '--non-goals', 'none', '--preconditions', 'a'], SUP).trim();
-    assert.match(run(old, ['planner', 'beta', '--goal', goal], M).err, /over its 80% ceiling: start this planner when some finish/);
+    assert.match(run(old, ['planner', 'beta', '--goal', goal], M).err, /over its 80% ceiling: start this planner when some sessions finish/);
 
     // the findings: no "make workers for", memory-full in its place
     const full = findings(M);
     assert.ok(!full.some((f) => ['idle-capacity', 'idle-planning'].includes(f.kind)), JSON.stringify(full.map((f) => f.kind)));
     const mf = full.find((f) => f.kind === 'memory-full');
     assert.ok(mf, 'memory-full is shown');
-    assert.match(mf.detail, /^the machine's memory is at 27\.2 of 32\.0 GB \(85%\), over its 80% ceiling, with 5 tickets ready, 0\/5 workers active/);
+    assert.match(mf.detail, /^the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling, with 5 tickets ready, 0\/5 workers active/);
     assert.match(mf.suggestion, /lower max_active_tickets/);
     assert.doesNotMatch(mf.suggestion, /make a worker|make workers/);
 
     // --force starts it, and its act says what it overrode
     ok(old, ['worker', 'ch-01-a', '--force'], M);
     const forced = starts().pop();
-    assert.match(forced.what, /^made worker ch-01-a in \S+ while the machine's memory is at 27\.2 of 32\.0 GB \(85%\), over its 80% ceiling, with --force$/);
+    assert.match(forced.what, /^made worker ch-01-a in \S+ while the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling, with --force$/);
     // a resume of a session that ran is never refused for memory, and says nothing of it
     use(31 * G);
     ok(old, ['worker', 'ch-01-a', '--resume'], M);
     assert.match(starts().pop().what, /^resumed worker ch-01-a in \S+$/);
+    // one that ran but whose worktree is gone (a new machine) starts fresh: allowed, and its act says so
+    ok(old, ['worker', 'ch-01-a', '--remove', '--force'], SUP);
+    ok(old, ['worker', 'ch-01-a', '--resume'], M);
+    assert.match(starts().pop().what, /^made worker ch-01-a in \S+, a resume that started fresh while the machine's memory is at 31\.0 of 32\.0 GB \(97%\)/);
+    // shmem (tmpfs, /dev/shm) is page cache the kernel can't drop: it counts as in use
+    fs.writeFileSync(path.join(cg, 'memory.current'), `${28 * G}\n`);
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${14 * G}\nfile ${8 * G}\nshmem ${6 * G}\n`);
+    assert.match(run(old, ['worker', 'ch-02-b'], M).err, /at 26\.0 of 32\.0 GB \(81%\), at or over its 80% ceiling/);
 
     // under the ceiling: starts, and idle-capacity is back
     use(20 * G);
@@ -96,7 +104,7 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
     const meminfo = path.join(F.base, 'meminfo');
     fs.writeFileSync(meminfo, `MemTotal:       16777216 kB\nMemFree:          524288 kB\nMemAvailable:    1677722 kB\n`);
-    assert.match(run(old, ['worker', 'ch-04-d'], { ...M, DEVTEAM_MEMINFO: meminfo }).err, /at 14\.4 of 16\.0 GB \(90%\), over its 80% ceiling/);
+    assert.match(run(old, ['worker', 'ch-04-d'], { ...M, DEVTEAM_MEMINFO: meminfo }).err, /at 14\.4 of 16\.0 GB \(90%\), at or over its 80% ceiling/);
     // no cgroup and no meminfo (macOS): nothing says, nothing is refused or suppressed
     const mac = { ...SUP, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup'), DEVTEAM_MEMINFO: none };
     ok(old, ['worker', 'ch-04-d'], mac);
