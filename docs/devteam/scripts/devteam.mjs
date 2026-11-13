@@ -8584,6 +8584,25 @@ function goalReadings(gid) {
     return true;
   });
 }
+// The readings taken under the measure as it stands: from the latest goal set that changed what it
+// reads (its source, check, question, unit or link) on. One taken before was of another measure, so
+// it is no baseline; a change to the measure's wording, target or direction keeps them.
+const MEASURE_DEFINING = ['source', 'check', 'question', 'unit', 'link'];
+let bornMeasures = null;
+function currentReadings(gid) {
+  const g = logGet(gid);
+  const log = readLog();
+  if (bornMeasures?.log !== log) bornMeasures = { log, m: new Map(log.lines.filter((l) => l.type === 'goal' && l.op === 'new').map((l) => [l.id, l.measure ?? {}])) };
+  let prev = bornMeasures.m.get(gid) ?? {};
+  let since = null;
+  for (const u of g?.updates ?? []) {
+    if (!u.measure) continue;
+    if (MEASURE_DEFINING.some((k) => (u.measure[k] ?? null) !== (prev[k] ?? null))) since = u.at;
+    prev = u.measure;
+  }
+  const all = goalReadings(gid);
+  return since ? all.filter((r) => r.created_at >= since) : all;
+}
 const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ?? []).includes(gid)).map((f) => f.id);
 
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
@@ -8638,7 +8657,7 @@ function goalCheck(g) {
   if (typeof g.priority !== 'number') definition.push('no priority');
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
-  if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
+  if (m.source !== 'owner' && !currentReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
   const unmarked = registryWording(g);
   if (unmarked) definition.push(`precondition ${unmarked.n} ("${unmarked.text}") reads as the registry being complete, and ${g.id} has no registry_precondition: goal set ${g.id} --registry-precondition ${unmarked.n} (goal-readiness then waits for the owner's registry-attest yes; planning.md §7)`);
   const approval = milestoneGaps(g);
@@ -8665,7 +8684,7 @@ function milestoneGaps(g) {
   if (!ms.length) return ['no milestones: the outcome in order, each a usable slice with a target on the measure, its preconditions and a size in tickets (goal set --milestones; one is fine for a goal one loop can meet)'];
   const gaps = [];
   const seen = new Map();
-  const base = goalReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
+  const base = currentReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
   const up = measureOf(g).direction !== 'down';
   let prevT = base;
   let prevBy = null;
@@ -8746,10 +8765,12 @@ function forecastText(g, f) {
 }
 function goalView(g) {
   const readings = goalReadings(g.id);
-  const first = readings[0];
-  const last = readings[readings.length - 1];
+  // the track runs from the baseline under the measure as it stands (currentReadings)
+  const current = currentReadings(g.id);
+  const first = current[0];
+  const last = current[current.length - 1];
   let track = null;
-  if (readings.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
+  if (current.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
     // Expected value now, on the line from the baseline through each dated milestone to the horizon.
     const pts = [[Date.parse(first.created_at), first.measure.value], ...(g.milestones ?? []).filter((m) => m.by && !Number.isNaN(Date.parse(m.by)) && typeof m.target === 'number').map((m) => [Date.parse(m.by), m.target]), [Date.parse(g.horizon), g.measure.target]].sort((a, b) => a[0] - b[0]);
     const now = Date.now();
