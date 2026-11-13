@@ -702,7 +702,7 @@ test('the dashboard: rotation needs no hub, one dashboard does it per interval, 
   } finally { await a.stop(); await b?.stop(); await new Promise((r) => { oldHub.close(r); oldHub.closeAllConnections?.(); }); A.done(); B.done(); }
 });
 
-test("the supervisor's own pane: a lost Enter is pressed once, never into a prompt, never while it works", { skip: !hasTmux }, async () => {
+test("the supervisor's own pane: a lost Enter is pressed, at most three times, never into a prompt, never while it works", { skip: !hasTmux }, async () => {
   const F = fixture('sup-enter');
   try {
     const text = '[devteam answer q-1 from owner] read it with: devteam.mjs questions --id q-1';
@@ -724,9 +724,53 @@ test("the supervisor's own pane: a lost Enter is pressed once, never into a prom
     deliver(3600);
     F.tick();
     await until(() => s.keys() === '\r', 'one Enter');
-    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, 1, 'kept for another try');
     F.tick();
-    assert.equal(s.keys(), '\r', 'a second tick presses nothing');
+    assert.equal(s.keys(), '\r', 'a second tick inside 30s presses nothing');
+    // that Enter was lost too (the stand-in never takes it): 30s on, another, up to three in all
+    const later = () => { const r = json(fs.readFileSync(sent, 'utf8')); write(sent, JSON.stringify({ ...r, at: new Date(Date.now() - 60 * 1000).toISOString() })); };
+    later();
+    F.tick();
+    await until(() => s.keys() === '\r\r', 'a second Enter');
+    later();
+    F.tick();
+    await until(() => s.keys() === '\r\r\r', 'a third Enter');
+    assert.ok(!fs.existsSync(sent), 'and then it stops');
+    F.tick();
+    assert.equal(s.keys(), '\r\r\r', 'never a fourth');
+    // a hand-written negative count gives no extra tries
+    write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString(), tries: -5 }));
+    F.tick();
+    await until(() => s.keys() === '\r\r\r\r', 'a first try');
+    assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, 1, 'counted from zero');
+    fs.rmSync(sent, { force: true });
+    // a stale read: another process pressed and put the record back (a fresh time) between this
+    // one's read and its claim; the claim reads it again and presses nothing
+    deliver(3600);
+    const slowDone = new Promise((r) => execFile(process.execPath, [path.join(F.root, 'docs/devteam/scripts/devteam.mjs'), 'accounts-tick'], { cwd: F.root, env: F.env({ DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS: '3000' }) }, r));
+    await new Promise((r) => setTimeout(r, 2000));
+    write(sent, JSON.stringify({ text, at: new Date().toISOString(), tries: 1, typed_at: new Date(Date.now() - 3600 * 1000).toISOString() }));
+    await slowDone;
+    assert.equal(s.keys(), '\r\r\r\r', 'a record pressed a moment ago is not pressed again');
+    assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, 1, 'and it is put back as it was');
+    fs.rmSync(sent, { force: true });
+    // the echo of a submitted line, then the bottom changes after a press: a reply, or the owner typing
+    // their own line (no client in a test, so only the bottom tells): no second or third Enter
+    const echo = [`> ${text}`, '⏺ Done.', '─'.repeat(60), '❯ ', '─'.repeat(60), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+    for (const after of [[`> ${text}`, '⏺ Done, and more besides.', '─'.repeat(60), '❯ ', '─'.repeat(60), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'], [`> ${text}`, '⏺ Done.', '─'.repeat(60), '❯ and next could you', '─'.repeat(60), '  ⏵⏵ bypass permissions on (shift+tab to cycle)']]) {
+      s = pane(echo);
+      await until(() => s.shows().includes('Done.'), 'the echo');
+      deliver(3600);
+      F.tick();
+      await until(() => s.keys() === '\r', 'the one Enter a static echo gets');
+      s = pane(after);
+      await until(() => s.shows().includes(after[3] === '❯ ' ? 'besides' : 'next could'), 'the changed bottom');
+      later();
+      F.tick();
+      if (fs.existsSync(sent)) { later(); F.tick(); }
+      assert.equal(s.keys(), '', `no more Enters once the bottom changed: ${after[1]} / ${after[3]}`);
+      assert.ok(!fs.existsSync(sent), 'the rescue ends');
+    }
     for (const shown of [[`❯ ${text}`, '✻ Thinking… (esc to interrupt)'], [`❯ ${text}`, 'Do you want to proceed?', '❯ 1. Yes', '  2. No'], [...MENU, `❯ ${text}`]]) {
       s = pane(shown);
       await until(() => s.shows().includes('devteam answer'), 'the pane');

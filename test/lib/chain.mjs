@@ -2419,7 +2419,7 @@ http.createServer((req, res) => {
     must(['goal', 'status', Gi, 'abandoned']);
   });
 
-  step('a lost Enter is pressed once, never into a prompt, never retyped', (tt) => {
+  step('a lost Enter is pressed, at most three times, never into a prompt, never retyped', (tt) => {
     if (!hasTmux) return void tt.diagnostic('tmux not installed: lost-Enter recovery not exercised');
     git(['branch', 'plan/enter', 'origin/main']);
     const text = '[devteam info m-1 from supervisor] Owner approved the goal; plan the feature and tickets, then send the graph for review.';
@@ -2466,11 +2466,11 @@ http.createServer((req, res) => {
     assert.equal(enters(), 1, 'exactly one Enter');
     assert.equal(resent().length, 1, 'and it is logged');
     assert.match(resent()[0].detail, /sha1 [0-9a-f]{12}/);
-    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, 1, 'the delivery is kept for another try, should that Enter be lost too');
     const [e1, p1] = [enters(), pressed()];
     must(['metrics', '--json'], { role: 'sup' });
     settle(e1, p1);
-    assert.equal(enters(), 1, 'a second pass presses nothing');
+    assert.equal(enters(), 1, 'a second pass inside 30s presses nothing');
     assert.equal(resent().length, 1);
     run(`❯ ${text}\nDo you want to proceed?\n❯ 1. Yes\n  2. No`, 3600);
     assert.equal(enters(), 0, 'never into a prompt');
