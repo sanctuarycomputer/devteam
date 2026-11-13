@@ -3227,6 +3227,11 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     await p.send('Page.navigate', { url: `${B}/#preview/${name}` });
     await soon(`document.getElementById('av-note').textContent === 'Reload to view this preview' && !document.getElementById('av-note').hidden`, 'the note');
     assert.equal(await p.ev('TS.ready'), false, 'the lens is outside this page\'s policy');
+    // only the lens's own refusal says to reload: another frame's is not this note's to say
+    await p.ev(`(() => { const n = document.getElementById('av-note'); n.hidden = true; n.textContent = ''; document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: 'http://127.0.0.1:1/other', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'a refusal of another address says nothing');
+    await p.ev(`(() => { document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: new URL(document.getElementById('pv-frame').src).origin + '/.devteam/lens', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').textContent`), 'Reload to view this preview', 'the lens\'s own does');
     assert.equal(await p.ev(`document.getElementById('av-title').textContent`), 'Checkout');
   });
 
@@ -3384,6 +3389,25 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     await aFrame();
     assert.equal(await p.ev('TS.route'), '/liar', 'its last word');
     assert.ok(await p.ev('window.__draws') < 50, 'drawn once a frame, not once a route');
+    // the same, saying ready (a route each) rather than route: the page it ends on is the one with a thread
+    const resolves = `window.__own.filter((m) => m.own === 'heard' && m.data.type === 'resolve').length`;
+    await p.ev('window.__draws = 0');
+    await tell({ own: 'forge', say: [...Array.from({ length: 5000 }, (_, i) => ({ lens: 1, type: 'ready', path: '/', route: i % 2 ? '/a' : '/b', viewport: { w: 10, h: 10 } })), { lens: 1, type: 'route', route: '/' }] });
+    ms = await frameMs();
+    assert.ok(ms < 1000, `a frame drawn in ${ms} ms`);
+    await aFrame();
+    assert.equal(await p.ev('TS.route'), '/', 'its last word');
+    assert.ok(await p.ev('window.__draws') < 50, 'drawn once a frame, not once a ready');
+    await soon(`document.querySelector('#av-pins .tl-pin')`, 'the pin on the route it ended on');
+    // a ready about the route it is on, once its watch was asked for, is heard no more: a load is heard once
+    await new Promise((r) => setTimeout(r, 300));
+    const settled = await p.ev(resolves);
+    await tell({ own: 'forge', say: Array.from({ length: 50 }, () => ({ lens: 1, type: 'ready', path: '/', route: '/', viewport: { w: 10, h: 10 } })) });
+    await aFrame();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev(resolves), settled, 'nothing asked of the lens again');
+    await tell({ own: 'forge', say: [{ lens: 1, type: 'route', route: '/liar' }] });
+    await soon(`TS.route === '/liar'`, 'back on its last word');
     await keysHere();
   });
 
@@ -3456,4 +3480,42 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     await aFrame();
     assert.deepEqual(await p.ev(`[TS.kind, document.getElementById('pv-frame').hasAttribute('src'), document.getElementById('pv-frame').hidden, location.hash]`), ['artifact', false, true, `#preview/${name}`]);
   });
+});
+
+test("the Library's preview card opens the stage here and the viewer in a tab; a question's [[name]] opens the viewer", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('preview-links');
+  undo.push(() => F.done());
+  const app = await fakeApp();
+  undo.push(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
+  F.sup(['ask', '--question', 'Does [[flow]] feel right?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ name: 'flow', title: 'The flow', preview: name }]), '--stake', '1', '--urgency', '1']);
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
+  const card = `[data-preview="${name}"]`;
+  await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
+  assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
+  assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
+  assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
+  // where the stage was opened from is taken once the preview is known, and not at all for an ask the owner left
+  await p.ev(`(() => { const f = window.fetch; window.fetch = (u, ...a) => (String(u).includes('/api/view') ? new Promise((r) => setTimeout(r, 400)).then(() => f(u, ...a)) : f(u, ...a)); return true; })()`);
+  await p.ev(`location.hash = '#preview/${name}'`);
+  await p.ev(`location.hash = '#library'`);
+  await new Promise((r) => setTimeout(r, 900));
+  assert.deepEqual(await p.ev('[AV_FROM, avFocus, document.getElementById("artifact-view").hidden]'), [false, null, true], 'an ask the owner left behind records nothing and opens nothing');
+  await p.ev(`location.hash = '#inbox'`);
+  await soon(`!!document.querySelector('.qref a')`, 'the [[flow]]');
+  assert.deepEqual(await link('.qref a'), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'The flow']);
 });

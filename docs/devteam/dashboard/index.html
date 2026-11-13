@@ -728,7 +728,10 @@
   <div id="av-stage">
     <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
     <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
-    <!-- a preview's lens: its own origin, so it can read the app it frames; no top navigation (decision 8) -->
+    <!-- a preview's lens: its own origin, so it can read the app it frames. The sandbox here is advisory: the app can navigate its lens
+         as itself, and no frame attribute stops that. What bounds it is this page's frame-src (the lens's origin only) and the server's
+         `sandbox` policy on the agent's HTML responses. Widening frame-src ('self' or another origin) or dropping those headers
+         changes what a preview can reach, and is sandbox-relevant. -->
     <iframe id="pv-frame" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
     <div id="av-pins" class="av-pins"></div>
     <div id="av-over" class="av-over" hidden></div>
@@ -1287,12 +1290,14 @@ function artNameLink(l) {
   try { v = artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'); } catch { return artLinkOf(l, true); }
   return `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
 }
+// A question's [[name]] for a preview opens its viewer (spec §7); the list under it keeps its own link.
+const pvNameLink = (l) => (l.state === 'gone' ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : `<a href="${esc(pvViewer(l.preview))}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>`);
 function qtext(text, links) {
   return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
     if (i % 2 === 0) return linkify(part);
     const l = (links || []).find((x) => x.name === part);
     // in the sentence the link alone; a changed artifact is flagged in the list below
-    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
+    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : l.preview ? pvNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
 }
 // the same as plain text, for a title attribute
@@ -3198,9 +3203,13 @@ function showPreview(name, info) {
   $('artifact-view').hidden = false;
   return null;
 }
-// a preview offered after this page loaded is outside its policy: the frame is refused, and the bar says what to do
+// a preview offered after this page loaded is outside its policy: the lens's frame is refused, and the bar says what to do.
+// Only a refusal of the lens itself says so (what the app's own frames are denied is the app's business).
 document.addEventListener('securitypolicyviolation', (e) => {
   if (TS.kind !== 'preview' || !String(e.violatedDirective).startsWith('frame-src')) return;
+  let lens = null;
+  try { lens = new URL($('pv-frame').getAttribute('src'), location.href).origin; } catch {}
+  if (!lens || !String(e.blockedURI).startsWith(lens)) return;
   $('av-note').hidden = false;
   $('av-note').textContent = 'Reload to view this preview';
 });
@@ -3210,10 +3219,11 @@ async function openPreview(raw) {
   let name = null;
   try { name = decodeURIComponent(raw); } catch {}
   if (!/^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/.test(name ?? '')) return void (location.hash = '#library');
-  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   const info = await previewInfo(name);
   // the owner went elsewhere while it was asked
   if (location.hash !== `#preview/${raw}`) return;
+  // where the stage was opened from, taken now: the await above is long enough for focus and the route to move
+  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
@@ -3507,14 +3517,14 @@ function renderLibrary(lib) {
     const s = previewState(p, Date.now());
     const url = previewUrl(pvHere, p);
     const act = {
-      open: () => `<a class="ghost" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open</a>`,
+      open: () => `<a class="ghost av-open" href="${esc(pvViewer(p.name))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`,
       copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
       start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
       stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
     };
     const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
     return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
-      <div class="art-t"><b>${esc(p.label || p.name)}</b><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
+      <div class="art-t"><a href="#preview/${esc(encodeURIComponent(p.name))}">${esc(p.label || p.name)}</a><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
       <div class="meta">${meta}</div>
       <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
     </div>`;
