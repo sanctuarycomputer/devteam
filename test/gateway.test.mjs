@@ -951,6 +951,21 @@ test('public.<box> serves artifacts with the kit\'s own type map, CDN list and p
   for (const p of ['index.html', 'a/b.js', '.env', 'a/.git/x', 'a//b', 'a/../b', 'a%2eb', 'é.png', '__proto__']) assert.equal(G.publicPathOk(p), kitOk(p), p);
 });
 
+test("the kit's preview lens and framing rules are the gateway's own: the laptop's relay serves the same bytes", () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const kitLens = /^const PREVIEW_LENS = String\.raw`([^`]*)`;$/m.exec(src)?.[1];
+  assert.ok(kitLens, 'the kit holds the lens as one String.raw');
+  assert.equal(kitLens, G.PREVIEW_LENS, 'byte for byte');
+  const gw = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  for (const name of ['FRAME_ANCESTORS', 'replaceFrameAncestors']) {
+    const one = (text) => new RegExp(`^(?:export )?const ${name} = (.*)$`, 'm').exec(text)?.[1];
+    assert.ok(one(src), `the kit has ${name}`);
+    assert.equal(one(src), one(gw), name);
+  }
+  const kitCsp = vm.runInNewContext(`${/^const previewLensPart = .*$/m.exec(src)[0]}\n${/^const previewLensHash = .*$/m.exec(src)[0]}\n${/^const previewLensCsp = .*$/m.exec(src)[0]}\npreviewLensCsp('http://a http://b')`, { PREVIEW_LENS: kitLens, crypto });
+  assert.equal(kitCsp, G.previewLensCsp('http://a http://b'), 'the same policy for the same ancestors');
+});
+
 test('the gateway computes git\'s blob and tree ids from bytes, sha1 and sha256', () => {
   const files = { 'index.html': '<!doctype html>', 'a/b.js': 'b', 'a/c/d.css': 'd', 'a-b.txt': 'x', 'a.txt': 'y', 'run.sh': 'echo' };
   for (const fmt of ['sha1', 'sha256']) {
