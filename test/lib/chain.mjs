@@ -2259,7 +2259,8 @@ http.createServer((req, res) => {
     git(['push', '-q', '--force', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'with "ask" and no standing rule: the owner answers each sync');
     // with "ask" and no standing rule, the answer that approves a sync's kit files is a kit-class one
-    const QaskSync = must(['ask', '--question', 'Adopt v0.3.0?', '--recommendation', 'yes'], { role: 'sup' });
+    // the same words again on purpose, past ask's re-ask refusal
+    const QaskSync = must(['ask', '--question', 'Adopt v0.3.0?', '--recommendation', 'yes', '--new-because', 'the sync now changes kit files'], { role: 'sup' });
     must(['answer', QaskSync, 'yes']);
     assert.match(dt([...args, '--approved', QaskSync], { role: 'sup' }).out, /changes kit files .*that needs the owner's answer in a governance-edit, process-edit, gate-change question, and .* is classless/, 'a classless answer is not a kit-class one');
     const QkitSync = must(['ask', '--question', 'Adopt v0.3.0?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
@@ -2499,7 +2500,8 @@ http.createServer((req, res) => {
     const change = JSON.stringify({ non_goals: ['enterprise invoicing', 'refunds'] });
     assert.equal(json(must(['goal', 'show', G, '--json'])).status, 'ready');
     assert.match(dt(['goal', 'set', G, '--non-goals', 'x'], { role: 'sup' }).err, /only the owner changes it now \(class goal-change\)/, 'refused without --approved');
-    const ask = (extra) => must(['ask', '--kind', 'owner-decision', '--question', 'Add refunds to the non-goals?', '--recommendation', 'Set it', '--options', 'Set it', 'Leave it', ...extra], { role: 'sup' });
+    // the same words in each case on purpose, past ask's re-ask refusal
+    const ask = (extra) => must(['ask', '--kind', 'owner-decision', '--question', 'Add refunds to the non-goals?', '--recommendation', 'Set it', '--options', 'Set it', 'Leave it', '--new-because', 'the test asks it again', ...extra], { role: 'sup' });
     assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--recommendation', 'Set it'], { role: 'sup' }).err, /says the exact change/, 'a goal-change question names its change');
     assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--change', '{"status":"met"}'], { role: 'sup' }).err, /not status/, 'only goal fields the supervisor may propose');
     const Qwrong = ask(['--class', 'release-scope']);
@@ -3086,6 +3088,11 @@ http.createServer((req, res) => {
     const Dp = hand({ kind: 'owner-decision', goal: G, question: 'Name the shared package billing-gate?', recommendation: 'yes' });
     must(['answer', Dp, 'yes']);
     hand({ op: 'set', id: Dp, class: 'one-way-door' });
+    // a door the owner answered against its recommendation; and one asked for another ticket, with the goal on it
+    const Dn = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, question: 'Drop the legacy gate entirely?', recommendation: 'yes' });
+    must(['answer', Dn, 'no']);
+    const Dk = hand({ kind: 'owner-decision', class: 'one-way-door', goal: G, ticket: 'bill-02-vault', question: 'Vault the card fingerprints?', recommendation: 'yes' });
+    must(['answer', Dk, 'yes']);
     const qs = json(must(['questions', '--json', '--all']));
     const st = (id) => qs.find((q) => q.id === id)?.status;
     assert.deepEqual([st(Dc), st(Dd), st(Df), st(Dp)], ['answered', 'defaulted', 'open', 'answered'], "only the owner's own line answers");
@@ -3097,10 +3104,12 @@ http.createServer((req, res) => {
     write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- move the gate into packages/gate\n\n## Tasks\n\n- T1 gate\n');
     const p1 = commit('bill-09-door: plan');
     const covers = (...ids) => { write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n${ids.map((id) => `- Goal-level door: ${id} covers this plan`).join('\n')}\n\n|`)); commit('plan review'); };
-    covers(Dc, Dd, Df, Dp);
+    covers(Dc, Dd, Df, Dp, Dn, Dk);
     const ap = (...extra) => dt(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', ...extra, '--', 'plan ok'], sup);
     assert.match(ap().err, /lists one-way doors; /, 'nothing cited, nothing answered for the ticket');
-    assert.match(ap('--approved', Dd).err, /never a default|not approval there/, 'a defaulted door approves nothing');
+    assert.match(ap('--approved', Dd).err, /was not answered by the owner; a one-way door needs the owner's answer, never a default/, 'a defaulted door approves nothing');
+    assert.match(ap('--approved', Dn).err, /was answered "no", not its recommendation \("yes"\)/, "the owner's no approves no plan");
+    assert.match(ap('--approved', Dk).err, /was asked for bill-02-vault, not bill-09-door/, "another ticket's door, though it names the goal");
     assert.match(ap('--approved', Df).err, /is not an answered question/, "the supervisor's own lines answer nothing");
     assert.match(ap('--approved', Dp).err, /was asked in class \(none\), not approve-plan/, 'a class set by the supervisor counts for nothing');
     // a decision the supervisor writes by hand on the defaulted door carries nothing either
@@ -3116,6 +3125,9 @@ http.createServer((req, res) => {
     const d = must(['decide', '--class', 'approve-plan', '--refs', 'bill-09-door', '--approved', Dc, '--', 'approve the gate plan'], sup);
     must(['act', '--decision', d, '--', 'plan ok'], sup);
     assert.equal(json(must(['log', '--type', 'decision', '--json'])).find((x) => x.id === d).approved_by, Dc, 'the earlier yes approves the plan; no second question');
+    // citing it for the plan doesn't use it up for its own class: the one-way-door act itself, once
+    must(['act', '--class', 'one-way-door', '--approved', Dc, '--refs', 'bill-09-door', '--', 'moved the gate into the shared package'], sup);
+    assert.match(dt(['act', '--class', 'one-way-door', '--approved', Dc, '--refs', 'bill-09-door', '--', 'again'], sup).err, /already approved an act/);
     // asked for the ticket, the same holds without a review line
     fs.rmSync(path.join(tdir, 'reviews'), { recursive: true });
     commit('no reviews');
@@ -3126,6 +3138,8 @@ http.createServer((req, res) => {
     must(['act', '--class', 'approve-plan', '--refs', 'bill-09-door', '--', 'plan ok'], sup);
     // ask: class one-way-door is asked as a one-way door, never as another kind, and never with a default
     // the same decision again is refused, with the answer to cite; something material changed lets it through, said first
+    // the owner's case: the goal's door answered, then the same move asked again for a ticket, as another kind
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--ticket', 'bill-09-door', '--question', 'Move the proposal gate into a shared package?', '--recommendation', 'yes'], sup).err, new RegExp(`the owner already decided this: ${Dc} `));
     const again = ['ask', '--class', 'one-way-door', '--goal', G, '--question', 'Move the proposal gate into a shared package?', '--recommendation', 'yes'];
     assert.match(dt(again, sup).err, new RegExp(`the owner already decided this: ${Dc} .*cite the answer instead \\(--approved ${Dc} .*"- Goal-level door: ${Dc} covers this plan".*--new-because`));
     const r = dt([...again, '--new-because', 'the package now ships to a second app'], sup);
@@ -3136,8 +3150,8 @@ http.createServer((req, res) => {
     assert.match(r.err, new RegExp(`answered a similar one-way door before: ${Dc}.*never ask it again \\(supervisor\\.md §6\\): act --class approve-plan --approved ${Dc}`), 'the warning still points at citing it');
     must(['withdraw', r.out, '--reason', 'test'], sup);
     assert.match(dt(['ask', '--class', 'one-way-door', '--kind', 'owner-decision', '--goal', G, '--question', 'x?', '--recommendation', 'yes'], sup).err, /a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind owner-decision/);
-    assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door never has a default/);
-    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door never has a default/);
+    assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
   });
 
   step('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', async () => {

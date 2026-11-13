@@ -154,6 +154,11 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     assert.notEqual(reask.status, 0, 'a decision the owner made is not asked again');
     assert.match(reask.err, new RegExp(`the owner already decided this: ${q1} "Should we adopt new devteam releases without asking\\?" \\(answered "Yes" on \\d{4}-\\d{2}-\\d{2}\\)\\. .*cite the answer instead \\(--approved ${q1} on decide or act\\)\\. .*--new-because`));
     assert.match(run(old, ['ask', '--question', 'x?', '--new-because', '  '], SUP).err, /--new-because .*can't be blank/);
+    // nothing the owner answered is like it: no "Asked again because" on a first question
+    const first = run(old, ['ask', '--question', 'Which colour should the alarm light be?', '--new-because', 'it changed'], SUP);
+    assert.equal(first.status, 0, first.err);
+    assert.match(first.err, /--new-because is for asking again what the owner answered; nothing they answered is like this, so it is left off/);
+    assert.equal(JSON.parse(ok(old, ['questions', '--id', first.out.trim(), '--json']))[0].new_because, null);
     const near = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'governance-edit', '--new-because', 'the releases now change the merge gate'], SUP);
     assert.equal(near.status, 0, near.err);
     const nv = JSON.parse(ok(old, ['questions', '--id', near.out.trim(), '--json']))[0];
@@ -164,9 +169,10 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     assert.match(near.err, new RegExp(`answered a similar question before: ${q1} .*otherwise it approves nothing here`));
     const far = run(old, ['ask', '--question', 'Which colour should the login button be?'], SUP);
     assert.doesNotMatch(far.err, /standing rule|answered a similar|may bear/, far.err);
-    // asked in another class, it is still the decision the owner made: refused without --new-because
-    assert.match(run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP).err, /already decided this/, 'another type is the same question');
-    const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design', '--new-because', 'a design question now'], SUP);
+    // asked in another class, the earlier answer can't be cited for it (the kit refuses it), so it is asked
+    const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP);
+    assert.equal(other.status, 0, other.err);
+    assert.doesNotMatch(other.err, /already decided/);
     assert.match(other.err, /an accepted rule may bear on this: k-\S+ .*It approves nothing here/, 'a rule for another class only bears on it');
   } finally { F.done(); }
 });
@@ -183,8 +189,11 @@ test('ask refuses only a decision the owner answered: not a defaulted or open on
     const sf = path.join(log, fs.readdirSync(log).find((f) => f.startsWith('supervisor-')));
     fs.appendFileSync(sf, `${JSON.stringify({ v: 1, id: qd, type: 'question', op: 'set', at: '2099-01-01T00:00:00.000Z', by: 'supervisor', status: 'defaulted' })}\n`);
     assert.equal(JSON.parse(ok(old, ['questions', '--id', qd, '--json']))[0].status, 'defaulted');
-    for (const [q, near] of [[qo, 'Should the nightly export include the archived invoices too?'], [qd, 'Should the weekly digest list each failed payment retry?']]) {
-      const r = run(old, ['ask', '--question', near, '--recommendation', 'yes'], SUP);
+    // and a clarification the owner answered: clarifying again is never refused, only mentioned
+    const qc = ok(old, ['ask', '--kind', 'clarification', '--question', 'Do refunds go back to the original card?'], SUP).trim();
+    ok(old, ['answer', qc, 'yes']);
+    for (const [q, near, kind] of [[qo, 'Should the nightly export include the archived invoices too?'], [qd, 'Should the weekly digest list each failed payment retry?'], [qc, 'Do refunds go back to the original card?', 'clarification']]) {
+      const r = run(old, ['ask', '--question', near, '--recommendation', 'yes', ...(kind ? ['--kind', kind] : [])], SUP);
       assert.equal(r.status, 0, `${q}: ${r.err}`);
       assert.doesNotMatch(r.err, /already decided/);
     }
