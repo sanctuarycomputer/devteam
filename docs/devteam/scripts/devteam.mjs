@@ -578,7 +578,94 @@ function settingsAt(ref, { orNull = false } = {}) {
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
-  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+  // gates run in their order, one after another in one checkout, so their order is the owner's too:
+  // compared as written (key order included), not canonically
+  const differs = (k) => (k === 'gates' ? JSON.stringify(a[k]) !== JSON.stringify(b[k]) : canonical(a[k]) !== canonical(b[k]));
+  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => differs(k)).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+}
+// Adding a gate is the supervisor's call when it only adds (constitution.md §4: development-only
+// tools are the supervisor's): a new check makes merges stricter, never looser. A gate's command runs
+// with the supervisor's own environment, as every gate's does, so it gives the supervisor nothing it
+// can't already do in its shell; that is why merge takes it only from the supervisor's own chore PR
+// (a planner's plan PR stays the owner's), and logs it as an act the owner can correct. So a chore may change
+// settings.gates without the owner only when it adds new entries after the ones main has, and
+// leaves every one of those byte-identical (its text as JSON, field order included), in main's
+// order, none removed or renamed. A new entry is a lowercase name (a letter first, so it can't be a
+// number JavaScript iterates before main's gates) and a gate of the fields the kit knows (cmd,
+// paths, junit, mode): a field the kit adds later, which might widen what a gate is, stays the
+// owner's to set. The head's settings block must not repeat a key under gates (JSON.parse keeps the
+// last one silently, so a second "lint" would replace main's out of sight). Read from the trees, so
+// no log line changes the answer. Returns { added: [names] }, or { problem } saying why it is
+// still the owner's gate-change. worktree_setup and worktree_files are not covered: both act on the
+// checkout before every gate runs, so even an addition changes what main's gates see.
+const GATE_ADD_NAME = /^[a-z][a-z0-9-]{0,39}$/;
+const GATE_ADD_FIELDS = ['cmd', 'paths', 'junit', 'mode'];
+const settingsBlockAt = (ref) => git(['show', `${ref}:${projectRel}/settings.md`])?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1] ?? null;
+function gateAdditions(base, head) {
+  const a = settingsAt(base), b = settingsAt(head);
+  if (!a || !b) return { problem: 'settings.md is not readable' };
+  const text = settingsBlockAt(head);
+  const dups = text === null ? [] : jsonDuplicateKeys(text);
+  const mine = dups?.filter((k) => k[0] === 'gates');
+  if (mine === undefined) return { problem: 'settings.md is not valid JSON' };
+  if (mine.length) return { problem: `it repeats ${[...new Set(mine.map((k) => k.join('.')))].join(', ')} in settings.md` };
+  const before = a.gates === undefined ? {} : a.gates;
+  if (!isObj(before) || !isObj(b.gates)) return { problem: 'gates is not an object' };
+  const was = Object.keys(before), now = Object.keys(b.gates);
+  const gone = was.filter((k) => !Object.hasOwn(b.gates, k));
+  if (gone.length) return { problem: `it removes ${gone.join(', ')}` };
+  const edited = was.filter((k) => JSON.stringify(before[k]) !== JSON.stringify(b.gates[k]));
+  if (edited.length) return { problem: `it changes ${edited.join(', ')}` };
+  if (now.slice(0, was.length).some((k, i) => k !== was[i])) return { problem: 'it reorders the gates main has' };
+  const added = now.slice(was.length);
+  for (const n of added) { const p = newGateProblem(n, b.gates[n]); if (p) return { problem: `new gate ${JSON.stringify(n).slice(0, 60)}: ${p}` }; }
+  return { added };
+}
+function newGateProblem(name, spec) {
+  if (!GATE_ADD_NAME.test(name)) return 'a new gate is a short lowercase name, a letter first (shellcheck, lint-css)';
+  if (!isObj(spec) && typeof spec !== 'string') return 'a gate is a command, or an object with cmd';
+  const s = typeof spec === 'string' ? { cmd: spec } : spec;
+  const extra = Object.keys(s).filter((k) => !GATE_ADD_FIELDS.includes(k));
+  if (extra.length) return `it sets ${extra.join(', ')}; a new gate the owner hasn't approved has only ${GATE_ADD_FIELDS.join(', ')}`;
+  if (typeof s.cmd !== 'string' || !s.cmd.trim() || s.cmd.length > 500 || UNSAFE_TEXT.test(s.cmd)) return 'cmd is one line of plain text, at most 500 characters';
+  if (s.paths !== undefined && !(Array.isArray(s.paths) && s.paths.length && s.paths.every((p) => typeof p === 'string' && p && !UNSAFE_TEXT.test(p)))) return 'paths is a list of globs';
+  if (s.junit !== undefined && !(typeof s.junit === 'string' && s.junit && !UNSAFE_TEXT.test(s.junit) && !path.isAbsolute(s.junit) && !s.junit.split(/[\\/]/).includes('..'))) return 'junit is a path inside the checkout';
+  if (s.mode !== undefined && !['enforced', 'ratchet'].includes(s.mode)) return 'mode is "enforced" or "ratchet"';
+  return null;
+}
+// The keys JSON text repeats inside one object, each as its path ([key, …]), or undefined when the
+// text isn't JSON. JSON.parse keeps the last of a repeated key and says nothing.
+function jsonDuplicateKeys(text) {
+  try { JSON.parse(text); } catch { return undefined; }
+  const dups = [];
+  let i = 0;
+  const ws = () => { while (' \t\n\r'.includes(text[i]) && i < text.length) i++; };
+  const str = () => { const s = i++; while (text[i] !== '"') i += text[i] === '\\' ? 2 : 1; i++; return JSON.parse(text.slice(s, i)); };
+  const val = (at) => {
+    ws();
+    if (text[i] === '{') {
+      i++; ws();
+      if (text[i] === '}') { i++; return; }
+      const seen = new Set();
+      for (;;) {
+        ws(); const k = str();
+        if (seen.has(k)) dups.push([...at, k]);
+        seen.add(k);
+        ws(); i++; // the colon
+        val([...at, k]); ws();
+        if (text[i++] === '}') return;
+      }
+    }
+    if (text[i] === '[') {
+      i++; ws();
+      if (text[i] === ']') { i++; return; }
+      for (let n = 0; ; n++) { val([...at, n]); ws(); if (text[i++] === ']') return; }
+    }
+    if (text[i] === '"') { str(); return; }
+    while (i < text.length && !' \t\n\r,]}'.includes(text[i])) i++;
+  };
+  val([]);
+  return dups;
 }
 // A link is classified by both sides: an owner's kind (LINK_KINDS[k].ownedByOwner: repo) on
 // either side makes every change to it the owner's; an add, a removal or a kind flip is
@@ -4387,23 +4474,31 @@ function cmdMerge() {
   // owner answer; real kit files need it in a kit class (KIT_CLASSES). project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
+  // gates this PR adds as the supervisor's own call (gateAdditions): run at its head below, and
+  // logged as their own gate-add act once it lands
+  let gateAdds = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
-    const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
+    // Only a chore: the supervisor's own PR. A plan PR is a planner's, and a ticket's can't change
+    // settings.md at all, so a gate added there is still the owner's gate-change.
+    const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
+    if (gateAdd?.added?.length) { gateAdds = gateAdd.added.map((n) => [n, settingsAt(sha).gates[n]]); out(`adds gate${gateAdds.length > 1 ? 's' : ''} ${gateAdd.added.join(', ')} and leaves main's as they are: a new check is the supervisor's call (constitution.md §4), to be logged as a gate-add act when it lands`); }
+    const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
     fails.push(...registryActFails(base, sha));
     fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
+      const gatesWhy = gateAdd?.problem && changed.some((c) => c.key === 'gates') ? ` (gates: ${gateAdd.problem}; only adding a gate is the supervisor's)` : '';
       // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
       // only when every changed setting is of such a class, and only the owner's own accepted rule.
       const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
       if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
@@ -4539,6 +4634,23 @@ function cmdMerge() {
       R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   }
+  // A gate this PR adds runs at its head before it lands, on every kind of PR: one that fails there
+  // would refuse every merge after it, and taking it out again is the owner's gate-change. A
+  // ratchet gate may fail (pre-existing debt is what ratchet mode is for).
+  if (!fails.length && gateAdds?.length) {
+    const wt = detachedWorktree(sha, `gate-add-${slug(branch)}`, R);
+    try {
+      for (const [name, spec] of gateAdds) {
+        const started = Date.now();
+        let ok = true;
+        try { execFileSync('sh', ['-c', typeof spec === 'string' ? spec : spec.cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(null, R) }); } catch { ok = false; }
+        appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha, tests_total: 0, tests: [], preexisting: !ok && spec.mode === 'ratchet' ? true : undefined }, 'supervisor');
+        if (!ok && spec.mode !== 'ratchet') fails.push(`the gate ${name} this PR adds fails at ${sha.slice(0, 12)}: fix it, or add it with "mode": "ratchet", since a failing gate would refuse every merge after it`);
+      }
+    } finally {
+      R.git(['worktree', 'remove', '--force', wt], R.root);
+    }
+  }
   if (fails.length) report(fails, '');
   if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}`);
   const mainBranch = S.main_branch;
@@ -4562,6 +4674,12 @@ function cmdMerge() {
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
   const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
+  // so the owner sees each new check in the act feed and can correct it.
+  if (gateAdds?.length) {
+    const ga = appendLog({ type: 'act', class: 'gate-add', what: `added gate${gateAdds.length > 1 ? 's' : ''} ${gateAdds.map(([n, spec]) => `${n} (${JSON.stringify(typeof spec === 'string' ? spec : spec.cmd).slice(0, 200)})`).join(', ')} to settings.gates by merging ${branch} at ${sha}`, refs: [...act.refs, act.id], reversible: false }, 'supervisor');
+    out(`added gate${gateAdds.length > 1 ? 's' : ''} ${gateAdds.map(([n]) => n).join(', ')} (${ga.id})`);
+  }
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
