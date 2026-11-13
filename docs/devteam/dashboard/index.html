@@ -3207,9 +3207,8 @@ function showPreview(name, info) {
 // Only a refusal of the lens itself says so (what the app's own frames are denied is the app's business).
 document.addEventListener('securitypolicyviolation', (e) => {
   if (TS.kind !== 'preview' || !String(e.violatedDirective).startsWith('frame-src')) return;
-  let lens = null;
-  try { lens = new URL($('pv-frame').getAttribute('src'), location.href).origin; } catch {}
-  if (!lens || !String(e.blockedURI).startsWith(lens)) return;
+  // the blocked address's origin must be the lens's exactly: a longer port (:48011) shares its prefix
+  try { if (new URL(e.blockedURI).origin !== new URL($('pv-frame').getAttribute('src'), location.href).origin) return; } catch { return; }
   $('av-note').hidden = false;
   $('av-note').textContent = 'Reload to view this preview';
 });

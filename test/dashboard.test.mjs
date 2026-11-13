@@ -3230,6 +3230,9 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     // only the lens's own refusal says to reload: another frame's is not this note's to say
     await p.ev(`(() => { const n = document.getElementById('av-note'); n.hidden = true; n.textContent = ''; document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: 'http://127.0.0.1:1/other', originalPolicy: '' })); return true; })()`);
     assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'a refusal of another address says nothing');
+    // the lens's address with a longer port after it is another address, not the lens
+    await p.ev(`(() => { document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: new URL(document.getElementById('pv-frame').src).origin + '9/.devteam/lens', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'a refusal of a longer port says nothing');
     await p.ev(`(() => { document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: new URL(document.getElementById('pv-frame').src).origin + '/.devteam/lens', originalPolicy: '' })); return true; })()`);
     assert.equal(await p.ev(`document.getElementById('av-note').textContent`), 'Reload to view this preview', 'the lens\'s own does');
     assert.equal(await p.ev(`document.getElementById('av-title').textContent`), 'Checkout');
