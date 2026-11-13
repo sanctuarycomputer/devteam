@@ -85,10 +85,11 @@ test('every kind of line takes a newer kit\'s field: new lines, owner lines, pla
   try {
     const at = () => new Date().toISOString();
     const sup = path.join(old, 'docs/devteam/run/log', `supervisor-${month()}.jsonl`);
-    // an unknown field on a new line, and a prototype name: both stripped and listed
+    // an unknown field on a new line, and a prototype name: both stripped and listed (not figures,
+    // which an observation now has)
     const oid = ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'seed'], SUP).trim();
     const nid = `${oid.replace(/-\d{9}-supervisor$/, '')}-${String(Number(oid.split('-')[2]) + 1).padStart(9, '0')}-supervisor`;
-    fs.appendFileSync(sup, line({ id: nid, type: 'observation', op: 'new', at: at(), by: 'supervisor', source: 'metrics', subject: 'app', kind: 'note', detail: 'from a newer kit', figures: { n: 1 }, constructor: 1 }));
+    fs.appendFileSync(sup, line({ id: nid, type: 'observation', op: 'new', at: at(), by: 'supervisor', source: 'metrics', subject: 'app', kind: 'note', detail: 'from a newer kit', insights: { n: 1 }, constructor: 1 }));
     // a set line with only unknown fields changes nothing
     const pid = ok(old, ['problem', 'add', '--title', 'slow page', '--severity', '1'], SUP).trim();
     fs.appendFileSync(sup, line({ id: pid, type: 'problem', op: 'set', at: at(), by: 'supervisor', figures: { n: 2 } }));
@@ -103,10 +104,10 @@ test('every kind of line takes a newer kit\'s field: new lines, owner lines, pla
     fs.appendFileSync(plan, line({ id: 'pay-01-start', type: 'ticket', op: 'new', at: at(), by: 'plan-pay', title: 'start', feature: 'pay', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['src/**'], done_when: ['its test passes in CI'], figures: { n: 4 } }));
     const r = run(old, ['log-check']);
     assert.equal(r.status, 0, r.err || r.out);
-    for (const want of [/observation\.figures, constructor/, /problem\.figures/, /owner-.*problem\.figures/, /plan-pay\.jsonl.*ticket\.figures/]) assert.match(r.out, want);
+    for (const want of [/observation\.insights, constructor/, /problem\.figures/, /owner-.*problem\.figures/, /plan-pay\.jsonl.*ticket\.figures/]) assert.match(r.out, want);
     const o = json(ok(old, ['log', '--id', nid, '--json']))[0];
     assert.equal(o.detail, 'from a newer kit');
-    assert.ok(!Object.hasOwn(o, 'figures') && !Object.hasOwn(o, 'constructor'));
+    assert.ok(!Object.hasOwn(o, 'insights') && !Object.hasOwn(o, 'constructor'));
     assert.equal(json(ok(old, ['log', '--id', pid, '--json']))[0].status, 'owned', 'the owner\'s known field applies');
     assert.ok(json(ok(old, ['log', '--id', 'pay-01-start', '--json']))[0], 'the plan file\'s ticket folds');
     assert.equal(json(ok(old, ['dashboard-data'])).ooda.log.unknown, 4, 'the dashboard counts what a newer kit wrote');

@@ -83,6 +83,8 @@ Leave out what isn't the supervisor choosing to ask: the kinds whose job is to a
 
 Write down the question ids each check caught. On a kit too old for `search --type question`, compare by reading `questions --all --json` alone.
 
+Each repo's weekly counts help with the first three: `log --type observation --json` holds one record of kind `learning` per ended week, with its `week` and `figures` (informed, autonomous, trusted). Compare the last few weeks rather than one; a count under five says little.
+
 **Signals.** Some of what you see is a symptom, and relaying it is the failure this review exists to catch. Each of these gets a "why?" answered before anything goes in `NOTES.md`, at the review and at any check-in that sees one:
 - a supervisor asking the owner in chat instead of with an Inbox question;
 - a goal whose latest reading is at or past its target but whose status isn't `met` (`goal --json`: `status`, and the last of `readings` against `measure.target` in the way `measure.direction` says);

@@ -2777,6 +2777,9 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   const soon = async (expr, what) => { for (let i = 0; i < 400; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
   const card = (sel) => `#observations [data-open="observation/${sel}"]`;
   await soon(`!!document.querySelector('${card(O1)}')`, 'the observation card');
+  // a young instance, no weekly learning record yet: tiles above the tabs, not charts
+  assert.match(await p.ev(`document.querySelector('#learning [data-learn="young"]')?.textContent ?? ''`), /The loop needs a few weeks of calls, answers and lessons before trends mean anything/);
+  assert.equal(await p.ev(`document.querySelectorAll('#learning svg').length`), 0);
   assert.equal(await p.ev(`document.querySelector('${card(O1)} .place').textContent`), 'Part of a recurring signal (2 of 3)');
   // an o- id in text links to its sidepeek
   assert.equal(await p.ev(`document.querySelector('${card(O2)}').querySelector('a[href="#observation/${O1}"]') !== null`), true, 'an o- id in text is a link');

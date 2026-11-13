@@ -919,6 +919,13 @@ exit 0
       }
     ],
     "answered": [],
+    "learning_totals": {
+      "calls": 5,
+      "lessons": 1,
+      "corrections": 0
+    },
+    "learning_marks": [],
+    "learning": [],
     "log": {
       "lines": 14,
       "errors": 0,
