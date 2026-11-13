@@ -12277,8 +12277,13 @@ async function cmdDashboard() {
   // Where the dashboard's own stage may frame a preview's lens, as of this request (decision 5): each
   // preview's own name through the box's gateway, or this laptop's relays open now, each as
   // previewStage gives it. Never a wildcard: an agent can answer on any instance name. With none,
-  // 'self' alone, as before.
-  const stageFrames = () => (previewBox() ? (previewServed() ? readPreviews().map(previewLink) : []) : [...relays.values()].filter((R) => R.port).map((R) => R.own));
+  // 'self' alone, as before. A relay counts only while its record is there and names its app's port:
+  // one whose preview has stopped or moved, and which the tick hasn't closed yet, is framed no more.
+  const stageFrames = () => {
+    if (previewBox()) return previewServed() ? readPreviews().map(previewLink) : [];
+    const live = new Map(readPreviews().map((r) => [r.name, r.port]));
+    return [...relays].filter(([n, R]) => R.port && live.get(n) === R.app).map(([, R]) => R.own);
+  };
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
