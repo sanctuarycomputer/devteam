@@ -4933,10 +4933,15 @@ async function load({ force = false } = {}) {
   loading = loadNow();
   try { return await loading; } finally { loading = null; }
 }
+// A refresh gives up after READ_GIVE_UP_MS, so one read the server never answers can't hold the
+// one-at-a-time guard: the next poll tries again. The first read waits as long as the server does.
+const READ_GIVE_UP_MS = 30000;
 async function loadNow() {
   let d;
+  const stop = new AbortController();
+  const late = DATA ? setTimeout(() => stop.abort(), READ_GIVE_UP_MS) : null;
   try {
-    const r = await fetch('/api/data');
+    const r = await fetch('/api/data', { signal: stop.signal });
     const pv = r.headers.get('x-devteam-page');
     if (pv) { if (!PAGE_VERSION) PAGE_VERSION = pv; else if (pv !== PAGE_VERSION) $('updated').hidden = false; }
     // what the cloud box serves; absent on a laptop, and a header that doesn't parse counts as absent
@@ -4949,8 +4954,8 @@ async function loadNow() {
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   } catch (e) {
     $('err').textContent = 'could not load (see the top of the page)';
-    return showFailure(e.message || String(e));
-  }
+    return showFailure(stop.signal.aborted ? `the server did not answer in ${READ_GIVE_UP_MS / 1000} s; trying again` : e.message || String(e));
+  } finally { clearTimeout(late); }
   $('err').textContent = '';
   $('banner').hidden = true;
   $('loading').hidden = true;

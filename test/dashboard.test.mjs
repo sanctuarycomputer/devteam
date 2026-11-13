@@ -16,8 +16,8 @@ import { canDrive, openChrome } from './lib/chrome.mjs';
 // A wait on a condition in a page. Page.navigate answers before the new page is parsed, so an
 // evaluation that throws (the last page still there, or the new one half parsed) is "not yet"; timed
 // out, it says where the tab is and the last error, so a page that never became the one expected
-// reads as that.
-const soonIn = (p, ms = 30000) => async (expr, what) => {
+// reads as that. server, if given, adds the end of what the dashboard's server has said.
+const soonIn = (p, ms = 30000, server = null) => async (expr, what) => {
   const end = Date.now() + ms;
   for (;;) {
     let v, err = null;
@@ -25,7 +25,9 @@ const soonIn = (p, ms = 30000) => async (expr, what) => {
     if (v) return v;
     if (Date.now() > end) {
       const at = await p.ev('[location.href, document.title, document.readyState]').catch((e) => e.message);
-      assert.fail(`timed out: ${what}; the tab is at ${JSON.stringify(at)}${err ? `; last: ${err.message}` : ''}`);
+      // with the fixture's fetch hook: the page's last /api/data reads, a stuck one with its age so far
+      const reads = await p.ev('(window.__reads ?? []).slice(-5).map((x) => x.ms === null ? `in flight ${Date.now() - x.at} ms` : `${x.status} in ${x.ms} ms`)').catch(() => []);
+      assert.fail(`timed out: ${what}; the tab is at ${JSON.stringify(at)}${err ? `; last: ${err.message}` : ''}${reads.length ? `; its last data reads: ${reads.join(', ')}` : ''}${server ? `; the server said, last: ${JSON.stringify(String(server()).slice(-600))}` : ''}`);
     }
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -327,7 +329,16 @@ const POLL_FAST = `(() => {
   window.__gate = null;
   window.__answerHold = null;
   const inner = async (u, o) => {
-    if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
+    // each read's start and end (a held one starts when the gate opens), so a wait that times out can
+    // say whether a read was stuck on the server, and for how long
+    if (String(u).startsWith('/api/data')) {
+      window.__polls++;
+      if (window.__gate) await window.__gate;
+      const x = { at: Date.now(), ms: null, status: null };
+      (window.__reads ??= []).push(x);
+      if (window.__reads.length > 20) window.__reads.shift();
+      try { const r = await rf(u, o); x.status = r.status; return r; } catch (e) { x.status = String(e.message || e); throw e; } finally { x.ms = Date.now() - x.at; }
+    }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
     // every owner action recorded as sent, and held on the wire, as a slow server would hold it
     if (o?.method === 'POST' && String(u).startsWith('/api/')) { (window.__posts ??= []).push({ url: String(u), body: o.body }); if (window.__postHold) await window.__postHold; }
@@ -429,7 +440,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
-  const soon = soonIn(p, 15000);
+  const soon = soonIn(p, 15000, () => dash.out());
   const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
   const hold = () => p.ev('void (window.__postHold = new Promise((r) => { window.__let = r; }))');
   const letGo = () => p.ev('window.__let(); window.__postHold = null; void 0');
@@ -543,7 +554,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
-    const soon = soonIn(p, 15000);
+    const soon = soonIn(p, 15000, () => dash.out());
     await soon(`!!document.querySelector('${box}')`, 'the question card');
     // Answered by polls actually arriving, however long /api/data takes.
     const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
@@ -674,6 +685,27 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
     });
   }
+});
+
+test('a slow data run: a read with data to fall back on has it at once, marked stale, and the run still lands', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-slow-data-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  // waiting no time at all on a run: every read after the first is the last good data
+  const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_HUB_PORT: String(PORTS + 40), DEVTEAM_PORT_BASE: String(PORTS + 41), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'slow');
+  const ask = (q) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', q], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
+  ask('First?');
+  const port = await freePort();
+  const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => dash.stop());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  const read = async () => { const r = await fetch(`http://127.0.0.1:${port}/api/data`); return { stale: r.headers.get('x-devteam-stale') === 'true', asked: (await r.json()).questions.map((q) => q.question) }; };
+  assert.deepEqual(await read(), { stale: false, asked: ['First?'] }, 'the first read waits for its run: there is nothing to fall back on');
+  ask('Second?');
+  assert.deepEqual(await read(), { stale: true, asked: ['First?'] }, 'a read during a run has the last good data, marked stale');
+  // the run that read started goes on, and a later read has what it found
+  await until(async () => (await read()).asked.includes('Second?'), 'the run landing');
 });
 
 test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {

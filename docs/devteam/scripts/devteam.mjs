@@ -10760,6 +10760,8 @@ const RESTART_MAX = 3;
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
+// How long a dashboard read waits on a dashboard-data run before it has the last good data instead.
+const DATA_WAIT_MS = Number(process.env.DEVTEAM_DATA_WAIT_MS ?? 20000);
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -12198,7 +12200,8 @@ async function cmdDashboard() {
       accountsSaid = said;
     });
   };
-  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes: each
+  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
+  // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
   let lastData = null;
@@ -12255,7 +12258,11 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
-      const r = await dashboardData();
+      // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
+      // the run goes on and the next read has it, but no page waits minutes on a stuck child.
+      let waited;
+      const r = await (lastData === null ? dashboardData() : Promise.race([dashboardData(), new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); })]));
+      clearTimeout(waited);
       if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
       // The page in use says which version of itself it is: an open tab keeps the code it loaded,
       // so after a kit update it compares this with the first one it saw and offers a reload.
