@@ -24,6 +24,18 @@ jobs:
       # the kit drives workers through tmux; the tests run it on servers of their own, through a shim
       # that refuses the machine's default server (test/lib/kit.mjs)
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
+      # test/gitleaks.test.mjs runs the kit's gitleaks config through gitleaks itself: a pinned
+      # release, checked against its published sha256, and required (DEVTEAM_TEST_GITLEAKS) so the
+      # test can't fall back to its regex-only check here
+      - if: matrix.part == 'rest'
+        run: |
+          set -euo pipefail
+          V=8.30.1
+          SHA=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -fsSL --retry 3 -o /tmp/gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "${SHA}  /tmp/gitleaks.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
+          gitleaks version
       # test files are *.test.mjs directly under test/; test/lib holds helpers, which node --test's
       # own discovery would also pick up
       - if: matrix.part == 'chain'
@@ -32,4 +44,6 @@ jobs:
       - if: matrix.part == 'rest'
         run: node --test test/bounds.test.mjs
       - if: matrix.part == 'rest'
+        env:
+          DEVTEAM_TEST_GITLEAKS: '1'
         run: node --test --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')

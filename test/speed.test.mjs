@@ -171,7 +171,7 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
   const release = path.join(base, 'release');
   write(path.join(fake, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in\n  send-keys) while [ ! -f "${release}" ]; do sleep 0.1; done ;;\n  display-message) echo "0 claude" ;;\nesac\nexit 0\n`);
   fs.chmodSync(path.join(fake, 'tmux'), 0o755);
-  write(path.join(root, 'docs/devteam/run/supervisor-pane'), '%1');
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(root, 'docs/devteam/run', n), '%1');
   const env = { ...process.env, PATH: `${fake}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const dt = (args, role = {}) => execFileSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }).trim();
