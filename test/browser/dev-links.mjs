@@ -261,14 +261,16 @@ function makeApp() {
   const app = path.join(repo, '.worktrees', 'demo-01-page');
   git(['worktree', 'add', '-q', '-b', 'ticket/demo-01-page', app, 'HEAD']);
   fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify({ name: 'dev-links-app', private: true, type: 'module' }));
-  fs.writeFileSync(path.join(app, 'index.html'), '<!doctype html><title>Vite page</title><div id="app"></div><script>document.documentElement.dataset.boot = String(performance.timeOrigin)</script><script type="module" src="/main.js"></script>\n');
+  fs.writeFileSync(path.join(app, 'index.html'), '<!doctype html><title>Vite page</title><div id="app"></div><a id="next" href="/next" style="position:fixed;right:24px;bottom:24px">Next page</a><script>document.documentElement.dataset.boot = String(performance.timeOrigin)</script><script type="module" src="/main.js"></script>\n');
   writeMain(app, 'hello one');
   say('installing vite (npm, the one network step)');
   execFileSync('npm', ['install', '--no-audit', '--no-fund', '--silent', 'vite@5'], { cwd: app, stdio: 'inherit', env: { ...process.env, PATH: `${nodeBin}${path.delimiter}${process.env.PATH}`, TMUX_TMPDIR: tmuxDir } });
   return app;
 }
-function writeMain(app, text) {
-  fs.writeFileSync(path.join(app, 'main.js'), `document.getElementById('app').textContent = ${JSON.stringify(text)};\nif (import.meta.hot) import.meta.hot.accept();\n`);
+// top: an edit that also moves the element down, so a pin on it has to follow it
+function writeMain(app, text, { top = null } = {}) {
+  const move = top === null ? '' : `document.getElementById('app').style.marginTop = '${top}px';\n`;
+  fs.writeFileSync(path.join(app, 'main.js'), `document.getElementById('app').textContent = ${JSON.stringify(text)};\n${move}if (import.meta.hot) import.meta.hot.accept();\n`);
 }
 function startDashboard(port) {
   const p = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env, stdio: 'ignore' });
@@ -287,10 +289,14 @@ async function throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix, ap
   const clip = await browser.readClipboard(dashUrl);
   assert.equal(clip, previewUrl);
   stepOk(`Copy link put ${clip} on the clipboard, from the hub's frame`);
+  // Open: the viewer, in a tab of its own; the page itself is the link the card copies
   const before = new Set(browser.pages().map((s) => s.targetId));
-  await browser.click(hubUrl, dashUrl, `${card} a[target=_blank]`);
-  const tab = await until(() => browser.pages().find((s) => !before.has(s.targetId) && (s.url ?? '').startsWith(previewUrl)), 'Open to make a new tab at the preview');
-  stepOk(`Open made a new tab at ${tab.url}`);
+  await browser.click(hubUrl, dashUrl, `${card} a.av-open`);
+  const viewerTab = await until(() => browser.pages().find((s) => !before.has(s.targetId) && /\/view\/preview\//.test(s.url ?? '')), 'Open to make a new tab at the viewer');
+  stepOk(`Open made a new tab at the viewer, ${viewerTab.url}`);
+  await browser.cdp.send('Target.closeTarget', { targetId: viewerTab.targetId });
+  const tab = await browser.newPage(previewUrl);
+  stepOk(`the copied link opens in a tab of its own: ${tab.url}`);
   await until(() => browser.evalIn(previewUrl, `document.getElementById('app')?.textContent === 'hello one'`), 'the Vite page to render');
   stepOk('the new tab shows the Vite page');
   const hmr = await until(() => tab.sockets.find((w) => w.url.startsWith(socketPrefix) && w.status === 101), 'the HMR socket to open');
@@ -321,6 +327,84 @@ async function laptop({ HUB, DASH, app }) {
   await browser.cdp.send('Browser.grantPermissions', { origin: `http://127.0.0.1:${DASH}`, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
   await throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix: `ws://127.0.0.1:${previewPort}/?token=`, app });
   return { name, previewPort, hub };
+}
+
+// ===== threads on a running app: the viewer through the laptop's relay, a pin through hot reload =====
+async function previewThreads({ DASH, name, previewPort, app }) {
+  const viewer = `http://127.0.0.1:${DASH}/view/preview/${name}`;
+  const tab = await browser.newPage(viewer);
+  // a relay this tab's own ask opened makes it load once more (decision 6): either way its lens says ready, on /
+  await until(() => browser.evalMain(viewer, `TS.ready && TS.route === '/'`), 'the lens through the relay');
+  const lensUrl = await browser.evalIn(viewer, `document.getElementById('pv-frame').src`);
+  assert.match(lensUrl, /^http:\/\/127\.0\.0\.1:48\d\d\/\.devteam\/lens\?route=%2F$/);
+  const relay = new URL(lensUrl);
+  assert.notEqual(relay.port, String(previewPort), 'the relay is not Vite\'s own port');
+  assert.equal(await browser.evalMain(viewer, 'TS.origin'), relay.origin, 'what goes to the lens goes to the relay only');
+  const inApp = (expr) => browser.evalIn(lensUrl, `(() => { const o = document.getElementById('app').getBoundingClientRect(), d = document.getElementById('app').contentDocument; return ${expr}; })()`);
+  await until(() => inApp(`d && d.getElementById('app') && d.getElementById('app').textContent`), 'the Vite page inside the lens');
+  assert.equal(await inApp('d.location.origin'), relay.origin, 'the app framed on the relay, not on its own port');
+  stepOk(`the viewer frames the lens on the relay (${relay.origin}), and the lens the Vite app, both on the relay`);
+
+  const hmr = await until(() => tab.sockets.find((w) => w.url.startsWith(`ws://127.0.0.1:${relay.port}/`) && w.status === 101), 'the HMR socket through the relay');
+  assert.ok(!tab.sockets.some((w) => w.url.startsWith(`ws://127.0.0.1:${previewPort}/`)), 'no socket straight to Vite');
+  stepOk(`the app's HMR socket opened through the relay: ${hmr.url.split('?')[0]} (101), none straight to Vite on ${previewPort}`);
+
+  // Shift and point at the app's element, then click: a thread on it, at its route
+  const f = await browser.evalIn(viewer, `(() => { const r = document.getElementById('pv-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+  const el = await inApp(`(() => { const r = d.getElementById('app').getBoundingClientRect(); return { x: o.left + r.left + 10, y: o.top + r.top + r.height / 2 }; })()`);
+  await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+  // a click in the viewer's bar makes sure of the keyboard
+  const bar = await browser.evalIn(viewer, `(() => { const r = document.getElementById('av-title').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await browser.mouseAt(tab, bar.x, bar.y, 0, true);
+  await until(() => browser.evalIn(viewer, 'document.hasFocus()'), 'the keyboard in the viewer');
+  await browser.shift(tab, true);
+  await until(() => browser.evalIn(viewer, `!document.getElementById('av-over').hidden`), 'the overlay, Shift held');
+  await browser.mouseAt(tab, f.x + el.x, f.y + el.y, 8);
+  await until(() => browser.evalMain(viewer, `!document.getElementById('tl-hl').hidden && TS.hit?.anchor?.selector === '#app' && document.getElementById('tl-chip').textContent.length > 0`), 'the app\'s element named');
+  stepOk(`Shift and point over the Vite app: the lens names its element (#app), outlined, the chip "${await browser.evalIn(viewer, `document.getElementById('tl-chip').textContent`)}"`);
+  await browser.mouseAt(tab, f.x + el.x, f.y + el.y, 8, true);
+  await browser.shift(tab, false);
+  await until(() => browser.evalMain(viewer, `TL.draft?.subject?.kind === 'preview' && TL.draft.subject.anchor?.selector === '#app'`), 'a thread about to start on it');
+  await browser.evalIn(viewer, `document.getElementById('tl-c-text').focus()`);
+  await browser.typeIn(tab, 'Say hello louder');
+  await browser.enter(tab);
+  const th = await until(() => JSON.parse(dt(['thread', 'list', '--json'])).find((x) => x.subject?.kind === 'preview' && x.subject.name === name), 'the thread in the log');
+  assert.deepEqual([th.subject.route, th.subject.anchor?.selector, th.turns[0].text], ['/', '#app', 'Say hello louder']);
+  // Escape, from the card's own box, closes it: the pin stays, and the app's link is clear of the card
+  for (const type of ['keyDown', 'keyUp']) await browser.cdp.send('Input.dispatchKeyEvent', { type, key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 }, tab.sessionId);
+  await until(() => browser.evalIn(viewer, `document.getElementById('tl-card').hidden`), 'the card closed');
+  // the pin, against the element it is on: the lens found it (a rect for this thread), not the point alone
+  const where = async () => {
+    const p = await browser.evalMain(viewer, `(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && TS.rects.get(${JSON.stringify(th.id)})?.rect ? { left: parseFloat(b.style.left), top: parseFloat(b.style.top) } : null; })()`);
+    if (!p) return null;
+    const e = await inApp(`(() => { const r = d.getElementById('app').getBoundingClientRect(); return { x: o.left + r.left, y: o.top + r.top }; })()`);
+    return { dx: p.left - e.x, dy: p.top - e.y, top: e.y };
+  };
+  const before = await until(where, 'its pin, on the element the lens found');
+  stepOk(`a Shift+click on the Vite app started a thread on a preview (${name}) at route /, on #app, pinned there`);
+
+  // an edit that moves the element: hot-reloaded through the relay's socket, and the pin goes with it
+  const boot = await inApp('d.documentElement.dataset.boot');
+  const seen = hmr.frames.length;
+  writeMain(app, 'hello again, hot', { top: 120 });
+  await until(() => hmr.frames.slice(seen).some((x) => /"type":"update"/.test(x)), 'an update frame on the relay\'s socket');
+  await until(() => inApp(`d.getElementById('app').textContent === 'hello again, hot'`), 'the hot reload inside the lens');
+  assert.equal(await inApp('d.documentElement.dataset.boot'), boot, 'a hot update, not a navigation');
+  const after = await until(async () => { const w = await where(); return w && w.top > before.top && Math.abs(w.dx - before.dx) <= 1 && Math.abs(w.dy - before.dy) <= 1 ? w : null; }, 'the pin to follow its element');
+  stepOk(`an edit hot-reloaded inside the lens (an update frame through the relay, no navigation), the element moved ${Math.round(after.top - before.top)}px, and the pin re-resolved onto it`);
+
+  // a real click on the app's own link: the app navigates, and the stage's route follows
+  const next = await inApp(`(() => { const r = d.getElementById('next').getBoundingClientRect(); return { x: o.left + r.left + r.width / 2, y: o.top + r.top + r.height / 2 }; })()`);
+  const nx = f.x + next.x;
+  const ny = f.y + next.y;
+  assert.equal(await browser.evalIn(viewer, `document.elementFromPoint(${nx}, ${ny})?.id`), 'pv-frame', 'the app\'s link is under nothing of the viewer\'s');
+  await browser.mouseAt(tab, nx, ny, 0, true);
+  await until(() => browser.evalMain(viewer, `TS.route === '/next' && document.getElementById('av-where').textContent.includes('/next')`), 'the route to follow the app');
+  assert.equal(await inApp('d.location.pathname'), '/next');
+  await until(() => browser.evalIn(viewer, `!document.querySelector('#av-pins .tl-pin')`), 'the pin, on /, gone from /next');
+  stepOk('a click on a link inside the app took it to /next: the stage\'s route and its bar say so, and the pin on / is not drawn there');
+  assert.ok(!tab.sockets.some((w) => w.url.startsWith(`ws://127.0.0.1:${previewPort}/`)), 'still no socket straight to Vite');
+  await browser.cdp.send('Target.closeTarget', { targetId: tab.targetId });
 }
 
 // ===== the gateway half: a real gateway on box.localhost, a real passkey (a virtual authenticator) =====
@@ -447,9 +531,16 @@ async function threads({ DASH, pane }) {
   stepOk(`the supervisor's turn showed in the card after ${ms} ms`);
   const Q = dt(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', G, '--stake', '2', '--urgency', '1'], SUP);
   await until(() => browser.evalIn(dash, `!!document.getElementById('t-q-${Q}')`), 'the question in the card', 30000);
-  await browser.click(dash, dash, `#t-q-${Q} input[value="Yes"]`);
-  await browser.click(dash, dash, `#t-q-${Q} button[data-answer="${Q}"]`);
-  await until(() => JSON.parse(dt(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer in the log');
+  // the card rebuilds every 10 s, so each attempt finds its elements again; a click that lands on a rebuilt card is tried again
+  const answered = () => JSON.parse(dt(['questions', '--id', Q, '--json']))[0].status === 'answered';
+  await until(async () => {
+    if (answered()) return true;
+    await browser.click(dash, dash, `#t-q-${Q} input[value="Yes"]`);
+    if (!(await browser.evalIn(dash, `!!document.querySelector('#t-q-${Q} input[value="Yes"]')?.checked`))) return false;
+    try { await browser.click(dash, dash, `#t-q-${Q} button[data-answer="${Q}"]`); } catch (e) { if (!/^no /.test(e.message)) throw e; }
+    await sleep(300);
+    return answered();
+  }, 'the answer in the log', 30000);
   await until(() => browser.evalIn(dash, `!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`), 'the Inbox copy answered', 20000);
   stepOk('a question asked in the thread, answered in the card, is answered in the Inbox');
   const pinAt = () => browser.evalIn(dash, `(() => { const p = document.querySelector('.tl-pin'), g = document.querySelector('${card}'); if (!p || !g) return null; const a = p.getBoundingClientRect(), b = g.getBoundingClientRect(); return Math.round(a.left + a.width / 2 - b.right) + ',' + Math.round(a.top + a.height / 2 - b.top); })()`);
@@ -804,7 +895,8 @@ async function main() {
   startDashboard(DASH);
   browser = await new Browser().start(path.join(base, 'chrome'));
   // the laptop half leaves the hub open, framing this same dashboard: closed, so a step here reads the thread tab's page
-  if (!only) { const lap = await laptop({ HUB, DASH, app }); await browser.cdp.send('Target.closeTarget', { targetId: lap.hub.targetId }); }
+  // and the preview it offered, still running, is the app the viewer's threads are on
+  if (!only) { const lap = await laptop({ HUB, DASH, app }); await previewThreads({ DASH, name: lap.name, previewPort: lap.previewPort, app }); await browser.cdp.send('Target.closeTarget', { targetId: lap.hub.targetId }); }
   const goal = await threads({ DASH, pane });
   if (!only) await viaGateway({ HUB, DASH, app, G: block + 30, SP: block + 20, goal });
   say('all steps passed');

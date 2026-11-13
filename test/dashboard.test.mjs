@@ -1276,8 +1276,8 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
-  const ctx = vm.createContext({ TextEncoder });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey };`, ctx);
+  const ctx = vm.createContext({ TextEncoder, URL });
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
@@ -1332,8 +1332,12 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.ok(A.tBytes(JSON.stringify(fit)) <= 2500);
   assert.equal(fit.errors.length, 3, 'the errors kept while the HTML can give');
   assert.ok(fit.anchor.html.length < 1024);
-  const noHtml = A.tFit({ ...big, anchor: { tag: 'button' }, errors: ['\u0001'.repeat(200), '\u0001'.repeat(200), '\u0001'.repeat(200)] });
+  // no HTML to give: the errors give next (each '"' is two bytes in the log's JSON; a control
+  // character, which was six, is dropped now, as from an anchor's words)
+  const q = (n) => '"'.repeat(n);
+  const noHtml = A.tFit({ ...big, route: q(300), anchor: { tag: q(40), role: q(40), text: q(80), name: q(80), selector: q(200) }, errors: [q(200), q(200), q(200)] });
   assert.ok(A.tBytes(JSON.stringify(noHtml)) <= 2500 && noHtml.errors.length < 3);
+  assert.deepEqual(plain(A.tFit({ ...big, errors: ['\u0001'.repeat(200)] })).errors, [''], 'no control character kept');
   assert.ok(A.tBytes(JSON.stringify(A.tFit({ kind: 'item', ref: `goal:${G}`, quote: '"'.repeat(1500) }))) <= 2500);
   assert.deepEqual(plain(A.tFit(hit.subject)), plain(hit.subject), 'a small subject is left alone');
   // every field to its own cap, whatever the total: what a lens says is the framed page's, never trusted
@@ -1435,6 +1439,18 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(msg({ lens: 1, type: 'rects', rects: Array.from({ length: 5000 }, (_, i) => ({ key: `t-${i}`, rect: null })) }).rects.length, 200, 'at most 200');
   assert.deepEqual(plain(msg({ lens: 1, type: 'key', key: 'Delete', shift: 1 })), { type: 'key', key: 'Shift', shift: false });
   assert.deepEqual(plain(msg({ lens: 1, type: 'errors', errors: ['a', 'b', 'c', 'd'.repeat(300), 5] })).errors.map((e) => A.tBytes(e)), [1, 1, 200], 'the last three, each cut');
+  // a preview's route and errors are its app's words: no control or bidi character, as an anchor's
+  assert.deepEqual(plain(msg({ lens: 1, type: 'route', route: '/che\u202eckout\u0007' })), { type: 'route', route: '/checkout' });
+  assert.deepEqual(plain(msg({ lens: 1, type: 'errors', errors: [`Failed at ${cap} \u2066x\n`] })).errors, ['Failed at [link removed] x']);
+  assert.equal(plain(msg({ lens: 1, type: 'hit-reply', id: 'h1', anchor, route: '/a\u202eb' })).route, '/ab');
+  const pvFit = plain(A.tFit({ kind: 'preview', name: 'cool-tiger', route: '/a\u202eb', errors: ['x\u2067y'], point: { x: 1, y: 2 } }));
+  assert.deepEqual([pvFit.route, pvFit.errors], ['/ab', ['xy']], 'and what the log is sent, likewise');
+  // where a preview's lens may be told to go: a path of the app's own, and nothing else
+  const relay = 'http://127.0.0.1:4862';
+  for (const [r, want] of [['/', '/'], ['/checkout?step=2#pay', '/checkout?step=2#pay'], ['/a/../b', '/b'], ['/a b', '/a%20b']]) assert.equal(A.tGoRoute(r, relay), want, r);
+  for (const r of ['//evil.example/x', '/\\evil.example', '/\t/evil.example', 'https://evil.example/', 'javascript:alert(1)', 'checkout', '', '/.devteam/lens', '/x/%2e%2e/.devteam/lens', '/\u202ex', `/${'a'.repeat(300)}`, null, 7]) assert.equal(A.tGoRoute(r, relay), null, JSON.stringify(r));
+  assert.equal(A.tGoRoute('/x', 'https://cool-tiger.box.example.com'), '/x', "a box's preview, by its own name");
+  assert.equal(A.tGoRoute('//evil.example', null), null, 'with no origin known, still only a path');
   // the page inside an artifact, under any of its prefixes
   assert.equal(A.tArtPath('/artifact/main/pricing-mock/', 'pricing-mock'), 'index.html');
   assert.equal(A.tArtPath('/c/a.b.c/artifact/tree/abc123/pricing-mock/sub/p.html', 'pricing-mock'), 'sub/p.html');
@@ -1549,6 +1565,98 @@ addEventListener('message', (e) => { const m = e.data; if (e.source === parent &
 };
 // What an artifact's own scripts post to the page, kept for a test.
 const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); }); })();";
+// A dev server of the test's own: what it was asked (method, url, Host, Origin) is kept; its framing
+// headers are the test's (none, as dev servers send by default); it redirects /go to its own origin,
+// and answers a WebSocket upgrade with one line, then echoes what it is sent until the other end
+// ends (on /no-ws it answers 400 instead and holds its side open: what it is sent after is kept as
+// after, and noWsEnded says the other end ended). sockets: those open now.
+// pages: a page of the test's own for a path (its query aside), in place of that one.
+async function fakeApp(headers = {}, pages = {}) {
+  const A = { seen: [], marks: [], headers, sockets: new Set() };
+  A.srv = http.createServer((q, s) => {
+    // the relay's own looks (once on opening, then each tick) to know the target isn't a dashboard are not the page's traffic
+    if (q.url === '/api/hello' && !Object.hasOwn(pages, '/api/hello')) { s.writeHead(404); return s.end(); }
+    A.seen.push({ method: q.method, url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
+    A.marks.push(q.headers['x-devteam-relay'] ?? null);
+    if (q.url === '/go') { s.writeHead(302, { location: `http://localhost:${A.port}/there` }); return s.end(); }
+    s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...A.headers });
+    const own = q.url.split('?')[0];
+    s.end(Object.hasOwn(pages, own) ? pages[own] : `<!doctype html><title>App</title><button id="buy">Buy now</button><p id="url">${q.url}</p>`);
+  });
+  A.srv.on('upgrade', (q, socket) => {
+    A.seen.push({ method: 'UPGRADE', url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
+    A.sockets.add(socket);
+    socket.on('close', () => A.sockets.delete(socket));
+    socket.on('error', () => {});
+    // /silent: it takes the connection and never says a word, as a hung app would, ending its own side when the other goes
+    if (q.url.startsWith('/silent')) { socket.on('end', () => socket.end()); return socket.resume(); }
+    // /no-ws: it won't upgrade, says why, and keeps its side open (as a keep-alive server would)
+    if (q.url.startsWith('/no-ws')) { socket.on('data', (d) => { A.after = (A.after ?? '') + d; }); socket.on('end', () => { A.noWsEnded = true; }); return socket.write('HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\ncontent-length: 7\r\nconnection: keep-alive\r\n\r\nno, ws\nand then more bytes the relay never sends\n'); }
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\nhello from the app\n');
+    socket.on('data', (d) => socket.write(d));
+    // as a WebSocket server does: the other end gone, it ends its own
+    socket.on('end', () => socket.end());
+  });
+  await new Promise((r) => A.srv.listen(0, '127.0.0.1', r));
+  A.port = A.srv.address().port;
+  A.close = () => { for (const s of A.sockets) s.destroy(); A.srv.closeAllConnections?.(); A.srv.close(); };
+  return A;
+}
+// An HTTP/1.1 request by hand (fetch can't set Host or keep a socket open): the status line and headers.
+function rawRequest(port, lines) {
+  return new Promise((resolve, reject) => {
+    const c = net.connect(port, '127.0.0.1', () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
+    let got = '';
+    c.on('data', (d) => { got += d; if (/\r\n\r\n[\s\S]*\n/.test(got) || /^HTTP\/1\.1 [45]/.test(got)) { c.destroy(); resolve(got); } });
+    c.on('error', reject);
+    setTimeout(() => { c.destroy(); resolve(got); }, 3000);
+  });
+}
+// A socket by hand, kept open: what it has been sent so far, and closed once either end has closed it.
+// halfOpen: it never ends its own side, so only the other end's destroy closes it.
+function rawSocket(port, lines, { halfOpen = false } = {}) {
+  const c = net.connect({ port, host: '127.0.0.1', allowHalfOpen: halfOpen }, () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
+  const S = { c, got: '', closed: false };
+  c.once('close', () => { S.closed = true; });
+  c.on('data', (d) => { S.got += d; });
+  c.on('error', () => {});
+  return S;
+}
+// The laptop's relays, in a range of this file's own block of ports (lib/ports.mjs), off every other
+// test file's and checkout's: the ports test holds all of it.
+const RELAY_LO = PORTS + 62;
+const RELAY_HI = PORTS + 79;
+const RELAY_ENV = { DEVTEAM_RELAY_PORTS: `${RELAY_LO}-${RELAY_HI}` };
+// The dashboard framed by a page of its own origin (a preview's app navigating its lens frame, or
+// an artifact's page its own, to the dashboard's address) draws nothing and runs nothing.
+test('the dashboard inside a frame of its own origin draws one line and runs nothing', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('framed-dash');
+  undo.push(() => F.done());
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
+  const soon = soonIn(p);
+  await p.send('Page.navigate', { url: `${B}/` });
+  await soon(`document.readyState === 'complete' && typeof DATA !== 'undefined' && !!document.querySelector('.app')`, 'the dashboard itself');
+  for (const route of ['/', '/#inbox', '/view/artifact/x']) {
+    const seen = await p.ev(`new Promise((resolve) => { const f = document.createElement('iframe'); f.id = 'probe'; setTimeout(() => { const w = f.contentWindow, d = f.contentDocument; resolve({ framed: !!w.frameElement, text: d.body.textContent.trim(), app: !!d.querySelector('.app, #artifact-view'), booted: typeof w.DATA !== 'undefined' || typeof w.TS !== 'undefined', asked: w.__asked ?? null }); f.remove(); }, 2500); f.src = ${JSON.stringify(route)}; document.body.append(f); })`);
+    assert.deepEqual(seen, { framed: true, text: 'Open the dashboard in its own tab', app: false, booted: false, asked: [] }, `framed at ${route}`);
+  }
+  // the page itself, not framed, still runs
+  assert.equal(await p.ev(`!!document.querySelector('.app') && typeof DATA !== 'undefined'`), true);
+});
+
 test('the viewer: one artifact on a stage the size of the tab, the threads and hello polled, never /api/data', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
@@ -1557,7 +1665,18 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  // A page of another origin to frame the viewer from, as the hub and the owner's wrapper do: the
+  // dashboard's frame-ancestors name the hub's address, so a small server stands in as the hub.
+  const hubPort = await freePort();
+  const hub = http.createServer((q, r) => {
+    const src = new URL(q.url, 'http://x').searchParams.get('src');
+    if (!q.url.startsWith('/frame') || !src) { r.writeHead(404); return r.end(); }
+    r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    r.end(`<!doctype html><title>parent</title><body><iframe id="v" style="width:900px;height:600px" src="${B}${src.replace(/"/g, '&quot;')}"></iframe>`);
+  });
+  await new Promise((r) => hub.listen(hubPort, '127.0.0.1', r));
+  undo.push(() => new Promise((r) => { hub.closeAllConnections?.(); hub.close(r); }));
+  const dash = startDashboard(F.old, F.env({ DEVTEAM_HUB_PORT: String(hubPort) }), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
@@ -1668,41 +1787,40 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev('[DATA, document.title]'), [null, 'Viewer mock · devteam']);
   });
 
+  // the viewer framed from a page of another origin (the hub's address), read by its own script world
+  const soonV = soonIn({ ev: (e) => p.evIn(B, e) });
   await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
-    await go(`${B}/api/hello`);
-    await soon(`document.readyState === 'complete'`, 'a page of the same origin');
+    await go(`http://127.0.0.1:${hubPort}/frame?src=${encodeURIComponent('/view/artifact/viewer-mock')}`);
+    await soonV(`document.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
     // a real click, and what it should do: a headless tab can be left without the window's focus, so
     // a click that didn't move the keyboard is tried once more with the tab brought to the front
     const clickFor = async (x, y, expr, what) => {
       await p.clickAt(x, y);
-      if (await soonIn(p, 5000)(expr, what).then(() => true, () => false)) return;
+      if (await soonIn({ ev: (e) => p.evIn(B, e) }, 5000)(expr, what).then(() => true, () => false)) return;
       await p.send('Page.bringToFront');
       await p.clickAt(x, y);
-      await soon(expr, what);
+      await soonV(expr, what);
     };
-    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock'; document.body.append(f); return true; })()`);
-    await soon(`document.getElementById('v').contentDocument?.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
     await p.ev('document.body.focus(); window.focus(); true');
-    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
-    assert.equal(await p.ev(`document.getElementById('v').contentDocument.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
+    await soonV(`!document.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
+    assert.equal(await p.evIn(B, `document.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
     // a real click on the framed viewer's bar, as the hint says
     const bar = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left + 450, y: r.top + 20 }; })()`);
-    await clickFor(bar.x, bar.y, `document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+    await clickFor(bar.x, bar.y, `document.getElementById('av-hint').hidden`, 'gone once the viewer has it');
     // a click on the top page, outside the viewer, takes the keyboard back: the hint again
-    await clickFor(1100, 700, `!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
+    await clickFor(1100, 700, `!document.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
     // a click on the artifact itself, in the viewer's own frame, gives it to the viewer's page
-    const art = await p.ev(`(() => { const v = document.getElementById('v').getBoundingClientRect(), f = document.getElementById('v').contentDocument.getElementById('av-frame').getBoundingClientRect(); return { x: v.left + f.left + 200, y: v.top + f.top + 200 }; })()`);
-    await clickFor(art.x, art.y, `document.getElementById('v').contentDocument.activeElement === document.getElementById('v').contentDocument.getElementById('av-frame')`, 'the artifact has the keyboard');
-    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the artifact has it');
+    const v = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+    const f = await p.evIn(B, `(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+    await clickFor(v.x + f.x + 200, v.y + f.y + 200, `document.activeElement === document.getElementById('av-frame')`, 'the artifact has the keyboard');
+    await soonV(`document.getElementById('av-hint').hidden`, 'gone once the artifact has it');
   });
 
   await t.test("framed, as the owner wrapper frames it, a published tree this checkout lacks isn't swapped for main: the gateway grants only that tree", async () => {
-    await go(`${B}/api/hello`);
     const gone = '0'.repeat(40);
-    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock?at=tree:${gone}'; document.body.append(f); return true; })()`);
-    const inV = (e) => `(() => { const d = document.getElementById('v').contentDocument; return ${e}; })()`;
-    await soon(inV(`!d.getElementById('av-note').hidden && !!d.getElementById('av-frame').getAttribute('src')`), 'the framed viewer, its note');
-    assert.deepEqual(await p.ev(inV(`[d.getElementById('av-note').textContent, d.getElementById('av-frame').getAttribute('src'), d.defaultView.eval('TS.at')]`)), ["The published version isn't in this checkout; open it from the Library.", `/artifact/tree/${gone}/viewer-mock/`, `tree:${gone}`]);
+    await go(`http://127.0.0.1:${hubPort}/frame?src=${encodeURIComponent(`/view/artifact/viewer-mock?at=tree:${gone}`)}`);
+    await soonV(`!document.getElementById('av-note').hidden && !!document.getElementById('av-frame').getAttribute('src')`, 'the framed viewer, its note');
+    assert.deepEqual(await p.evIn(B, `[document.getElementById('av-note').textContent, document.getElementById('av-frame').getAttribute('src'), TS.at]`), ["The published version isn't in this checkout; open it from the Library.", `/artifact/tree/${gone}/viewer-mock/`, `tree:${gone}`]);
   });
 
   await t.test("an artifact /api/view can't read says so, and shows the version asked for: only nothing there falls back to main", async () => {
@@ -2263,6 +2381,426 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await soon(`!document.getElementById('artifact-view').hidden`, 'the stage');
   assert.deepEqual(await link('#av-tab'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in new tab']);
 });
+test("the laptop's relay: the lens on GET alone, the app with localhost as its Host and Origin, its framing given way only to its lens", async (t) => {
+  const F = threadsFixture('relay-http');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  // an app that refuses every frame, and names its own socket's origin in its policy
+  app.headers = { 'x-frame-options': 'DENY', 'content-security-policy': `default-src 'self'; frame-ancestors 'none'; connect-src ws://localhost:${app.port}` };
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'relay']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  // another site's page can't open one, and a GET of anything else here opens none
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'another site\'s page can\'t open one');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=quiet-otter`)).status, 404, 'no such preview');
+  // asked several times at once: one ask opened it, and only that one says so
+  const asks = await Promise.all(Array.from({ length: 6 }, async () => (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()));
+  const v = asks.find((a) => a.opened) ?? asks[0];
+  assert.deepEqual(asks.map((a) => a.opened).sort(), [false, false, false, false, false, true], 'exactly one ask opened it');
+  assert.ok(asks.every((a) => a.origin === v.origin), 'all of them the one relay');
+  assert.deepEqual((({ origin, opened }) => ({ origin, opened }))(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), { origin: v.origin, opened: false }, 'the next finds it open');
+  const R = Number(/^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin)?.[1]);
+  assert.ok(R >= RELAY_LO && R <= RELAY_HI, `a relay in the range it was given: ${v.origin}`);
+  const rel = `http://127.0.0.1:${R}`;
+  // the lens, as the gateway serves it, under a policy for the hub and every instance here
+  let r = await fetch(`${rel}/.devteam/lens?route=%2F`);
+  assert.equal(r.status, 200);
+  const G = await import('../cloud/gateway.mjs');
+  assert.equal(await r.text(), G.PREVIEW_LENS);
+  // the hub, every instance in the block, and this dashboard itself (pinned here outside the block), each once
+  const instances = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${PORTS + 1 + i}`);
+  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([...new Set([`http://127.0.0.1:${PORTS}`, ...instances, `http://127.0.0.1:${port}`, `http://localhost:${port}`])].join(' ')));
+  assert.deepEqual(app.seen.filter((x) => x.url !== '/api/hello'), [], 'the lens never asks the app (the relay\'s one look at /api/hello, to know it isn\'t a dashboard, aside)');
+  // any other method or path there is the app's
+  for (const [method, p] of [['HEAD', '/.devteam/lens'], ['POST', '/.devteam/lens'], ['GET', '/.devteam/lens/x'], ['GET', '/.devteam/lensx']]) {
+    r = await fetch(`${rel}${p}`, { method });
+    assert.equal(r.status, 200, `${method} ${p}`);
+    assert.deepEqual([app.seen.at(-1).method, app.seen.at(-1).url], [method, p]);
+  }
+  // the app sees localhost, as the gateway gives it: its Host, and an Origin that was the relay's
+  await fetch(`${rel}/page?x=1`, { method: 'POST', headers: { origin: rel }, body: 'x' });
+  assert.deepEqual(app.seen.at(-1), { method: 'POST', url: '/page?x=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  assert.equal(await statusWithHost(R, '/page', `localhost:${R}`, 'POST', { origin: `http://localhost:${R}` }), 200);
+  assert.deepEqual(app.seen.at(-1), { method: 'POST', url: '/page', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` }, 'the relay\'s other name for itself too');
+  await fetch(`${rel}/page`, { method: 'POST', headers: { origin: 'http://evil.example' }, body: 'x' });
+  assert.equal(app.seen.at(-1).origin, 'http://evil.example', 'another Origin passes as it is, for the app to refuse');
+  await fetch(`${rel}/page`, { method: 'POST', headers: { origin: B }, body: 'x' });
+  assert.equal(app.seen.at(-1).origin, B, 'the dashboard\'s own Origin is not the relay\'s');
+  // its own origin in a policy or a redirect is the relay's
+  r = await fetch(`${rel}/go`, { redirect: 'manual' });
+  assert.equal(r.headers.get('location'), `${rel}/there`);
+  // a top-level load: the app's own framing headers
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
+  assert.equal(r.headers.get('x-frame-options'), 'DENY');
+  assert.match(r.headers.get('content-security-policy'), new RegExp(`frame-ancestors 'none'; connect-src ws://127\\.0\\.0\\.1:${R}$`));
+  // framed from its own origin, which is how its lens holds it: given way to the lens, the hub and this dashboard
+  const ancestors = `'self' http://127.0.0.1:${PORTS} http://127.0.0.1:${port} http://localhost:${port}`;
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(r.headers.get('x-frame-options'), null);
+  assert.equal(r.headers.get('content-security-policy'), `default-src 'self'; frame-ancestors ${ancestors}; connect-src ws://127.0.0.1:${R}`);
+  for (const h of [{ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site' }, { 'sec-fetch-dest': 'frame', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'cross-site' }]) assert.equal((await fetch(`${rel}/`, { headers: h })).headers.get('x-frame-options'), 'DENY', JSON.stringify(h));
+  // another site's frame (or one that doesn't say whose it is) is refused outright, the lens too, as the gateway refuses it
+  const before = app.seen.length;
+  for (const dest of ['iframe', 'frame', 'object', 'embed', 'fencedframe']) {
+    for (const site of ['cross-site', 'none', null]) {
+      for (const p of ['/', '/.devteam/lens']) {
+        r = await fetch(`${rel}${p}`, { headers: { 'sec-fetch-dest': dest, ...(site ? { 'sec-fetch-site': site } : {}) } });
+        assert.equal(r.status, 403, `${dest} ${site} ${p}`);
+        assert.equal(await r.text(), 'not in another site\'s frame');
+      }
+    }
+  }
+  assert.equal(app.seen.length, before, 'none of those reached the app');
+  // an app that says nothing of frames gets that policy as its own, on that load only
+  app.headers = {};
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(r.headers.get('content-security-policy'), `frame-ancestors ${ancestors}`);
+  assert.equal((await fetch(`${rel}/`)).headers.get('content-security-policy'), null);
+  // only on its own address (DNS rebinding), and no service worker, which would outlive this preview on its port
+  const seen = app.seen.length;
+  assert.equal(await statusWithHost(R, '/', `rebound.example:${R}`), 421);
+  assert.equal(await statusWithHost(R, '/.devteam/lens', `rebound.example:${R}`), 421);
+  assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'service-worker': 'script' }), 403);
+  assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'sec-fetch-dest': 'serviceworker' }), 403);
+  assert.equal(app.seen.length, seen, 'none of those reached the app');
+  // a dev server can't take a relay's port: 4800-4899 unless told otherwise, and then the range it's given
+  assert.match(F.fails(['preview', '4801'], F.SUP), /4801 is where the dashboard's preview relays listen \(4800-4899\)/);
+  assert.match(F.fails(['preview', String(RELAY_LO + 1)], { ...F.SUP, ...RELAY_ENV }), new RegExp(`${RELAY_LO + 1} is where the dashboard's preview relays listen \\(${RELAY_LO}-${RELAY_HI}\\)`));
+  const moved = /preview (\S+) /.exec(F.sup(['preview', '4801', '--label', 'moved'], RELAY_ENV))[1];
+  F.sup(['preview', 'stop', moved]);
+  // a record from before the range stays a preview: only a new registration is refused
+  const old = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
+  write(old, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-http', session: 'supervisor', label: 'old', port: 4802, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  assert.ok(JSON.parse(F.sup(['preview', 'list', '--json'])).some((x) => x.name === 'quiet-otter' && x.port === 4802), 'still listed');
+  fs.rmSync(old);
+  // the record gone, the relay closes
+  F.sup(['preview', 'stop', name]);
+  await until(async () => { try { await fetch(`${rel}/`); return false; } catch { return true; } }, 'the relay closed with its record');
+});
+test("the laptop's relay: a port anything holds is passed over, none free keeps nothing, and a record moved closes its relay", async (t) => {
+  const F = threadsFixture('relay-ports');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ports']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const view = async () => (({ origin, opened }) => ({ origin, opened }))(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json());
+  // every port of the range held (those free now, by this test)
+  const hold = (p, h) => new Promise((resolve) => { const s = net.createServer(); s.once('error', () => resolve(null)); s.listen(p, h, () => resolve(s)); });
+  const held = new Map();
+  t.after(() => { for (const s of held.values()) s.close(); });
+  for (let p = RELAY_LO; p <= RELAY_HI; p++) { const s = await hold(p, '127.0.0.1'); if (s) held.set(p, s); }
+  assert.ok(held.size >= 3, `three ports of ${RELAY_LO}-${RELAY_HI} free to test with: ${held.size}`);
+  assert.deepEqual(await view(), { origin: null, opened: false }, 'none free');
+  assert.deepEqual(await view(), { origin: null, opened: false }, 'and asked again, it looks again');
+  // three let go: the first now a dev server's on ::1 alone (localhost), the second an old record's
+  const [a, b, c] = [...held.keys()];
+  for (const p of [a, b, c]) { await new Promise((r) => held.get(p).close(r)); held.delete(p); }
+  const six = await hold(a, '::1');
+  if (six) held.set(-1, six);
+  const rec = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
+  write(rec, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-ports', session: 'supervisor', label: 'old', port: b, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  const v = await view();
+  assert.deepEqual(v, { origin: `http://127.0.0.1:${six ? c : a}`, opened: true }, 'the first port nothing holds');
+  assert.equal((await fetch(`${v.origin}/x`)).status, 200);
+  assert.equal(app.seen.at(-1).url, '/x');
+  // its record now names another port: the relay closes on the tick after, and the next ask opens one for it
+  const app2 = await fakeApp();
+  t.after(() => app2.close());
+  const file = path.join(F.old, 'docs/devteam/run/previews', `${name}.json`);
+  write(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), port: app2.port }));
+  await until(async () => { try { await fetch(`${v.origin}/`); return false; } catch { return true; } }, 'the relay closed with its record\'s port');
+  const v2 = await view();
+  assert.equal(v2.opened, true);
+  await fetch(`${v2.origin}/moved`);
+  assert.equal(app2.seen.at(-1).url, '/moved');
+});
+test("the laptop's relay never serves a dashboard: not this one's own port, not any port that answers as one, and none registers", async (t) => {
+  const F = threadsFixture('relay-dash');
+  t.after(() => F.done());
+  // a page that answers a dashboard's hello, as another checkout's would
+  // (a process of its own: the CLI calls below block this one's event loop)
+  const child = spawn(process.execPath, ['-e', `const s = require('http').createServer((q, r) => { if (q.url !== '/api/hello') process.stderr.write('x'); r.end('{"devteam":1,"viewer":1}'); }).listen(0, '127.0.0.1', () => console.log(s.address().port));`], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let stray = 0;
+  child.stderr.on('data', (c) => { stray += c.length; });
+  const other = { port: Number(await new Promise((resolve) => child.stdout.once('data', resolve))) };
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  // a new registration is refused for either
+  assert.match(F.fails(['preview', String(port)], F.SUP), /devteam dashboard|own dashboard/);
+  assert.match(F.fails(['preview', String(other.port)], F.SUP), /is a devteam dashboard/);
+  assert.match(F.fails(['preview', '--run', 'true', '--port', String(other.port)], F.SUP), /is a devteam dashboard/);
+  // records made another way (by hand, or before the rule) are listed, and never relayed
+  for (const [n, pt] of [['quiet-otter', port], ['calm-heron', other.port]]) {
+    write(path.join(F.old, 'docs/devteam/run/previews', `${n}.json`), JSON.stringify({ v: 1, name: n, project: 'relay-dash', session: 'supervisor', label: n, port: pt, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+    const r = await (await fetch(`${B}/api/view?kind=preview&name=${n}`)).json();
+    assert.deepEqual([r.origin, r.opened], [null, false], `${n} is not relayed`);
+  }
+  assert.equal(stray, 0, 'nothing but the hello reached it');
+});
+test("what the relay forwards carries a mark every owner route refuses, and a target that turns into a dashboard closes its relay", async (t) => {
+  const F = threadsFixture('relay-mark');
+  t.after(() => F.done());
+  const pages = { '/': '<title>App</title>' };
+  const app = await fakeApp({}, pages);
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'mark']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const rel = v.origin;
+  // a normal app sees all its traffic, each request marked, whatever the page sent
+  const n = app.marks.length;
+  await fetch(`${rel}/a`, { headers: { 'x-devteam-relay': '0' } });
+  await fetch(`${rel}/b`, { method: 'POST', body: 'x', headers: { origin: rel } });
+  assert.deepEqual(app.marks.slice(n), ['1', '1'], 'set fresh, a page\'s own copy replaced');
+  assert.equal(app.seen.at(-1).url, '/b');
+  // the dashboard refuses a marked request on every route, with localhost as Host and Origin as the relay sends them
+  const as = (route, method = 'GET') => fetch(`${B}${route}`, { method, headers: { host: `localhost:${port}`, origin: `http://localhost:${port}`, 'x-devteam-relay': '1', 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}) });
+  for (const [route, method] of [['/api/action', 'POST'], ['/api/answer', 'POST'], ['/api/threads', 'GET'], ['/api/data', 'GET'], ['/api/hello', 'GET'], ['/api/view?kind=preview&name=' + name, 'GET'], ['/', 'GET'], ['/view/preview/' + name, 'GET']]) {
+    const r = await statusWithHost(port, route, `localhost:${port}`, method, { origin: `http://localhost:${port}`, 'x-devteam-relay': '1', 'sec-fetch-site': 'same-origin' });
+    assert.equal(r, 403, `${method} ${route}`);
+  }
+  assert.equal(await statusWithHost(port, '/api/hello', `localhost:${port}`), 200, 'unmarked, the same host is served');
+  // the target now answers as a dashboard: the tick closes the relay
+  pages['/api/hello'] = '{"devteam":1,"viewer":1}';
+  await until(async () => { try { await fetch(`${rel}/x`); return false; } catch { return true; } }, 'the relay closed once its target answered as a dashboard');
+  assert.ok(!d.out().includes('Error'), d.out());
+});
+test("a preview can't be registered on a port settings.md pins for this checkout's dashboard", async (t) => {
+  const F = threadsFixture('pinned-dash');
+  t.after(() => F.done());
+  const pin = await freePort();
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', `"gates": {}, "dashboard_port": ${pin}`));
+  assert.match(F.fails(['preview', String(pin)], F.SUP), /own dashboard/);
+});
+test("the laptop's relay carries a preview's WebSockets: from its own Origin only, with localhost as the app's Host and Origin", async (t) => {
+  const F = threadsFixture('relay-ws');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ws']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const R = Number(/:(\d+)$/.exec(v.origin)[1]);
+  const ask = (origin, host = `127.0.0.1:${R}`, url = '/hmr?token=1') => ['GET ' + url + ' HTTP/1.1', `Host: ${host}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', ...(origin ? [`Origin: ${origin}`] : [])];
+  const upgrade = (origin, host) => rawRequest(R, ask(origin, host));
+  const got = await upgrade(v.origin);
+  assert.match(got, /^HTTP\/1\.1 101 /);
+  assert.match(got, /hello from the app/, 'the app\'s bytes after the handshake');
+  assert.deepEqual(app.seen.at(-1), { method: 'UPGRADE', url: '/hmr?token=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  // the relay's other name for itself, from a page on that name
+  assert.match(await upgrade(`http://localhost:${R}`, `localhost:${R}`), /^HTTP\/1\.1 101 /);
+  assert.deepEqual(app.seen.at(-1), { method: 'UPGRADE', url: '/hmr?token=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  const n = app.seen.length;
+  assert.match(await upgrade('http://evil.example'), /^HTTP\/1\.1 403 /, 'another page\'s socket');
+  assert.match(await upgrade(B), /^HTTP\/1\.1 403 /, 'the dashboard\'s page');
+  assert.match(await upgrade(null), /^HTTP\/1\.1 403 /, 'no Origin');
+  assert.match(await upgrade(`http://localhost:${R}`), /^HTTP\/1\.1 403 /, 'a page on its other name, to this one');
+  assert.match(await rawRequest(R, ['GET /hmr HTTP/1.1', `Host: rebound.example:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', `Origin: ${v.origin}`]), /^HTTP\/1\.1 421 /, 'DNS rebinding');
+  assert.match(await rawRequest(R, ask(v.origin, `127.0.0.1:${R}`, 'http://elsewhere.example/hmr')), /^HTTP\/1\.1 400 /, 'origin-form only');
+  assert.equal(app.seen.length, n, 'none of those reached the app');
+  // both ways, after the handshake: the handshakes above let go first, so the app's count is this one's
+  await until(() => app.sockets.size === 0, 'the handshakes above let go');
+  const one = rawSocket(R, ask(v.origin));
+  await until(() => /hello from the app\n/.test(one.got), 'the handshake');
+  await until(() => app.sockets.size === 1, 'the app holds it');
+  one.c.write('ping from the page\n');
+  await until(() => /ping from the page\n/.test(one.got), 'the app\'s echo');
+  // the app ends it: so does the relay, and the dashboard carries on
+  for (const s of app.sockets) s.destroy();
+  await until(() => one.closed, 'the page\'s side closed with the app\'s');
+  // the page ends it: so does the relay, to the app
+  const two = rawSocket(R, ask(v.origin));
+  await until(() => app.sockets.size === 1, 'the app holds the next');
+  two.c.destroy();
+  await until(() => app.sockets.size === 0, 'the app\'s side closed with the page\'s');
+  // 32 at once, and no more; one let go makes room (none of the above still holds a slot)
+  assert.equal(app.sockets.size, 0);
+  const held = [];
+  t.after(() => { for (const s of held) s.c.destroy(); });
+  for (let i = 0; i < 32; i++) held.push(rawSocket(R, ask(v.origin)));
+  await until(() => held.every((s) => /hello from the app/.test(s.got)), 'thirty-two sockets');
+  const n2 = app.seen.length;
+  assert.match(await upgrade(v.origin), /^HTTP\/1\.1 429 /, 'a thirty-third');
+  assert.equal(app.seen.length, n2, 'which never reached the app');
+  held.shift().c.destroy();
+  await until(async () => /^HTTP\/1\.1 101 /.test(await upgrade(v.origin)), 'room once one closed');
+  // the app gone: the socket is closed, unanswered, and the dashboard still answers
+  const app2 = await fakeApp();
+  const gone = app2.port;
+  app2.close();
+  const file = path.join(F.old, 'docs/devteam/run/previews', `${name}.json`);
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // the relay closes with its record: every socket it carries goes with it, to the page and to the app
+  F.sup(['preview', 'stop', name]);
+  await until(() => held.every((s) => s.closed), 'the pages\' sides closed with the relay');
+  await until(() => app.sockets.size === 0, 'the app\'s sides closed with the relay');
+  write(file, JSON.stringify({ ...rec, port: gone }));
+  const v2 = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  assert.equal(v2.opened, true);
+  const R2 = Number(/:(\d+)$/.exec(v2.origin)[1]);
+  const lost = rawSocket(R2, ask(v2.origin, `127.0.0.1:${R2}`));
+  await until(() => lost.closed, 'closed, with nothing to carry it to');
+  assert.equal(lost.got, '', 'nothing to answer it');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`)).status, 200, 'the dashboard carries on');
+});
+test("the laptop's relay ends a socket the app won't upgrade once it has answered, and one it refuses even if the page holds on", async (t) => {
+  const F = threadsFixture('relay-ws-end');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ws']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const R = Number(/:(\d+)$/.exec(v.origin)[1]);
+  const ask = (url, origin = v.origin) => ['GET ' + url + ' HTTP/1.1', `Host: 127.0.0.1:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', `Origin: ${origin}`];
+  // A page that never ends its own side sees the relay's close only when it next writes: so it
+  // writes, every 100 ms, until that close comes back. Without it the relay would read on for good.
+  const pester = (S) => () => { if (!S.closed) S.c.write('more from the page\n'); return S.closed; };
+  // a 400 to the handshake: the page gets that answer, its body and no more, and both sides end,
+  // though the page holds its own open and the app would keep going
+  const no = rawSocket(R, ask('/no-ws'), { halfOpen: true });
+  await until(() => no.got.includes('no, ws\n'), 'the answer');
+  await until(pester(no), 'the page\'s side closed after the answer');
+  assert.match(no.got, /^HTTP\/1\.1 400 Bad Request\r\n/);
+  assert.match(no.got, /\r\nconnection: close\r\n/i);
+  assert.doesNotMatch(no.got, /keep-alive/i);
+  assert.ok(no.got.endsWith('\r\n\r\nno, ws\n'), JSON.stringify(no.got));
+  await until(() => app.noWsEnded, 'the relay\'s side to the app ended too');
+  assert.equal(app.after, undefined, 'nothing of the page\'s reached the app after the answer');
+  // a refused socket is closed, not just ended, so a page that never ends its side holds nothing here
+  const n = app.seen.length;
+  const refused = rawSocket(R, ask('/hmr', 'http://evil.example'), { halfOpen: true });
+  await until(() => /^HTTP\/1\.1 403 /.test(refused.got), 'the refusal');
+  await until(pester(refused), 'the refused socket closed though the page held on');
+  assert.match(refused.got, /^HTTP\/1\.1 403 /);
+  assert.equal(app.seen.length, n, 'which never reached the app');
+});
+test("the laptop's relay gives up on an app that takes a WebSocket and sends no answer, destroying both sides", async (t) => {
+  const F = threadsFixture('relay-ws-head');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ws']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', DEVTEAM_RELAY_HEAD_MS: '600', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const R = Number(/:(\d+)$/.exec(v.origin)[1]);
+  const S = rawSocket(R, ['GET /silent HTTP/1.1', `Host: 127.0.0.1:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', `Origin: ${v.origin}`], { halfOpen: true });
+  await until(() => app.sockets.size === 1, 'the app to hold the relay\'s side');
+  const t0 = Date.now();
+  // the page never ends its own side, so the relay's close shows only when it next writes
+  await until(() => { if (!S.closed) S.c.write('more from the page\n'); return S.closed; }, 'the page\'s side closed with no head');
+  assert.ok(Date.now() - t0 < 5000, 'within moments of the limit, not the page\'s own patience');
+  await until(() => app.sockets.size === 0, 'the app\'s side closed too');
+});
+// A preview's viewer: on this laptop the relay's origin, once the page's own ask has opened it (a GET
+// of the viewer never does); on a box its own name through the gateway, or nothing when the gateway
+// doesn't serve previews. The dashboard's page names exactly those, never a wildcard.
+test("a preview's viewer: its route, frame-src naming exactly where its lens is, and the dashboard's own frames", async (t) => {
+  const F = threadsFixture('preview-view');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  let d = null;
+  t.after(() => d?.stop());
+  const start = async (env) => {
+    d = startDashboard(F.old, F.env(env), ['--port', String(port)]);
+    await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  };
+  await start(RELAY_ENV);
+  const csp = async (p) => (await fetch(`${B}${p}`)).headers.get('content-security-policy');
+  const tail = `frame-ancestors 'self' http://127.0.0.1:${PORTS}`;
+  const viewer = `/view/preview/${name}`;
+  // before any relay: a GET of the viewer opens none, and every page frames only itself, as before
+  let r = await fetch(`${B}${viewer}`);
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8'));
+  assert.equal(r.headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'a navigation opens no relay');
+  assert.deepEqual([r.headers.get('x-frame-options'), r.headers.get('referrer-policy'), r.headers.get('cache-control')], [null, 'no-referrer', 'no-store']);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
+  assert.equal((await fetch(`${B}${viewer}`)).headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'nor does a second');
+  // the page's own ask opens it, and says so: a page loaded before it reloads (the viewer) or says to (the stage).
+  // up is the tick's word, as hello has it: the app answers, so once the first tick is done, true
+  await until(async () => (await (await fetch(`${B}/api/hello`)).json()).previews?.find((x) => x.name === name)?.up === true, 'the tick to find the app up');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const relay = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin ?? '');
+  assert.ok(relay && Number(relay[1]) >= RELAY_LO && Number(relay[1]) <= RELAY_HI, v.origin);
+  assert.deepEqual(v, { name, label: 'Checkout', session: v.session, project: v.project, up: true, origin: relay[0], opened: true, lens: `${relay[0]}/.devteam/lens`, served: false });
+  assert.equal(typeof v.session, 'string');
+  assert.equal(typeof v.project, 'string');
+  assert.equal((await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()).opened, false, 'the next ask finds it open');
+  // from then on the viewer and the dashboard name that relay, and nothing else; an artifact's viewer frames only its own
+  assert.equal(await csp(viewer), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/'), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/index.html'), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/view/artifact/some-mock'), `frame-src 'self'; ${tail}`);
+  // only a preview here, by its own name; what was asked is never said back
+  for (const bad of ['/view/preview/no-such', '/view/preview/Not_A_Name', `${viewer}/x`, '/view/preview/', `/view/preview/${name}%3Cb%3E`, `/view/preview/%3Cscript%3E`]) {
+    const b = await fetch(`${B}${bad}`);
+    assert.deepEqual([b.status, await b.text()], [404, 'not found'], bad);
+  }
+  assert.equal((await fetch(`${B}${viewer}`, { method: 'POST' })).status, 404, 'a GET only: a POST is no route here');
+  // a relay whose record moved to another port (or went) is framed no more, at once: not on the tick
+  // that closes it (every 10 s here), on the next page asked for
+  const file = path.join(F.old, 'docs/devteam/run/previews', `${name}.json`);
+  const was = fs.readFileSync(file, 'utf8');
+  write(file, JSON.stringify({ ...JSON.parse(was), port: app.port === 65535 ? app.port - 1 : app.port + 1 }));
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`, 'its record names another port');
+  fs.rmSync(file);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`, 'its record gone');
+  write(file, was);
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=no-such`)).status, 404);
+  await d.stop();
+  // on a box whose gateway serves previews: the preview's own name, which the gateway leaves as it is
+  await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1', ...RELAY_ENV });
+  const own = `https://${name}.box.example.com`;
+  assert.equal(await csp(viewer), `frame-src 'self' ${own}; ${tail}`);
+  assert.equal(await csp('/'), `frame-src 'self' ${own}; ${tail}`, 'each preview\'s own name, never a wildcard');
+  const other = /preview (\S+) /.exec(F.sup(['preview', String(app.port + 1 > 65535 ? app.port - 1 : app.port + 1), '--label', 'Other']))[1];
+  assert.equal(await csp('/'), `frame-src 'self' ${[name, other].sort().map((n) => `https://${n}.box.example.com`).join(' ')}; ${tail}`, 'every preview on the box, read per request');
+  assert.equal(await csp(viewer), `frame-src 'self' ${own}; ${tail}`, 'a viewer frames its own preview only');
+  assert.deepEqual((({ origin, lens, served, opened }) => [origin, lens, served, opened])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [own, `${own}/.devteam/lens`, true, false]);
+  F.sup(['preview', 'stop', other]);
+  assert.equal(await csp('/'), `frame-src 'self' ${own}; ${tail}`, 'a preview stopped is framed no more');
+  await d.stop();
+  // a box whose gateway doesn't: nothing to frame, and the viewer says so; the page's ask opens no relay
+  await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com', ...RELAY_ENV });
+  assert.equal(await csp(viewer), `frame-src 'self'; ${tail}`);
+  assert.deepEqual((({ origin, lens, served, opened }) => [origin, lens, served, opened])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [null, null, false, false]);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
+});
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
@@ -2804,6 +3342,382 @@ test("a goal at its target: the card's Mark met is an owner action, same-origin 
   const html = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
   assert.match(html, /g\.status === 'ready' && g\.at_target \? `<div class="holdbar"><button type="button" data-met-id=/, 'the card draws Mark met for a running goal at its target');
   assert.match(html, /build: \(\) => \(\{ action: 'goal-met', body: \{ id \} \}\)/);
+});
+// A preview's app to point at, on / and /second: a button at a known spot and, a beat after it loads
+// (once its lens watches it), a console error holding a box's capability and a bidi override. On its
+// lens's origin, its script reads what the viewer says to the lens and tells the test (heard), and
+// speaks to the dashboard from its own window, never the lens's (a route and errors of its making).
+// Told to (possess), it takes its lens's voice, as any app can: the lens's realm is its origin's, so
+// the Object.assign the lens builds every message with is the app's to replace, and a key event on
+// the app's window has the lens say something at once. From then on it says what it is told to
+// (forge), 5,000 routes (routes), and answers every hit with lies: markup and the box's capability
+// (as itself), about somewhere else (far), or 5,000 times over (flood).
+const APP_PAGE = `<!doctype html><title>App</title><style>body{margin:0;height:3000px}#buy{position:absolute;left:10px;top:5px;width:100px;height:30px}</style><button id="buy">Buy now</button><script>
+parent.addEventListener('message', (e) => { if (e.source === parent.parent) top.postMessage({ own: 'heard', data: e.data }, '*'); });
+setTimeout(() => console.error('Failed at ${LIE_CAP} \\u202eon purpose'), 600);
+top.postMessage({ lens: 1, type: 'route', route: '/forged-by-app' }, '*');
+top.postMessage({ lens: 1, type: 'errors', errors: ['forged by the app'] }, '*');
+top.postMessage({ own: 'app-said', at: location.pathname }, '*');
+let mode = 'lie';
+const next = [];
+// one message in the lens's voice: queued, then a key on this window, which the lens tells at once
+const say = (m) => { next.push(m); dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' })); };
+const lie = (id) => ({ lens: 1, type: 'hit-reply', id, anchor: { selector: '#x', tag: 'p', role: 'note', text: 'Pay at ${LIE_CAP} now\\u202e', name: '<img src=x onerror="window.__pwned=1">', html: '<img src=x onerror="window.__pwned=1">', rect: { x: 0, y: 0, w: 400, h: 300 } }, route: '/liar' });
+const possess = () => {
+  const own = parent.Object.assign;
+  parent.Object.assign = function (t, m) {
+    if (next.length) return next.shift();
+    if (!m || m.type !== 'hit-reply') return own.call(this, t, m);
+    if (mode === 'far') return { lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#far', tag: 'div', text: 'Far away', rect: { x: 700, y: 700, w: 20, h: 20 } } };
+    if (mode === 'flood') { setTimeout(() => { for (let i = 1; i < 5000; i++) say({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#p', tag: 'p', text: String(i), rect: { x: 0, y: 0, w: 2000, h: 2000 } } }); top.postMessage({ own: 'flooded', id: m.id }, '*'); }); return { lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#p', tag: 'p', text: '0', rect: { x: 0, y: 0, w: 2000, h: 2000 } } }; }
+    return lie(m.id);
+  };
+};
+addEventListener('message', (e) => {
+  const m = e.data;
+  if (e.source !== top || !m || !m.own) return;
+  if (m.own === 'possess') { possess(); say({ lens: 1, type: 'route', route: '/liar' }); say({ lens: 1, type: 'hit-reply', id: 'zz-forged', anchor: { selector: '#forged', text: 'FORGED', rect: { x: 0, y: 0, w: 2000, h: 2000 } } }); say({ lens: 1, type: 'key', key: 'Shift', shift: true }); }
+  if (m.own === 'forge') for (const x of m.say) say(x);
+  if (m.own === 'mode') mode = m.mode;
+  if (m.own === 'routes') { for (let i = 0; i < 5000; i++) say({ lens: 1, type: 'route', route: i % 2 ? '/a' : '/b' }); say({ lens: 1, type: 'route', route: '/liar' }); }
+  top.postMessage({ own: m.own + '-done', n: m.n }, '*');
+});
+</script>`;
+test('Shift over a preview, through the relay: what the app has under the pointer, a thread on it, its pin, and go', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('preview-stage');
+  undo.push(() => F.done());
+  // an app that refuses every frame, as many do: only its lens's own loads may hold it
+  const app = await fakeApp({ 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" }, { '/': APP_PAGE, '/second': APP_PAGE });
+  undo.push(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env(RELAY_ENV), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: OWN_MESSAGES });
+  // how often the tab's own page has loaded (a viewer reloads once for a relay its own ask opened)
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: "if (window === top) try { sessionStorage.__loads = String(Number(sessionStorage.__loads || 0) + 1); } catch {}" });
+  const soon = soonIn(p);
+  const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('pv-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
+  const keysHere = () => p.ev(`(() => { document.activeElement?.blur?.(); window.focus(); return document.activeElement === document.body; })()`);
+  const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
+  // a word to the app inside the lens, and its answer once it has done it
+  let said = 0;
+  const tell = async (m) => { const n = ++said; await p.ev(`document.getElementById('pv-frame').contentWindow.frames[0].postMessage(${JSON.stringify({ ...m, n })}, '*'), true`); return soon(`window.__own.find((x) => x.own === ${JSON.stringify(`${m.own}-done`)} && x.n === ${n})`, m.own); };
+  const patient = (ms) => p.ev(`TS.waitMs = ${ms}`);
+  const heard = () => p.ev(`window.__own.filter((m) => m.own === 'heard').map((m) => m.data)`);
+  const aFrame = () => p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+  const frameMs = () => p.ev('new Promise((r) => { const t = performance.now(); requestAnimationFrame(() => r(performance.now() - t)); })');
+
+  await t.test('the first look opens the relay, which the page loaded without: the stage says to reload', async () => {
+    await p.send('Page.navigate', { url: `${B}/#preview/${name}` });
+    await soon(`document.getElementById('av-note').textContent === 'Reload to view this preview' && !document.getElementById('av-note').hidden`, 'the note');
+    assert.equal(await p.ev('TS.ready'), false, 'the lens is outside this page\'s policy');
+    // only the lens's own refusal says to reload: another frame's is not this note's to say
+    await p.ev(`(() => { const n = document.getElementById('av-note'); n.hidden = true; n.textContent = ''; document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: 'http://127.0.0.1:1/other', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'a refusal of another address says nothing');
+    // the lens's address with a longer port after it is another address, not the lens
+    await p.ev(`(() => { document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: new URL(document.getElementById('pv-frame').src).origin + '9/.devteam/lens', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'a refusal of a longer port says nothing');
+    await p.ev(`(() => { document.dispatchEvent(new SecurityPolicyViolationEvent('securitypolicyviolation', { violatedDirective: 'frame-src', blockedURI: new URL(document.getElementById('pv-frame').src).origin + '/.devteam/lens', originalPolicy: '' })); return true; })()`);
+    assert.equal(await p.ev(`document.getElementById('av-note').textContent`), 'Reload to view this preview', 'the lens\'s own does');
+    assert.equal(await p.ev(`document.getElementById('av-title').textContent`), 'Checkout');
+  });
+
+  await t.test('the stage here frames the lens on the relay, sandboxed with no top navigation, and the lens frames the app', async () => {
+    await p.send('Page.reload');
+    await soon(`TS.kind === 'preview' && TS.ready && TS.route === '/'`, 'the lens to say ready');
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'no note once the page names the relay');
+    const f = await p.ev(`(() => { const f = document.getElementById('pv-frame'); return [f.hidden, f.getAttribute('sandbox'), new URL(f.src).pathname, document.getElementById('av-frame').hidden, document.getElementById('av-frame').hasAttribute('src')]; })()`);
+    assert.deepEqual(f, [false, 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads', '/.devteam/lens', true, false]);
+    assert.doesNotMatch(f[1], /top-navigation/);
+    const relay = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(await p.ev('TS.origin'));
+    assert.ok(relay && Number(relay[1]) >= RELAY_LO && Number(relay[1]) <= RELAY_HI, 'the relay, in its range');
+    assert.equal(await p.ev('TS.target'), relay[0], 'what goes to the lens goes to its origin only');
+    assert.deepEqual(await p.ev(`[document.getElementById('av-title').textContent, document.getElementById('av-tab').getAttribute('href')]`), ['Checkout', `/view/preview/${name}`]);
+    assert.match(await p.ev(`document.getElementById('av-where').textContent`), /^from \S+ · \/( · (live|not answering))?$/);
+  });
+
+  await t.test("the app's own window can say what it likes: it is not the stage's frame, so it is taken for nothing", async () => {
+    await soon(`window.__own.some((m) => m.own === 'app-said' && m.at === '/')`, 'the app has spoken');
+    assert.equal(await p.ev('TS.route'), '/', 'its route is its lens\'s word, not its own');
+    assert.equal(await p.ev(`TS.errors.includes('forged by the app')`), false);
+  });
+
+  await t.test("a Shift+click on the app's button starts a thread on it: its name, route, viewport, errors and anchor", async () => {
+    await patient(2000);
+    await soon(`TS.errors.length === 1`, "the app's error, from its lens");
+    const at = await frameAt(30, 15);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`document.getElementById('tl-chip').textContent === 'button "Buy now"'`, 'the chip');
+    await soon(`TS.hit?.anchor?.selector === '#buy'`, "the lens's answer for the hover");
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.kind === 'preview'`, 'a thread about to start');
+    const s = await p.ev('TL.draft.subject');
+    assert.deepEqual([s.name, s.route, s.anchor.selector, s.anchor.text, typeof s.viewport.w, typeof s.viewport.h, s.point], [name, '/', '#buy', 'Buy now', 'number', 'number', { x: 30, y: 15 }]);
+    // the app's own words, as its lens passed them on: the capability cut, the bidi override gone
+    assert.deepEqual(s.errors, ['Failed at [link removed] on purpose']);
+    await p.type('Make it green');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.subject?.kind === 'preview'), 'the thread');
+    assert.deepEqual([th.title, th.subject.name, th.subject.route, th.subject.anchor.selector, th.subject.errors], ['button "Buy now"', name, '/', '#buy', ['Failed at [link removed] on purpose']]);
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'its pin');
+    await p.ev('tlClose()');
+    await patient(150);
+    await keysHere();
+  });
+
+  await t.test('with the keyboard in the app, its lens tells Shift, and that raises the overlay', async () => {
+    const blank = await frameAt(600, 500);
+    await p.clickAt(blank.x, blank.y);
+    await soon(`document.activeElement === document.getElementById('pv-frame')`, 'the frame has the keyboard');
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden && TS.raised`, 'raised by what the lens said');
+    await p.hold('Shift', false);
+    await p.move(blank.x + 5, blank.y + 5);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'lowered by the pointer, Shift up');
+    await keysHere();
+  });
+
+  await t.test('another route: the pin goes; the thread from the dock goes back to its route, by go, and go goes nowhere else', async () => {
+    const T = threads().find((x) => x.subject?.kind === 'preview').id;
+    await p.ev(`tsPost({ type: 'go', route: '/second' })`);
+    await soon(`TS.route === '/second' && !document.querySelector('#av-pins .tl-pin')`, 'no pin on another route');
+    // a route from the log is the log's: only one of the app's own paths is ever asked for
+    const bad = ['//evil.example/x', 'https://evil.example/', '/\\evil.example', '/\t/evil.example', 'javascript:alert(1)', '/.devteam/lens', 'second', ''];
+    for (const r of bad) await p.ev(`tlGoTo(${JSON.stringify({ kind: 'preview', name, route: r })}), true`);
+    await p.ev(`tlOpen('${T}')`);
+    await soon(`TS.route === '/' && !!document.querySelector('#av-pins .tl-pin')`, 'back on its route, its pin with it');
+    const gone = (await heard()).filter((m) => m.type === 'go').map((m) => m.route);
+    assert.deepEqual([...new Set(gone)].sort(), ['/', '/second'], 'only the app\'s own paths');
+    await p.ev('tlClose()');
+  });
+
+  await t.test("messages from the preview's frame are taken only from the lens's own origin", async () => {
+    const say = (origin, data) => p.ev(`window.dispatchEvent(new MessageEvent('message', { data: ${JSON.stringify({ lens: 1, ...data })}, origin: ${JSON.stringify(origin)}, source: document.getElementById('pv-frame').contentWindow })), true`);
+    await say('http://evil.example', { type: 'route', route: '/evil' });
+    await say('http://evil.example', { type: 'errors', errors: ['evil'] });
+    await say('null', { type: 'route', route: '/opaque' });
+    await aFrame();
+    assert.deepEqual(await p.ev(`[TS.route, TS.errors.includes('evil')]`), ['/', false], 'another origin: nothing taken');
+    // the same word from the lens's origin is taken, so it is the origin that kept the others out
+    const own = await p.ev('TS.origin');
+    await say(own, { type: 'route', route: '/from-its-origin' });
+    assert.equal(await p.ev('TS.route'), '/from-its-origin');
+    await say(own, { type: 'route', route: '/' });
+    await soon(`TS.route === '/' && !!document.querySelector('#av-pins .tl-pin')`, 'its route again');
+  });
+
+  await t.test("the app can take its lens's voice: what it says is still the page's", async () => {
+    await keysHere();
+    await tell({ own: 'possess' });
+    await soon(`TS.ready && TS.route === '/liar'`, 'its route, in its lens\'s voice');
+    assert.equal(await p.ev('TS.hit'), null, 'a reply to an id the page never minted is kept nowhere');
+    assert.deepEqual(await p.ev(`[document.getElementById('av-over').hidden, TS.raised]`), [true, false], 'its Shift, with the keyboard on the dashboard, raises nothing');
+    await soon(`!document.querySelector('#av-pins .tl-pin')`, 'no pin on its route, once it is drawn');
+  });
+
+  await t.test('with the keyboard in the frame, its say-so raises the overlay, which only the owner lowers', async () => {
+    const blank = await frameAt(600, 500);
+    await p.clickAt(blank.x, blank.y);
+    await soon(`document.activeElement === document.getElementById('pv-frame')`, 'the frame has the keyboard');
+    const raise = { own: 'forge', say: [{ lens: 1, type: 'key', key: 'Shift', shift: true }] };
+    await tell(raise);
+    await soon('TS.raised', 'its say-so, believed while it has the keyboard');
+    await p.move(blank.x + 5, blank.y + 5);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'gone once the pointer moves without Shift');
+    await p.hold('Shift', true);
+    await tell(raise);
+    await soon('TS.raised', 'raised');
+    await tell({ own: 'forge', say: [{ lens: 1, type: 'key', key: 'Shift', shift: false }, { lens: 1, type: 'key', key: 'Escape', shift: false }] });
+    assert.deepEqual(await p.ev(`[TS.raised, document.getElementById('av-over').hidden]`), [true, false], 'its "Shift up" lowers nothing while the owner holds it');
+    await p.hold('Shift', false);
+    await p.move(blank.x, blank.y);
+    await soon('!TS.raised', 'lowered');
+    await keysHere();
+  });
+
+  await t.test("an answer about somewhere else isn't believed: the point alone", async () => {
+    await patient(2000);
+    await tell({ own: 'mode', mode: 'far' });
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit && TS.hit.anchor === null`, 'its answer, dropped to the point');
+    await soon(`document.getElementById('tl-chip').textContent === ${JSON.stringify(`${name} · /liar`)}`, 'the chip names the page');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.point?.x === 100`, 'the point');
+    assert.deepEqual(await p.ev(`[TL.draft.subject.anchor ?? null, TL.draft.subject.point, TL.draft.subject.route]`), [null, { x: 100, y: 140 }, '/liar']);
+    await p.key('Escape');
+    await tell({ own: 'mode', mode: 'lie' });
+    await patient(150);
+    await keysHere();
+  });
+
+  await t.test('a question answered 5,000 times is answered once, 5,000 routes are drawn once, and the page keeps up', async () => {
+    await tell({ own: 'mode', mode: 'flood' });
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    const { id } = await soon(`window.__own.find((x) => x.own === 'flooded')`, 'the flood');
+    assert.deepEqual(await p.ev(`[TS.hit?.anchor?.text, TS.minted.has(${JSON.stringify(id)})]`), ['0', false], 'its first answer, and the question let go of');
+    let ms = await frameMs();
+    assert.ok(ms < 2000, `a frame drawn in ${ms} ms`);
+    await p.hold('Shift', false);
+    await tell({ own: 'mode', mode: 'lie' });
+    await p.ev(`(() => { window.__draws = 0; const d = tlDraw; tlDraw = () => { window.__draws++; d(); }; return true; })()`);
+    await tell({ own: 'routes' });
+    ms = await frameMs();
+    assert.ok(ms < 2000, `a frame drawn in ${ms} ms`);
+    await aFrame();
+    assert.equal(await p.ev('TS.route'), '/liar', 'its last word');
+    assert.ok(await p.ev('window.__draws') < 200, 'drawn once a frame, not once a route');
+    // the same, saying ready (a route each) rather than route: the page it ends on is the one with a thread
+    const resolves = `window.__own.filter((m) => m.own === 'heard' && m.data.type === 'resolve').length`;
+    await p.ev('window.__draws = 0');
+    await tell({ own: 'forge', say: [...Array.from({ length: 5000 }, (_, i) => ({ lens: 1, type: 'ready', path: '/', route: i % 2 ? '/a' : '/b', viewport: { w: 10, h: 10 } })), { lens: 1, type: 'route', route: '/' }] });
+    ms = await frameMs();
+    assert.ok(ms < 2000, `a frame drawn in ${ms} ms`);
+    await aFrame();
+    assert.equal(await p.ev('TS.route'), '/', 'its last word');
+    assert.ok(await p.ev('window.__draws') < 200, 'drawn once a frame, not once a ready');
+    await soon(`document.querySelector('#av-pins .tl-pin')`, 'the pin on the route it ended on');
+    // a ready about the route it is on, once its watch was asked for, is heard no more: a load is heard once
+    await new Promise((r) => setTimeout(r, 300));
+    const settled = await p.ev(resolves);
+    await tell({ own: 'forge', say: Array.from({ length: 50 }, () => ({ lens: 1, type: 'ready', path: '/', route: '/', viewport: { w: 10, h: 10 } })) });
+    await aFrame();
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev(resolves), settled, 'nothing asked of the lens again');
+    await tell({ own: 'forge', say: [{ lens: 1, type: 'route', route: '/liar' }] });
+    await soon(`TS.route === '/liar'`, 'back on its last word');
+    await keysHere();
+  });
+
+  await t.test("its lies are its words: shown as text, cut of the box's capability and of bidi, and never markup", async () => {
+    await patient(2000);
+    const at = await frameAt(60, 60);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.role === 'note'`, 'its answer');
+    const chip = 'note "<img src=x onerror="window.__pwned=1">"';
+    await soon(`document.getElementById('tl-chip').textContent === ${JSON.stringify(chip)}`, 'the chip, drawn as text');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.route === '/liar'`, 'a thread about to start');
+    const s = await p.ev('TL.draft.subject');
+    assert.equal(s.anchor.text, 'Pay at [link removed] now');
+    assert.doesNotMatch(JSON.stringify(s), /1767225600000/, 'no capability in the subject');
+    await p.ev(`document.querySelector('#tl-card details')?.setAttribute('open', ''); true`);
+    assert.deepEqual(await p.ev(`[document.querySelectorAll('#tl img').length, window.__pwned ?? null]`), [0, null], "its markup never became the page's");
+    await p.type('Who wrote this');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.subject?.route === '/liar'), 'the thread');
+    assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
+    assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
+    await p.ev('tlClose()');
+    await patient(150);
+    await keysHere();
+  });
+
+  await t.test("nothing sent to the preview's frame carries the owner's words: questions only, by ids the page minted", async () => {
+    const all = await heard();
+    assert.ok(all.some((m) => m.type === 'hello') && all.some((m) => m.type === 'hit') && all.some((m) => m.type === 'resolve') && all.some((m) => m.type === 'go'), JSON.stringify([...new Set(all.map((m) => m.type))]));
+    assert.deepEqual([...new Set(all.map((m) => m.type))].filter((k) => !['hello', 'hit', 'resolve', 'scroll-by', 'go'].includes(k)), [], 'only questions');
+    assert.deepEqual(all.filter((m) => m.id !== undefined && !(typeof m.id === 'string' && /^[hr]\d+$/.test(m.id))), [], 'string ids only');
+    for (const w of ['Make it green', 'Who wrote this']) assert.ok(all.every((m) => !JSON.stringify(m).includes(w)), `never the owner's words: ${w}`);
+  });
+
+  await t.test('closed, the stage lets go of the lens', async () => {
+    await p.ev(`location.hash = '#library'`);
+    await soon(`document.getElementById('artifact-view').hidden && !document.getElementById('pv-frame').hasAttribute('src') && document.getElementById('pv-frame').hidden && TS.kind === null && TS.name === null && TS.route === null`, 'closed');
+  });
+
+  await t.test('the viewer tab for a preview: the same stage, the whole tab, its state from hello', async () => {
+    await p.ev(`sessionStorage.__loads = '0'`);
+    await p.send('Page.navigate', { url: `${B}/view/preview/${name}` });
+    await soon(`TS.kind === 'preview' && TS.ready && !!document.querySelector('#av-pins .tl-pin')`, 'the viewer, the lens, the pin');
+    assert.equal(await p.ev(`document.documentElement.classList.contains('viewer')`), true);
+    await soon(`/ · live$/.test(document.getElementById('av-where').textContent)`, 'its state, from hello');
+    assert.equal(await p.ev('sessionStorage.__loads'), '1', 'its relay was open: no reload');
+  });
+
+  await t.test("a viewer whose own ask opened the relay loads once more, and then shows it", async () => {
+    const app2 = await fakeApp({}, { '/': APP_PAGE });
+    undo.push(() => app2.close());
+    const name2 = /preview (\S+) /.exec(F.sup(['preview', String(app2.port), '--label', 'Other']))[1];
+    await p.ev(`sessionStorage.__loads = '0'`);
+    await p.send('Page.navigate', { url: `${B}/view/preview/${name2}` });
+    await soon(`TS.kind === 'preview' && TS.name === ${JSON.stringify(name2)} && TS.ready && TS.route === '/'`, 'the second preview, through its own relay');
+    assert.equal(await p.ev('sessionStorage.__loads'), '2', 'once more, and only once');
+    assert.equal(await p.ev(`sessionStorage.getItem(${JSON.stringify(`devteam.preview.reloaded.${name2}`)})`), null, 'and ready to again, the next time one opens');
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true);
+  });
+
+  await t.test("an artifact's viewer never shows a preview: not by its route, not by a preview's thread", async () => {
+    const T = threads().find((x) => x.subject?.kind === 'preview' && x.subject.route === '/').id;
+    await p.send('Page.navigate', { url: `${B}/view/artifact/some-mock#preview/${name}` });
+    await soon(`TS.kind === 'artifact' && TL.threads.some((x) => x.id === ${JSON.stringify(T)})`, 'the artifact viewer, with the threads');
+    await p.ev(`tlOpen(${JSON.stringify(T)})`);
+    await aFrame();
+    assert.deepEqual(await p.ev(`[TS.kind, document.getElementById('pv-frame').hasAttribute('src'), document.getElementById('pv-frame').hidden, location.hash]`), ['artifact', false, true, `#preview/${name}`]);
+  });
+});
+
+test("the Library's preview card opens the stage here and the viewer in a tab; a question's [[name]] opens the viewer", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('preview-links');
+  undo.push(() => F.done());
+  const app = await fakeApp();
+  undo.push(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
+  F.sup(['ask', '--question', 'Does [[flow]] feel right?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ name: 'flow', title: 'The flow', preview: name }]), '--stake', '1', '--urgency', '1']);
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
+  const card = `[data-preview="${name}"]`;
+  await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
+  assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
+  assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
+  assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
+  // where the stage was opened from is taken once the preview is known, and not at all for an ask the owner left
+  await p.ev(`(() => { const f = window.fetch; window.fetch = (u, ...a) => (String(u).includes('/api/view') ? new Promise((r) => setTimeout(r, 400)).then(() => f(u, ...a)) : f(u, ...a)); return true; })()`);
+  await p.ev(`location.hash = '#preview/${name}'`);
+  await p.ev(`location.hash = '#library'`);
+  await new Promise((r) => setTimeout(r, 900));
+  assert.deepEqual(await p.ev('[AV_FROM, avFocus, document.getElementById("artifact-view").hidden]'), [false, null, true], 'an ask the owner left behind records nothing and opens nothing');
+  await p.ev(`location.hash = '#inbox'`);
+  await soon(`!!document.querySelector('.qref a')`, 'the [[flow]]');
+  assert.deepEqual(await link('.qref a'), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'The flow']);
 });
 
 // The Loop's sidepeeks (the OODA spec, PR 3): every card opens one when clicked anywhere on it; an

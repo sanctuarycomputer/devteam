@@ -1,6 +1,6 @@
 // Each test process owns a block of 100 ports between 20000 and 32699 (below 32768, where Linux
 // starts handing out ephemeral ports; macOS starts at 49152): the file-wide hub and instance block at PORTS, the ports test at
-// PORTS+30, the hub test at PORTS+60. A block is claimed with a lock file in the temp dir, so the
+// PORTS+30, the hub test at PORTS+60. The dashboard test's preview relays listen at PORTS+62..79, inside the hub test's instance block: they share it, so those two never run at once (serial only). A block is claimed with a lock file in the temp dir, so the
 // suite's files running side by side, and another checkout's suite, never share one. The lock goes
 // when the process exits; one left by a process that died is cleared once it is an hour old.
 import fs from 'node:fs';

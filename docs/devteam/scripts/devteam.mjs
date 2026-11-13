@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
+import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ===== 1. helpers =====
@@ -6097,12 +6098,22 @@ function previewLabel() {
   if (label.length > PREVIEW_LABEL_MAX) die(`preview --label is at most ${PREVIEW_LABEL_MAX} characters`);
   return label.trim();
 }
+// A port for a new registration: previewPortOk's rules, and none of the relays' range. That rule is
+// for new ones only: readPreviews checks every record with previewPortOk, so one made before the
+// range existed stays a preview (decision 3).
 function previewPort(v) {
   const port = /^\d+$/.test(String(v)) ? Number(v) : NaN;
   const ok = previewPortOk(port);
   if (ok !== true) die(`preview: ${v}: ${ok}`);
+  if (RELAY_PORTS.includes(port)) die(`preview: ${v}: ${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`);
+  // this checkout's own dashboard, when its port was saved: a relay for it would serve the dashboard under the owner's pointer
+  // (a pinned port, which pickDashboardPort never saves, is settings.md's dashboard_port)
+  if ([readNum(path.join(runDir, 'dashboard-port')), Number(loadSettings().dashboard_port)].includes(port)) die(`preview: ${v}: ${port} is this checkout's own dashboard`);
   return port;
 }
+// A dashboard of any checkout answering on the port (its hello), which is never a preview's app: a
+// registration refuses it, and the relay won't serve it. One timed probe, a few hundred ms at most.
+async function previewPortIsDashboard(port) { return !!(await probeHello(port, 500)); }
 // What other instances on this machine list, from the hub (one agent-written list among others,
 // used only to pick a clear name). Two seconds at most: no hub, or a slow one, means no clash.
 function previewNamesElsewhere() {
@@ -6247,6 +6258,275 @@ async function previewRunIt(rec) {
 // What hello and the Library say of one preview, every string capped: this goes into the hub's list.
 const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+// --- the preview lens: framed by the viewer at <preview>/.devteam/lens, on the app's own origin, it
+// reads the app's page for the viewer over postMessage (spec §7). On a box the gateway serves it; on a
+// laptop the dashboard's relay does. Copied from cloud/gateway.mjs, never edited here: a test holds
+// the two byte for byte. Plain ASCII, no backtick and no dollar sign before a brace.
+const PREVIEW_LENS = String.raw`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Preview</title><style>html{touch-action:manipulation}html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
+<body><!-- The sandbox is advisory: the same-origin app can lift it. frame-src 'self' is what keeps the app's frame on its own origin. -->
+<iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
+(() => {
+  'use strict';
+  // devteam's preview lens. It is on the app's own origin, so it can read the app's page. It frames
+  // the app, and answers the viewer that frames it, over postMessage, about what is where. It takes
+  // only the viewer's questions (hello, hit, resolve, scroll-by, scroll-to, go), tells it only about
+  // the app (ready, route, hit-reply, rects, key, errors), and holds nothing of the owner's.
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, route: 300, error: 200, errors: 3 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const frame = document.getElementById('app');
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => (typeof id === 'string' && id.length > 0 && id.length <= 64) || (Number.isInteger(id) && id >= 0);
+
+  // --- the viewer: the page that frames this one, and only it ----------------------------------
+  // This page's frame-ancestors says who that may be. Here: a message must come from that frame
+  // (never the app, which shares this origin), and from the origin first heard.
+  let viewer = null;
+  const tell = (m) => { if (viewer) parent.postMessage(Object.assign({ lens: 1 }, m), viewer); };
+
+  // --- the app ----------------------------------------------------------------------------------
+  const appWindow = () => { try { const w = frame.contentWindow; return w && w.document && w.location.href !== 'about:blank' ? w : null; } catch (e) { return null; } };
+  const routeOf = (w) => { try { return w.location.origin === location.origin ? cap(w.location.pathname + w.location.search + w.location.hash, CAPS.route) : null; } catch (e) { return null; } };
+  // a path on this origin, and never the lens's own
+  const safeRoute = (r) => {
+    if (typeof r !== 'string' || r[0] !== '/' || r[1] === '/' || r.indexOf('\\') >= 0 || size(r) > 2048) return null;
+    try { const u = new URL(r, location.origin); return u.origin === location.origin && u.pathname.indexOf('/.devteam/') !== 0 ? u.pathname + u.search + u.hash : null; } catch (e) { return null; }
+  };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (doc, sel) => { try { return doc.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el, doc) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only(doc, '#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && size(sel) <= CAPS.selector && only(doc, sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== doc.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only(doc, '#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el, doc) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = doc.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(el.ownerDocument.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(top.outerHTML, CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(el.textContent), CAPS.text);
+  const anchorOf = (el, doc, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el, doc), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(nameOf(el, doc)), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // Where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was.
+  const find = (doc, a) => {
+    let el = null;
+    try { el = doc.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = doc.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves --------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const w = appWindow();
+    const rects = watched.map((x) => { const f = w ? find(w.document, x.anchor) : null; return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- what the app does: its route, its keys, its errors ----------------------------------------
+  let route = null;
+  const checkRoute = () => { const w = appWindow(); const r = w ? routeOf(w) : null; if (r === route) return; route = r; tell({ type: 'route', route: r }); soon(); };
+  let errors = [];
+  const describe = (x) => { try { return x && typeof x === 'object' && 'message' in x ? String(x.message) : String(x); } catch (e) { return 'an error'; } };
+  const noteError = (text) => { const one = cap(oneLine(text), CAPS.error); if (!one) return; errors = errors.concat(one).slice(-CAPS.errors); tell({ type: 'errors', errors }); };
+  let shiftDown = false;
+  const onKey = (e) => {
+    if (e.key !== 'Shift' && e.key !== 'Escape') return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+  const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
+  // Each page the app loads is a new window: listen on it, in the capture phase so the app can't stop
+  // a key reaching here, and note the errors it logs from then on.
+  let attached = null;
+  const attach = () => {
+    const w = appWindow();
+    if (!w || w.document === attached) return;
+    attached = w.document;
+    errors = [];
+    try {
+      w.addEventListener('keydown', onKey, true);
+      w.addEventListener('keyup', onKey, true);
+      w.addEventListener('blur', onBlur);
+      w.addEventListener('error', (e) => { if (e && e.message) noteError(e.message); }, true);
+      w.addEventListener('unhandledrejection', (e) => noteError('Unhandled rejection: ' + describe(e.reason)));
+      const own = w.console && w.console.error;
+      if (typeof own === 'function') w.console.error = function () { noteError(Array.prototype.map.call(arguments, describe).join(' ')); return own.apply(this, arguments); };
+      w.addEventListener('scroll', soon, true);
+      w.addEventListener('resize', soon);
+      w.addEventListener('popstate', checkRoute);
+      w.addEventListener('hashchange', checkRoute);
+      new w.MutationObserver(later).observe(w.document, { subtree: true, childList: true, attributes: true, characterData: true });
+    } catch (e) { /* a page that can't be watched is still framed */ }
+    route = routeOf(w);
+    tell(readyOf(w));
+    sendRects();
+  };
+
+  // --- the viewer's questions ----------------------------------------------------------------------
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => { tell(readyOf(appWindow())); if (errors.length) tell({ type: 'errors', errors }); },
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      const w = appWindow();
+      const doc = w && w.document;
+      let el = doc ? doc.elementFromPoint(m.x, m.y) : null;
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === doc.documentElement || el === doc.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, doc, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null, route: w ? routeOf(w) : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const w = appWindow();
+      if (!w) return;
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = w.document.elementFromPoint(at.x, at.y); el && el !== w.document.body && el !== w.document.documentElement; el = el.parentElement) {
+        const s = w.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      w.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const w = appWindow();
+      const a = m.anchor;
+      if (!w || !a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(w.document, a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+    go: (m) => { const r = safeRoute(m.route); if (r) frame.src = r; },
+  };
+  addEventListener('message', (e) => {
+    if (!e.isTrusted) return;
+    if (e.source !== parent || parent === window) return;
+    if (e.origin === location.origin || e.origin === 'null') return;
+    const ancestors = location.ancestorOrigins;
+    if (ancestors && ancestors.length && ancestors[0] !== e.origin) return;
+    if (viewer && e.origin !== viewer) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    viewer = e.origin;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  // the poll can find a page mid-parse (no title yet): its load says ready again, whatever attach did
+  frame.addEventListener('load', () => { attach(); const w = appWindow(); if (w) tell(readyOf(w)); checkRoute(); });
+  // an SPA's pushState can't be seen without touching its code: the route is polled
+  setInterval(() => { attach(); checkRoute(); }, 250);
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  frame.src = safeRoute(new URLSearchParams(location.search).get('route')) || '/';
+})();
+</script></body></html>
+`;
+// Its policy: its one script and its one style by hash, its own origin to frame, and who may hold it.
+const previewLensPart = (tag) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(PREVIEW_LENS)[1];
+const previewLensHash = (tag) => `'sha256-${crypto.createHash('sha256').update(previewLensPart(tag)).digest('base64')}'`;
+const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${previewLensHash('script')}; style-src ${previewLensHash('style')}; frame-src 'self'; frame-ancestors ${ancestors}; base-uri 'none'; form-action 'none'`;
+// The frame-ancestors directive of each policy in a header, and who may frame the page, replaced in
+// every policy that says: the gateway's own (a test holds them equal), for the relay's one relaxation.
+const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
+const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
+// Where a laptop dashboard's preview relays listen, one per preview its viewer has opened (spec §7):
+// off the instance block and PREVIEW_PICK, and no new preview may take one (previewPort).
+// DEVTEAM_RELAY_PORTS (low-high) is for tests, each in a range of its own.
+const RELAY_PORTS = (() => {
+  const m = /^(\d{4,5})-(\d{4,5})$/.exec(process.env.DEVTEAM_RELAY_PORTS ?? '');
+  const [lo, hi] = m && Number(m[1]) >= 1024 && Number(m[1]) <= Number(m[2]) && Number(m[2]) <= 65535 ? [Number(m[1]), Number(m[2])] : [4800, 4899];
+  return Array.from({ length: hi - lo + 1 }, (_, i) => lo + i);
+})();
+// The frames a page may be loaded in: a preview's is refused in another site's, as the gateway refuses it.
+const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
 // The dashboard's own: the last probe of each name. A preview command has no tick to ask, and
 // dashboard-data is a child process, so the dashboard hands it over in the environment.
 const previewUp = new Map();
@@ -6373,6 +6653,7 @@ async function cmdPreview() {
     let port;
     if (flags.port !== undefined) {
       port = previewPort(flagStr('port'));
+      if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
       if (!(await previewPortQuiet(port))) die(`preview: something already answers on port ${port}; stop it, or leave out --port and the kit picks one`);
     } else if (had?.run && PREVIEW_PICK.includes(had.port) && (await previewPortQuiet(had.port))) port = had.port;
     else port = await previewPickPort(name);
@@ -6380,6 +6661,7 @@ async function cmdPreview() {
   }
   if (sub !== undefined && !listing) {
     const port = previewPort(sub);
+    if (await previewPortIsDashboard(port)) die(`preview: ${port} is a devteam dashboard`);
     const session = logWriter();
     const label = previewLabel();
     const { name, had } = await previewClaim(session, label);
@@ -12229,8 +12511,9 @@ async function cmdDashboard() {
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(kitDir, 'dashboard', 'index.html');
-  // The page's policy, at / and at /view/: its frames are its own pages, and only it and the hub frame it.
-  const PAGE_CSP = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
+  // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
+  // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
+  const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
@@ -12364,10 +12647,243 @@ async function cmdDashboard() {
   const runPreviewTick = () => {
     if (previewTicking) return;
     previewTicking = true;
-    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; });
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
   };
   runPreviewTick();
   setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
+  // ----- the laptop's preview relay (spec §7): a loopback listener per preview, opened when its viewer
+  // is first asked for and closed with its record. It serves the lens on GET /.devteam/lens and
+  // forwards everything else to the app as the box's gateway does (proxyPreview, downstreamHeaders):
+  // localhost as Host and Origin, the app's loopback origin mapped to the relay's, and its framing
+  // headers given way for one load only, the app framed from its own origin, which is how its lens
+  // holds it. No session (it is loopback, like the dev server) and no cookie rules (no cookie of the
+  // owner's to protect): decision 1. Where it differs from the gateway, knowingly: it forwards a
+  // non-GET with a foreign Origin as it is (the app refuses it, or doesn't) and cross-site
+  // non-navigate fetches, which the gateway refuses; it passes clear-site-data on; and it answers a
+  // plain 502 when the app is down, where the gateway serves an HTML 503.
+  const relays = new Map();
+  // who may hold the lens here: the hub, every instance in the block, and this dashboard (its port may
+  // be pinned outside the block), each once (decision 4)
+  const relayLensCsp = () => previewLensCsp([...new Set([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`), `http://127.0.0.1:${port}`, `http://localhost:${port}`])].join(' '));
+  const RELAY_MARK = 'x-devteam-relay';
+  const RELAY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded']);
+  const RELAY_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
+  // Every route answers only on the relay's own address: a page elsewhere that points its own name at
+  // 127.0.0.1 (DNS rebinding) sends its own Host, and reaches neither the lens nor the app.
+  const relayOwnHost = (R, req) => [`127.0.0.1:${R.port}`, `localhost:${R.port}`].includes(req.headers.host ?? '');
+  const relayUpHeaders = (req, R) => {
+    const h = {};
+    for (const [k, v] of Object.entries(req.headers)) if (!RELAY_HOP.has(k) && !k.startsWith('x-forwarded-') && k !== RELAY_MARK) h[k] = v;
+    // set fresh on everything forwarded: a dashboard that ends up on the target refuses it everywhere
+    h[RELAY_MARK] = '1';
+    h.host = `localhost:${R.app}`;
+    // the relay's own origin, by either of its names, is the app's; any other passes as it is, for the app to refuse
+    if (req.headers.origin === `http://${req.headers.host}`) h.origin = `http://localhost:${R.app}`;
+    return h;
+  };
+  const relayDownHeaders = (h, R, framedBySelf) => {
+    const out = {};
+    for (const [k, v] of Object.entries(h)) {
+      if (['connection', 'keep-alive', 'transfer-encoding'].includes(k)) continue;
+      out[k] = k !== 'content-security-policy' && k !== 'location' ? v : String(v).replace(RELAY_LOOP, (all, scheme, p) => (Number(p) !== R.app ? all : scheme === 'ws' ? R.own.replace(/^http/, 'ws') : R.own));
+    }
+    if (framedBySelf) {
+      // the lens, the hub and this dashboard, which frames the lens: no other instance's page holds the app
+      const ancestors = `'self' http://127.0.0.1:${HUB_PORT} http://127.0.0.1:${port} http://localhost:${port}`;
+      delete out['x-frame-options'];
+      const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
+      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
+      // The app said nothing of frames by policy: by X-Frame-Options alone, or not at all (a dev
+      // server's default). Either way a policy of its own keeps every other instance's page out.
+      else out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
+    }
+    return out;
+  };
+  const relayRequest = (R) => (req, res) => {
+    const say = (code, text) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(text); };
+    if (!relayOwnHost(R, req)) return say(421, 'this relay answers only on its own address');
+    // origin-form only, as the gateway takes it
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return say(400, 'bad request');
+    let url;
+    try { url = new URL(req.url, R.own); } catch { return say(400, 'bad request'); }
+    // A service worker registered here would outlive this preview, and answer for the next one given its port.
+    if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return say(403, 'no service workers on a preview');
+    // framed only by a page of this machine, the lens too, so no other site lays the app under its own page
+    if (PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return say(403, 'not in another site\'s frame');
+    // the lens: static, the gateway's bytes, and never the app's; any other method or path is the app's
+    if (req.method === 'GET' && url.pathname === '/.devteam/lens') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': relayLensCsp(), 'referrer-policy': 'no-referrer' });
+      return res.end(PREVIEW_LENS);
+    }
+    const framedBySelf = req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin';
+    let current = null;
+    res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
+    // 127.0.0.1, then ::1 when that is refused; the body starts only once a connection is up, so a
+    // refused attempt has taken none of it. agent: false, a fresh connection each time, as the gateway's.
+    const attempt = (hosts) => {
+      let connected = false;
+      const up = http.request({ host: hosts[0], port: R.app, agent: false, method: req.method, path: req.url, headers: relayUpHeaders(req, R) }, (ur) => {
+        res.writeHead(ur.statusCode, { ...relayDownHeaders(ur.headers, R, framedBySelf), 'cache-control': 'no-store' });
+        pipeline(ur, res, () => {});
+      });
+      current = up;
+      up.on('socket', (s) => { const go = () => { connected = true; pipeline(req, up, () => {}); }; if (s.connecting) s.once('connect', go); else go(); });
+      up.on('error', (e) => {
+        if (!connected && e.code === 'ECONNREFUSED' && hosts.length > 1) return attempt(hosts.slice(1));
+        if (res.headersSent) return res.destroy();
+        if (res.destroyed) return undefined;
+        return say(502, `Nothing answers on port ${R.app}.`);
+      });
+    };
+    return attempt(['127.0.0.1', '::1']);
+  };
+  // A preview's sockets (HMR, mostly), as previewUpgrade carries them on a box: on the relay's own
+  // address, from a page of its own origin under that name (a page elsewhere can't open the app's
+  // socket through it), a cap per preview so a client's reconnect loop can't exhaust the dashboard,
+  // and the bytes relayed raw after a 101, both ways. No cookie rules here (decision 1), so the app's
+  // 101 passes as it is; any other answer is relayed, then both sides end.
+  const RELAY_SOCKETS = 32;
+  const RELAY_LINGER_MS = 2000;
+  // ended, then closed shortly after whether or not the page ends its side: a page that holds on keeps nothing here
+  const relayEnd = (socket) => { socket.end(); setTimeout(() => socket.destroy(), RELAY_LINGER_MS).unref(); };
+  const relayUpgrade = (R, req, socket, head) => {
+    const refuse = (code, msg) => { socket.write(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); relayEnd(socket); };
+    socket.on('error', () => {});
+    if (!relayOwnHost(R, req)) return refuse(421, 'Misdirected Request');
+    if (req.headers.origin !== `http://${req.headers.host}`) return refuse(403, 'Forbidden');
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
+    if (R.sockets.size >= RELAY_SOCKETS) return refuse(429, 'Too Many Requests');
+    R.sockets.add(socket);
+    socket.once('close', () => R.sockets.delete(socket));
+    // 127.0.0.1, then ::1 when that is refused, as a request's
+    const connect = (hosts) => {
+      const up = net.connect(R.app, hosts[0]);
+      let open = false;
+      let next = false;
+      // answered without an upgrade: the page's side ends on its own once the answer is written
+      let answered = false;
+      up.on('error', (e) => { if (!open && e.code === 'ECONNREFUSED' && hosts.length > 1) next = true; else if (!answered) socket.destroy(); });
+      up.once('close', () => { if (next && !socket.destroyed) connect(hosts.slice(1)); else if (!answered) socket.destroy(); });
+      up.once('connect', () => {
+        open = true;
+        if (socket.destroyed) return up.destroy();
+        socket.on('close', () => up.destroy());
+        const h = relayUpHeaders(req, R);
+        h.connection = 'Upgrade';
+        h.upgrade = req.headers.upgrade;
+        up.write(`GET ${req.url} HTTP/1.1\r\n${Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\r\n')}\r\n\r\n`);
+        if (head?.length) up.write(head);
+        // The answer's head, held until it is whole: a 101 is relayed as it is, then the bytes both
+        // ways; anything else is the answer to one request, so it and its body (by content-length,
+        // else until the app ends it) are all the page gets, and both sides end after it.
+        let held = Buffer.alloc(0);
+        // an app that takes the socket and never answers holds two sockets for nothing: both go after 10 s without a head
+        const noHead = setTimeout(() => { up.destroy(); socket.destroy(); }, Number(process.env.DEVTEAM_RELAY_HEAD_MS) || 10000);
+        up.once('close', () => clearTimeout(noHead));
+        socket.once('close', () => clearTimeout(noHead));
+        const onHead = (chunk) => {
+          held = Buffer.concat([held, chunk]);
+          const end = held.indexOf('\r\n\r\n');
+          if (end < 0) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+          clearTimeout(noHead);
+          up.off('data', onHead);
+          const top = held.subarray(0, end).toString('latin1');
+          const rest = held.subarray(end + 4);
+          if (/^HTTP\/1\.[01] 101\b/.test(top)) {
+            socket.write(held);
+            pipeline(up, socket, () => {});
+            pipeline(socket, up, () => {});
+            return;
+          }
+          answered = true;
+          const rows = top.split('\r\n').filter((row, i) => i === 0 || !/^(connection|keep-alive)[ \t]*:/i.test(row));
+          socket.write(`${rows.join('\r\n')}\r\nconnection: close\r\n\r\n`, 'latin1');
+          const len = /\r\ncontent-length:[ \t]*(\d+)[ \t]*(?:\r\n|$)/i.exec(top);
+          let left = len ? Number(len[1]) : Infinity;
+          let done = false;
+          const finish = () => { if (done) return; done = true; clearTimeout(cap); up.destroy(); relayEnd(socket); };
+          const body = (b) => { const part = b.subarray(0, Math.min(b.length, left)); if (part.length) socket.write(part); left -= part.length; if (left <= 0) finish(); };
+          const cap = setTimeout(finish, 5000);
+          up.on('data', body);
+          up.once('end', finish);
+          up.once('close', finish);
+          body(rest);
+        };
+        up.on('data', onHead);
+        return undefined;
+      });
+    };
+    return connect(['127.0.0.1', '::1']);
+  };
+  const relayCloseOne = (R) => { for (const s of R.sockets) s.destroy(); R.server?.closeAllConnections?.(); R.server?.close(); };
+  const relayClose = (name) => { const R = relays.get(name); if (!R) return; relays.delete(name); relayCloseOne(R); };
+  // A relay for this preview, on the first port of the range nothing holds; null when none is free.
+  const relayFor = (rec) => {
+    const had = relays.get(rec.name);
+    if (had?.app === rec.port) return had.ready;
+    if (had) relayClose(rec.name);
+    // a record (written by hand, or before this rule) naming this dashboard: never relayed
+    if (rec.port === port) return Promise.resolve(null);
+    const R = { name: rec.name, app: rec.port, port: null, own: null, server: null, sockets: new Set() };
+    R.ready = (async () => {
+      // any dashboard answering there (this one's own port aside, another checkout's, or a record that names one): not an app
+      if (await previewPortIsDashboard(rec.port)) { log(`previews: ${rec.name}: port ${rec.port} answers as a devteam dashboard, not relayed`); if (relays.get(rec.name) === R) relays.delete(rec.name); return null; }
+      const held = new Set(readPreviews().map((r) => r.port));
+      for (const p of RELAY_PORTS) {
+        // nothing answering there on either family (a dev server on ::1 would take localhost), and no record's
+        if (held.has(p) || [...relays.values()].some((x) => x !== R && x.port === p) || !(await portFree(p))) continue;
+        const srv = keepAlive(http.createServer());
+        if (!(await new Promise((resolve) => { srv.once('error', () => resolve(false)); srv.listen(p, '127.0.0.1', () => resolve(true)); }))) continue;
+        Object.assign(R, { port: p, own: `http://127.0.0.1:${p}`, server: srv });
+        srv.on('request', relayRequest(R));
+        srv.on('upgrade', (req, socket, head) => relayUpgrade(R, req, socket, head));
+        srv.on('error', (e) => log(`previews: relay for ${R.name} on ${p}: ${e?.message ?? e}`));
+        // closed before it was up (its record gone meanwhile): not kept
+        if (relays.get(rec.name) !== R) { relayCloseOne(R); return null; }
+        return p;
+      }
+      // none free: nothing kept, so the next ask tries again
+      if (relays.get(rec.name) === R) relays.delete(rec.name);
+      return null;
+    })();
+    relays.set(rec.name, R);
+    return R.ready;
+  };
+  // a relay for a record gone, or one now on another port, closes on the tick after
+  // and one whose target now answers as a dashboard (one that came up there after the relay did)
+  const relaysTidy = () => {
+    const live = new Map(readPreviews().map((r) => [r.name, r.port]));
+    for (const [n, R] of [...relays]) {
+      if (live.get(n) !== R.app) relayClose(n);
+      else if (R.port) previewPortIsDashboard(R.app).then((is) => { if (is && relays.get(n) === R) { log(`previews: ${n}: port ${R.app} now answers as a devteam dashboard, relay closed`); relayClose(n); } });
+    }
+  };
+  // Where a preview's lens is, for its viewer (spec §7): its own name through the box's gateway, which
+  // serves the lens there; else this laptop's relay, opened only when open is set (/api/view's ask);
+  // null on a box whose gateway doesn't serve previews, where the loopback is out of the browser's
+  // reach (decision 7). opened: this ask opened the relay, so a page loaded before it lacks it in its
+  // policy (decision 6).
+  const previewStage = async (rec, { open = false } = {}) => {
+    if (previewServed()) return { origin: previewLink(rec), opened: false };
+    if (previewBox()) return { origin: null, opened: false };
+    const had = relays.get(rec.name);
+    if (had?.app === rec.port && had.port) return { origin: had.own, opened: false };
+    if (!open) return { origin: null, opened: false };
+    // one still opening was another ask's: this one waits for it, but didn't open it
+    const mine = had?.app !== rec.port;
+    const p = await relayFor(rec);
+    return p ? { origin: `http://127.0.0.1:${p}`, opened: mine } : { origin: null, opened: false };
+  };
+  // Where the dashboard's own stage may frame a preview's lens, as of this request (decision 5): each
+  // preview's own name through the box's gateway, or this laptop's relays open now, each as
+  // previewStage gives it. Never a wildcard: an agent can answer on any instance name. With none,
+  // 'self' alone, as before. A relay counts only while its record is there and names its app's port:
+  // one whose preview has stopped or moved, and which the tick hasn't closed yet, is framed no more.
+  const stageFrames = () => {
+    if (previewBox()) return previewServed() ? readPreviews().map(previewLink) : [];
+    const live = new Map(readPreviews().map((r) => [r.name, r.port]));
+    return [...relays].filter(([n, R]) => R.port && live.get(n) === R.app).map(([, R]) => R.own);
+  };
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
@@ -12433,13 +12949,15 @@ async function cmdDashboard() {
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
+    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': PAGE_CSP });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
@@ -12466,7 +12984,19 @@ async function cmdDashboard() {
     const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
     if (vw) {
       if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': PAGE_CSP });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
+      return res.end(fs.readFileSync(page));
+    }
+    // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
+    // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
+    // dev port) or this laptop's relay (decision 5). Never opens a relay: any page can navigate here
+    // (decision 3); the page's own /api/view does, and says so.
+    const vp = req.method === 'GET' ? /^\/view\/preview\/([^/]+)$/.exec(u.pathname) : null;
+    if (vp) {
+      const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
+      if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      const { origin } = await previewStage(rec);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
       return res.end(fs.readFileSync(page));
     }
     // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
@@ -12479,6 +13009,13 @@ async function cmdDashboard() {
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       const slug = u.searchParams.get('slug') ?? '';
       const at = u.searchParams.get('at') || 'main';
+      if (u.searchParams.get('kind') === 'preview') {
+        const rec = readPreviews().find((r) => r.name === u.searchParams.get('name') && PREVIEW_NAME.test(r.name));
+        if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
+        // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
+        const { origin, opened } = await previewStage(rec, { open: true });
+        return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
+      }
       if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
       const key = `${slug}|${at}`;
       let job = describing.get(key);

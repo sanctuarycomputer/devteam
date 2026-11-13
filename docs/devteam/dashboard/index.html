@@ -8,6 +8,18 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lucide-static@0.460.0/font/lucide.css">
+<script>
+// Framed by a page of its own origin (frameElement is null under any other parent, so the hub and the
+// owner's wrapper are untouched): a preview's app or an artifact's page that sent its frame here. The
+// owner's pointer is under it and this page has the owner's powers, so it draws one line and stops:
+// window.stop ends the parser, so nothing below runs, and nothing is fetched.
+try {
+  if (window.frameElement) {
+    window.stop();
+    document.documentElement.innerHTML = '<head><meta charset="utf-8"><title>devteam</title></head><body style="font:16px system-ui,sans-serif;padding:24px">Open the dashboard in its own tab</body>';
+  }
+} catch {}
+</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
 <style>
@@ -504,7 +516,8 @@
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
   .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
   .av-bar a.av-btn:hover { background: var(--hover); }
-  #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
+  #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
+  #av-frame[hidden], #pv-frame[hidden] { display: none; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
@@ -757,6 +770,11 @@
   <div id="av-stage">
     <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
     <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+    <!-- a preview's lens: its own origin, so it can read the app it frames. The sandbox here is advisory: the app can navigate its lens
+         as itself, and no frame attribute stops that. What bounds it is this page's frame-src (the lens's origin and this page's own, which is why a page framed by one of its own origin draws one line and stops, at the top of the head) and the server's
+         `sandbox` policy on the agent's HTML responses. Widening frame-src ('self' or another origin) or dropping those headers
+         changes what a preview can reach, and is sandbox-relevant. -->
+    <iframe id="pv-frame" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
     <div id="av-pins" class="av-pins"></div>
     <div id="av-over" class="av-over" hidden></div>
   </div>
@@ -793,11 +811,11 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
-// The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>], one
-// artifact on the stage, the thread layer and the dock over it, and nothing else: no sections, no
-// routes, no /api/data.
+// The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>] or
+// /view/preview/<name>, one artifact or preview on the stage, the thread layer and the dock over it,
+// and nothing else: no sections, no routes, no /api/data.
 const VIEWER = (() => {
-  const m = /^\/view\/(artifact)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
+  const m = /^\/view\/(artifact|preview)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
   return m ? { kind: m[1], name: m[2], at: new URLSearchParams(location.search).get('at') || 'main' } : null;
 })();
 // The dashboard page this tab loaded, by the server's own fingerprint of it (x-devteam-page).
@@ -1315,12 +1333,14 @@ function artNameLink(l) {
   try { v = artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'); } catch { return artLinkOf(l, true); }
   return `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
 }
+// A question's [[name]] for a preview opens its viewer (spec §7); the list under it keeps its own link.
+const pvNameLink = (l) => (l.state === 'gone' ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : `<a href="${esc(pvViewer(l.preview))}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>`);
 function qtext(text, links) {
   return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
     if (i % 2 === 0) return linkify(part);
     const l = (links || []).find((x) => x.name === part);
     // in the sentence the link alone; a changed artifact is flagged in the list below
-    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
+    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : l.preview ? pvNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
 }
 // Owner-facing prose (a question's context, a choice's detail) as blocks: paragraphs, "- " bullets
@@ -3480,9 +3500,11 @@ const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).st
 // Its viewer, in a tab of its own.
 const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at && at !== 'main' ? `?${new URLSearchParams({ at })}` : ''}`;
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
-// artifact's opaque origin takes '*'), the ids minted for real pointer events, the last reply, and
-// where the lens says each pinned anchor is now (keyed by a thread's id).
-const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
+// artifact's opaque origin takes '*'; a preview's lens, its own origin), the ids minted for real
+// pointer events, the last reply, and where the lens says each pinned anchor is now (keyed by a
+// thread's id). A preview's: its name, the lens's origin, and its app's route, viewport and last
+// errors as the lens said them; the session that offered it and whether it answers, for the bar.
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
 // What the lens was asked and has not answered, let go: a waiting click hears it is gone (the page it
 // pointed at is no longer there, so it starts nothing), and no reply to a question from before is taken.
 function tsForget() {
@@ -3493,7 +3515,7 @@ function tsForget() {
 }
 function tsSet(kind, info = {}) {
   tsForget();
-  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, watch: '', last: null }, info);
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null }, info);
   for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
@@ -3510,8 +3532,72 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('av-tab').href = artViewer(slug, at);
   if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp });
   else Object.assign(TS, { fp, mainFp });
+  $('pv-frame').hidden = true;
+  $('pv-frame').removeAttribute('src');
+  $('av-frame').hidden = false;
   if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
   $('artifact-view').hidden = false;
+}
+// A preview's viewer, in a tab of its own.
+const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
+// The bar for a preview: the session that offered it, its app's route, whether it answers.
+function tsBar() {
+  if (TS.kind !== 'preview') return;
+  $('av-where').textContent = [TS.session ? `from ${TS.session}` : '', TS.route || '', TS.up === true ? 'live' : TS.up === false ? 'not answering' : ''].filter(Boolean).join(' · ');
+}
+// The stage on a preview: its lens where it is served (info: /api/view's, null when it said nothing),
+// framing the app at its root. A relay this page's own ask just opened is missing from the policy the
+// page loaded with (decision 6): a viewer tab loads again, once (a preview's viewer has no grant in
+// its address to keep), and says it is doing so ('reload'); the stage here says to reload rather than
+// reloading the whole dashboard.
+function showPreview(name, info) {
+  const seen = `devteam.preview.reloaded.${name}`;
+  if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return 'reload'; } } catch {} }
+  else { try { sessionStorage.removeItem(seen); } catch {} }
+  AV = { preview: name };
+  $('av-title').textContent = info?.label || name;
+  $('av-tab').href = pvViewer(name);
+  const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : info.opened ? 'Reload to view this preview' : null;
+  $('av-note').hidden = !note;
+  $('av-note').textContent = note ?? '';
+  // what goes to the lens goes to its origin only; with none known, nothing is framed to hear it
+  if (TS.kind !== 'preview' || TS.name !== name || TS.origin !== (info?.origin ?? null)) tsSet('preview', { name, route: '/', target: info?.origin ?? 'null', origin: info?.origin ?? null, session: info?.session ?? null });
+  TS.up = info?.up ?? null;
+  tsBar();
+  $('av-frame').hidden = true;
+  $('av-frame').removeAttribute('src');
+  const f = $('pv-frame');
+  f.hidden = !info?.lens;
+  const src = info?.lens ? `${info.lens}?${new URLSearchParams({ route: '/' })}` : null;
+  if (!src) f.removeAttribute('src');
+  else if (f.getAttribute('src') !== src) f.src = src;
+  $('artifact-view').hidden = false;
+  return null;
+}
+// a preview offered after this page loaded is outside its policy: the lens's frame is refused, and the bar says what to do.
+// Only a refusal of the lens itself says so (what the app's own frames are denied is the app's business).
+document.addEventListener('securitypolicyviolation', (e) => {
+  if (TS.kind !== 'preview' || !String(e.violatedDirective).startsWith('frame-src')) return;
+  // the blocked address's origin must be the lens's exactly: a longer port (:48011) shares its prefix
+  try { if (new URL(e.blockedURI).origin !== new URL($('pv-frame').getAttribute('src'), location.href).origin) return; } catch { return; }
+  $('av-note').hidden = false;
+  $('av-note').textContent = 'Reload to view this preview';
+});
+const previewInfo = async (name) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'preview', name })}`); return r.ok ? await r.json() : null; } catch { return null; } };
+// #preview/<name>: the stage here, over the scrim, as an artifact's
+async function openPreview(raw) {
+  let name = null;
+  try { name = decodeURIComponent(raw); } catch {}
+  if (!/^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/.test(name ?? '')) return void (location.hash = '#library');
+  const info = await previewInfo(name);
+  // the owner went elsewhere while it was asked
+  if (location.hash !== `#preview/${raw}`) return;
+  // where the stage was opened from, taken now: the await above is long enough for focus and the route to move
+  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
+  showPreview(name, info);
+  $('scrim').hidden = false;
+  document.body.style.overflow = 'hidden';
+  $('av-close').focus();
 }
 function openArtifact(raw) {
   const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
@@ -3534,6 +3620,8 @@ function closeArtifact() {
   tsPins();
   $('artifact-view').hidden = true;
   $('av-frame').removeAttribute('src');
+  $('pv-frame').removeAttribute('src');
+  $('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
   if ($('drawer').hidden && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
@@ -3542,7 +3630,7 @@ function closeArtifact() {
 // a viewer tab has nothing to go back to: it never closes
 function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
 $('av-close').addEventListener('click', leaveArtifact);
-$('av-reload').addEventListener('click', () => { const f = $('av-frame'), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
+$('av-reload').addEventListener('click', () => { const f = tsFrame(), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
 // a question's link to a changed artifact says so in the viewer's header
 document.addEventListener('click', (e) => { const a = e.target.closest?.('a[data-av-note]'); if (a) AV_NOTE = a.dataset.avNote || null; });
 
@@ -3561,6 +3649,7 @@ let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
+  if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
   if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
   if (closeArtifact() && /^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
@@ -3809,14 +3898,14 @@ function renderLibrary(lib) {
     const s = previewState(p, Date.now());
     const url = previewUrl(pvHere, p);
     const act = {
-      open: () => `<a class="ghost" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open</a>`,
+      open: () => `<a class="ghost av-open" href="${esc(pvViewer(p.name))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`,
       copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
       start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
       stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
     };
     const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
     return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
-      <div class="art-t"><b>${esc(p.label || p.name)}</b><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
+      <div class="art-t"><a href="#preview/${esc(encodeURIComponent(p.name))}">${esc(p.label || p.name)}</a><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
       <div class="meta">${meta}</div>
       <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
     </div>`;
@@ -3877,7 +3966,7 @@ function renderLibrary(lib) {
       <div class="meta"><code>${esc(l.id)}</code>${loc(l) ? ` · <span class="loc">${loc(l)}</span>` : ''}${l.for?.length ? ` · for ${l.for.map((f) => linkify(f)).join(', ')}` : ''}</div>
     </div>`).join('')
     : empty('No links in the registry. The supervisor adds the docs, designs and dashboards the fleet works from.');
-  if (AV) avHeader();
+  if (AV?.slug) avHeader();
 }
 
 function render(d) {
@@ -4118,10 +4207,11 @@ function tFit(s) {
     else if (k === 'point') { const p = tBox(v, ['x', 'y']); if (p) x.point = p; }
     else if (k === 'viewport') { const p = tBox(v, ['w', 'h']); if (p) x.viewport = p; }
     else if (k === 'at' && s.kind === 'page') { const p = tBox(v, ['x', 'y'], false); if (p) x.at = p; }
-    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(tUncap(e), T_ERROR_MAX)); }
+    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(tUncap(e.replace(T_UNSAFE, '')), T_ERROR_MAX)); }
     else if (typeof v !== 'string') continue;
     else if (T_WHOLE.includes(k)) { if (tBytes(v) <= (k === 'at' ? T_AT_MAX : T_CAPS[k])) x[k] = v; }
-    else x[k] = tCut(tUncap(v), T_CAPS[k]);
+    // a preview's route is its app's say-so, as an anchor's words are: no control or bidi character
+    else x[k] = tCut(tUncap(k === 'route' ? v.replace(T_UNSAFE, '') : v), T_CAPS[k]);
   }
   const size = () => tBytes(JSON.stringify(x));
   for (let i = 0; i < 100 && size() > T_SUBJECT_MAX; i++) {
@@ -4216,7 +4306,8 @@ function tLensMessage(e, frameWin, minted) {
   if (!frameWin || e.source !== frameWin) return null;
   const m = e.data;
   if (!m || typeof m !== 'object' || m.lens !== 1 || !T_LENS_SAYS.includes(m.type)) return null;
-  const str = (v, n) => (typeof v === 'string' ? tCut(tUncap(v), n) : null);
+  // a path or a route: the page's words, without what would have the owner's eye read them otherwise
+  const str = (v, n) => (typeof v === 'string' ? tCut(tUncap(v.replace(T_UNSAFE, '')), n) : null);
   if (m.type === 'hit-reply') {
     if (typeof m.id !== 'string' || !minted.has(m.id)) return null;
     const anchor = tAnchor(m.anchor);
@@ -4227,7 +4318,18 @@ function tLensMessage(e, frameWin, minted) {
   if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
-  return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x), T_ERROR_MAX)) };
+  return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x.replace(T_UNSAFE, '')), T_ERROR_MAX)) };
+}
+// Where a preview's lens may be told to go (go): a path of the app's own (origin: the lens's), never
+// another site's, a scheme's, or the lens's own; null for anything else. A route is the log's, so the
+// page's: its lens checks again, and this keeps a bad one from being sent at all.
+function tGoRoute(r, origin) {
+  if (typeof r !== 'string' || r[0] !== '/' || r[1] === '/' || r.includes('\\') || r.replace(T_UNSAFE, '') !== r || tBytes(r) > T_CAPS.route) return null;
+  try {
+    const base = /^https?:\/\/[^/]+$/.test(origin ?? '') ? origin : 'http://preview.invalid';
+    const u = new URL(r, base);
+    return u.origin === base && !u.pathname.startsWith('/.devteam/') ? `${u.pathname}${u.search}${u.hash}` : null;
+  } catch { return null; }
 }
 // The page inside an artifact, from the path its lens reports: whatever the prefix (main, a draft's
 // worktree, a published tree, the gateway's capability before it), what follows <slug>/, cut to the
@@ -4392,6 +4494,17 @@ function tlTargetRect(s) {
 }
 // Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
 function tlGoTo(s) {
+  // a spot on a preview: the stage on it, then its route, by go: a route from the log, so only a path
+  // of the app's own (tGoRoute) is sent, and its lens checks again. A viewer shows only its own.
+  if (s?.kind === 'preview') {
+    if (TS.kind === 'preview' && TS.name === s.name) {
+      const r = tGoRoute(s.route ?? '/', TS.origin);
+      if (r && r !== (TS.route ?? '/')) tsPost({ type: 'go', route: r });
+      return;
+    }
+    if (!VIEWER && typeof s.name === 'string') location.hash = `#preview/${encodeURIComponent(s.name)}`;
+    return;
+  }
   // a spot on an artifact: the stage on it (a published tree's thread opens main's), in the dashboard
   if (s?.kind === 'artifact') {
     if (VIEWER) return;
@@ -4837,7 +4950,8 @@ function tlAct(action, body) {
   });
 }
 // ---- the stage's lens (spec §4, §6): what is where in the framed page ----
-const tsFrame = () => $('av-frame');
+// the stage's frame: a preview's lens has its own, with its own origin (pv-frame); an artifact's, av-frame
+const tsFrame = () => (TS.kind === 'preview' ? $('pv-frame') : $('av-frame'));
 const tsOn = () => !!TS.kind && !$('artifact-view').hidden;
 // To the lens on the stage. An artifact's frame has an opaque origin, so '*', and the artifact's own
 // scripts see these too: string ids, points and anchors from the log, never the owner's words (decision 7).
@@ -4855,8 +4969,11 @@ function tsRaise(on) {
 // when it has one (none: no lens, an older kit, a page that ignores it, or an answer about somewhere
 // else), so the pin can be drawn at the point either way (spec §4 step 3).
 function tsSubject(anchor, x, y) {
-  if (TS.kind !== 'artifact') return null;
-  return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : {}), point: { x: Math.round(x), y: Math.round(y) } };
+  const point = { x: Math.round(x), y: Math.round(y) };
+  if (TS.kind === 'artifact') return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : {}), point };
+  // a preview's route, viewport and last errors are its app's, as its lens said them
+  if (TS.kind === 'preview') return { kind: 'preview', name: TS.name, ...(TS.route ? { route: TS.route } : {}), ...(TS.viewport ? { viewport: TS.viewport } : {}), ...(anchor ? { anchor } : {}), point, ...(TS.errors?.length ? { errors: TS.errors } : {}) };
+  return null;
 }
 // An anchor the lens gave for a point, only when its box holds that point (a few pixels' slack for
 // rounding): the page says where its element is, and a page that names something elsewhere is not
@@ -4930,14 +5047,26 @@ tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e)
 function tsDrawSoon() {
   if (TS.pinsPending) return;
   TS.pinsPending = true;
-  requestAnimationFrame(() => { TS.pinsPending = false; tlDraw(); });
+  requestAnimationFrame(() => { TS.pinsPending = false; tsBar(); tlDraw(); });
 }
-// Each page the frame loads is asked what it is: its lens answers ready.
-tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
+// Each page the stage's frame loads is asked what it is: its lens answers ready. The other frame's
+// loads (one let go of) are nothing to the stage.
+for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', (e) => { if (e.target !== tsFrame()) return; tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
 window.addEventListener('message', (e) => {
   if (!TS.kind) return;
+  // a preview's lens has an origin of its own: only messages from it (an artifact's is opaque, 'null')
+  if (TS.kind === 'preview' && (!TS.origin || e.origin !== TS.origin)) return;
   const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
   if (!m) return;
+  // a preview's app went to another route (its lens says so, or says ready on the next page): what is
+  // pinned there is another set. Taken as often as it comes, drawn once a frame, so a page saying
+  // routes as fast as it can costs a comparison each.
+  if (TS.kind === 'preview' && (m.type === 'route' || m.type === 'ready')) {
+    if (m.type === 'ready' && m.viewport) TS.viewport = m.viewport;
+    if (m.route !== TS.route) { TS.route = m.route; TS.rects.clear(); TS.watch = ''; if (TS.ready) tsDrawSoon(); }
+    if (m.type === 'route') return;
+  }
+  if (m.type === 'errors') { if (TS.kind === 'preview') TS.errors = m.errors; return; }
   // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
   // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
   // load lets it go): a page that says ready again and again would otherwise have every one redraw
@@ -5375,11 +5504,9 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
-// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, and the
-// instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
-async function viewerBoot() {
-  document.documentElement.classList.add('viewer');
-  // what /api/view said: the artifact there, or its status (404: nothing there; else 0 for no answer)
+// An artifact's viewer: what /api/view said: the artifact there, or its status (404: nothing there;
+// else 0 for no answer)
+async function viewerArtifact() {
   const info = async (slug, at) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return { status: r.status, d: r.ok ? await r.json() : null }; } catch { return { status: 0, d: null }; } };
   let at = VIEWER.at;
   let got = await info(VIEWER.name, at);
@@ -5397,8 +5524,16 @@ async function viewerBoot() {
   }
   const d = got.d;
   showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+}
+// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, and the
+// instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
+async function viewerBoot() {
+  document.documentElement.classList.add('viewer');
+  if (VIEWER.kind === 'preview') { if (showPreview(VIEWER.name, await previewInfo(VIEWER.name)) === 'reload') return; }
+  else await viewerArtifact();
   document.title = `${$('av-title').textContent} · devteam`;
-  const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
+  // the instance's name, and for a preview whether it answers, as the dashboard's tick last found it
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
   hello();
   setInterval(hello, 30000);
   // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
