@@ -1544,6 +1544,8 @@ const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e
 async function fakeApp(headers = {}, pages = {}) {
   const A = { seen: [], marks: [], headers, sockets: new Set() };
   A.srv = http.createServer((q, s) => {
+    // the relay's own looks (once on opening, then each tick) to know the target isn't a dashboard are not the page's traffic
+    if (q.url === '/api/hello' && !Object.hasOwn(pages, '/api/hello')) { s.writeHead(404); return s.end(); }
     A.seen.push({ method: q.method, url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
     A.marks.push(q.headers['x-devteam-relay'] ?? null);
     if (q.url === '/go') { s.writeHead(302, { location: `http://localhost:${A.port}/there` }); return s.end(); }
