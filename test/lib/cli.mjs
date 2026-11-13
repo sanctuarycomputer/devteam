@@ -36,7 +36,14 @@ function start() {
   slots.push({ dir, child });
 }
 
+// The kit reads the machine's memory before it starts a session (and before it suggests one): a test
+// reads none of the machine it runs on, where a busy runner would refuse its workers, unless it
+// names its own (DEVTEAM_CGROUP, DEVTEAM_MEMINFO).
+const NOWHERE = path.join(os.tmpdir(), 'dt-no-such-machine');
+const machineless = (env) => ({ DEVTEAM_CGROUP: NOWHERE, DEVTEAM_MEMINFO: NOWHERE, ...(env ?? process.env) });
+
 export function runNode(script, args, { cwd, env, input, cold } = {}) {
+  env = machineless(env);
   if (cold || input !== undefined || process.env.DEVTEAM_TEST_COLD) {
     const r = spawnSync(process.execPath, [script, ...args], { cwd, env, encoding: 'utf8', input });
     return { status: r.status, stdout: r.stdout, stderr: r.stderr };
