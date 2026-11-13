@@ -224,7 +224,7 @@ Rules: `--goal <g-id>` on every question that serves a goal, and `--ticket`/`--b
 |---|---|---|
 | `design-change` | worker → you | `ruling` (maybe a re-plan) |
 | `merge-request` | worker → you, with the exact head | `ruling`: merged, or what's missing |
-| `review-request` | worker or planner → you | `info`: who reviews, or "use your own subagent" |
+| `review-request` | worker or planner → you | `info`: who reviews, or "use your own subagent"; for a ticket's spec or plan, once you accept it, also the `approve-spec` or `approve-plan` act: a `ruling` or a design-change answer is not an approval, and `check-ticket` fails without it |
 | `blocked` | worker or planner → you | `ruling`: an unblock, or park |
 | `ruling`, `answer` | you → a session | none; the session records it in its spec or plan |
 | `info` | anyone → anyone | none |
