@@ -4482,12 +4482,13 @@ function cmdMerge() {
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
-      const what = changed.map((c) => `${c.key} (${c.cls}${c.key === 'gates' && gateAdd?.problem ? `: ${gateAdd.problem}; only adding a gate is the supervisor's` : ''})`).join(', ');
+      const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
+      const gatesWhy = gateAdd?.problem && changed.some((c) => c.key === 'gates') ? ` (gates: ${gateAdd.problem}; only adding a gate is the supervisor's)` : '';
       // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
       // only when every changed setting is of such a class, and only the owner's own accepted rule.
       const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
       if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);

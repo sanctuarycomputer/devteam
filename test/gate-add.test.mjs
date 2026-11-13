@@ -75,21 +75,21 @@ test('an edited, removed or renamed gate is refused without the owner, alone or 
   try {
     withGates(F);
     chore(F, 'edit', (j) => { j.gates.test.paths = ['src/**', 'lib/**']; });
-    refused(merge(F, 'edit', '--dry-run'), /changes owner settings: gates \(gate-change: it changes test; only adding a gate is the supervisor's\)/);
+    refused(merge(F, 'edit', '--dry-run'), /changes owner settings: gates \(gate-change\) \(gates: it changes test; only adding a gate is the supervisor's\)/);
     chore(F, 'loosen', (j) => { j.gates.test.mode = 'ratchet'; });
-    refused(merge(F, 'loosen', '--dry-run'), /gates \(gate-change: it changes test/);
+    refused(merge(F, 'loosen', '--dry-run'), /gates \(gate-change\) \(gates: it changes test/);
     chore(F, 'remove', (j) => { delete j.gates.lint; });
-    refused(merge(F, 'remove', '--dry-run'), /gates \(gate-change: it removes lint/);
+    refused(merge(F, 'remove', '--dry-run'), /gates \(gate-change\) \(gates: it removes lint/);
     chore(F, 'rename', (j) => { j.gates = { test: j.gates.test, eslint: 'true' }; });
-    refused(merge(F, 'rename', '--dry-run'), /gates \(gate-change: it removes lint/);
+    refused(merge(F, 'rename', '--dry-run'), /gates \(gate-change\) \(gates: it removes lint/);
     chore(F, 'add-and-edit', (j) => { j.gates.shellcheck = 'true'; j.gates.lint = 'exit 0'; });
-    refused(merge(F, 'add-and-edit', '--dry-run'), /gates \(gate-change: it changes lint/);
+    refused(merge(F, 'add-and-edit', '--dry-run'), /gates \(gate-change\) \(gates: it changes lint/);
     // the same entries, main's in another order, then the new one
     chore(F, 'reorder', (j) => { j.gates = { test: j.gates.test, lint: j.gates.lint, shellcheck: 'true' }; });
-    refused(merge(F, 'reorder', '--dry-run'), /gates \(gate-change: it reorders the gates main has/);
+    refused(merge(F, 'reorder', '--dry-run'), /gates \(gate-change\) \(gates: it reorders the gates main has/);
     // the same value written with its fields in another order is not byte-identical
     chore(F, 'refield', (j) => { j.gates.test = { paths: ['src/**'], cmd: 'true' }; j.gates.shellcheck = 'true'; });
-    refused(merge(F, 'refield', '--dry-run'), /gates \(gate-change: it changes test/);
+    refused(merge(F, 'refield', '--dry-run'), /gates \(gate-change\) \(gates: it changes test/);
     // nothing lands, and no gate-add act was written
     assert.ok(!liveLog(F).some((o) => o.class === 'gate-add'));
   } finally { F.done(); }
@@ -101,10 +101,10 @@ test('an added gate whose name repeats a key under gates is refused: JSON.parse 
     withGates(F);
     // a second "lint" after the new gate; its value is main's, so the parsed gates look like an addition
     chore(F, 'dup', (j) => { j.gates.shellcheck = 'true'; }, (t) => t.replace('"shellcheck": "true"', '"shellcheck": "true",\n    "lint": "true"'));
-    refused(merge(F, 'dup', '--dry-run'), /gates \(gate-change: it repeats gates\.lint in settings\.md/);
+    refused(merge(F, 'dup', '--dry-run'), /gates \(gate-change\) \(gates: it repeats gates\.lint in settings\.md/);
     // a repeated key elsewhere in settings is not this rule's business; a repeated gates is
     chore(F, 'dup-gates', (j) => { j.gates.shellcheck = 'true'; }, (t) => t.replace(/\n}$/, `,\n  "gates": ${JSON.stringify({ ...MAIN_GATES, shellcheck: 'true' })}\n}`));
-    refused(merge(F, 'dup-gates', '--dry-run'), /gates \(gate-change: it repeats gates in settings\.md/);
+    refused(merge(F, 'dup-gates', '--dry-run'), /gates \(gate-change\) \(gates: it repeats gates in settings\.md/);
   } finally { F.done(); }
 });
 
@@ -113,7 +113,7 @@ test('a new gate is a plain check: a known shape, a lowercase name, and it passe
   try {
     withGates(F);
     chore(F, 'numeric', (j) => { j.gates['1'] = 'true'; });
-    refused(merge(F, 'numeric', '--dry-run'), /gate-change: (it reorders the gates main has|new gate "1": a new gate is a short lowercase name)/);
+    refused(merge(F, 'numeric', '--dry-run'), /gate-change\) \(gates: (it reorders the gates main has|new gate "1": a new gate is a short lowercase name)/);
     chore(F, 'upper', (j) => { j.gates.Shellcheck = 'true'; });
     refused(merge(F, 'upper', '--dry-run'), /new gate "Shellcheck": a new gate is a short lowercase name/);
     chore(F, 'field', (j) => { j.gates.shellcheck = { cmd: 'true', env: { RAILS_ENV: 'production' } }; });
@@ -143,7 +143,7 @@ test('a hand-written log line changes nothing: the check reads the trees', () =>
     fs.appendFileSync(path.join(F.old, 'docs/devteam/run/log', `supervisor-${at.slice(0, 7)}.jsonl`),
       line({ id: 'a-20990101-000000000-supervisor', op: 'new', at, by: 'supervisor', type: 'act', class: 'gate-add', what: 'added gate shellcheck; lint is unchanged', refs: ['chore-edit'], reversible: true })
       + line({ id: 'a-20990101-000000001-supervisor', op: 'new', at, by: 'supervisor', type: 'act', class: 'gate-change', what: 'the owner approved the lint change', refs: ['chore-edit'], reversible: true }));
-    refused(merge(F, 'edit', '--dry-run'), /changes owner settings: gates \(gate-change: it changes lint/);
+    refused(merge(F, 'edit', '--dry-run'), /changes owner settings: gates \(gate-change\) \(gates: it changes lint/);
     // and an addition needs no line at all
     chore(F, 'add', (j) => { j.gates.shellcheck = 'true'; });
     const r = merge(F, 'add', '--dry-run');
