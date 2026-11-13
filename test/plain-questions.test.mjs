@@ -24,6 +24,14 @@ test('ask: plain words, no asking about asking, credentials straight to a paste 
     refused('Is q-20261101-120000000-supervisor still the right call?', /kit id/, 'a kit id in the question');
     refused('Should we move this release-scope call to next week?', /class name/, 'a class name in the question');
     refused('Can the worker run in its own worktree for this?', /kit's own word "worktree"/, 'kit jargon in the question');
+    // the override: the question is about that very thing, so the named word stays, and only it
+    const po = run(old, ['ask', '--question', 'Can the worker run in its own git worktree for this?', '--plain-ok', 'worktree', '--recommendation', 'yes'], SUP);
+    assert.equal(po.status, 0, po.err);
+    assert.match(po.err, /--plain-ok worktree: the owner reads those words as they are/);
+    ok(old, ['ask', '--question', 'Should release-scope calls go ahead without you from now on?', '--plain-ok', 'release-scope', '--recommendation', 'yes'], SUP);
+    refused('Can the worktree use the trust ladder?', /kit's own word "trust ladder"/, 'a word not named stays refused', '--plain-ok', 'worktree');
+    refused('Is q-20261101-120000000-supervisor still the right call?', /kit id/, 'ids never pass', '--plain-ok', 'q-20261101-120000000-supervisor');
+    refused('Should I ask you for the deploy token?', /don't ask whether to ask/, 'asking about asking never passes', '--plain-ok', 'token');
     refused('x'.repeat(301), /301 characters/, 'a question that should have been context');
     refused('Ship the billing page this week?', /low-confidence with --confidence 0.8/, 'low confidence that isn\'t', '--reasons', 'low-confidence', '--confidence', '0.8');
 

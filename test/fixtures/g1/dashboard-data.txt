@@ -653,7 +653,7 @@ exit 0
         "about": "start planning a feature the owner hasn't asked for",
         "rung": 2,
         "rung_name": "ask with a default",
-        "ceiling": 2,
+        "ceiling": 3,
         "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
@@ -779,7 +779,7 @@ exit 0
     ],
     "classes": {
       "new-feature": {
-        "ceiling": 2,
+        "ceiling": 3,
         "start": 2,
         "about": "start planning a feature the owner hasn't asked for",
         "rung": 2

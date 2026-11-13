@@ -39,7 +39,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
 ```json devteam
 {
   "classes": {
-    "new-feature": { "ceiling": 2, "start": 2, "about": "start planning a feature the owner hasn't asked for" },
+    "new-feature": { "ceiling": 3, "start": 2, "about": "start planning a feature the owner hasn't asked for" },
     "priority-change": { "ceiling": 3, "start": 2, "about": "reorder goals' work or move a feature between releases" },
     "release-scope": { "ceiling": 3, "start": 2, "about": "move a story to a later release to ship the rest on time" },
     "upstream-pr": { "ceiling": 3, "start": 2, "about": "open a PR on upstream devteam with a general improvement" },

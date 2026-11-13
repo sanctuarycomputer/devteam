@@ -4739,10 +4739,16 @@ function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, r
   if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
   if (!secrets?.length && kind !== 'owner-action' && CRED_REQUEST.test(q)) die(`don't ask for a credential in a decision's words: the owner would have to type it into an answer. Ask with --kind owner-action and --secrets naming each one and where it goes, so the owner gets the paste box at once (supervisor.md §6, Secrets)`);
   if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
+  // --plain-ok <word>…: the question is about that very thing (a git worktree, the trust ladder
+  // itself), so that word may stay. Only the words named; ids, asking about asking and credentials
+  // never pass.
+  const plainOk = new Set(asList(flags['plain-ok']).map((w) => w.toLowerCase()));
   const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
-  const cw = classes.find((c) => c.includes('-') && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
-  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it`);
-  if (KIT_WORDS.test(q)) die(`the question uses the kit's own word "${q.match(KIT_WORDS)[0]}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself`);
+  const cw = classes.find((c) => c.includes('-') && !plainOk.has(c) && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
+  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it (if the question is about that class itself, --plain-ok ${cw})`);
+  const jw = [...q.matchAll(new RegExp(KIT_WORDS.source, 'gi'))].map((m) => m[0]).find((w) => !plainOk.has(w.toLowerCase()));
+  if (jw) die(`the question uses the kit's own word "${jw}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself. If the question is about that very thing, keep the word and say so: --plain-ok ${shq(jw.toLowerCase())}`);
+  if (plainOk.size) warn(`--plain-ok ${[...plainOk].join(' ')}: the owner reads those words as they are, so make sure the question explains them`);
   if (q.length > 300) die(`the question is ${q.length} characters: lead with the decision in one or two sentences (300 at most) and put the rest in --context, as a list where it is one`);
   if (context && KIT_ID.test(context)) warn(`--context names a kit id (${context.match(KIT_ID)[0]}): fine as a link, but say in words what it is`);
   if (context && KIT_WORDS.test(context)) warn(`--context uses the kit's word "${context.match(KIT_WORDS)[0]}": say it in plain words, the owner hasn't got the fleet's vocabulary`);
