@@ -730,11 +730,13 @@ test('a stale read is said on the page: a note at the top with the time of what 
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/` });
   const soon = soonIn(p, 30000, () => dash.out());
   await soon(`DATA && window.__reads?.length >= 1 && window.__reads[0].ms !== null`, 'the first read drawn');
-  assert.equal(await p.ev(`$('stale').hidden`), true, 'the first read waits for its run, so nothing is stale');
-  await soon(`!$('stale').hidden`, 'the note, once a read is stale');
-  const note = await p.ev(`(() => { const n = $('stale'), r = n.getBoundingClientRect(); return { text: n.textContent, shown: getComputedStyle(n).display !== 'none', inside: r.left >= 0 && r.right <= innerWidth && r.top >= 0, at: new Date(DATA.generated_at).toLocaleTimeString() }; })()`);
-  assert.ok(note.shown && note.inside, "shown, inside a phone's width");
-  assert.equal(note.text, `Showing data from ${note.at}. The latest is taking a while; this page updates when it's ready.`);
+  // one check, in the page, so a read landing between two can't split them: shown, inside a phone's
+  // width, below the nav, naming the time of what is drawn
+  await soon(`(() => {
+    const n = $('stale'), r = n.getBoundingClientRect(), nav = document.querySelector('.side').getBoundingClientRect();
+    const want = 'Showing data from ' + new Date(DATA.generated_at).toLocaleTimeString() + '. Newer data is taking a while to load; this page will update by itself.';
+    return !n.hidden && getComputedStyle(n).display !== 'none' && r.left >= 0 && r.right <= innerWidth && r.top >= nav.bottom && n.textContent === want;
+  })()`, 'the note, once a read is stale, saying what it shows');
 });
 
 test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {

@@ -48,8 +48,9 @@
   .banner.updated button { margin: 0 0 0 8px; }
   .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
   /* fixed, so it never moves what is under the cursor; at the top, as both bottom corners are taken,
-     over the content, not the nav (below it on a phone), and never in the way of a click */
-  .stale-note { position: fixed; top: 12px; left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 30; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
+     over the content, not the nav (below it on a phone, where staleNote measures the nav), under a
+     drawer or review, and never in the way of a click */
+  .stale-note { position: fixed; top: 12px; left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -5071,15 +5072,20 @@ async function loadNow() {
   $('banner').hidden = true;
   $('loading').hidden = true;
   document.querySelector('main').classList.remove('waiting');
-  staleNote(d);
   drawOrHold(d);
+  staleNote();
 }
 // The server answers a slow read with the last data it had, marked stale: say so where it shows on
-// any screen, with the time of what is shown, until a fresh read lands.
-function staleNote(d) {
+// any screen, with the time of what is drawn (not of a read held while the owner types), until a
+// fresh read lands. A banner at the top says more, and the note gives way to it.
+function staleNote() {
   const n = $('stale');
-  n.hidden = !STALE;
-  if (STALE) n.textContent = `Showing data from ${new Date(d.generated_at).toLocaleTimeString()}. The latest is taking a while; this page updates when it's ready.`;
+  n.hidden = !STALE || !DATA || !$('banner').hidden || !$('updated').hidden;
+  if (n.hidden) return;
+  const at = new Date(DATA.generated_at);
+  const t = `Showing data from ${at.toDateString() === new Date().toDateString() ? at.toLocaleTimeString() : at.toLocaleString()}. Newer data is taking a while to load; this page will update by itself.`;
+  if (n.textContent !== t) n.textContent = t; // unchanged, a screen reader isn't told again
+  n.style.top = matchMedia('(max-width: 900px)').matches ? `${Math.max(0, document.querySelector('.side').getBoundingClientRect().bottom) + 8}px` : '';
 }
 
 // The tab title carries the Inbox count. Notifications are the hub's, for every instance.
