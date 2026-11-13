@@ -58,7 +58,13 @@ export async function openChrome() {
     await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('could not reach the page')); });
     let seq = 0;
     const waiting = new Map();
-    ws.onmessage = (m) => { const o = JSON.parse(m.data); const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(`${w.method}: ${o.error.message}`)); else w.resolve(o.result); };
+    // the page's script worlds by origin (Runtime.enable sends them), for evIn: a frame of another origin is out of its parent's reach
+    const worlds = new Map();
+    ws.onmessage = (m) => { const o = JSON.parse(m.data);
+      if (o.method === 'Runtime.executionContextCreated' && o.params.context.auxData?.isDefault) worlds.set(o.params.context.id, o.params.context.origin);
+      else if (o.method === 'Runtime.executionContextDestroyed') worlds.delete(o.params.executionContextId);
+      else if (o.method === 'Runtime.executionContextsCleared') worlds.clear();
+      const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(`${w.method}: ${o.error.message}`)); else w.resolve(o.result); };
     // A page that stops answering fails the call: an await nobody will ever settle hangs the run.
     const send = (method, params = {}) => new Promise((resolve, reject) => {
       const id = ++seq;
@@ -72,6 +78,18 @@ export async function openChrome() {
       const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
       if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
       return r.result.value;
+    };
+    // ev, in the newest page of that origin (a frame under a page of another one)
+    const evIn = async (origin, expression) => {
+      // newest first, and one that is really at that origin: a frame's first, empty document has a world of its own
+      for (const id of [...worlds].filter(([, o]) => o === origin).map(([i]) => i).reverse()) {
+        const at = await send('Runtime.evaluate', { expression: 'location.href', returnByValue: true, contextId: id }).catch(() => null);
+        if (!String(at?.result?.value).startsWith(origin)) continue;
+        const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, contextId: id });
+        if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+        return r.result.value;
+      }
+      throw new Error(`no page of ${origin} yet`);
     };
     const key = async (k, modifiers = 0) => {
       const printable = k.length === 1;
@@ -97,7 +115,7 @@ export async function openChrome() {
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, modifiers, button: 'left', buttons: 1, clickCount: 1 });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, modifiers, button: 'left', buttons: 0, clickCount: 1 });
     };
-    return { send, ev, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
+    return { send, ev, evIn, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
   };
   return { newPage, close };
 }

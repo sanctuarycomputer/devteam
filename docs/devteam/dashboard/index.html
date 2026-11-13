@@ -14,9 +14,7 @@
 // owner's pointer is under it and this page has the owner's powers, so it draws one line and stops:
 // window.stop ends the parser, so nothing below runs, and nothing is fetched.
 try {
-  // (a test that frames the viewer under a page of its own origin, as the owner's wrapper does from another one, sets this on the
-  // parent: a frame's own page can't, and the dashboard's never does)
-  if (window.frameElement && !(() => { try { return parent.__devteamTestFraming === true; } catch { return false; } })()) {
+  if (window.frameElement) {
     window.stop();
     document.documentElement.innerHTML = '<head><meta charset="utf-8"><title>devteam</title></head><body style="font:16px system-ui,sans-serif;padding:24px">Open the dashboard in its own tab</body>';
   }

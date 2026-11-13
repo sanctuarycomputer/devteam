@@ -1599,7 +1599,18 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  // A page of another origin to frame the viewer from, as the hub and the owner's wrapper do: the
+  // dashboard's frame-ancestors name the hub's address, so a small server stands in as the hub.
+  const hubPort = await freePort();
+  const hub = http.createServer((q, r) => {
+    const src = new URL(q.url, 'http://x').searchParams.get('src');
+    if (!q.url.startsWith('/frame') || !src) { r.writeHead(404); return r.end(); }
+    r.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    r.end(`<!doctype html><title>parent</title><body><iframe id="v" style="width:900px;height:600px" src="${B}${src.replace(/"/g, '&quot;')}"></iframe>`);
+  });
+  await new Promise((r) => hub.listen(hubPort, '127.0.0.1', r));
+  undo.push(() => new Promise((r) => { hub.closeAllConnections?.(); hub.close(r); }));
+  const dash = startDashboard(F.old, F.env({ DEVTEAM_HUB_PORT: String(hubPort) }), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
@@ -1710,43 +1721,40 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev('[DATA, document.title]'), [null, 'Viewer mock · devteam']);
   });
 
+  // the viewer framed from a page of another origin (the hub's address), read by its own script world
+  const soonV = soonIn({ ev: (e) => p.evIn(B, e) });
   await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
-    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'if (window === top) window.__devteamTestFraming = true;' });
-    await go(`${B}/api/hello`);
-    await soon(`document.readyState === 'complete'`, 'a page of the same origin');
+    await go(`http://127.0.0.1:${hubPort}/frame?src=${encodeURIComponent('/view/artifact/viewer-mock')}`);
+    await soonV(`document.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
     // a real click, and what it should do: a headless tab can be left without the window's focus, so
     // a click that didn't move the keyboard is tried once more with the tab brought to the front
     const clickFor = async (x, y, expr, what) => {
       await p.clickAt(x, y);
-      if (await soonIn(p, 5000)(expr, what).then(() => true, () => false)) return;
+      if (await soonIn({ ev: (e) => p.evIn(B, e) }, 5000)(expr, what).then(() => true, () => false)) return;
       await p.send('Page.bringToFront');
       await p.clickAt(x, y);
-      await soon(expr, what);
+      await soonV(expr, what);
     };
-    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock'; document.body.append(f); return true; })()`);
-    await soon(`document.getElementById('v').contentDocument?.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
     await p.ev('document.body.focus(); window.focus(); true');
-    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
-    assert.equal(await p.ev(`document.getElementById('v').contentDocument.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
+    await soonV(`!document.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
+    assert.equal(await p.evIn(B, `document.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
     // a real click on the framed viewer's bar, as the hint says
     const bar = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left + 450, y: r.top + 20 }; })()`);
-    await clickFor(bar.x, bar.y, `document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+    await clickFor(bar.x, bar.y, `document.getElementById('av-hint').hidden`, 'gone once the viewer has it');
     // a click on the top page, outside the viewer, takes the keyboard back: the hint again
-    await clickFor(1100, 700, `!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
+    await clickFor(1100, 700, `!document.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
     // a click on the artifact itself, in the viewer's own frame, gives it to the viewer's page
-    const art = await p.ev(`(() => { const v = document.getElementById('v').getBoundingClientRect(), f = document.getElementById('v').contentDocument.getElementById('av-frame').getBoundingClientRect(); return { x: v.left + f.left + 200, y: v.top + f.top + 200 }; })()`);
-    await clickFor(art.x, art.y, `document.getElementById('v').contentDocument.activeElement === document.getElementById('v').contentDocument.getElementById('av-frame')`, 'the artifact has the keyboard');
-    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the artifact has it');
+    const v = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+    const f = await p.evIn(B, `(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+    await clickFor(v.x + f.x + 200, v.y + f.y + 200, `document.activeElement === document.getElementById('av-frame')`, 'the artifact has the keyboard');
+    await soonV(`document.getElementById('av-hint').hidden`, 'gone once the artifact has it');
   });
 
   await t.test("framed, as the owner wrapper frames it, a published tree this checkout lacks isn't swapped for main: the gateway grants only that tree", async () => {
-    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'if (window === top) window.__devteamTestFraming = true;' });
-    await go(`${B}/api/hello`);
     const gone = '0'.repeat(40);
-    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock?at=tree:${gone}'; document.body.append(f); return true; })()`);
-    const inV = (e) => `(() => { const d = document.getElementById('v').contentDocument; return ${e}; })()`;
-    await soon(inV(`!d.getElementById('av-note').hidden && !!d.getElementById('av-frame').getAttribute('src')`), 'the framed viewer, its note');
-    assert.deepEqual(await p.ev(inV(`[d.getElementById('av-note').textContent, d.getElementById('av-frame').getAttribute('src'), d.defaultView.eval('TS.at')]`)), ["The published version isn't in this checkout; open it from the Library.", `/artifact/tree/${gone}/viewer-mock/`, `tree:${gone}`]);
+    await go(`http://127.0.0.1:${hubPort}/frame?src=${encodeURIComponent(`/view/artifact/viewer-mock?at=tree:${gone}`)}`);
+    await soonV(`!document.getElementById('av-note').hidden && !!document.getElementById('av-frame').getAttribute('src')`, 'the framed viewer, its note');
+    assert.deepEqual(await p.evIn(B, `[document.getElementById('av-note').textContent, document.getElementById('av-frame').getAttribute('src'), TS.at]`), ["The published version isn't in this checkout; open it from the Library.", `/artifact/tree/${gone}/viewer-mock/`, `tree:${gone}`]);
   });
 
   await t.test("an artifact /api/view can't read says so, and shows the version asked for: only nothing there falls back to main", async () => {
