@@ -4830,14 +4830,16 @@ function askLikeWarnings({ text, question, cls, kind, about, newBecause }) {
   const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
   const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
   const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context, x.recommendation, (x.choices ?? []).map((c) => c?.label)) }] }))];
-  if (!docs.length) return newBecause ? (warn('--new-because is for asking again what the owner answered; nothing they answered is like this, so it is left off'), null) : newBecause;
+  if (!docs.length) return newBecause ? (warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'), null) : newBecause;
   const ix = searchIndex(docs);
   const close = ix.docs.map((d) => ({ d, ...searchSimilar(ix, text, d) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
   const line = (s) => quoteData(capBytes300(s));
-  const same = REASK_EXEMPT(cls, kind) || about.sensor || (kind === 'owner-action' && !(about.secrets ?? []).length) ? null : close.find((c) => c.d.q && c.d.q.answered_by === 'owner' && !REASK_EXEMPT(c.d.q.class, c.d.q.kind) && settlesClass(c.d.q, cls, kind) && nearlySameQuestion(question, c.d.q.question) && sameWork(about, c.d.q) && !answerSpent(c.d.q));
-  if (same && !newBecause) die(reaskWords(same.d.q));
-  // asked again: only after a decision the owner made, or one like it, does the owner read why
-  if (newBecause && !close.some((c) => c.d.q)) { warn('--new-because is for asking again what the owner answered; nothing they answered is like this, so it is left off'); newBecause = null; }
+  const reaskable = (k, secrets) => !(k === 'owner-action' && !(secrets ?? []).length);
+  const like = (c) => c.d.q && c.d.q.answered_by === 'owner' && !REASK_EXEMPT(c.d.q.class, c.d.q.kind) && reaskable(c.d.q.kind, c.d.q.secrets) && settlesClass(c.d.q, cls, kind) && nearlySameQuestion(question, c.d.q.question) && sameWork(about, c.d.q) && !answerSpent(c.d.q);
+  const same = close.find(like);
+  if (same && !REASK_EXEMPT(cls, kind) && !about.sensor && reaskable(kind, about.secrets) && !newBecause) die(reaskWords(same.d.q));
+  // asked again: the owner reads why only on a question that asks again what they decided
+  if (newBecause && !same) { warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'); newBecause = null; }
   for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
     const k = c.d.rule;
     if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
@@ -4991,6 +4993,8 @@ function askLine({ thread } = {}) {
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   // silence is never a yes on a one-way door or on what is the owner's alone (constitution.md §1)
   if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
+  // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
+  if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
   if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
@@ -7711,7 +7715,7 @@ function authorise(cls, scope, approved, refs, verb) {
     if (declared.length) {
       const part = refs.flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
       if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this ${verb === 'decide' ? 'decision' : 'act'} is for in --refs`);
-      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part));
+      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part) && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} for ${part} (${used.id}); ask again for another`);
     } else {
       // a door's answer cited for the plans it covers (approve-plan) never uses it up for its own class

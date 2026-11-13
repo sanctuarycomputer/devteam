@@ -157,7 +157,7 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     // nothing the owner answered is like it: no "Asked again because" on a first question
     const first = run(old, ['ask', '--question', 'Which colour should the alarm light be?', '--new-because', 'it changed'], SUP);
     assert.equal(first.status, 0, first.err);
-    assert.match(first.err, /--new-because is for asking again what the owner answered; nothing they answered is like this, so it is left off/);
+    assert.match(first.err, /--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off/);
     assert.equal(JSON.parse(ok(old, ['questions', '--id', first.out.trim(), '--json']))[0].new_because, null);
     const near = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'governance-edit', '--new-because', 'the releases now change the merge gate'], SUP);
     assert.equal(near.status, 0, near.err);

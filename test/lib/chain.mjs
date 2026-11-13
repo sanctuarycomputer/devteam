@@ -3152,6 +3152,7 @@ http.createServer((req, res) => {
     assert.match(dt(['ask', '--class', 'one-way-door', '--kind', 'owner-decision', '--goal', G, '--question', 'x?', '--recommendation', 'yes'], sup).err, /a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind owner-decision/);
     assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
+    assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'Rename the shared package?'], sup).err, /a one-way door needs --recommendation/, 'its answer approves only as recommended');
   });
 
   step('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', async () => {
