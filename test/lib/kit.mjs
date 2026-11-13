@@ -67,6 +67,15 @@ export const serverUp = async (url) => { for (let i = 0; i < 1200; i++) { try { 
 export const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 export const review = (reviewer, sha) => `- Reviewer: ${reviewer}\n\n| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n\nVerdict: APPROVE ${sha}\n`;
 export const json = (s) => JSON.parse(s);
+// A default's deadline, passed: the question's own line says it fell due a minute ago, so a default
+// applied now is applied after it (answer --defaulted refuses before).
+export function pastDeadline(root, qid) {
+  const dir = path.join(root, 'docs/devteam/run/log');
+  for (const f of fs.readdirSync(dir).filter((x) => x.startsWith('supervisor-'))) {
+    const p = path.join(dir, f);
+    fs.writeFileSync(p, fs.readFileSync(p, 'utf8').split('\n').map((l) => (l.includes(`"id":"${qid}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: new Date(Date.now() - 60000).toISOString() }) : l)).join('\n'));
+  }
+}
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
 // A throwaway origin, an old machine and a new one, for the fleet tests.

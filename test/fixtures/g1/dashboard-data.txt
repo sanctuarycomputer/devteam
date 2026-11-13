@@ -109,6 +109,7 @@ exit 0
       "approves": [],
       "evidence": [],
       "note": null,
+      "new_because": null,
       "why_asked": {
         "reasons": []
       },
@@ -348,7 +349,16 @@ exit 0
         "source_key": "note:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        },
+        "place": {
+          "state": "new",
+          "ref": null
+        }
       },
       {
         "id": "o-<sha>-<sha>-owner",
@@ -362,7 +372,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -375,7 +396,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -388,7 +420,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       }
     ],
     "clusters": [
@@ -404,6 +447,10 @@ exit 0
         "latest": "slow 3"
       }
     ],
+    "debt": {
+      "signals": [],
+      "incidents": []
+    },
     "knowledge": [
       {
         "id": "k-<sha>-<sha>-owner",
@@ -651,10 +698,10 @@ exit 0
       {
         "class": "new-feature",
         "about": "start planning a feature the owner hasn't asked for",
-        "rung": 1,
-        "rung_name": "ask",
-        "ceiling": 2,
-        "start": 1,
+        "rung": 2,
+        "rung_name": "ask with a default",
+        "ceiling": 3,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -667,10 +714,10 @@ exit 0
       {
         "class": "priority-change",
         "about": "reorder goals' work or move a feature between releases",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -683,10 +730,10 @@ exit 0
       {
         "class": "release-scope",
         "about": "move a story to a later release to ship the rest on time",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -699,10 +746,10 @@ exit 0
       {
         "class": "upstream-pr",
         "about": "open a PR on upstream devteam with a general improvement",
-        "rung": 1,
-        "rung_name": "ask",
+        "rung": 2,
+        "rung_name": "ask with a default",
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "acts_since_drop": 0,
         "uncorrected_acts": [],
         "corrections": 0,
@@ -779,28 +826,28 @@ exit 0
     ],
     "classes": {
       "new-feature": {
-        "ceiling": 2,
-        "start": 1,
+        "ceiling": 3,
+        "start": 2,
         "about": "start planning a feature the owner hasn't asked for",
-        "rung": 1
+        "rung": 2
       },
       "priority-change": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "reorder goals' work or move a feature between releases",
-        "rung": 1
+        "rung": 2
       },
       "release-scope": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "move a story to a later release to ship the rest on time",
-        "rung": 1
+        "rung": 2
       },
       "upstream-pr": {
         "ceiling": 3,
-        "start": 1,
+        "start": 2,
         "about": "open a PR on upstream devteam with a general improvement",
-        "rung": 1
+        "rung": 2
       },
       "release-production": {
         "ceiling": 3,
@@ -848,7 +895,7 @@ exit 0
       },
       {
         "id": "low-confidence",
-        "means": "the supervisor could decide but isn't sure enough of its recommendation"
+        "means": "the supervisor could decide but isn't sure enough of its recommendation (under 0.7)"
       },
       {
         "id": "goals-conflict",
@@ -872,6 +919,13 @@ exit 0
       }
     ],
     "answered": [],
+    "learning_totals": {
+      "calls": 5,
+      "lessons": 1,
+      "corrections": 0
+    },
+    "learning_marks": [],
+    "learning": [],
     "log": {
       "lines": 14,
       "errors": 0,

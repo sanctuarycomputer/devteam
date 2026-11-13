@@ -779,11 +779,11 @@
         ]
       },
       "observation": {
-        "description": "Something noticed: a metrics finding, a slow test, a goal reading (kind reading), a trial's outcome (kind outcome), an escaped defect, a retro (kind retro, source_ref = its file). Deduped on source_key.",
+        "description": "Something noticed: a metrics finding, a slow test, a goal reading (kind reading), a trial's outcome (kind outcome), an escaped defect, a retro (kind retro, source_ref = its file), a week's learning record (kind learning: its week and figures). Deduped on source_key.",
         "type": "object",
         "properties": {
           "source": {
-            "description": "Who or what noticed it.",
+            "description": "Who or what noticed it, as its writer gave it: a sensor's name on a sensor's line, repo, prod or owner on a goal reading, one of x-ooda.sources from observe --source, or older free text. Free text stays valid; where it came from, in x-ooda.sources words, is computed when it is read (provenance).",
             "type": "string"
           },
           "subject": {
@@ -799,7 +799,7 @@
             "type": "string"
           },
           "detector": {
-            "description": "The check that found it.",
+            "description": "The check that found it: sensor and metrics mark the kit's own lines (every kit reads them so), pane the kit's pane check; anything else is free text.",
             "type": "string"
           },
           "severity": {
@@ -836,6 +836,57 @@
           "fix_hint": {
             "description": "A suggested fix.",
             "type": "string"
+          },
+          "week": {
+            "description": "On a learning record (kind learning): the ISO week it counts, in UTC, as yyyy-Www. Its at is when it was written, which for a back-filled week is later.",
+            "x-tip": "The week these figures count.",
+            "type": "string",
+            "pattern": "^\\d{4}-W\\d{2}$"
+          },
+          "figures": {
+            "description": "On a learning record (kind learning): the week's counts, from the log as it stood at the week's end. Counts, never shares: the views divide.",
+            "x-tip": "What the week counted: informed, autonomous, trusted.",
+            "type": "object",
+            "properties": {
+              "informed": {
+              "description": "Informed: what the loop knew at the week's end.",
+              "x-tip": "Whether the agents work from what the loop has learned.",
+              "type": "object",
+              "properties": {
+                "knowledge": { "type": "integer", "minimum": 0, "description": "Accepted knowledge in force at the week's end." },
+                "signals_formed": { "type": "integer", "minimum": 0, "description": "Recurring signals formed by the week's end (three or more on one key, from two writers or on two days)." },
+                "signals_explained": { "type": "integer", "minimum": 0, "description": "Of those, the ones a lesson, a problem, an incident or a live decision explains." },
+                "starts": { "type": "integer", "minimum": 0, "description": "Workers and planners started fresh in the week." },
+                "starts_given": { "type": "integer", "minimum": 0, "description": "Of those, the ones whose prompt carried at least one lesson." }
+              },
+              "required": ["knowledge", "signals_formed", "signals_explained", "starts", "starts_given"]
+            },
+              "autonomous": {
+              "description": "Autonomous: how much the supervisor did alone.",
+              "x-tip": "Whether the supervisor needs to ask less.",
+              "type": "object",
+              "properties": {
+                "ladder_calls": { "type": "integer", "minimum": 0, "description": "Calls in a trust-ladder class made in the week." },
+                "trusted_calls": { "type": "integer", "minimum": 0, "description": "Of those, the ones made on trust (its rung, or a standing rule) rather than asked." },
+                "questions": { "type": "integer", "minimum": 0, "description": "Decisions put to the owner in the week (decisions, one-way doors, proposals, trust, clarifications)." },
+                "merged": { "type": "integer", "minimum": 0, "description": "Tickets merged in the week." }
+              },
+              "required": ["ladder_calls", "trusted_calls", "questions", "merged"]
+            },
+              "trusted": {
+              "description": "Trusted: how often the owner agreed, and corrected.",
+              "x-tip": "Whether the owner agrees with the supervisor's calls.",
+              "type": "object",
+              "properties": {
+                "answered": { "type": "integer", "minimum": 0, "description": "Questions the owner answered in the week that carried a recommendation." },
+                "agreed": { "type": "integer", "minimum": 0, "description": "Of those, the ones answered with the recommendation." },
+                "calls": { "type": "integer", "minimum": 0, "description": "The supervisor's calls made in the week." },
+                "corrections": { "type": "integer", "minimum": 0, "description": "Corrections the owner made in the week." }
+              },
+              "required": ["answered", "agreed", "calls", "corrections"]
+            }
+            },
+            "required": ["informed", "autonomous", "trusted"]
           },
           "sha": {
             "description": "A reading of a repo measure: the commit on main its check ran on.",
@@ -1463,6 +1514,10 @@
             "type": "array",
             "description": "The remediation entries a governance-edit question would approve (name, script, sha, entry_hash; ask --remediations). merge lands a change only if it is one of these, exactly."
           },
+          "new_because": {
+            "type": "string",
+            "description": "What materially changed since the owner answered the same decision, when a question asks it again (ask --new-because). The owner reads it first: \"Asked again because: …\"."
+          },
           "owner_said": {
             "type": "string",
             "description": "The owner's words, verbatim, when a question asks again after their no. Checked against the transcript like a chat answer's said."
@@ -1780,6 +1835,15 @@
             "type": "string",
             "pattern": "^[qk]-"
           },
+          "knowledge": {
+            "description": "The knowledge or problems this decision rests on (decide --on); never copied into refs, and never its authority (approved_by is).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(k|p)-"
+            },
+            "x-tip": "The lessons, facts or problems the call rests on."
+          },
           "corrected": {
             "description": "Your correction, if the call was wrong; it drops the class to rung 1. On a goal-impact decision (constitutional, so no rung drops) it may carry the impact you give the goal instead.",
             "type": "object",
@@ -1866,6 +1930,15 @@
             "type": "string",
             "pattern": "^d-",
             "x-tip": "The decision it carried out."
+          },
+          "knowledge": {
+            "description": "On a worker-slots act that started a worker or planner fresh: the accepted knowledge its prompt carried (the knowledge that applies to its ticket or feature), newest first, at most 60. Never in what, which the kit parses. A resumed session reads no new prompt, so its act carries none.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^k-"
+            },
+            "x-tip": "The lessons and facts its instructions carried when it started."
           },
           "corrected": {
             "description": "Your correction, if it was its own call and wrong.",
@@ -2413,6 +2486,59 @@
           "corrected"
         ]
       }
+    }
+  },
+  "x-ooda": {
+    "description": "Where each record sits in the loop (Observe, Orient, Decide, Act, Learn), and the words for where an observation came from. The views compute both when they read a record (stageOf, provenanceOf in scripts/devteam.mjs); nothing stores them, so a line an older kit wrote reads the same. A measurement (a reading, spend, a gate) is outside the loop: it is never a signal Orient groups. inbox: a question, drawn in Decide as the owner's call once answered. A type not listed (the work graph, conversation) has no stage.",
+    "x-tip": "The five stages of the loop: what was noticed, what is known, what was decided, what was done, and what was learned.",
+    "stages": {
+      "observation": {
+        "kind": {
+          "reading": "measurement",
+          "learning": "learn",
+          "outcome": "learn",
+          "fix-deployed": "learn",
+          "fix-regressed": "learn",
+          "recurred": "learn",
+          "finding-ack": "decide",
+          "sensor-ignored": "decide",
+          "sensor-unignored": "decide", "sensor-reconsidered": "decide",
+          "*": "observe"
+        }
+      },
+      "knowledge": "orient",
+      "problem": "orient",
+      "decision": "decide",
+      "act": "act",
+      "question": "inbox",
+      "spend": "measurement",
+      "gate": "measurement"
+    },
+    "sources": [
+      "sensor",
+      "metrics",
+      "spend",
+      "owner",
+      "owner-answer",
+      "owner-thread",
+      "owner-chat",
+      "retro",
+      "worker",
+      "planner",
+      "supervisor"
+    ],
+    "x-source-words": {
+      "sensor": "a production sensor, or a goal's measure",
+      "metrics": "the kit's own checks",
+      "spend": "the spend meter",
+      "owner": "you",
+      "owner-answer": "your answer to a question",
+      "owner-thread": "a thread with you",
+      "owner-chat": "what you said in the supervisor's chat",
+      "retro": "a retro",
+      "worker": "a ticket's worker",
+      "planner": "a planner",
+      "supervisor": "the supervisor"
     }
   }
 }

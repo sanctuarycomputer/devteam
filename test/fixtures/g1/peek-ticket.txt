@@ -28,6 +28,7 @@ exit 0
     },
     "set_by": {}
   },
+  "stage": null,
   "ticket": {
     "id": "g1-01-a",
     "type": "ticket",

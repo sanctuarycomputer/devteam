@@ -95,6 +95,14 @@
   .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
   .card.small { padding: 10px 12px; }
+  .card[data-open] { cursor: pointer; }
+  .card[data-open]:hover { background: var(--hover); }
+  .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
+  .lineage .diagram svg { max-width: 100%; height: auto; }
+  .lineage a.lineage-node { cursor: pointer; }
+  .lineage a.lineage-node:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .lineage-list h4 { margin: 8px 0 2px; font-size: 12px; color: var(--fg-2); }
+  .lineage-list ul { margin: 0 0 4px; }
   .card p { margin: 6px 0; }
   .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 
@@ -206,8 +214,14 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .ctx p, .qcard .d p, .qcard .e p { margin: 0 0 6px; }
+  .ctx p:last-child, .qcard .d p:last-child, .qcard .e p:last-child { margin-bottom: 0; }
+  .ctx ul, .ctx ol, .qcard .d ul, .qcard .d ol, .qcard .e ul, .qcard .e ol { margin: 4px 0 8px; padding-left: 20px; }
+  .ctx li, .qcard .d li, .qcard .e li { margin: 2px 0; }
+  .ctx code, .qcard h4 code { font: 12px var(--mono); }
   .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
+  .qcard .again { margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
   .choice:hover { background: var(--hover); opacity: 1; }
@@ -318,6 +332,12 @@
   .drawer h3 { margin: 18px 0 6px; }
   .hist-h { padding-top: 12px; border-top: 1px solid var(--line); }
   .mini-chart svg { width: 100%; height: auto; display: block; }
+  .learning { margin-bottom: 14px; }
+  .learn-cols { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 860px) { .learn-cols { grid-template-columns: minmax(0, 1fr); } }
+  .learn-chart h4 { font-size: 12px; font-weight: 500; margin: 0 0 4px; color: var(--fg-2); }
+  .learn-chart .card { margin-bottom: 2px; padding: 8px 10px; }
+  .learn-chart p { margin: 0 0 10px; }
   .diagram-wrap { overflow-x: auto; margin: 4px 0 8px; }
   .diagram-wrap figure { margin: 0; }
   .md.tldr { font-size: 13px; }
@@ -623,6 +643,7 @@
 
   <section id="loop">
     <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
+    <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
     <div class="tabs" role="tablist" id="loop-tabs">
       <button role="tab" data-tab="observe">Observe<span class="n" id="n-observe"></span></button>
       <button role="tab" data-tab="orient">Orient<span class="n" id="n-orient"></span></button>
@@ -635,6 +656,9 @@
     </div>
     <div class="loop-panel" data-panel="orient" hidden>
       <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
+      <h3>Orientation debt</h3>
+      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise. Then incidents fixed and verified in the last 30 days that nobody has learned from: each wants a lesson, or a ruling that there is nothing to keep.</p>
+      <div id="debt"></div>
       <div class="two">
         <div><h3>Recurring signals</h3><div id="clusters"></div></div>
         <div><h3>Problems</h3><div id="problems"></div></div>
@@ -1054,7 +1078,7 @@ const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" h
 const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
-  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk' }[k];
+  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' }[k];
   if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
@@ -1231,7 +1255,7 @@ function questionCard(q, o, reasonText, copy = false) {
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${qblock(c.detail, q.links)}</div>` : ''}${c.effect ? `<div class="e">${qblock(c.effect, q.links)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
@@ -1244,8 +1268,9 @@ function questionCard(q, o, reasonText, copy = false) {
       ${rankWhy(q)}
       ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${(q.approves || []).length ? `<div class="meta">Your answer approves each of these, once: ${q.approves.map((a) => !/^(chore|plan)-/.test(a) ? tlink(a) : `<code>${esc(a)}</code>`).join(', ')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
@@ -1299,6 +1324,65 @@ function qtext(text, links) {
     // in the sentence the link alone; a changed artifact is flagged in the list below
     return l ? `<span class="qref">${l.artifact ? artNameLink(l) : l.preview ? pvNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
+}
+// Owner-facing prose (a question's context, a choice's detail) as blocks: paragraphs, "- " bullets
+// and "1." numbered lists, a run of "1) … 2) …" on one line too, with **bold** and `code`. The marks
+// are read from the raw text and each piece goes through qtext on its own, so everything is escaped,
+// ids and [[links]] work as anywhere else, and a mark never lands inside a link's href or its title.
+// "2**10" and "src/**/x" stay as written: bold opens after a space and closes before one.
+function qinline(text, links) {
+  return String(text ?? '').split(/(`[^`\n]+`|(?<![\w*])\*\*(?=\S)[^*\n]+?(?<=\S)\*\*(?![\w*]))/).map((seg, i) => (i % 2 === 0 ? qtext(seg, links) : seg[0] === '`' ? `<code>${qtext(seg.slice(1, -1), links)}</code>` : `<b>${qinline(seg.slice(2, -2), links)}</b>`)).join('');
+}
+// "Two ways: 1) wait 2) ship it" → the lead, then each numbered item. Only a run that counts up from
+// 1 with at least two items in one style, each marker after a space or a colon, so "version 2) of"
+// stays prose. A number that closes a parenthesis ("(phase 1) and (phase 2)") is prose. So is a
+// number that ends a sentence ("on Nov 1. Then Nov 2. Done"): "1." opens a run only at the start
+// of the line or straight after a colon.
+function inlineList(line) {
+  const ms = [...line.matchAll(/(^|[\s:])(\()?(\d{1,2})([.)])\s+/g)];
+  let run = [];
+  for (const m of ms) {
+    const n = Number(m[3]);
+    const before = line.slice(0, m.index + m[1].length);
+    if (m[4] === ')' && !m[2] && before.split('(').length > before.split(')').length) continue;
+    if (n === 1) run = m[4] === ')' || !before.trim() || before.trimEnd().endsWith(':') ? [m] : [];
+    else if (run.length && n === run.length + 1 && m[4] === run[0][4] && !m[2] === !run[0][2]) run.push(m);
+  }
+  if (run.length < 2) return null;
+  const at = (m) => m.index + m[1].length;
+  const items = run.map((m, i) => line.slice(m.index + m[0].length, i + 1 < run.length ? at(run[i + 1]) : undefined).trim().replace(/[;,]\s*(and|or)?$/i, '').trim());
+  return { lead: line.slice(0, at(run[0])).trim(), items };
+}
+const NUMBERED = /^\(?(\d{1,2})[.)]\s+(.*)$/;
+function qblock(text, links) {
+  const out = [];
+  let para = [], list = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${para.map((l) => qinline(l, links)).join('<br>')}</p>`); para = []; };
+  // a list that starts at 3 says 3: the owner may be told "do step 3"
+  const flushList = () => { if (list) out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ''}>${list.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</${list.tag}>`); list = null; };
+  const item = (tag, t, n = 1) => { flushPara(); if (list?.tag !== tag) flushList(); list = list ?? { tag, items: [], start: n }; list.items.push(t); };
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const raw = lines[k], line = raw.trim();
+    let m;
+    if (!line) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^[-*•]\s+(.*)$/))) { item('ul', m[1]); continue; }
+    if ((m = line.match(NUMBERED))) {
+      // one line holding the whole list ("1) a 2) b") is split; a line of a list written one per
+      // line is one item, whatever numbers its own words hold
+      const alone = list?.tag !== 'ol' && !NUMBERED.test((lines[k + 1] ?? '').trim());
+      const il = alone ? inlineList(line) : null;
+      if (il && !il.lead) for (const t of il.items) item('ol', t); else item('ol', m[2], Number(m[1]));
+      continue;
+    }
+    if (list && /^\s{2,}\S/.test(raw)) { list.items[list.items.length - 1] += ` ${line}`; continue; }
+    flushList();
+    const il = inlineList(line);
+    if (il) { if (il.lead) para.push(il.lead); flushPara(); out.push(`<ol>${il.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</ol>`); continue; }
+    para.push(line);
+  }
+  flushPara(); flushList();
+  return out.join('');
 }
 // the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
@@ -1420,8 +1504,9 @@ function reviewCard(q, o, reasonText) {
       ${rankWhy(q)}
       ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
       ${ok ? '' : '<p class="err">The page or data changed since the supervisor asked, so it can’t be answered. Send it back, or tell the supervisor to ask again.</p>'}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1619,8 +1704,8 @@ function renderReviewHead(note = '') {
   const links = (DATA?.questions || []).find((q) => q.id === RV.qid)?.links || info.links || [];
   // one line for the question, one for the facts; the rest folds away so the agent's page gets the height
   const more = [rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : '',
-    `<div>${qtext(info.question, links)}</div>`,
-    info.context ? `<p class="ctx">${qtext(info.context, links)}</p>` : '',
+    `<div>${qinline(info.question, links)}</div>`,
+    info.context ? `<div class="ctx">${qblock(info.context, links)}</div>` : '',
     links.length ? `<div class="links"><span class="muted small">Look at:</span>${links.map(linkOf).join('')}</div>` : '',
     `<div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))} · ${pins} · pinned at <code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})${rv.allow_partial ? ' · partial answers allowed' : ''}</div>`].join('');
   $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(qplain(info.question, links))}">${esc(rv.title || qplain(info.question, links))}</h4>${CLOSE}</div>
@@ -2029,20 +2114,28 @@ function renderOoda(o) {
     return empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).');
   })());
 
+  // Is it learning: the chart above the tabs
+  $('learning').innerHTML = learningSection(o);
+
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
-      <div>${linkify(x.detail)}</div><div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
+    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} data-open="observation/${esc(encodeURIComponent(x.id))}"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
+      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, <a class="linkish" href="#observation/${encodeURIComponent(x.id)}">${when(x.created_at)}</a></div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
+  const debt = o.debt?.signals || [];
+  const taught = o.debt?.incidents || [];
+  $('debt').innerHTML = debt.length || taught.length ? debt.map((x) => `
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><a class="linkish" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
+    <div class="card small"${subj('problem', x.id, x.title)} data-open="problem/${esc(encodeURIComponent(x.id))}"><span class="badge">incident</span><a class="linkish" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><a class="linkish" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"${subj('problem', p.id, p.title)}><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"${subj('problem', p.id, p.title)} data-open="problem/${esc(encodeURIComponent(p.id))}"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)}><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Trust Ladder
@@ -2059,7 +2152,7 @@ function renderOoda(o) {
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)}>
+    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} data-open="act/${esc(encodeURIComponent(a.id))}">
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
         <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
@@ -2080,6 +2173,8 @@ function decisionUnder(r) {
 // A routine act (a merge the gates passed, a worker started, a default applied) is its own call under
 // the constitution; it is in the Act tab, and here only on request, so judgment calls stay in view.
 const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution';
+// A decision that is complete in itself: a noise ruling explains a signal, and no act carries it out.
+const NO_ACT_CLASSES = ['orient-noise'];
 function renderDecisions(o) {
   const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
   const sel = $('dec-class');
@@ -2097,10 +2192,10 @@ function renderDecisions(o) {
     const under = decisionUnder(r);
     const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
     return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)}>
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} data-open="${esc(open.slice(1))}">
       <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
-        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
+        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
         ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
         ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
       </div>
@@ -2123,6 +2218,7 @@ const TYPE_META = {
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
+  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -2214,8 +2310,8 @@ const ATTR = {
     hide: ['review', 'result', 'secrets', 'secrets_posted', 'choices', 'status'],
     fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v), re: (v) => linkify(v) },
   },
-  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v) } },
-  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'reversible'], fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}` } },
+  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
+  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'knowledge', 'reversible'], label: { knowledge: 'Given' }, fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}`, knowledge: linkList } },
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
@@ -2301,7 +2397,7 @@ let DRAWER = { kind: null, id: null };
 let lastFocus = null;
 let LAST_HTML = '';
 let AFTER = [];
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -2363,7 +2459,8 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); }
+  // another drawer: what failed to load (a peek, a lineage graph) is tried again
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); for (const [g, svg] of [...LINEAGE_SVG]) if (svg === false) LINEAGE_SVG.delete(g); }
   const same = DRAWER.kind === kind && DRAWER.id === id;
   DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };
@@ -2456,10 +2553,13 @@ function designBlock(d, label = 'Design') {
   return `<h3>${esc(label)}: the TL;DR</h3><div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`;
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
+/* learning start */
 // A small time chart: one line per series over time, optional horizontal marks (targets).
 // span: [from, to] in ms to fix the x axis (a sensor's last 24h); width: the drawing's own width,
-// so a narrow card draws a narrow chart with readable text; a series may name its color.
-function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0, span = null, width = 640 } = {}) {
+// so a narrow card draws a narrow chart with readable text; a series may name its color. A point
+// is [ts, value] or [ts, value, { hollow, href, title }]: hollow for too few to say, href to open
+// what it counts. xmarks: [{ at, label, href }] draws dashed vertical lines (a retro, a rung change).
+function lineChart(series, { marks = [], xmarks = [], unit = '', height = 160, yMin = 0, span = null, width = 640 } = {}) {
   const pts = series.flatMap((s) => s.points);
   if (!pts.length) return '';
   const W = width, H = height, L = 40, R = 12, T = 12, B = 22;
@@ -2485,10 +2585,71 @@ function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0, span
   series.forEach((s, i) => {
     const ps = s.points.slice().sort((a, b) => a[0] - b[0]);
     svg += `<polyline fill="none" stroke="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}" stroke-width="2" points="${ps.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`;
-    if (ps.length <= 60) for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
+    const c = s.color || `var(--series-${(i % 4) + 1}, var(--blue))`;
+    if (ps.length <= 60) for (const p of ps) {
+      const o = p[2] || {};
+      const dot = `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" ${o.hollow ? `fill="none" stroke="${c}" stroke-width="1.5" pointer-events="all" data-hollow` : `fill="${c}"`}><title>${esc(o.title ?? `${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
+      svg += o.href ? `<a href="${esc(o.href)}">${dot}</a>` : dot;
+    }
   });
+  for (const m of xmarks) {
+    const ts = Date.parse(m.at);
+    if (!(ts >= t0 && ts <= t1)) continue;
+    const X = x(ts).toFixed(1);
+    const mark = `<g class="xmark"><line x1="${X}" x2="${X}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-dasharray="3 3"/><line x1="${X}" x2="${X}" y1="${T}" y2="${H - B}" stroke="transparent" stroke-width="8"/><title>${esc(`${m.label} · ${fmtDate(ts)}`)}</title></g>`;
+    svg += m.href ? `<a href="${esc(m.href)}">${mark}</a>` : mark;
+  }
   return `<div class="card chart mini-chart">${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i style="border-top-color:${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}${svg}</svg></div>`;
 }
+// Is the loop making the system smarter? Six small charts, two per column (Informed, Autonomous,
+// Trusted), from the weekly learning records, oldest first. Three columns, never one score: a
+// correction in one class shows as a dip, not averaged away by a promotion in another. A count and
+// a share never share a chart. A point whose denominator is under LEARN_MIN is hollow: too few to say.
+const LEARN_MIN = 5;
+const learnShare = (a, b) => (b ? Math.round((100 * a) / b) : 0);
+const LEARN_CHARTS = [
+  ['Informed', [
+    { title: 'Accepted knowledge', note: 'lessons, facts and rules in force at the week\'s end', series: [{ name: 'accepted knowledge', v: (f) => f.informed.knowledge }] },
+    { title: 'Explained, and given', note: 'recurring signals explained, of those formed; fresh starts given a lesson', unit: '%', series: [
+      { name: 'signals explained', v: (f) => learnShare(f.informed.signals_explained, f.informed.signals_formed), n: (f) => f.informed.signals_formed },
+      { name: 'starts given a lesson', v: (f) => learnShare(f.informed.starts_given, f.informed.starts), n: (f) => f.informed.starts },
+    ] },
+  ]],
+  ['Autonomous', [
+    { title: 'Ladder calls made on trust', note: 'of the calls in a trust-ladder class, the ones made on its rung or a standing rule, not asked', unit: '%', series: [{ name: 'on trust', v: (f) => learnShare(f.autonomous.trusted_calls, f.autonomous.ladder_calls), n: (f) => f.autonomous.ladder_calls }] },
+    { title: 'Questions per merged ticket', note: 'decisions put to you, for each ticket merged', series: [{ name: 'questions per merged ticket', v: (f) => +(f.autonomous.questions / Math.max(1, f.autonomous.merged)).toFixed(2), n: (f) => f.autonomous.merged, none: 'no ticket merged' }] },
+  ]],
+  ['Trusted', [
+    { title: 'Agreement', note: 'your answers that went with the recommendation', unit: '%', series: [{ name: 'agreement', v: (f) => learnShare(f.trusted.agreed, f.trusted.answered), n: (f) => f.trusted.answered }] },
+    { title: 'Corrections per 100 calls', note: 'calls you corrected, for every hundred the supervisor made', series: [{ name: 'corrections per 100 calls', v: (f) => +((100 * f.trusted.corrections) / Math.max(1, f.trusted.calls)).toFixed(1), n: (f) => f.trusted.calls }] },
+  ]],
+];
+// a record whose three columns aren't objects (a hand-written line) is left out, not drawn
+const learnable = (r) => !!r && !!r.figures && ['informed', 'autonomous', 'trusted'].every((k) => r.figures[k] && typeof r.figures[k] === 'object');
+function learningSection(o) {
+  const recs = (o.learning || []).filter(learnable);
+  const T = o.learning_totals || {};
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  if (recs.length < 3) {
+    const since = T.since ? fmtDate(Date.parse(T.since)) : 'the start';
+    return `<div class="learn-young" data-learn="young"><div class="grid">${[['calls', T.calls], ['lessons kept', T.lessons], ['corrections', T.corrections]].map(([k, v]) => `<div class="stat"><span>${esc(`${k} since ${since}`)}</span><b>${esc(v ?? 0)}</b></div>`).join('')}</div>
+      <p class="small muted">Since ${esc(since)}: ${esc(plural(T.calls ?? 0, 'call'))}, ${esc(plural(T.lessons ?? 0, 'lesson'))} kept, ${esc(plural(T.corrections ?? 0, 'correction'))}. The loop needs a few weeks of calls, answers and lessons before trends mean anything.</p></div>`;
+  }
+  const xmarks = (o.learning_marks || []).map((m) => ({ at: m.at, label: m.label, href: m.href }));
+  const span = [Date.parse(recs[0].from), Date.parse(recs[recs.length - 1].from) + 7 * DAY];
+  const chart = (c) => {
+    const series = c.series.map((s, i) => ({ name: s.name, color: i ? 'var(--amber)' : 'var(--series-1)', points: recs.map((r) => {
+      const v = s.v(r.figures);
+      const n = s.n ? s.n(r.figures) : null;
+      const few = n !== null && n < LEARN_MIN;
+      return [Date.parse(r.from), v, { hollow: few, href: `#learning/${encodeURIComponent(r.id)}`, title: few ? `${s.name}, week ${r.week}: ${n === 0 && s.none ? s.none : `too few to say (n = ${n})`}` : `${s.name}, week ${r.week}: ${v}${c.unit || ''}${n !== null ? ` (n = ${n})` : ''}` }];
+    }) }));
+    return `<div class="learn-chart" data-chart="${esc(c.title)}"><h4>${esc(c.title)}</h4>${lineChart(series, { unit: c.unit || '', height: 120, width: 360, span, xmarks })}<p class="small muted">${esc(c.note)}</p></div>`;
+  };
+  return `<div class="learn-cols" data-learn="charts">${LEARN_CHARTS.map(([col, charts]) => `<div class="learn-col"><h3>${esc(col)}</h3>${charts.map(chart).join('')}</div>`).join('')}</div>
+    <p class="small muted">Weekly, from each week's learning record: open a point for what it counted. A hollow point is too few to say (under ${LEARN_MIN}). Dashed lines are retros and rung changes.</p>`;
+}
+/* learning end */
 // A set's progress: its meter and forecast, its burn-up, then its tickets as the board.
 function progressBlock(items) {
   const now = Date.parse(DATA.progress.now);
@@ -2629,11 +2790,10 @@ function renderMonitoring(d) {
   }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
   for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
   $('incidents').innerHTML = incidentBoard(d.incidents || []);
-  for (const b of $('incidents').querySelectorAll('[data-open]')) b.onclick = () => { location.hash = b.dataset.open; };
   const feed = d.sensor_feed || [];
   $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)}><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -2845,6 +3005,8 @@ function openAct(id) {
       ['Under', actUnder(a), 'What it carried out: a decision, your answer, a standing rule, or its own call.'],
     ] })}
     ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
+    ${lineageBlock(p)}
+    ${knowledgeCited(p, 'What its instructions carried')}
     ${d ? `<h3>The decision it carried out</h3><div class="card small"><div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div></div>` : ''}
     ${citedBlock(p, a)}
     ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}
@@ -2857,9 +3019,16 @@ function restsOn(approvedBy) {
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === approvedBy);
   return k ? `<h3>The standing rule it rests on</h3><div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span></div>` : '';
 }
-// Records an object cites, in their own words (from its peek).
+// The knowledge a decision rests on (decide --on), or a start's prompt carried, in its own words
+// (from its peek): what the call or the session had to go on.
+function knowledgeCited(p, title) {
+  const ks = p?.record?.fields?.knowledge || [];
+  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}${x.type === 'knowledge' && x.status && x.status !== 'accepted' ? `, ${esc(x.status)}` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
+}
+// Records an object cites, in their own words (from its peek); what it rests on or was given has its own list.
 function citedBlock(p, o) {
-  const c = Object.entries(p?.cited || {}).filter(([id]) => !id.startsWith('q-') || !o?.approved_by || id !== o.approved_by);
+  const given = new Set(p?.record?.fields?.knowledge || []);
+  const c = Object.entries(p?.cited || {}).filter(([id]) => (!id.startsWith('q-') || !o?.approved_by || id !== o.approved_by) && !given.has(id));
   return c.length ? `<h3>What it cites</h3><ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>` : '';
 }
 function openDecision(id) {
@@ -2874,7 +3043,9 @@ function openDecision(id) {
       ['Under', authorityWords(r.under), 'The trust it rested on when it was made.'],
       ['Its class now', now ? `${esc(RUNG_WORDS[now.rung])}${r.under?.rung && r.under.rung !== now.rung ? ` <span class="muted">(was ${esc(RUNG_WORDS[r.under.rung])} when decided)</span>` : ''}` : '', 'Where its kind of decision is on the trust ladder today, against when it was made.'],
     ] })}
+    ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
+    ${knowledgeCited(p, 'What it drew on (not its authority)')}
     ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
     ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
     ${historySection(p, id)}`);
@@ -2936,8 +3107,180 @@ function openLesson(id) {
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
     ${k.status === 'candidate' ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : ''}
+    ${lineageBlock(p)}
     ${obs.length ? `<h3>The signals it came from</h3>${obsList(obs)}` : ''}
     ${citedBlock(p, k)}
+    ${historySection(p, id)}`);
+}
+/* loop-place start */
+// Where an observation came from, in your words (its provenance, which the kit computes).
+function fromWords(pv, o) {
+  const r = pv?.ref;
+  switch (pv?.from) {
+    case 'sensor': return r === 'goal-measure' ? 'From a goal\'s measure, read by the kit' : `From the ${(DATA?.sensors || []).some((x) => x.name === r) ? `<a class="linkish" href="#sensor/${encodeURIComponent(r)}">${esc(r)}</a>` : esc(r ?? 'kit\'s')} sensor`;
+    case 'metrics': return r === 'pane' ? 'From the kit\'s check on the agents\' panes' : `From the kit's own checks (${esc(words(r ?? 'a finding').toLowerCase())})`;
+    case 'spend': return 'From the spend meter';
+    case 'owner': return 'From you';
+    case 'owner-answer': return r ? `From your answer to ${qlink(r)}` : 'From your answer';
+    case 'owner-thread': return r ? `From a thread with you (${linkify(r)})` : 'From a thread with you';
+    case 'owner-chat': return 'From what you said in the supervisor chat';
+    case 'retro': return 'From a retro';
+    case 'worker': case 'planner': return `From ${esc(who(o?.created_by))}`;
+    case 'supervisor': return 'From the supervisor';
+    default: return pv?.from ? `From ${esc(pv.from)}` : '';
+  }
+}
+// A record's sidepeek, from its id (a correction opens the call it corrects).
+const recordHref = (id) => { const x = String(id ?? '').replace(/^correction:/, ''); const k = { k: 'lesson', p: 'problem', d: 'decision', a: 'act', o: 'observation', q: 'q' }[x[0]]; return k && x[1] === '-' ? `#${k}/${encodeURIComponent(x)}` : null; };
+const aWord = (w) => `${/^[aeiou]/i.test(w) ? 'an' : 'a'} ${w}`;
+// Where an observation sits in the loop, one line: the kit's place for it (collectOoda, peek).
+function loopPlace(pl) {
+  if (!pl) return '';
+  const to = (h, t) => (h ? `<a class="linkish" href="${esc(h)}">${t}</a>` : t);
+  const sig = (t) => to(`#signal/${encodeURIComponent(pl.ref ?? '')}`, t);
+  const why = pl.why ? `: ${linkify(pl.why)}` : '';
+  switch (pl.state) {
+    case 'new': return 'Not oriented yet';
+    case 'signal': return pl.recurring ? `Part of a ${sig('recurring signal')} (seen ${esc(pl.n)} times)` : pl.n >= 3 ? `Seen ${esc(pl.n)} times, by one writer on one day: ${sig('not a recurring signal yet')}` : `Part of a ${sig('recurring signal')} (${esc(pl.n)} of 3)`;
+    case 'explained': return `Explained: became ${to(recordHref(pl.ref), esc(aWord(pl.why || 'lesson')))}`;
+    case 'noise': return `Ruled ${to(recordHref(pl.ref), 'noise')}${why}`;
+    case 'ignored': return `${to(recordHref(pl.ref), 'Ignored at triage')}${why}`;
+    case 'set-aside': return `${to(recordHref(pl.ref), 'Set aside')} until ${esc(when(pl.until))}${why}`;
+    case 'carried': return `Carried on: ${esc(pl.why)} ${to(recordHref(pl.ref), '(the furthest step)')}`;
+    default: return '';
+  }
+}
+// The lineage as a list, when its graph can't be drawn (Mermaid didn't load, or failed): by stage
+// in the loop's order, then what it is about; every record that has a sidepeek a link to it.
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], ['inbox', 'Asked you'], ['measurement', 'Measured'], [null, 'What it is about']];
+function lineageList(L) {
+  const inLoop = LINEAGE_STAGES.map(([s]) => s).filter(Boolean);
+  const item = (n) => `<li>${n.href ? `<a class="linkish" href="${esc(n.href)}"${n === L.nodes[0] ? ' aria-current="page"' : ''}>${esc(n.label)}</a>` : esc(n.label)} <span class="muted">${esc(words(n.kind ?? n.type))}</span></li>`;
+  return `<div class="lineage-list">${LINEAGE_STAGES.map(([s, title]) => { const xs = L.nodes.filter((n) => (s ? n.stage === s : !inLoop.includes(n.stage))); return xs.length ? `<h4>${title}</h4><ul>${xs.map(item).join('')}</ul>` : ''; }).join('')}</div>`;
+}
+/* loop-place end */
+// What a record came from and what came of it (the kit's lineage, peek's lineage and
+// lineage_mermaid). The list is the first paint; the graph, once drawn, is kept by its nodes' ids,
+// stages and labels, so a refresh that changes none of them draws the same HTML and the drawer stays
+// as it is, and one that relabels or moves a node draws it again. Each node of
+// the graph (the i-th node is n<i>: its group's data-id, or, as 11.4.1 draws it once sanitized, its
+// id flowchart-n<i>-<counter>) is wrapped in a link to its sidepeek; Mermaid's own click is off in
+// strict mode. When Mermaid can't load or render, the list stays while the drawer is open, and the
+// next open tries again (the CDN may be back). A collapsed group lists its members under it.
+const LINEAGE_SVG = new Map();
+const LINEAGE_FLIGHT = new Set();
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function wrapLineage(svg, L) {
+  const box = document.createElement('div');
+  box.innerHTML = svg;
+  const byN = new Map([...box.querySelectorAll('g.node')].map((g) => [g.dataset.id ?? /(?:^|-)flowchart-(n\d+)-\d+$/.exec(g.id)?.[1], g]));
+  L.nodes.forEach((n, i) => {
+    const g = byN.get(`n${i}`);
+    if (!g || !/^#[a-z]+\/[^\s"<>]*$/.test(n.href ?? '')) return;
+    const a = document.createElementNS(SVG_NS, 'a');
+    a.setAttribute('href', n.href);
+    a.setAttribute('tabindex', '0');
+    a.setAttribute('class', 'lineage-node');
+    if (i === 0) a.setAttribute('aria-current', 'page');
+    const t = document.createElementNS(SVG_NS, 'title');
+    t.textContent = n.label;
+    a.appendChild(t);
+    g.replaceWith(a);
+    a.appendChild(g);
+  });
+  return box.innerHTML;
+}
+function drawLineage(key, peek) {
+  if (LINEAGE_FLIGHT.has(key)) return;
+  LINEAGE_FLIGHT.add(key);
+  drawMermaid(peek.lineage_mermaid).then((svg) => { LINEAGE_SVG.set(key, wrapLineage(svg, peek.lineage)); while (LINEAGE_SVG.size > 50) LINEAGE_SVG.delete(LINEAGE_SVG.keys().next().value); }, () => { LINEAGE_SVG.set(key, false); }).finally(() => { LINEAGE_FLIGHT.delete(key); redraw(); });
+}
+function lineageBlock(peek) {
+  const L = peek?.lineage;
+  if (!L?.nodes?.length || L.nodes.length < 2) return '';
+  const key = L.nodes.map((n) => `${n.id}\t${n.stage}\t${n.label}`).join('\n');
+  const svg = LINEAGE_SVG.get(key);
+  if (svg === undefined && peek.lineage_mermaid) drawLineage(key, peek);
+  const groups = L.nodes.filter((n) => n.members?.length);
+  return `<h3>How it came about, and what came of it</h3>
+    <div class="lineage" data-lineage="${esc(L.nodes.map((n) => n.id).join(' '))}">${svg ? `<figure class="diagram">${svg}</figure>` : lineageList(L)}</div>
+    ${groups.map((g) => `<details><summary>${esc(g.label)}</summary><ul>${g.members.map((m) => `<li>${linkify(m)}</li>`).join('')}</ul></details>`).join('')}
+    ${L.truncated ? '<p class="small muted">Only the nearest steps are shown: it goes on further.</p>' : ''}`;
+}
+const clip = (x, n) => { const t = String(x ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
+const hoursWords = (h) => (h < 48 ? `${h} hour${h === 1 ? '' : 's'}` : `${Math.floor(h / 24)} days`);
+function openObservation(id) {
+  drawerFor('observation', id);
+  const p = peekOf('observation', id);
+  const card = (DATA.ooda.observations || []).find((x) => x.id === id);
+  const o = card || (p?.record ? { ...p.record.fields, id, created_by: p.record.created_by, created_at: p.record.created_at } : null);
+  if (!o) return notFound('observation', id, p, p?.error ? 'No such observation.' : '');
+  const pv = card?.provenance ?? p?.provenance;
+  const place = p && p.place !== undefined ? p.place : card?.place;
+  showDrawer(`<h2 id="drawer-title">${esc(words(o.kind))}: ${esc(clip(o.detail, 80))}</h2>
+    ${pv ? `<p class="ctx" data-from>${fromWords(pv, o)}</p>` : ''}
+    ${attrs({ id, peek: p, type: 'observation', computed: [
+      ['Where it sits', loopPlace(place), 'Where it is in the loop: not oriented yet, part of a recurring signal, explained, ruled noise, set aside, or carried on to a decision, an act or an outcome.'],
+      ['Stage', esc(words(card?.stage ?? p?.stage ?? '')), 'Which stage of the loop it is in: observe, orient, decide, act or learn.'],
+    ] })}
+    <p class="ctx measure">${linkify(o.detail)}</p>
+    ${lineageBlock(p)}
+    ${citedBlock(p, o)}
+    ${historySection(p, id)}`);
+}
+// A recurring signal is computed, not stored: what nothing explains yet on one key.
+const signalTitle = (key) => `${words(key.split(':')[0])} ${key.split(':').slice(1).join(':')}`.trim();
+function openSignal(key) {
+  drawerFor('signal', key);
+  const p = peekOf('signal', key);
+  const c = (DATA.ooda.clusters || []).find((x) => x.key === key);
+  const s = p?.signal;
+  if (!s && !c) return notFound('signal', key, p, p?.error ? 'Nothing recurs on this key now: it was explained, or never recurred.' : '', { noRecord: true });
+  const items = s?.items ?? [];
+  showDrawer(`<h2 id="drawer-title">${esc(signalTitle(key))}</h2>
+    ${attrs({ id: key, idTip: 'The key its observations recur on: a fingerprint, a finding, or a kind and a subject.', peek: p, type: 'signal', noRecord: true, computed: [
+      ['Seen', esc(s?.count ?? c?.count), 'How many observations on this key nothing explains yet.'],
+      ['Recurring', s ? (s.recurring ? 'yes' : 'not yet: a signal is three or more, from two writers or on two days') : p === undefined ? '' : c ? 'yes' : '', 'Whether Orient lists it as a recurring signal (nothing while its peek loads).'],
+      ['First seen', s?.first_at ? esc(when(s.first_at)) : '', 'The oldest observation nothing explains yet.'],
+      ['Latest', s?.latest_at ? esc(when(s.latest_at)) : '', 'The newest one.'],
+      ['Unexplained for', s?.unexplained_hours != null ? esc(hoursWords(s.unexplained_hours)) : '', 'How long since the oldest of them: over a day is orientation debt.'],
+      ['Explained already', s?.explained?.length ? `${esc(s.explained.length)} earlier observation${s.explained.length > 1 ? 's' : ''} on this key` : '', 'Ones a lesson, a problem or a ruling already explains.'],
+    ] })}
+    ${c?.latest ? `<p class="ctx measure">${linkify(c.latest)}</p>` : ''}
+    <h3>Its observations</h3>${items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.')}
+    ${lineageBlock(p)}
+    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary><p class="small muted">With what it teaches, or a ruling that it is noise; you can correct either.</p>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
+    ${historySection(p, key)}`);
+}
+// The weekly learning record: its figures, every record each counts (recomputed from the log as it
+// stood at the week's end; the line's refs are capped), and what each lesson given did since.
+function openLearning(id) {
+  drawerFor('learning', id);
+  const p = peekOf('learning', id);
+  const card = (DATA.ooda.learning || []).find((x) => x.id === id);
+  const f = p?.record?.fields ?? (card ? { detail: card.detail, week: card.week, figures: card.figures } : null);
+  if (!f) return notFound('learning', id, p, p?.error ? 'No such learning record.' : '');
+  const L = p?.learning;
+  const F = L?.figures ?? f.figures;
+  const ids = (xs) => (xs?.length ? linkify(xs.join(' ')) : '<span class="muted">none</span>');
+  const of = (a, b) => `${esc(a)} of ${esc(b)}${b ? ` <span class="muted">(${esc(Math.round((100 * a) / b))}%)</span>` : ''}${b < 5 ? ' <span class="muted">· too few to say</span>' : ''}`;
+  const rows = F ? [
+    ['Informed', 'Accepted knowledge in force', esc(F.informed.knowledge), L?.lists.knowledge],
+    ['', 'Recurring signals explained, of those formed', of(F.informed.signals_explained, F.informed.signals_formed), L?.lists.signals.filter((x) => x.explained).flatMap((x) => x.by.slice(0, 1))],
+    ['', 'Fresh starts given a lesson', of(F.informed.starts_given, F.informed.starts), L?.lists.starts.map((x) => x.id)],
+    ['Autonomous', 'Ladder calls made on trust', of(F.autonomous.trusted_calls, F.autonomous.ladder_calls), L?.lists.ladder_calls.map((x) => x.id)],
+    ['', 'Questions put to you, for merged tickets', `${esc(F.autonomous.questions)} for ${esc(F.autonomous.merged)}`, L ? [...L.lists.questions, ...L.lists.merged] : null],
+    ['Trusted', 'Answers that went with the recommendation', of(F.trusted.agreed, F.trusted.answered), L?.lists.answered.map((x) => x.id)],
+    ['', 'Corrections, in the calls made', `${esc(F.trusted.corrections)} in ${esc(F.trusted.calls)}`, L?.lists.corrections],
+  ] : [];
+  const eff = L?.efficacy ?? [];
+  showDrawer(`<h2 id="drawer-title">The week of ${esc(L?.from ? fmtDate(Date.parse(L.from)) : f.week)}</h2>
+    ${attrs({ id, peek: p, type: 'observation' })}
+    ${f.detail ? `<p class="ctx measure">${linkify(f.detail)}</p>` : ''}
+    <h3>The figures</h3>${rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('No figures on this record.')}
+    <h3>Lesson efficacy</h3><p class="small muted">For each lesson a worker or planner was given: what was seen on the signals it came from in the four weeks before it was first given, and since. Counts and records, not a score.</p>
+    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('No lesson was given to a worker or planner by the end of this week.')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}
+    ${lineageBlock(p)}
     ${historySection(p, id)}`);
 }
 // An incident's part of the problem drawer: its stage and authority, its fingerprints, the fix
@@ -2968,6 +3311,7 @@ function openProblem(id) {
   const goals = (x.threatens || []).map((gid) => goalOf(gid)).filter(Boolean);
   showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2>
     ${attrs({ id, peek: p, type: 'problem' })}
+    ${lineageBlock(p)}
     ${statuses.length ? `<h3>Status</h3><div class="status-trail">${statuses.map((l) => `<span class="badge">${esc(l.status ?? 'open')}</span><span class="muted small">${esc(when(l.at))}</span>`).join('<span class="muted">→</span>')}</div>` : ''}
     ${goals.length ? `<h3>What it puts at risk</h3><ul>${goals.map((g) => { const fc = g.forecast; const last = (fc?.milestones || []).slice(-1)[0]; return `<li>${glink(g.id)}: ${last?.eta ? `ETA ${esc(last.eta)}` : 'no ETA yet'}${g.horizon ? ` against ${fmtDay(g.horizon)}` : ''}${fc?.past_horizon ? ' <span class="badge high">after the horizon</span>' : ''}${(fc?.milestones || []).some((m) => m.late) ? ' <span class="badge high">a milestone is late</span>' : ''}</li>`; }).join('')}</ul>` : ''}
     ${incidentSection(p?.incident || (DATA.incidents || []).find((i) => i.id === id), p)}
@@ -3027,15 +3371,15 @@ function openQuestion(id) {
   const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
   const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
   const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
-  showDrawer(`<h2 id="drawer-title">${qtext(q.question, q.links)}</h2>
+  showDrawer(`<h2 id="drawer-title">${qinline(q.question, q.links)}</h2>
     ${attrs({ id, peek: p, type: 'question', computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
-    ${q.context ? `<p class="ctx measure">${qtext(q.context, q.links)}</p>` : ''}
-    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
+    ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
+    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
     ${answeredCard(q)}
     ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
@@ -3085,27 +3429,36 @@ function openFile(params) {
 // Mermaid fenced blocks in markdown render as diagrams. The library loads from the CDN only when a
 // document has one; offline, or on a diagram with an error, the source stays as a code block.
 let MERMAID = null;
-async function renderMermaid(root) {
-  const blocks = root ? [...root.querySelectorAll('pre > code.language-mermaid')] : [];
-  if (!blocks.length) return;
-  let mermaid;
+const loadMermaid = async () => {
   try {
     MERMAID ??= import('https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs').then((m) => m.default);
-    mermaid = await MERMAID;
-  } catch { MERMAID = null; return; }
+    return await MERMAID;
+  } catch (e) { MERMAID = null; throw e; }
+};
+// One diagram, as sanitized SVG text: initialize, render, sanitize. Throws when Mermaid can't load
+// or the diagram doesn't render.
+let MMD_N = 0;
+async function drawMermaid(text) {
+  const mermaid = await loadMermaid();
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
   // Agents write these documents: a diagram's own %%{init}%% directive could set themeCSS and restyle
   // the owner's page (the SVG keeps its <style>). Directives are stripped and the theme keys locked.
   mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', fontFamily: getComputedStyle(document.body).fontFamily, htmlLabels: false, flowchart: { htmlLabels: false },
     secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'theme', 'themeCSS', 'themeVariables', 'fontFamily', 'htmlLabels', 'flowchart', 'darkMode'] });
-  for (const [i, code] of blocks.entries()) {
+  const src = text.replace(/%%\{[\s\S]*?\}%%/g, '').replace(/^\s*---\n[\s\S]*?\n---\s*\n/, '');
+  const { svg } = await mermaid.render(`mmd-${Date.now()}-${++MMD_N}`, src);
+  return DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['style'] });
+}
+async function renderMermaid(root) {
+  const blocks = root ? [...root.querySelectorAll('pre > code.language-mermaid')] : [];
+  if (!blocks.length) return;
+  try { await loadMermaid(); } catch { return; }
+  for (const code of blocks) {
     const pre = code.parentElement;
     try {
-      const src = code.textContent.replace(/%%\{[\s\S]*?\}%%/g, '').replace(/^\s*---\n[\s\S]*?\n---\s*\n/, '');
-      const { svg } = await mermaid.render(`mmd-${Date.now()}-${i}`, src);
       const fig = document.createElement('figure');
       fig.className = 'diagram';
-      fig.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['style'] });
+      fig.innerHTML = await drawMermaid(code.textContent);
       pre.replaceWith(fig);
     } catch (e) {
       pre.insertAdjacentHTML('beforebegin', `<p class="err">This diagram didn't render: ${esc(String(e?.message ?? e).split('\n')[0])}</p>`);
@@ -3263,6 +3616,17 @@ $('av-reload').addEventListener('click', () => { const f = tsFrame(), src = f.ge
 // a question's link to a changed artifact says so in the viewer's header
 document.addEventListener('click', (e) => { const a = e.target.closest?.('a[data-av-note]'); if (a) AV_NOTE = a.dataset.avNote || null; });
 
+// A Loop card opens its sidepeek when clicked anywhere on it. A link, a control or the correct form
+// inside it keeps its own click; a Shift, Ctrl, Meta or Alt click, a pinned thread layer and a text
+// being selected are the owner's own.
+document.addEventListener('click', (e) => {
+  const card = e.target.closest?.('[data-open]');
+  if (!card || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  const inner = e.target.closest('a, button, input, select, textarea, label, [data-correct-form], .untrusted');
+  if (inner && inner !== card && card.contains(inner)) return;
+  if (String(window.getSelection?.() ?? '')) return;
+  location.hash = card.dataset.open;
+});
 let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
@@ -3285,7 +3649,7 @@ function route() {
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
   if (h.startsWith('talk/')) { hideDrawer(); return void tlOpen(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -4227,13 +4591,13 @@ function tlQuestion(q, reasonText) {
   if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
   const open = (DATA?.questions || []).find((x) => x.id === q.id);
   if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
-  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${qinline(q.question, q.links)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
 }
 // A turn's words, or the question it asks.
 function tlTurnBody(u, t) {
   const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
-  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : u.by === 'owner' ? `<div class="tl-text">${linkify(u.text)}</div>` : `<div class="tl-text ctx">${qblock(u.text)}</div>`;
 }
 function tlTurns(t) {
   return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');

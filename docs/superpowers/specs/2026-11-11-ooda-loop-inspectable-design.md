@@ -64,26 +64,26 @@ One model, for production and for the kit's own checks:
 - **Recurring signals** are Orient's: three or more observations on one recurrence key that nothing has explained yet. They are computed, not stored, and get a stable address: `signal:<key>`.
 
 The key Orient groups on, fixed so sensor observations recur:
-- a sensor observation: its fingerprint (`<sensor>:<kind>:<fingerprint>`, as `fpIdOfObservation` already derives), so every spike, qualify and regression on one fingerprint is one signal
+- a sensor observation: its fingerprint (`<sensor>:<kind>:<fingerprint>`, as `fpIdOfObservation` already derives), so every qualify and spike on one fingerprint is one signal (a `fix-regressed` or `recurred` line keeps its own key: it already cites its incident)
 - a finding: `metrics:<kind>:<subject>` (its `source_key` today)
 - anything else: `source_key`, else `kind:subject`
 
 Fixes to the spike check:
-- **Listened hours.** Every sensor records the hours in which it ran or listened (`listened` in its `counts.json`, set on each successful run or drain). The spike check's median is over those hours only, and a spike needs 24 of them. A probe on a box that was down has the same gap a stream has.
+- **Listened hours.** Every sensor records the hours in which it ran or listened (`listened.json` beside its `counts.json`, whose keys are fingerprints: set on each successful check and whenever events arrive). The spike check's median is over those hours only, and a spike needs 24 of them. A probe on a box that was down has the same gap a stream has.
 - **Say which line.** A spike's detail names the fingerprint's class or code and its id; a log template goes inside the untrusted-data frame, as `log-error` does. The days count is `floor(hours / 24)`, never "0 day(s)".
-- **Untriaged escalations.** A new finding `sensor-untriaged`, per fingerprint: an observation of severity 3 or more from a sensor, older than `triage_overdue_hours` (default 2) while the supervisor runs, with no incident, ignore or noise ruling. Today `incident-unowned` needs an incident to exist first.
+- **Untriaged escalations.** A new finding `sensor-untriaged`, per fingerprint: an observation of severity 3 or more from a sensor, older than `sensor_defaults.triage_overdue_hours` (default 2) while the supervisor runs, with no incident, ignore or noise ruling, over the last 7 days (so an upgrade doesn't raise every escalation the log ever held). Today `incident-unowned` needs an incident to exist first.
 
 ### 2. Provenance
 
-Observation already carries `source`, `detector`, `source_key`, `source_ref` and `subject`. Reconcile them; add no field.
+Observation already carries `source`, `detector`, `source_key`, `source_ref` and `subject`. Reconcile them; add no field, and rewrite none.
 
-- `source`: where it came from. It stays a string in the schema (history holds `ticket`, `owner`, `ack`, `repo`, `prod` and sensor names, and `log-check` validates every line ever written), and is not required (an older worktree's `observe` lines must still sync). The kit's writers set one of `x-ooda.sources`: `sensor`, `metrics`, `spend`, `owner-answer`, `owner-thread`, `owner-chat`, `retro`, `worker`, `planner`, `supervisor`; `observe` refuses any other value from the command line, as it refuses `--detector sensor` today. A ticket's writer is `worker`, a plan's `planner`.
-- `source_ref`: which one within that source: the sensor's name, the finding's kind, the question, thread or turn id, the retro's file, the fingerprint.
-- `source_key`: the recurrence key (unchanged meaning).
-- `subject`: what it is about (unchanged).
-- `detector`: retired; no new line writes it. The views read any line through one function, `sourceOf(o)`: `detector: "sensor"` → `sensor` with the old `source` as `source_ref`; `detector: "metrics"` → `metrics`; `ack` → `supervisor`; `repo`, `prod` or `owner` on a goal reading → `sensor` with `source_ref: goal-measure`; any other or missing value → by its writer (`owner`, `supervisor`, a ticket → `worker`, a plan → `planner`).
+*Changed while building PR 2:* an earlier draft had every writer set `source` to one of `x-ooda.sources` and retired `detector`. That would break a mixed fleet: `source` and `detector` already mean things every kit reads (`source` is `repo`, `prod` or `owner` on a goal reading, which `goalReadingOnMain` reads, and a sensor's name on a sensor's line; `detector: "sensor"` is how every kit, an older worktree's included, recognises the kit's own sensor lines, `fromSensor`, and `detector: "metrics"` its findings, `observeFindings`). A newer kit writing new values there would have an older kit misread its lines. So provenance is computed when a line is read, and nothing stored changes:
 
-Each writer sets it: `sensorObserveOnce` (sensor), `observeFindings` (metrics), the cost-hotspot finding (spend), `answer` and `thread resolve` observations (owner-answer, owner-thread), chat-derived observations (owner-chat), the retro (retro), `observe` by its writer. The sidepeek shows it first: "From the g3d-stacks-logs sensor", "From your answer to …".
+- `source` and `detector`: written as today, by the same writers. `source` stays a free string in the schema (history holds `ticket`, `owner`, `ack`, `repo`, `prod`, `pane` and sensor names, and `log-check` validates every line ever written) and is not required.
+- `provenanceOf(o)` → `{ from, ref }`, `from` one of `x-ooda.sources` (`sensor`, `metrics`, `spend`, `owner`, `owner-answer`, `owner-thread`, `owner-chat`, `retro`, `worker`, `planner`, `supervisor`), `ref` which one within it. First match wins: a set-aside (`finding-ack`, `sensor-ignored`, `sensor-unignored`, `sensor-reconsidered`) is its writer's call, below; a sensor's line (`fromSensor`, as readers trust it today) → `sensor`, ref its sensor's name; a finding (`detector: "metrics"`, the supervisor's) → `metrics`, or `spend` for a cost hotspot, ref its kind; the pane check (`detector: "pane"`) → `metrics`, ref `pane`; a goal reading of a repo or prod measure → `sensor`, ref `goal-measure`, of an owner measure → `owner-answer`, ref the question; `thread-resolved` → `owner-thread`, ref the thread; `retro` → `retro`, ref its file; a `source` already in the vocabulary and the writer's own (`observe --source`) → that, ref `source_ref`; else by writer: the owner → `owner` (or `owner-chat`, `owner-thread` by channel), the supervisor → `supervisor`, a ticket → `worker`, a planner → `planner`.
+- `observe --source` refuses the kit's own sources (`sensor`, `metrics`, `spend`), as it refuses `--detector sensor`, and another writer's: a worker gives only `worker`, a planner only `planner`, the owner `owner` and the `owner-…` ones, the supervisor any other but `owner` (it records what the owner said, as `owner-chat`, `owner-answer` or `owner-thread`, and never speaks as the owner). Older free text is still written as given and reads as its writer's.
+- `source_ref`: which one within that source (unchanged). `source_key`: the recurrence key (unchanged meaning). `subject`: what it is about (unchanged).
+- The views carry it: `log --json`, the dashboard's observations and `peek` add `provenance` and `stage` (`stageOf`, from `x-ooda.stages`). Readers, the operator's included, read `provenance.from`, not `source`. The sidepeek shows it first: "From the g3d-stacks-logs sensor", "From your answer to …".
 
 ### 3. The links the loop needs
 
@@ -93,14 +93,15 @@ Additive fields and refs, so a lineage walk finds every step:
 - **A worker or planner start records what it was given:** the `worker-slots` act gains `knowledge: [k-…]`, the ids `knowledgeBlock` put in its prompt, as a field (never in `what`, which `LAUNCH_ACT` parses). The act is the same class for both roles; a planner's is counted apart from a worker's. This is what makes a lesson's effect measurable (§6).
 - **A noise ruling is a decision:** `decide --class orient-noise --refs <signal key> <observation ids…> -- "<why>"`, a new constitutional class (the supervisor's own call: the owner can correct it, and a correction is recorded and drawn in Learn, but like every constitutional class it moves no rung). `orientClusters` treats ids cited by a decision as explained, as it does knowledge evidence and problem refs. Today "say so in an observation" silences nothing.
 - **A set-aside cites what it sets aside:** `ack` writes `refs` to the finding's observations. A triage ignore (`sensor ignore`) writes `refs` to the fingerprint's observations. Both stay stored as they are and sit in Decide. Each carries at most the 40 most recent observation ids (a line is at most 4,096 bytes); the fingerprint or finding key stays in `source_ref`, and the lineage joins the rest by key.
+  *Changed while building PR 4:* `orient` proposes no `decide` commands, so the `--on` hint went into its incident-debt lines instead. A start records its knowledge only when it starts fresh (a resumed session never reads the new prompt), newest first, at most 60 ids; `--on` takes at most 60 too, and refuses an id also in `--refs`.
 - **A resolved incident asks what it taught.** An incident resolved with an `outcome` and no knowledge citing it is orientation debt: `orient` lists it beside the recurring signals ("p-… was fixed and verified: what did it teach? a lesson, or nothing to keep"). The supervisor answers with `knowledge add --evidence <p-id> <d-id> <outcome id>` or a noise ruling. This is how a fast fix still turns into knowledge.
 
 ### 4. Lineage
 
 The kit computes it, the dashboard draws it.
 
-- `lineage(id)` in `devteam.mjs`, over one reverse index of the folded log (replacing the ad-hoc ones in `orientClusters`, `orientLinks` and `historyOf`). An explicit edge list per type, never a generic string walk:
-  - observation ← cited by: knowledge `evidence`, problem `refs`, decision `refs` (noise), a set-aside or ignore `refs`, question `evidence`; joined to a recurring signal by its key
+- `lineage(id)` in `devteam.mjs`, over one reverse index of the folded log (the ad-hoc indexes in `orientClusters`, `orientLinks` and `historyOf` stay as they are for now). An explicit edge list per type, never a generic string walk:
+  - observation ← cited by: knowledge `evidence`, problem `refs`, decision `refs` (noise), a set-aside or ignore `refs`, question `evidence`; held by an incident on its fingerprint from its opening to its resolution; joined to a recurring signal by its key
   - knowledge and problem → decision `knowledge` and `refs`, question `evidence` and `blocks`, `worker-slots` act `knowledge`
   - decision → its acts (`act.decision`), the question it rests on (`approved_by`, that one question only), its correction
   - act → the outcome observations that cite it, the ticket it made (a work-graph node)
@@ -168,7 +169,7 @@ This is an additive change to the kit's internals: new fields, new optional valu
 ## PRs, in order (each leaves every instance working)
 
 1. **Reader tolerance** (§8). Small. Adopted fleet-wide before anything writes a new field.
-2. **Signals the loop can see** (§1, §2, §3's set-aside and ignore refs, noise rulings, orientation debt): listened hours, spike detail, `sensor-untriaged`, the fingerprint key, `source` provenance and the `detector` alias, `orient-noise`, `x-ooda`.
+2. **Signals the loop can see** (§1, §2, §3's set-aside and ignore refs, noise rulings): listened hours, spike detail, `sensor-untriaged`, the fingerprint key, computed provenance (`provenanceOf`) and stages (`stageOf`), `orient-noise`, `x-ooda`. Orientation debt's list on the Orient tab comes with the sidepeeks (PR 3) and resolved-incident debt with PR 4.
 3. **Lineage and sidepeeks** (§4, §5): `lineage()`, `/api/peek`'s `lineage`, `--mermaid`, the observation, signal and learning sidepeeks, clickable cards, where-it-sits lines.
 4. **Knowledge in decisions and prompts** (§3's `decision.knowledge` and `worker-slots.knowledge`, resolved-incident debt).
 5. **The learning record and the chart** (§6), with back-fill. Lesson efficacy starts filling in from PR 4's records.
@@ -177,7 +178,7 @@ This is an additive change to the kit's internals: new fields, new optional valu
 
 - Spike: a stream with a 10-hour listening gap and a normal hour after it raises nothing; a real 5× hour over 24 listened hours raises one spike naming the fingerprint; "1 day(s)" at 24–47 hours.
 - Orient: four spikes and a qualify on one fingerprint form one recurring signal; a noise ruling citing them clears it; `decide --on` a retired lesson is refused; a set-aside's refs stop at 40; an ack's and an ignore's refs name the observations.
-- Provenance: every writer sets `source`; `sourceOf` maps old `detector`, `ack`, `repo`, `prod`, `owner` and missing values; `log-check` passes on a historical log with free-text `source`; `observe --source <other>` is refused.
+- Provenance: `provenanceOf` gives every writer's line its source (a sensor's, a finding, a cost hotspot, the pane check, goal readings, a thread resolved, a retro, a set-aside, the owner's, the supervisor's, a worker's); stored `source` and `detector` are unchanged; `observe --source` refuses the kit's own sources and another writer's.
 - Reader tolerance: `log-check` on a log with an unknown field and an unknown type lists both and passes; `log-sync` syncs a file whose lines carry a field it doesn't know; `merge`'s log rule passes them too (only `errors` fail), since the merging kit is the instance's newest; `appendLog` still refuses to write one.
 - Lineage: an incident chain (observations → incident → incident-fix decision → add-ticket act → fix-deployed → outcome) walks both ways from every node; collapse above five siblings; the 120-node cap sets `truncated`; labels with Mermaid syntax characters render as text; `--mermaid` output parses.
 - Dashboard (the existing `dashboard.test.mjs` harness): every Loop card opens its sidepeek; a Mermaid node found by `data-id` opens the right one; a signal key with `/` routes; with Mermaid blocked the list fallback renders.

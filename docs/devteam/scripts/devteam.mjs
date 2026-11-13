@@ -999,6 +999,9 @@ const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 const SCHEMA = readJson(path.join(kitDir, 'schema', 'log.schema.json'));
 const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 const LINE_MAX = 4096;
+// The most knowledge ids a decision (--on) or a start (the lessons its prompt carried) records, so its
+// line stays under LINE_MAX.
+const KNOWLEDGE_IDS_MAX = 60;
 const TYPES = Object.keys(SCHEMA.$defs.types);
 const RANK = SCHEMA['x-authority'].rank;
 
@@ -1623,6 +1626,16 @@ function ratingHistory(q) {
 const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
+// A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
+// whatever its kind (ask now records those as kind one-way-door; older lines may not). Only the
+// question is classified here: what it approves is still the owner's own answer on the fold
+// (questionView's status "answered", bound to the question's hash), never a default or a line the
+// supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
+const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
+// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
+// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+const doorAgreed = (v) => !v.recommendation || v.matched === true;
+
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
   const hash = questionHash(q);
@@ -1657,7 +1670,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
@@ -2010,6 +2023,13 @@ function cmdLogCheck() {
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
+  // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
+  // rung 1, however its lines were written. A call that stands on one fails; the default alone warns.
+  const voidDefaults = new Map();
+  for (const q of logObjects('question')) { const v = questionView(q); const why = v.status === 'defaulted' ? defaultGap(v) : null; if (why) voidDefaults.set(v.id, why); }
+  const standing = new Set();
+  for (const c of calls()) if (voidDefaults.has(c.approved_by)) { standing.add(c.approved_by); fails.push(`${c.id} stands on ${c.approved_by}'s default, which approves nothing: ${voidDefaults.get(c.approved_by)}`); }
+  for (const [id, why] of voidDefaults) if (!standing.has(id)) out(`warn: ${id}'s default approves nothing: ${why}`);
   report(fails, `${n} log line(s)`);
 }
 
@@ -2020,7 +2040,8 @@ function cmdLog() {
   if (flagStr('id')) objs = objs.filter((o) => o.id === flagStr('id'));
   objs.sort(byTime);
   objs = objs.slice(-Number(flagStr('tail') ?? 50));
-  if (flags.json) return json(objs);
+  // each record's stage in the loop, and an observation's provenance (computed: x-ooda)
+  if (flags.json) return json(objs.map(withOoda));
   for (const o of objs) {
     const what = o.question ?? o.statement ?? o.title ?? o.what ?? o.detail ?? o.text ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'} ${o.ms}ms` : '');
     out(`${o.created_at} ${o.id} [${o.type}${o.kind ? ` ${o.kind}` : ''}${o.status ? ` ${o.status}` : ''}] ${String(what).slice(0, 160)}`);
@@ -2530,33 +2551,82 @@ function paneWaitingIn(window) {
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
 // window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
-// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
-// so a delivery gets at most one Enter however many passes or processes look.
+// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
+// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
+// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
+// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
+// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
+// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
+// is claimed (moved aside) and read again before each key, so however many passes or processes look,
+// and however stale their first read, one press happens per claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
+const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
-const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+const squash = (t) => t.replace(/[\s─-╿]+/g, '');
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
   try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
 }
+// A claim left by a process that died between its claim and its writeback: dropped, so the
+// sent directory doesn't collect them (that delivery's rescue ends with it).
+function dropDeadClaims(file) {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.claim-`;
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.startsWith(prefix)); } catch { return; }
+  for (const n of names) {
+    const pid = /^\d+$/.test(n.slice(prefix.length)) ? Number(n.slice(prefix.length)) : 0; // not a writeback's .tmp
+    if (!pid || pid === process.pid) continue;
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') { try { fs.unlinkSync(path.join(dir, n)); } catch {} } }
+  }
+}
 function resendLostEnter(key, target, lines) {
   const file = sentFile(key);
+  dropDeadClaims(file);
+  const ripe = (r) => typeof r?.text === 'string' && (Date.now() - Date.parse(r.at)) / 1000 >= LOST_ENTER_SECONDS;
   let rec;
   try { rec = readJson(file); } catch { return; }
-  const age = (Date.now() - Date.parse(rec.at)) / 1000;
   const tail = squash(rec.text ?? '').slice(-40);
-  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  if (!tail || !ripe(rec)) return;
   const bottom = lines.slice(-8);
-  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
-  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
+  const claimed = `${file}.claim-${process.pid}`;
+  const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
+  // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
+  // fails if the name is taken, where a rename would replace it): then the claim is just dropped.
+  const putBack = () => { try { fs.linkSync(claimed, file); } catch {} drop(); };
+  // Claimed, and read again: a pass whose first read is stale (another process pressed and wrote
+  // the record back since) finds a fresh time, or another text, and leaves it as it was.
+  const claim = () => {
+    try { fs.renameSync(file, claimed); } catch { return null; }
+    let now = null;
+    try { now = readJson(claimed); } catch {}
+    if (now?.text === rec.text && ripe(now)) return now;
+    putBack();
+    return null;
+  };
+  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
   if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
-  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
-  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
-  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
+  if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
+  // tests only: the pause a loaded machine can put between the first read and the claim
+  const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
+  if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
+  const cur = claim();
+  if (!cur) return;
+  const done = Math.max(0, Number(cur.tries) || 0);
+  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
+  const pressed = tmux(['send-keys', '-t', target, 'Enter']);
+  const tries = done + 1;
+  const typedAt = cur.typed_at ?? cur.at;
+  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
+  if (!pressed) return;
+  const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
 // The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
 // tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
@@ -4700,29 +4770,159 @@ function cmdAsk() { out(askLine().id); }
 // and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
 // (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
 const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
-function askLikeWarnings({ text, cls, kind }) {
-  if (!text.trim() || KIT_WORDED(cls, kind)) return;
+// A decision the owner has made is never put to them again (supervisor.md §6): ask refuses a
+// question as close as those above to one the owner answered (their own line, bound to the question
+// as asked; never a default or an open one) about the same work: a ticket or incident both name, or
+// the same goal or feature, and neither about other tickets; or neither about any work at all.
+// --new-because says what materially changed, and the owner reads it first. Not for the questions
+// whose answers lapse by design (a trust step's evidence, an incident's fix, a remediation's window,
+// a sensor's token, asked again only after the owner's own sensor reconsider),
+// nor for the kit's own wordings, nor for an answer already spent: one answer approves one call (one
+// per item it approves), so a yes that approved its call can't be cited again, and the next call of
+// the kind is a new question (the warning below still shows the earlier answer). A one-way door is
+// never spent: it covers each plan inside it.
+const REASK_EXEMPT = (cls, kind) => KIT_WORDED(cls, kind) || !['owner-decision', 'one-way-door', 'owner-action'].includes(kind) || ['incident-fix', 'production-remediation'].includes(cls);
+// An answer settles a question in its own class (an answer in another class can't be cited for this
+// one: the kit refuses it, so asking in the right class is no re-ask), or a one-way door's answer
+// settles a door asked again in any shape: what the owner was re-asked here.
+const settlesClass = (v, cls, kind) => (v.class ?? null) === (cls ?? null) || (isDoorQuestion(v) && (isDoorQuestion({ kind, class: cls }) || !cls || cls === 'approve-plan'));
+function sameWork(a, b) {
+  // a request for secrets is about what it asks for: the same secret to the same place, or not the same
+  const sinks = (x) => (x.secrets ?? []).map((y) => `${y.name}\n${y.sink}`);
+  if (sinks(a).length || sinks(b).length) return sinks(a).some((y) => sinks(b).includes(y));
+  // a question pinned to a text (a draft's blob, an artifact's hash) is about that text: a new draft is a new decision
+  const pins = (x) => ((x.id ? logGet(x.id)?.links : x.links) ?? []).filter(isObj).map((l) => l.blob ?? l.sha256).filter(Boolean);
+  if (pins(a).length || pins(b).length) { if (!pins(a).some((y) => pins(b).includes(y))) return false; }
+  const ta = [a.ticket, ...(a.blocks ?? [])].filter(Boolean);
+  const tb = [b.ticket, ...(b.blocks ?? [])].filter(Boolean);
+  if (ta.some((x) => tb.includes(x))) return true;
+  // about two different tickets: two decisions (a question that only blocks a ticket may still be the goal's)
+  if (a.ticket && b.ticket) return false;
+  if (!ta.length && !tb.length && !a.goal && !b.goal) return true;
+  if (a.goal && a.goal === b.goal) return true;
+  return sharesWork(questionAbout(a), questionAbout(b));
+}
+// The search above finds questions alike enough to mention; a refusal needs more: the two questions
+// themselves (not their context) share most of their words, every word counted whole ("v0.3.0" and
+// "v0.4.0", "UK" and "US" differ), only the glue words left out.
+const REASK_GLUE = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'for', 'in', 'on', 'at', 'is', 'it', 'be', 'we', 'i', 'you', 'should', 'would', 'could', 'can', 'do', 'does', 'shall', 'will', 'please', 'this', 'that']);
+const questionWords = (t) => new Set((String(t ?? '').toLowerCase().match(/[\p{L}\p{N}]+(?:[.'’-][\p{L}\p{N}]+)*/gu) ?? []).filter((w) => !REASK_GLUE.has(w)));
+function nearlySameQuestion(a, b) {
+  const x = questionWords(a);
+  const y = questionWords(b);
+  if (!x.size || !y.size) return false;
+  const both = [...x].filter((w) => y.has(w)).length;
+  return both / (x.size + y.size - both) >= 0.7;
+}
+function answerSpent(v) {
+  if (isDoorQuestion(v)) return false;
+  // a goal change records its answer on the goal line, not as a call
+  if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === v.id))) return true;
+  const used = calls().filter((c) => c.approved_by === v.id);
+  const declared = v.approves ?? [];
+  if (!declared.length) return used.length > 0;
+  const done = new Set(used.flatMap((c) => (c.refs ?? []).flatMap((x) => String(x).split(','))));
+  return declared.every((a) => done.has(a));
+}
+function reaskWords(v) {
+  const door = isDoorQuestion(v);
+  const cite = v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
+  return `the owner already decided this: ${v.id} ${quoteData(capBytes300(v.question))} (answered ${quoteData(capBytes300(v.answer))} on ${String(v.answered_at).slice(0, 10)}). Never ask the owner a decision they have made: ${cite}. If something material changed since, ask again with --new-because "<what changed>", which the owner reads first (supervisor.md §6)`;
+}
+// Returns the --new-because to record: left off when nothing the owner answered is like this.
+function askLikeWarnings({ text, question, cls, kind, about, newBecause }) {
+  if (!text.trim() || KIT_WORDED(cls, kind)) return newBecause;
   const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
   const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
   const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context, x.recommendation, (x.choices ?? []).map((c) => c?.label)) }] }))];
-  if (!docs.length) return;
+  if (!docs.length) return newBecause ? (warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'), null) : newBecause;
   const ix = searchIndex(docs);
   const close = ix.docs.map((d) => ({ d, ...searchSimilar(ix, text, d) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
   const line = (s) => quoteData(capBytes300(s));
+  const reaskable = (k, secrets) => !(k === 'owner-action' && !(secrets ?? []).length);
+  const like = (c) => c.d.q && c.d.q.answered_by === 'owner' && !REASK_EXEMPT(c.d.q.class, c.d.q.kind) && reaskable(c.d.q.kind, c.d.q.secrets) && settlesClass(c.d.q, cls, kind) && nearlySameQuestion(question, c.d.q.question) && sameWork(about, c.d.q) && !answerSpent(c.d.q);
+  const same = close.find(like);
+  if (same && !REASK_EXEMPT(cls, kind) && !about.sensor && reaskable(kind, about.secrets) && !newBecause) die(reaskWords(same.d.q));
+  // asked again: the owner reads why only on a question that asks again what they decided
+  if (newBecause && !same) { warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'); newBecause = null; }
   for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
     const k = c.d.rule;
     if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
     else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
   }
-  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  // An answered one-way door covers each plan inside it, whatever kind it was asked as: cited, never asked again.
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) {
+    if (isDoorQuestion(c.d.q)) warn(`the owner answered a similar one-way door before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it covers this decision, withdraw this and cite it, never ask it again (supervisor.md §6): act --class approve-plan --approved ${c.d.q.id}, with "- Goal-level door: ${c.d.q.id} covers this plan" in the plan review when it was asked for the goal`);
+    else warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  }
+  return newBecause;
+}
+// Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
+// paragraphs reach the dashboard as written (supervisor.md §6). Only where it can't be anything else:
+// text that already has real line breaks is left alone, and so are `code`, a Windows path
+// (C:\new\node_modules) and an escaped backslash (\\n).
+const ownerText = (t) => (t == null || String(t).includes('\n') ? t : String(t).split(/(`[^`]*`|\b[A-Za-z]:\\\S*)/).map((p, i) => (i % 2 ? p : p.replace(/(?<!\\)\\n/g, '\n'))).join(''));
+// The owner reads every question cold, on the dashboard, without the fleet's context or its words
+// (supervisor.md §6, Ask less, act more). What ask refuses, and what it warns about.
+// A question about asking the owner: "should I ask you for…", "want me to request access?", "is it ok
+// to ask for the key?". Asking someone else ("should I ask the vendor for a refund?", "request a key
+// from Stripe?") or a product's own prompt ("should the app request access to contacts?") is not one.
+const OWNER_GIVES = String.raw`(?:access|permissions?|logins?|keys?|tokens?|secrets?|certificates?|passwords?|passphrases?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env)`;
+// Someone other than the owner, before the verb ("let users request access", "require customers to
+// ask for access") or between it and the thing asked for: a question about the product, not about
+// asking the owner. And "ask you to <do something> each time / from now on" is about the owner's part
+// in the process, not whether to ask them once.
+const THIRD_PARTY = String.raw`(?:users?|customers?|clients?|members?|people|visitors?|guests?|admins?|them|they|anyone|everyone|someone)`;
+const NOT_THIRD = (n) => String.raw`(?:(?!\b${THIRD_PARTY}\b)[^?.]){0,${n}}?`;
+const META_ASK = new RegExp(String.raw`\b(?:should|shall|can|may|could|might|want|need|do you mind|would you (?:like|mind|prefer)|is it (?:ok(?:ay)?|fine|all ?right)|are you (?:ok(?:ay)?|fine|happy) (?:with|for)|would it (?:help|be (?:ok(?:ay)?|useful|helpful|better))|does it make sense)\b${NOT_THIRD(40)}(?:\b(?:i|we|me|us)\b${NOT_THIRD(24)}|\bto\s+)\b(?:ask(?:ing|ed)?|request(?:ing|ed)?|prompt(?:ing|ed)?)\s+(?:you\b(?!\s+to\s+(?!(?:share|send|give|provide|paste|post|supply|set|add|grant|create|generate|upload)\b)[^?.]*\b(?:each|every|always|from now on|going forward|in (?:the )?future|as well)\b)|(?:for\s+)?(?:(?:the|a|an|your|some|more|those|these|that|this)\s+)?(?:(?!${THIRD_PARTY}\b)[\w.-]+\s+){0,2}?${OWNER_GIVES}\b(?!\s+(?:from|of)\s+(?!you\b)))`, 'i');
+const CRED_WORDS = /\b(?:passwords?|passphrases?|api[ _-]?keys?|access[ _-]?keys?|secret[ _-]?keys?|private[ _-]?keys?|(?:auth|access|api|bearer|personal access) tokens?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env\b)/i;
+const KIT_ID = /\b(?:q|[gkapmodt])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/;
+// A credential asked for in a decision's words ("can you share the staging password?", "may I have
+// the API key?"): the owner would have to type it into an answer. It is an owner-action with --secrets.
+const CRED_REQUEST = new RegExp(String.raw`\b(?:(?:share|send|give|provide|paste|post|supply)\s+(?:me|us)\b\s*(?:with\s+)?(?:(?:the|a|an|your|our|that|those)\s+)?|(?:(?:can|could|will|would) you|please|do you want to|would you like to|i need you to)\s+(?:\w+\s+){0,2}?(?:share|send|give|provide|paste|post|supply)\s+(?:the|a|an|your|that|those)\s+|(?:may|can|could) (?:i|we) (?:have|get)\s+(?:(?:the|a|an|your|that|those)\s+)?)(?:[\w.-]+\s+){0,3}?${CRED_WORDS.source}(?!\s+from\s+(?!you\b))`, 'i');
+// "dry-run/staging" is the project's; run/… on its own is the kit's folder
+const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|(?<![\w/-])run\/[\w./-]+)\b/i;
+function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, recommendation, L }) {
+  if (!q || KIT_WORDED(cls, kind)) return;
+  if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
+  if (!secrets?.length && kind !== 'owner-action' && CRED_REQUEST.test(q)) die(`don't ask for a credential in a decision's words: the owner would have to type it into an answer. Ask with --kind owner-action and --secrets naming each one and where it goes, so the owner gets the paste box at once (supervisor.md §6, Secrets)`);
+  if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
+  const tid = [...tickets().keys()].find((t) => new RegExp(`(?<![\\w-])${escRe(t)}(?![\\w-])`, 'i').test(q));
+  if (tid) die(`the question names the ticket ${tid}: the owner doesn't know it by its id. Say what it is in words; --ticket or a link carries the id`);
+  // --plain-ok <word>…: the question is about that very thing (a git worktree, the trust ladder
+  // itself), so that word may stay. Only the words named; ids, asking about asking and credentials
+  // never pass.
+  // a word and its plural are one word: --plain-ok worktree covers "worktrees"
+  const stem = (w) => String(w).toLowerCase().replace(/s$/, '');
+  const plainOk = new Set(asList(flags['plain-ok']).map(stem));
+  const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
+  const cw = classes.find((c) => c.includes('-') && !plainOk.has(stem(c)) && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
+  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it (if the question is about that class itself, --plain-ok ${cw})`);
+  const jw = [...q.matchAll(new RegExp(KIT_WORDS.source, 'gi'))].map((m) => m[0]).find((w) => !plainOk.has(stem(w)));
+  if (jw) die(`the question uses the kit's own word "${jw}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself. If the question is about that very thing, keep the word and say so: --plain-ok ${shq(stem(jw))}`);
+  if (plainOk.size) warn(`--plain-ok ${[...plainOk].join(' ')}: the owner reads those words as they are, so make sure the question explains them`);
+  if (q.length > 300) die(`the question is ${q.length} characters: lead with the decision in one or two sentences (300 at most) and put the rest in --context, as a list where it is one`);
+  if (context && KIT_ID.test(context)) warn(`--context names a kit id (${context.match(KIT_ID)[0]}): fine as a link, but say in words what it is`);
+  if (context && KIT_WORDS.test(context)) warn(`--context uses the kit's word "${context.match(KIT_WORDS)[0]}": say it in plain words, the owner hasn't got the fleet's vocabulary`);
+  if (context && context.length > 600 && !/\n\s*(?:[-*•]|\d{1,2}[.)])\s/.test(context)) warn(`--context is ${context.length} characters of prose: break it into short paragraphs or a list ("- " or "1. " lines) so it can be read at a glance`);
+  if (!secrets?.length && (CRED_WORDS.test(q) || (kind === 'owner-action' && CRED_WORDS.test(context ?? '')))) warn(`this looks like it needs a credential. Ask for it directly: --kind owner-action with --secrets naming each one and where it goes, so the owner pastes it on the dashboard (supervisor.md §6, Secrets)`);
+  if (['owner-decision', 'clarification', 'one-way-door'].includes(kind) && !recommendation) warn('no --recommendation: say what you would do and how sure you are (--confidence); the owner answers faster with a pick to agree or disagree with');
+  // only when low confidence is the whole reason: a question asked for another reason too stands on that
+  if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
-  let q = flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question'));
-  const kind = flagStr('kind') ?? 'owner-decision';
-  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
+  let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const cls = flagStr('class') ?? null;
+  // A question in the owner-only class one-way-door is a one-way door: left without --kind it is
+  // asked as one, and asked as another kind it is refused, so the owner's answer is the one-way-door
+  // answer approve-plan and the plan review cite (and never re-asked as one), and the kind's own
+  // rules (no default, below; the Inbox's floor) hold. Refused, not rewritten: another kind given on purpose
+  // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
+  const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
+  if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
     const g = logGet(flagStr('goal') ?? '');
@@ -4796,6 +4996,11 @@ function askLine({ thread } = {}) {
   const reasons = asList(flags.reasons);
   const known = L.reasons.map((r) => r.id);
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
+  // silence is never a yes on a one-way door or on what is the owner's alone (constitution.md §1)
+  if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
+  // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
+  if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
+  if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
   // a remediation question names the remediation (and a rollback its release), so the answer
@@ -4820,8 +5025,6 @@ function askLine({ thread } = {}) {
     const rec = flagStr('recommendation');
     if (!rec) die('a production-remediation question needs --recommendation');
     if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
-    // at rung 1 a default can never fire, so it would only be a promise the kit can't keep
-    if (def && rungFor('production-remediation') < 2) die(`production-remediation is on rung ${rungFor('production-remediation')}: no --default until it's on rung 2`);
     // after the owner's no, not again for the same remediation and target, whichever incident is named
     const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
@@ -4854,7 +5057,7 @@ function askLine({ thread } = {}) {
   // the owner said not to use this sensor: nothing asks about it again until they reverse that
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
-  let context = flagStr('context');
+  let context = ownerText(flagStr('context'));
   if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
@@ -4869,6 +5072,9 @@ function askLine({ thread } = {}) {
     scope = want;
     if (releasesOnMerge()) context = [context, 'Merging deploys this fix to production (release: "merge").'].filter(Boolean).join('\n\n');
   }
+  // Below rung 2 a default can never fire, so it would only be a promise the kit can't keep; and the
+  // rung it was asked on is recorded (why_asked), so a later promotion never wakes it (defaultGap).
+  if (def !== null && onLadder && rungFor(cls, scope) < 2) die(`${cls}${scope ? ` (${scope})` : ''} is on rung ${rungFor(cls, scope)}: no --default until it's on rung 2`);
   // --deadline 15m|2h|<time>: the default may fire before question_default_after_hours
   const dl = flagStr('deadline');
   if (dl !== undefined && !def) die('--deadline goes with --default: it is when the default may be applied');
@@ -4966,10 +5172,14 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence: flagNum('confidence'), recommendation, L });
   // what the owner may already have said about it: never in the way of asking
-  try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
+  // and a decision they already made is refused, unless something material changed (--new-because)
+  let newBecause = flagStr('new-because');
+  if (newBecause !== undefined && !newBecause.trim()) die('--new-because says what materially changed since the owner answered; it can\'t be blank');
+  try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
@@ -5021,8 +5231,8 @@ function cmdAnswer() {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
-    // an incident fix's default fires at its deadline, not before
-    if (['incident-fix', 'production-remediation'].includes(v.class) && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
+    // a default fires at its deadline, not before, and only where it could fire when asked (defaultGap)
+    { const why = defaultGap(v, new Date().toISOString()); if (why) die(why); }
     // a default never overrides the owner's later no on the same remediation and target
     if (v.class === 'production-remediation') {
       const rem = (v.blocks ?? []).find((b) => b.startsWith('remediation:'));
@@ -7718,7 +7928,7 @@ function cmdQuestions() {
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
-    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
+    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}${q.new_because ? `\n  Asked again because: ${q.new_because}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
@@ -7771,21 +7981,23 @@ function authorise(cls, scope, approved, refs, verb) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    if (approval.status === 'defaulted') { const why = defaultGap(approval); if (why) die(`${why}: its default approves nothing; ask again`); }
     reviewApproves(approval, `${verb} --approved`);
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
   // the act checks it against the ticket's goals and its plan review, not as an approve-plan answer.
-  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  const doorCited = cls === 'approve-plan' && isDoorQuestion(approval);
   if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     const declared = approval.approves ?? [];
     if (declared.length) {
       const part = refs.flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
       if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this ${verb === 'decide' ? 'decision' : 'act'} is for in --refs`);
-      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part));
+      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part) && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} for ${part} (${used.id}); ask again for another`);
     } else {
-      const used = calls().find((a) => a.approved_by === approved);
+      // a door's answer cited for the plans it covers (approve-plan) never uses it up for its own class
+      const used = calls().find((a) => a.approved_by === approved && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} (${used.id}); ask again for another`);
     }
   }
@@ -7826,12 +8038,25 @@ function decisionFor(id) {
   if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
   return d;
 }
+// Whether an applied default stands in for the owner. Only where it could fire when the owner saw the
+// question: its class on rung 2 or above as asked (why_asked.rung, in the line the question's hash
+// covers, so a class promoted later doesn't wake an old rung-1 default), and only once its deadline
+// passed with no answer. answer --defaulted asks it of now; authorise, a decision's authority and
+// log-check ask it of when the default was applied, so a defaulted line written by hand approves
+// nothing either. A question from before defaults had deadlines is judged on its rung alone.
+function defaultGap(v, now = null) {
+  const rung = v.why_asked?.rung;
+  if (typeof rung === 'number' && rung < 2) return `${v.id} was asked on rung ${rung} (${RUNG[rung] ?? '?'}), where a default never stands in for the owner`;
+  const at = now ?? v.answered_at;
+  if (v.deadline && at && Date.parse(at) < Date.parse(v.deadline)) return now ? `${v.id}'s default fires at ${v.deadline}; until then it is the owner's to answer` : `${v.id} was defaulted before its deadline (${v.deadline})`;
+  return null;
+}
 function decisionAuthorityGap(d) {
   const L = ladder();
   const ownerOnly = (L.owner_only ?? []).includes(d.class);
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
-  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && isDoorQuestion(v)));
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
@@ -7841,8 +8066,7 @@ function decisionAuthorityGap(d) {
     case 'default': {
       if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
       if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
-      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
-      return answerUseGap(d, v);
+      return defaultGap(v) ?? answerUseGap(d, v);
     }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
@@ -7857,11 +8081,11 @@ function decisionAuthorityGap(d) {
 function answerUseGap(d, v) {
   const refs = (d.refs ?? []).flatMap((x) => String(x).split(','));
   if (v.ticket && !refs.includes(v.ticket) && !(v.approves ?? []).some((a) => refs.includes(a))) return `${v.id} was asked about ${v.ticket}, not ${refs.join(', ') || 'nothing'}`;
-  if (d.class === 'approve-plan' && v.kind === 'one-way-door') return null; // a goal-level door covers each plan it names (approve-plan's own check)
+  if (d.class === 'approve-plan' && isDoorQuestion(v)) return null; // a goal-level door covers each plan it names (approve-plan's own check)
   const declared = v.approves ?? [];
   const part = declared.length ? refs.find((r) => declared.includes(r)) : null;
   if (declared.length && !part) return `${v.id} approves ${declared.join(', ')}, and this names none of them`;
-  const first = calls().filter((c) => c.approved_by === v.id && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
+  const first = calls().filter((c) => c.approved_by === v.id && !(c.class === 'approve-plan' && isDoorQuestion(v)) && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
   return first && first.id !== d.id ? `${v.id} already approved ${first.type === 'decision' ? 'a decision' : 'an act'}${part ? ` for ${part}` : ''} (${first.id})` : null;
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
@@ -7886,12 +8110,24 @@ const citing = () => flagStr('decision') ?? undefined;
 function cmdDecide() {
   const what = rest ? rest.join(' ') : flagStr('what');
   const cls = flagStr('class');
-  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what you decided>"');
+  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--on k-…|p-…] [--irreversible] -- "<what you decided>"');
   supervisorOnly('decide');
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   let scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
   const refs = asList(flags.refs);
+  // --on: the knowledge or problems the call rests on, a link for the lineage and the learning
+  // record, apart from refs (an act stays within refs) and from approved_by (authorise reads only
+  // that). Knowledge must be accepted: a candidate isn't the project's yet, and a retired one no
+  // longer is. An id in both would read as what the call is about and what it rests on at once.
+  const on = flags.on === true ? die('--on names the knowledge or problems the decision rests on: --on <k-…|p-…>…') : [...new Set(asList(flags.on))];
+  if (on.length > KNOWLEDGE_IDS_MAX) die(`--on takes at most ${KNOWLEDGE_IDS_MAX} ids (a log line is at most ${LINE_MAX} bytes): cite the ones the call turns on`);
+  for (const k of on) {
+    const o = logGet(k) ?? die(`--on ${k}: no such knowledge or problem`);
+    if (!['knowledge', 'problem'].includes(o.type)) die(`--on ${k} is ${o.type === 'observation' ? 'an' : 'a'} ${o.type}: a decision rests on knowledge or a problem (cite what it is about in --refs)`);
+    if (o.type === 'knowledge' && o.status !== 'accepted') die(`${k} is ${o.status}: a decision rests only on accepted knowledge`);
+    if (refs.includes(k)) die(`${k} is in both --refs and --on: --refs is what the decision is about, --on what it rests on`);
+  }
   // a remediation decision names the remediation it runs
   if (cls === 'production-remediation') {
     upkeepAllows('a remediation', { noForce: true });
@@ -7933,11 +8169,14 @@ function cmdDecide() {
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'goal-readiness') readinessGoal(refs);
+  // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
+  // (or the fixed incident it rules there is nothing to learn from: incidentDebt)
+  if (cls === 'orient-noise' && !refs.some((r) => { const x = logGet(r); return x?.type === 'observation' || (x?.type === 'problem' && isIncident(x) && x.status === 'resolved'); })) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>… (or a fixed incident with nothing to keep: --refs <p-…>)');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
     type: 'decision', class: cls, scope: scope ?? undefined, what, rationale: flagStr('rationale'), options: flags.options !== undefined ? listFlag('options') : undefined,
-    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined,
+    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined, knowledge: on.length ? [...new Set(on)] : undefined,
   }, 'supervisor');
   out(line.id);
 }
@@ -7972,7 +8211,7 @@ function cmdAct() {
   if (decision) {
     const q = approved?.startsWith('q-') ? logGet(approved) : null;
     const approval = q?.type === 'question' ? questionView(q) : null;
-    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && approval?.kind === 'one-way-door' };
+    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && isDoorQuestion(approval) };
   } else auth = authorise(cls, scope, approved, refs, 'act');
   const { approval, doorCited } = auth;
   // Classes that are about one ticket name it first in refs; checkTicket finds approvals by it.
@@ -7984,13 +8223,16 @@ function cmdAct() {
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
       if (approval.ticket !== t.id) {
+        // a question asked for one ticket is that ticket's door, never a goal-level one for another
+        if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
         const goals = features().get(t.feature)?.goals ?? [];
         if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
@@ -8066,6 +8308,57 @@ function cmdRepair() {
 
 // --- observe and orient ---
 
+// Where a record sits in the loop and where an observation came from (schema x-ooda), computed
+// when it is read and never stored: `source` and `detector` already mean things every kit reads (a
+// sensor's name, repo or prod on a goal reading, detector sensor on the kit's own lines), so a
+// rewrite would have an older kit on a mixed fleet misread a newer kit's lines.
+const OODA = SCHEMA['x-ooda'];
+// observe, learn, decide, act, orient, measurement or inbox; null for the work graph and conversation.
+// An act is always Act, whether or not a decision stands behind it.
+const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? OODA.stages[o.type] : null; return !s ? null : typeof s === 'string' ? s : Object.hasOwn(s.kind, o.kind ?? '') ? s.kind[o.kind] : s.kind['*']; };
+// The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
+// kit's own, read off its own lines, never given. The supervisor records what the owner said (an
+// answer, a thread, the chat), but never speaks as the owner.
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+// An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
+// only when its ref is the record that holds them: an answered question (the owner's answer) for
+// owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
+// doesn't check out reads as its writer's (provenanceOf); observe refuses it.
+function ownerRefHolds(from, ref) {
+  const o = ref ? logGet(ref) : null;
+  if (!o) return false;
+  const answered = o.type === 'question' && questionView(o).status === 'answered';
+  const spoke = (o.type === 'turn' && o.created_by === 'owner') || o.type === 'thread';
+  return from === 'owner-answer' ? answered : from === 'owner-thread' ? spoke : from === 'owner-chat' ? answered || spoke : true;
+}
+// { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
+// a question, a thread, a retro's file). First match wins.
+function provenanceOf(o) {
+  if (o?.type !== 'observation') return null;
+  const cls = writerClass(o.created_by);
+  const ref = o.source_ref ?? null;
+  // a set-aside (an ack, a triage ignore) is the call of whoever made it, not the check it sets
+  // aside: it falls to its writer below, though an ignore carries detector sensor
+  const setAside = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'].includes(o.kind);
+  // the kit's own lines, as the readers already trust them: a sensor's from the supervisor's process
+  // (fromSensor, which also takes a supervisor's hand line, as it always has), the findings pass's
+  // and the pane check's from the supervisor alone
+  if (!setAside && fromSensor(o)) return { from: 'sensor', ref: o.source ?? null };
+  if (!setAside && o.detector === 'metrics' && cls === 'supervisor') return { from: o.kind === 'cost-hotspot' ? 'spend' : 'metrics', ref: o.kind };
+  if (o.detector === 'pane' && cls === 'supervisor') return { from: 'metrics', ref: 'pane' };
+  // a goal reading (goal reading, by the supervisor or the owner): a repo or prod measure is read like a
+  // sensor's; an owner measure is the owner's yes to a goal-met question
+  const reading = o.kind === 'reading' && ['owner', 'supervisor'].includes(cls);
+  if (reading && ['repo', 'prod'].includes(o.source)) return { from: 'sensor', ref: 'goal-measure' };
+  if (reading && o.source === 'owner' && ownerRefHolds('owner-answer', o.approved)) return { from: 'owner-answer', ref: o.approved };
+  if (o.kind === 'thread-resolved' && cls === 'owner') return { from: 'owner-thread', ref: o.refs?.[0] ?? null };
+  if (o.kind === 'retro' && cls === 'supervisor') return { from: 'retro', ref };
+  if (!setAside && (SOURCE_FOR[cls] ?? []).includes(o.source) && (cls === 'owner' || !o.source.startsWith('owner-') || ownerRefHolds(o.source, ref))) return { from: o.source, ref };
+  if (cls === 'owner') return { from: o.channel === 'chat' ? 'owner-chat' : o.channel === 'thread' ? 'owner-thread' : 'owner', ref };
+  return { from: cls === 'ticket' ? 'worker' : cls, ref };
+}
+// A record as the views show it: its stage, and an observation's provenance.
+const withOoda = (o) => (o?.type === 'observation' ? { ...o, stage: stageOf(o), provenance: provenanceOf(o) } : { ...o, stage: stageOf(o) });
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   // the sensors write their own lines; a hand-made one could fake an outage or hide an error
@@ -8073,10 +8366,19 @@ function cmdObserve() {
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   // the kit's own detectors write their own lines: a hand-written one could pass for a poll's
   if (['sensor', 'metrics', 'pane'].includes(flagStr('detector'))) die(`observe --detector ${flagStr('detector')}: those lines come from the kit itself (sensor poll, observe-metrics, the pane check); use another detector name`);
+  // --source in the loop's words is the writer's own; older free text is still written as given,
+  // and reads as its writer's (provenanceOf)
+  const src = flagStr('source');
+  if (['sensor', 'metrics', 'spend'].includes(src)) die(`observe --source ${src}: those lines come from the kit itself (sensor poll, observe-metrics, observe-spend)`);
+  // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
+  if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
+  const mine = SOURCE_FOR[writerClass(by)];
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
     detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
-    source_key: flagStr('key'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
+    source_key: flagStr('key'), source_ref: flagStr('ref'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
     measure: flagStr('value') !== undefined ? { value: Number(flagStr('value')), unit: flagStr('unit') } : undefined,
   }, by);
   out(line.id);
@@ -8099,6 +8401,12 @@ function cmdObserveLink() {
   out(line.id);
 }
 const SEV = { low: 1, medium: 2, high: 3 };
+// The most observations a set-aside (an ack, a triage ignore) cites: 40 ids keep its line well under
+// LINE_MAX; the finding's key or the fingerprint, in source_ref, joins the rest.
+const SET_ASIDE_REFS = 40;
+// A set-aside's refs, the newest kept, trimmed so its line (with the envelope's ~250 bytes) fits LINE_MAX:
+// a long reason costs refs, never the line.
+const fitRefs = (fields, refs) => { const r = [...refs]; while (r.length && JSON.stringify({ ...fields, refs: r }).length + 250 > LINE_MAX) r.shift(); return r; };
 // Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
   const recent = new Map();
@@ -8119,7 +8427,8 @@ async function cmdObserveMetrics() {
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
   const s = observeSpend();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  const learned = writeLearning();
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
 }
 // The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
 // inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
@@ -8567,29 +8876,225 @@ function cmdProblem() {
   if (flags.json) return json(ps);
   for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}${(p.threatens ?? []).length ? ` (threatens ${p.threatens.join(', ')})` : ''}`);
 }
-// Recurring signals no knowledge or problem explains yet: three or more observations (or
-// corrections) on one key, from at least two writers or on at least two days.
-function orientClusters() {
-  const linked = new Set();
-  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
+// The key an observation recurs on: a sensor's escalation its fingerprint's id, so each qualify and
+// spike on one fingerprint is one signal (a spike's source_key carries its hour, and would never
+// recur); anything else its source_key (a finding's metrics:<kind>:<subject>), else kind:subject.
+// A fix-regressed or recurred line keeps its own key: it already cites its incident.
+const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
+// What explains an observation, one definition for Orient and for sensor-untriaged. ids: what
+// knowledge's evidence, a problem's refs, or a live decision's refs cite (any class: a decision
+// that cites an observation took it into account). keys: signal key → until when it is explained.
+// A live orient-noise ruling naming a key covers that signal's observations up to the ruling, so a
+// chatty one needn't list them all, and an escalation after it gets a fresh look (a fingerprint that
+// is always noise is for sensor ignore). An open incident holds its fingerprints for as long as it is
+// open. A corrected ruling explains nothing, so the owner's correction brings its signal back.
+// covered(keys, key, at): whether an observation on key, made at at, is explained by its key.
+function explained() {
+  const ids = new Set();
+  const keys = new Map();
+  const upTo = (k, at) => { if (!(keys.get(k) >= at)) keys.set(k, at); };
+  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) ids.add(r);
+  for (const d of logObjects('decision')) {
+    if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
+    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) upTo(r, d.created_at); }
+  }
+  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) upTo(f, '9999');
+  return { ids, keys };
+}
+const covered = (keys, key, at) => keys.has(key) && at <= keys.get(key);
+// The observations (and corrections) nothing explains yet (explained, above), grouped on the key
+// they recur on, each group with whether it spreads (two writers or two days): every group, however
+// small, so a card can say how near a signal one is; computed once per read of the log.
+let SIGNALS = null;
+function signalGroups() {
+  if (SIGNALS?.log === readLog()) return SIGNALS.groups;
+  const { ids: linked, keys } = explained();
   const groups = new Map();
-  const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
+  const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
-    add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue;
+    const key = signalKeyOf(o);
+    if (covered(keys, key, o.created_at)) continue;
+    add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
     const c = correctionOf(a);
     if (c && !linked.has(a.id)) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by, valence: -2, detail: c.reason });
   }
+  for (const g of groups.values()) g.spread = new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2;
+  return (SIGNALS = { log: readLog(), groups }).groups;
+}
+// Recurring signals: three or more of one group that spreads.
+function orientClusters() {
   const res = [];
-  for (const [key, items] of groups) {
-    const spread = new Set(items.map((i) => i.who)).size >= 2 || new Set(items.map((i) => dateOnly(i.at))).size >= 2;
+  for (const { key, items, spread } of signalGroups().values()) {
     if (items.length < 3 || !spread) continue;
     const v = items.reduce((s, i) => s + i.valence, 0) / items.length;
     res.push({ key, count: items.length, valence: +v.toFixed(1), ids: items.map((i) => i.id), latest: items.map((i) => i.detail).pop() });
   }
   return res.sort((a, b) => b.count - a.count);
+}
+// Recurring signals left unexplained for more than a day, oldest first: what Orient owes.
+function orientationDebt() {
+  const now = Date.now();
+  return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
+    .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
+}
+// Resolved incidents nobody learned from, oldest first: fixed and verified (an outcome cites the
+// incident) in the last 30 days, with no knowledge citing it in its evidence and no live noise
+// ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is nothing to
+// keep (a corrected ruling owes it again). Resolved when the last change setting its status said so.
+// One whose status the owner set is the owner's call, and owes nothing.
+function incidentDebt() {
+  const now = Date.now();
+  // a lesson the owner retired taught nothing, so the incident is owed one again
+  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
+  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
+    const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
+    // verified only: an unverified resolution (valence 0, seen too few times) proved nothing to learn from
+    const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id) && (o.valence ?? 0) > 0).pop();
+    if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
+    const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
+    const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
+    const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
+    return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
+  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
+// ===== the weekly learning record (the OODA spec §6) =====
+
+// ISO weeks, in UTC: Monday 00:00 of the week ms falls in, the week's name, and back.
+const WEEK = 7 * DAY;
+const mondayOf = (ms) => { const d = new Date(ms); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() + 6) % 7) * DAY; };
+const isoWeekOf = (ms) => { const m = mondayOf(ms); const y = new Date(m + 3 * DAY).getUTCFullYear(); return `${y}-W${String(1 + Math.round((m - mondayOf(Date.UTC(y, 0, 4))) / WEEK)).padStart(2, '0')}`; };
+const weekStartOf = (week) => { const [y, w] = String(week).split('-W').map(Number); return mondayOf(Date.UTC(y, 0, 4)) + (w - 1) * WEEK; };
+// Run fn against the log as it stood at cut: a fold of only the lines with at <= cut, every memo
+// built on readLog() following it, and the log-derived globals that aren't (SENSOR_KEYS and the
+// process-wide memos) reset for fn and put back after. Git facts (mergedAt) replay as they are.
+function withLogAt(cut, fn) {
+  const full = readLog();
+  const saved = { logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX };
+  try {
+    const lines = full.lines.filter((l) => l.at <= cut);
+    const { objects, ignored } = fold(lines);
+    const byType = new Map();
+    for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
+    logCache = { lines, objects, errors: full.errors, ignored, unknown: full.unknown, byType };
+    SENSOR_KEYS = roadmapMemo = STATUS_MEMO = spendMemo = spendItemsMemo = spendWhoMemo = SIGNALS = FP_OBS = LINKS = PLACE_CTX = null;
+    return fn();
+  } finally {
+    ({ logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX } = saved);
+  }
+}
+// The questions that put a decision to the owner (the schema's kinds, less an action only the owner
+// can do, a review, and defining or approving a goal).
+const DECISION_KINDS = ['owner-decision', 'one-way-door', 'proposal', 'trust', 'clarification'];
+const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthority(c));
+// One week's figures (counts, never shares) and the records each counts, from the log as it stood
+// at the week's end. "In the week" is the named time falling in it.
+function learningFigures(week, merges = mergeTimes()) {
+  const from = weekStartOf(week);
+  const fromIso = new Date(from).toISOString(), cut = new Date(from + WEEK - 1).toISOString();
+  const inW = (at) => typeof at === 'string' && at >= fromIso && at <= cut;
+  return withLogAt(cut, () => {
+    const L = ladder();
+    const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').sort(byTime).map((k) => k.id);
+    // recurring signals as Orient forms them, before what explains them is taken out
+    const { ids, keys } = explained();
+    const groups = new Map();
+    const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
+    for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+    for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
+    const signals = [...groups.values()].filter((g) => g.items.length >= 3 && (new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2))
+      .map((g) => { const by = g.items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id); return { key: g.key, ids: g.items.map((i) => i.id), explained: by.length > 0, by }; });
+    const starts = logObjects('act').filter((a) => a.class === 'worker-slots' && inW(a.created_at) && String(a.what).startsWith('made ')).sort(byTime).map((a) => ({ id: a.id, given: Array.isArray(a.knowledge) ? a.knowledge : [] }));
+    const all = calls().sort(byTime);
+    const weekCalls = all.filter((c) => inW(c.created_at));
+    const ladderCalls = weekCalls.filter((c) => L.classes[c.class]).map((c) => ({ id: c.id, class: c.class, authority: authorityOfCall(c) }));
+    const qs = questions();
+    const asked = qs.filter((q) => inW(q.asked_at) && DECISION_KINDS.includes(q.kind)).map((q) => q.id);
+    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals)
+    const answered = qs.filter((q) => q.status === 'answered' && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.matched }));
+    const corrections = all.filter((c) => inW(correctionOf(c)?.at)).map((c) => c.id);
+    const merged = merges.filter(([, at]) => at >= from && at < from + WEEK).map(([id]) => id);
+    const figures = {
+      informed: { knowledge: knowledge.length, signals_explained: signals.filter((s) => s.explained).length, signals_formed: signals.length, starts_given: starts.filter((s) => s.given.length).length, starts: starts.length },
+      autonomous: { trusted_calls: ladderCalls.filter((c) => ['rung', 'standing-rule'].includes(c.authority)).length, ladder_calls: ladderCalls.length, questions: asked.length, merged: merged.length },
+      trusted: { agreed: answered.filter((q) => q.matched).length, answered: answered.length, corrections: corrections.length, calls: weekCalls.length },
+    };
+    return { week, from: fromIso, cut, figures, lists: { knowledge, signals, starts, ladder_calls: ladderCalls, questions: asked, merged, answered, calls: weekCalls.map((c) => c.id), corrections } };
+  });
+}
+// When each ticket merged (ms), from git, once per read of the whole log: a back-fill asks every week.
+const mergeTimes = () => memo('mergeTimes', () => [...tickets().keys()].map((id) => [id, mergedAt(id)]).filter(([, at]) => at));
+// The record's line: its counts, one sentence of them, and refs to what it counted (at most 60,
+// and fewer when long ids would take the line past LINE_MAX: the corrections first, then the
+// explained signals, then the knowledge in force, so the ones dropped are from the end).
+function learningLine(r) {
+  const { informed: I, autonomous: A, trusted: T } = r.figures;
+  const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+  const detail = `Week ${r.week}: ${n(I.knowledge, 'lesson')} in force, ${I.signals_explained} of ${n(I.signals_formed, 'recurring signal')} explained, ${I.starts_given} of ${n(I.starts, 'start')} given a lesson; ${A.trusted_calls} of ${n(A.ladder_calls, 'ladder call')} made on trust, ${n(A.questions, 'question')} to the owner for ${n(A.merged, 'merged ticket')}; ${T.agreed} of ${n(T.answered, 'recommendation')} agreed, ${n(T.corrections, 'correction')} in ${n(T.calls, 'call')}.`;
+  const base = { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: r.week, figures: r.figures, detail: detail.slice(0, 300), source_key: `learning:${r.week}` };
+  const refs = [...new Set([...r.lists.corrections, ...r.lists.signals.filter((s) => s.explained).map((s) => s.by[0]), ...r.lists.knowledge])].slice(0, KNOWLEDGE_IDS_MAX);
+  // 250: what appendLog adds (op, id, at, by)
+  while (refs.length && JSON.stringify({ ...base, refs }).length + 250 > LINE_MAX) refs.pop();
+  return { ...base, refs };
+}
+// Lesson efficacy, as the log stood at cut: for each lesson a start's prompt carried, the
+// observations on the keys of its evidence in the four weeks before it was first given and since.
+// Lists and counts, never a score: the numbers are small, and the owner should see which.
+function lessonEfficacy(cut) {
+  return withLogAt(cut, () => {
+    const first = new Map();
+    for (const a of logObjects('act').filter((x) => x.class === 'worker-slots' && Array.isArray(x.knowledge)).sort(byTime)) for (const k of a.knowledge) if (!first.has(k)) first.set(k, a.created_at);
+    const byKey = new Map();
+    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
+    return [...first].map(([id, at]) => {
+      const k = logGet(id);
+      const keys = [...new Set((k?.evidence ?? []).map(logGet).filter((o) => o?.type === 'observation').map(signalKeyOf))];
+      const obs = keys.flatMap((key) => byKey.get(key) ?? []);
+      const t = Date.parse(at);
+      const before = obs.filter((o) => Date.parse(o.created_at) >= t - 4 * WEEK && o.created_at < at).map((o) => o.id);
+      const since = obs.filter((o) => o.created_at >= at).map((o) => o.id);
+      return { id, statement: k?.statement ?? null, status: k?.status ?? null, first_given: at, keys, before: { count: before.length, ids: before.slice(-40) }, since: { count: since.length, ids: since.slice(-40) } };
+    });
+  });
+}
+// The metrics pass (supervisor only): one learning record for each ISO week since the log's
+// earliest line (back to LEARN_BACKFILL_WEEKS at most) that has ended and has no record of the
+// supervisor's yet, as the dashboard counts them: an owner's or hand line with the source_key
+// doesn't stand in for one. A back-filled week's record is stamped now (records can't be
+// back-dated) and names its week. Every week is counted before any is written, so each count
+// folds the log once; under a lock, read afresh, so two passes at once don't both write a week.
+const LEARN_BACKFILL_WEEKS = 104;
+const isLearningRecord = (o) => o.kind === 'learning' && o.created_by === 'supervisor' && o.detector === 'metrics';
+// The records the dashboard draws, oldest week first: one per week, the earliest written (two
+// passes at once could each have written one), and only one whose three columns are objects, so
+// a malformed line is left out, not drawn.
+function learningRecords() {
+  const byWeek = new Map();
+  for (const o of logObjects('observation').filter((x) => isLearningRecord(x) && /^\d{4}-W\d{2}$/.test(x.week ?? '') && ['informed', 'autonomous', 'trusted'].every((k) => x.figures?.[k] && typeof x.figures[k] === 'object')).sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b))) if (!byWeek.has(o.week)) byWeek.set(o.week, o);
+  return [...byWeek.values()];
+}
+function writeLearning() {
+  fs.mkdirSync(runDir, { recursive: true });
+  return withLock(runPath('learning'), () => {
+    logCache = null;
+    const log = readLog();
+    const first = log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '');
+    const start = Date.parse(first);
+    if (!Number.isFinite(start)) return 0;
+    const have = new Set(logObjects('observation').filter(isLearningRecord).map((o) => o.source_key).filter((k) => k?.startsWith('learning:')));
+    const weeks = [];
+    const cur = mondayOf(Date.now());
+    for (let t = Math.max(mondayOf(start), cur - LEARN_BACKFILL_WEEKS * WEEK); t < cur; t += WEEK) if (!have.has(`learning:${isoWeekOf(t)}`)) weeks.push(isoWeekOf(t));
+    if (!weeks.length) return 0;
+    const merges = mergeTimes();
+    const lines = weeks.map((w) => learningLine(learningFigures(w, merges)));
+    for (const l of lines) appendLog(l, 'supervisor');
+    return lines.length;
+  }, { staleMs: 300000, waitMs: 310000 });
 }
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
@@ -8664,10 +9169,14 @@ function orientLinks() {
 }
 function cmdOrient() {
   const cl = orientClusters();
+  const inc = incidentDebt();
   const lk = orientLinks();
+  // --json stays the signals and the link proposals its readers count; incident debt is dashboard-data's ooda.debt.incidents
   if (flags.json) return json([...cl, ...lk]);
-  if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
+  if (!cl.length && !inc.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
+  for (const x of inc) out(`${x.id} was fixed and verified (${x.title}): what did it teach? ${x.explain[0]} or ${x.explain[1]}`);
+  if (inc.length) out('  (once a lesson is accepted, a decision it informs cites it: decide … --on <k-…>)');
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
@@ -8848,6 +9357,25 @@ function goalReadings(gid) {
     return true;
   });
 }
+// The readings taken under the measure as it stands: from the latest goal set that changed what it
+// reads (its source, check, question, unit or link) on. One taken before was of another measure, so
+// it is no baseline; a change to the measure's wording, target or direction keeps them.
+const MEASURE_DEFINING = ['source', 'check', 'question', 'unit', 'link'];
+let bornMeasures = null;
+function currentReadings(gid) {
+  const g = logGet(gid);
+  const log = readLog();
+  if (bornMeasures?.log !== log) bornMeasures = { log, m: new Map(log.lines.filter((l) => l.type === 'goal' && l.op === 'new').map((l) => [l.id, l.measure ?? {}])) };
+  let prev = bornMeasures.m.get(gid) ?? {};
+  let since = null;
+  for (const u of g?.updates ?? []) {
+    if (!u.measure) continue;
+    if (MEASURE_DEFINING.some((k) => (u.measure[k] ?? null) !== (prev[k] ?? null))) since = u.at;
+    prev = u.measure;
+  }
+  const all = goalReadings(gid);
+  return since ? all.filter((r) => r.created_at >= since) : all;
+}
 const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ?? []).includes(gid)).map((f) => f.id);
 
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
@@ -8902,7 +9430,7 @@ function goalCheck(g) {
   if (typeof g.priority !== 'number') definition.push('no priority');
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
-  if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
+  if (m.source !== 'owner' && !currentReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
   const unmarked = registryWording(g);
   if (unmarked) definition.push(`precondition ${unmarked.n} ("${unmarked.text}") reads as the registry being complete, and ${g.id} has no registry_precondition: goal set ${g.id} --registry-precondition ${unmarked.n} (goal-readiness then waits for the owner's registry-attest yes; planning.md §7)`);
   const approval = milestoneGaps(g);
@@ -8929,7 +9457,7 @@ function milestoneGaps(g) {
   if (!ms.length) return ['no milestones: the outcome in order, each a usable slice with a target on the measure, its preconditions and a size in tickets (goal set --milestones; one is fine for a goal one loop can meet)'];
   const gaps = [];
   const seen = new Map();
-  const base = goalReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
+  const base = currentReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
   const up = measureOf(g).direction !== 'down';
   let prevT = base;
   let prevBy = null;
@@ -9010,10 +9538,12 @@ function forecastText(g, f) {
 }
 function goalView(g) {
   const readings = goalReadings(g.id);
-  const first = readings[0];
-  const last = readings[readings.length - 1];
+  // the track runs from the baseline under the measure as it stands (currentReadings)
+  const current = currentReadings(g.id);
+  const first = current[0];
+  const last = current[current.length - 1];
   let track = null;
-  if (readings.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
+  if (current.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
     // Expected value now, on the line from the baseline through each dated milestone to the horizon.
     const pts = [[Date.parse(first.created_at), first.measure.value], ...(g.milestones ?? []).filter((m) => m.by && !Number.isNaN(Date.parse(m.by)) && typeof m.target === 'number').map((m) => [Date.parse(m.by), m.target]), [Date.parse(g.horizon), g.measure.target]].sort((a, b) => a[0] - b[0]);
     const now = Date.now();
@@ -10037,6 +10567,27 @@ function collectMetrics(since) {
     const sev = incidentSeverity(p);
     if (sev >= 3 && !incidentDecisions(p.id).length) add('medium', 'incident-unowned', p.id, `severity ${sev}, open since ${p.created_at}, no incident-fix decision`, 'decide a fix (decide --class incident-fix --refs <p-id> <ticket-id> …), or watch it with a reason');
   }
+  // a sensor's escalation of severity 3 or more nobody has triaged, triage_overdue_hours (default 2)
+  // after the first, while the supervisor runs: no incident holds it (once one does, incident-unowned
+  // above takes over), it isn't ignored, and no live noise ruling cites it. Per fingerprint, over
+  // the last 7 days, so an upgrade doesn't raise every escalation the log ever held.
+  if (supervisorRunning) {
+    const overdue = (Number(loadSettings().sensor_defaults?.triage_overdue_hours) || 2) * 3600000;
+    const sensorsNow = new Set(sensorList().map((x) => x.name));
+    const { ids: handled, keys: heldKeys } = explained();
+    const byFp = new Map();
+    for (const o of logObjects('observation')) {
+      if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
+      const id = fpIdOfObservation(o);
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || covered(heldKeys, id, o.created_at) || openIncidentOf(id)) continue;
+      (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
+    }
+    for (const [id, obs] of byFp) {
+      const sev = Math.max(...obs.map((o) => o.severity ?? 0));
+      const first = obs.map((o) => o.created_at).sort()[0];
+      if (sev >= 3 && now - Date.parse(first) > overdue) add('medium', 'sensor-untriaged', id, `severity ${sev}, ${obs.length} observation(s) since ${first} (${obs.slice(-3).map((o) => o.id).join(', ')}), not triaged`, 'triage it: fold it into an incident, ignore it, or rule it noise (sensor incident, sensor ignore, decide --class orient-noise)');
+    }
+  }
   if (sensorList().length || logObjects('observation').some((o) => o.kind === 'discovery')) {
     const last = logObjects('observation').filter((o) => o.kind === 'discovery' && o.subject === 'sensors').sort(byTime).pop();
     const changed = last?.source_ref && last.source_ref !== discoveryKey();
@@ -10346,7 +10897,12 @@ function cmdAck() {
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
-  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs: [] }, by);
+  // it cites what it sets aside: the finding's observations (observeFindings'), the newest 40 so the
+  // line stays under LINE_MAX; the finding's key, in source_ref, joins the rest
+  const key = `metrics:${kind}:${subject}`;
+  const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
+  const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
+  const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
@@ -10413,24 +10969,35 @@ function collectOoda() {
     const d = a.decision ? logGet(a.decision) : null;
     return { ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a), under: a.decision ? { decision: a.decision, what: d?.what ?? null, authority: d?.authority ?? null, corrected: d ? !!correctionOf(d) : false } : { authority: actAuthority(a), approved_by: a.approved_by ?? null, own: true } };
   });
+  const trust = trustTable();
   return {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
+    // each with where it sits in the loop, so its card can say so without the whole index
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack', 'learning'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
+    // orientation debt: recurring signals nothing has explained for more than a day, and resolved
+    // incidents nobody learned from, each oldest first
+    debt: { signals: orientationDebt(), incidents: incidentDebt() },
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
-    trust: trustTable(),
+    trust,
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
     impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
     answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
+    // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
+    // under three records the Loop shows these since the log began instead of lines; retros and rung
+    // changes mark the chart, so cause sits next to effect
+    learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
+    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
+    learning: learningRecords().map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
@@ -12693,7 +13260,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -13092,6 +13659,10 @@ function makeSession(role) {
   seedWorktree(wt, { repo: R });
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
+  // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
+  // from it): only on a fresh start, since a resumed session never reads the new prompt; the newest
+  // first, as many as fit a line.
+  const given = resume ? [] : knowledgeFor(id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, KNOWLEDGE_IDS_MAX).map((k) => k.id);
   const links = linksBlock(id);
   const arts = artifactsBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
@@ -13153,7 +13724,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {
@@ -13922,6 +14493,8 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
   let st = sensorState(m.name);
   if (m.kind === 'http' && fresh) st = { ...st, ...sensorStateFromLog(m.name) };
   const r = m.kind === 'http' ? await pollHttp(m, st) : await pollProbe(m, st);
+  // a check that ran is an hour the sensor heard, events or not (a quiet hour counts toward a median)
+  if (r.sample?.ok) markListened(m.name);
   // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
   const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
   if (rollupDay || st.rollup_day !== yesterday) {
@@ -13948,11 +14521,14 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
       if (live.length !== Object.keys(fps).length) writeJsonAtomic(fpsPath, Object.fromEntries(live));
     }
     const counts = jsonOr(path.join(sensorDir(m.name), 'counts.json'), null);
+    const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
     if (counts) {
-      const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
       for (const fp of Object.keys(counts)) { for (const h of Object.keys(counts[fp])) if (h < cut) delete counts[fp][h]; if (!Object.keys(counts[fp]).length) delete counts[fp]; }
       writeJsonAtomic(path.join(sensorDir(m.name), 'counts.json'), counts);
     }
+    // the hours it heard, with the counts they are a median of
+    const heard = jsonOr(listenedFile(m.name), null);
+    if (heard) writeJsonAtomic(listenedFile(m.name), Object.fromEntries(Object.entries(heard).filter(([h]) => h >= cut)));
     if (st.days) for (const d of Object.keys(st.days)) if (d < dateOnly(new Date(Date.now() - 8 * 86400000).toISOString())) delete st.days[d];
     st.pruned = dateOnly(nowIso());
   }
@@ -14502,12 +15078,23 @@ function repoPath(file) {
   return null;
 }
 const frameWords = (fr) => `${fr.file}${fr.line != null ? `:${fr.line}` : ''}${fr.fn ? ` ${fr.fn}` : ''}`;
+// The hours a sensor heard: a check that ran, or events that arrived (listened.json, { "<yyyy-mm-ddThh>":
+// true }, beside counts.json, whose keys are fingerprints). A spike's median is over these alone,
+// so hours a box was down (nobody listening) never read as quiet ones.
+const listenedFile = (name) => path.join(sensorDir(name), 'listened.json');
+function markListened(name, hour = nowIso().slice(0, 13)) {
+  const l = jsonOr(listenedFile(name), {});
+  if (!l[hour]) { l[hour] = true; fs.mkdirSync(sensorDir(name), { recursive: true }); writeJsonAtomic(listenedFile(name), l); }
+  return l;
+}
 function ingestEvents(m, events, st, at = nowIso()) {
   if (!events.length) return [];
   const dir = sensorDir(m.name);
   const fps = jsonOr(path.join(dir, 'fingerprints.json'), {});
   const counts = jsonOr(path.join(dir, 'counts.json'), {});
   const hour = at.slice(0, 13);
+  // events arrived: it heard this hour
+  const listened = markListened(m.name, hour);
   const day = dayStats(st, at.slice(0, 10));
   const tri = { min_level: 'error', min_count: 1, min_users: 0, ...(m.triage ?? {}) };
   const spike = { factor: 5, min: 20, ...(m.spike ?? {}) };
@@ -14562,21 +15149,25 @@ function ingestEvents(m, events, st, at = nowIso()) {
     }
   }
   // spikes: a known fingerprint (a day of the kit's own counts, not the provider's first_seen,
-  // which can be months back with nothing counted) this hour against its 7-day hourly median
+  // which can be months back with nothing counted) this hour against its 7-day hourly median, over
+  // the hours the sensor heard (a sensor just upgraded has none yet: a day of them before a spike)
   for (const fp of touched) {
     const f = fps[fp];
     if (levelRank(f.level) < levelRank('warning')) continue;
     const c = counts[fp][hour];
     const start = Math.max(Date.parse(f.seen_at) || Date.now(), Date.now() - 7 * 86400000);
     const hours = [];
-    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) hours.push(counts[fp][new Date(t).toISOString().slice(0, 13)] ?? 0);
+    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) { const h = new Date(t).toISOString().slice(0, 13); if (listened[h]) hours.push(counts[fp][h] ?? 0); }
     if (hours.length < 24) continue;
     const median = quantile(hours, 0.5);
     const prev = new Date(Date.parse(`${hour}:00:00.000Z`) - 3600000).toISOString().slice(0, 13);
     if (c >= Math.max(spike.min, spike.factor * median)) {
       if (f.spike_hour !== hour && f.spike_hour !== prev) {
         const sev = Math.min(4, (LEVEL_SEV[f.level] ?? 1) + 1);
-        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${m.name}: ${f.class ?? f.code ?? 'a log line'} is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.round(hours.length / 24)} day(s)`.slice(0, 900), severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
+        // which line: its class or code and its id; a log line's template is production text, framed
+        // (the head is cut first, so the cut never reaches the frame's end marker)
+        const tpl = f.kind === 'log' && isStr(f.template) ? `\n${untrusted('the line', f.template.slice(0, 300))}` : '';
+        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${`${m.name}: ${f.class ?? f.code ?? 'a log line'} (${fpIdOf(m.name, fp)}) is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.floor(hours.length / 24)} day(s)`.slice(0, 400)}${tpl}`, severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
         if (o && sev >= 4) alerts.push(`${m.name}: a ${f.kind} is spiking (${o.id}; sensor show ${fp})`);
       }
       f.spike_hour = hour;
@@ -14901,7 +15492,10 @@ function cmdSensorIgnore(sub) {
   if (sub === 'ignore') {
     if (ignored) die(`${fp.id} is already ignored`);
     const reason = flagStr('reason') ?? die('sensor ignore needs --reason "…" (why it isn\'t worth fixing)');
-    const o = appendLog({ type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` }, by);
+    // it cites what it sets aside: the fingerprint's observations, the newest 40 (source_ref joins the rest)
+    const refs = [...fpObservations(fp.id)].sort(byTime).slice(-SET_ASIDE_REFS).map((x) => x.id);
+    const fields = { type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` };
+    const o = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
     return out(`${o.id}: ignored ${fp.id}; triage skips it until sensor unignore`);
   }
   if (!ignored) die(`${fp.id} is not ignored`);
@@ -15041,8 +15635,8 @@ function verifyIncidents() {
       const prob = logObjects('problem').find((x) => (x.refs ?? []).includes(o.id) && !isIncident(x)) ?? appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
       const q = logObjects('question').find((x) => (x.evidence ?? []).includes(prob.id)) ?? appendLog({
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
-        context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
-        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
+        context: `The same errors came back after the fix was deployed (${recurred.join(', ')}).\n\n- **Sound call, failed fix**: deciding to fix it was right and the fix was not. It stays an open problem (${prob.id}), and nothing changes in what I decide alone.\n- **Wrong call**: fixing it this way was the wrong decision. You record that yourself (\`devteam.mjs correct ${dec?.id ?? '<decision>'} --reason "…"\`), and from then on I ask you before every production fix.\n\nErrors can come back for innocent reasons too: stale dynos, cached client bundles, replayed jobs, or a second cause that looks the same.`,
+        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: 'Keep the problem open and fix forward. Nothing changes in what I decide alone.' }, { label: 'Wrong call', detail: 'You correct the decision yourself. From then on I ask you before every production fix.' }],
         blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
@@ -15191,7 +15785,7 @@ async function cmdRemediate() {
   // (never a standing rule or the class's rung); the question was asked about this remediation (and
   // this release), and the answer is its recommendation, or its default applied at or after its deadline.
   if (!['answer', 'default'].includes(d.authority) || !q) die(`${d.id} rests on ${d.authority ?? 'nothing'}${d.approved_by ? ` (${d.approved_by})` : ''}: a remediation runs only on the owner's answer to a production-remediation question, or its default`);
-  if (q.class !== 'production-remediation' && !(q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
+  if (q.class !== 'production-remediation' && !(isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
   if (!(q.blocks ?? []).includes(remediationRef(action))) die(`${q.id} was asked about ${(q.blocks ?? []).filter((x) => String(x).startsWith('remediation:')).join(', ') || 'no remediation'}, not ${remediationRef(action)}`);
   const qrel = (q.blocks ?? []).find((x) => String(x).startsWith('release:')) ?? null;
   const drel = (d.refs ?? []).find((x) => String(x).startsWith('release:')) ?? null;
@@ -15219,7 +15813,7 @@ async function cmdRemediate() {
     if (to !== rel) die(`${d.id} decided a rollback to ${rel ?? 'no release'}, not ${to}`);
     const crossed = migrationsSince(to);
     if (!crossed) die(`no deploy of release ${to} was observed by a sensor: a rollback goes to a release the sensors saw`);
-    if (crossed.length && !(q && q.status === 'answered' && !q.default && (q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
+    if (crossed.length && !(q && q.status === 'answered' && !q.default && (isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
   }
   const m = { name: `remediation-${action}`, kind: 'probe', probe: r.script, params: { ...r.params, ...(to ? { to } : {}) }, uses: r.uses, credentials: r.credentials };
   let env, redact, src;
@@ -15583,6 +16177,200 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
+// ---- lineage: what a record in the loop came from and what came of it ----
+// Whether a record's approved_by is an approval the owner gave, for the lineage's word: a decision whose
+// authority checks out (decisionAuthorityGap), an act carrying one out, or an act of its own resting
+// on an owner's accepted rule or an answered question. Anything else only cites it: a supervisor's
+// lesson is never the owner approving.
+const restsOnHolds = (x) => x?.type === 'problem' || (x?.type === 'knowledge' && x.status === 'accepted');
+function approvalHolds(o) {
+  if (o.type === 'decision') return !decisionAuthorityGap(o);
+  if (o.type !== 'act') return false;
+  if (o.decision) { const d = logGet(o.decision); return d?.type === 'decision' && !decisionAuthorityGap(d); }
+  const r = logGet(o.approved_by ?? '');
+  if (r?.type === 'knowledge') return writerClass(r.created_by) === 'owner' && r.status === 'accepted';
+  return r?.type === 'question' && ['answered', 'defaulted'].includes(questionView(r).status);
+}
+// One index of the links between records, built once per read of the log: an edge from each record
+// a field cites to the record citing it (cited before citing, for every field), read off the fields
+// that cite, never a walk over strings. The ticket an add-ticket act made comes after the act. Then
+// the computed steps: an observation recurs in its signal, and a correction follows the call.
+const LINK_FIELDS = { evidence: 'evidence', refs: 'about', blocks: 'asks about', knowledge: 'rests on' };
+let LINKS = null;
+function linkIndex() {
+  if (LINKS?.log === readLog()) return LINKS;
+  const out = new Map(), inn = new Map(), seen = new Map();
+  // one edge a pair: a second field citing the same pair adds its why to it ("evidence, about")
+  const edge = (from, to, why) => {
+    const k = `${from}\0${to}`;
+    if (from === to) return;
+    const had = seen.get(k);
+    if (had) { if (!had[0].why.split(', ').includes(why)) for (const e of had) e.why = `${e.why}, ${why}`; return; }
+    const pair = [{ to, why }, { from, why }];
+    seen.set(k, pair);
+    (out.get(from) ?? out.set(from, []).get(from)).push(pair[0]);
+    (inn.get(to) ?? inn.set(to, []).get(to)).push(pair[1]);
+  };
+  const known = (t) => typeof t === 'string' && readLog().objects.has(t);
+  for (const o of readLog().objects.values()) {
+    for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
+      if (!known(t)) continue;
+      if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
+      // a start's knowledge was what its prompt carried, whatever became of it since; what a decision
+      // rests on is only what decide --on would take, a problem or accepted knowledge (a hand-written
+      // line citing anything else only cites it)
+      else edge(t, o.id, k !== 'knowledge' ? why : o.type === 'act' ? 'given' : restsOnHolds(logGet(t)) ? why : 'cites');
+    }
+    if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
+    if (known(o.decision)) edge(o.decision, o.id, 'carried out');
+  }
+  // An incident holds what its fingerprints raise while it is open, not only what it cited when it
+  // opened (sensor incident snapshots its refs): each observation on one of them from its opening to
+  // its resolution (the last update that resolved it; open-ended while it isn't resolved).
+  for (const p of incidentList()) {
+    const end = p.status === 'resolved' ? [...(p.updates ?? [])].reverse().find((u) => u.status === 'resolved')?.at ?? null : null;
+    for (const f of p.fingerprints) for (const o of fpObservations(f)) if (o.created_at >= p.created_at && (!end || o.created_at <= end)) edge(o.id, p.id, 'held');
+  }
+  for (const c of orientClusters()) for (const id of c.ids) edge(id, `signal:${c.key}`, 'recurs');
+  for (const a of calls()) if (correctionOf(a)) edge(a.id, `correction:${a.id}`, 'corrected');
+  return (LINKS = { log: readLog(), out, in: inn });
+}
+// Where each record opens on the dashboard: its sidepeek's address.
+const PEEK_HASH = { observation: 'observation', knowledge: 'lesson', problem: 'problem', decision: 'decision', act: 'act', question: 'q', ticket: 'ticket', goal: 'goal', feature: 'feature', message: 'thread', thread: 'talk' };
+const hrefOf = (o) => { const k = o?.type === 'observation' ? { retro: 'retro', learning: 'learning' }[o.kind] ?? 'observation' : PEEK_HASH[o?.type]; return k ? `#${k}/${encodeURIComponent(o.id)}` : null; };
+const plainLabel = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+// A question is the Inbox's; one answered in a ladder class is the owner's call, drawn in Decide.
+const lineageStage = (o) => { const s = stageOf(o); return s === 'inbox' && questionView(o).status === 'answered' && ladder().classes[o.class] ? 'decide' : s; };
+function lineageNode(id) {
+  if (id.startsWith('signal:')) {
+    const key = id.slice('signal:'.length);
+    const g = signalGroups().get(key);
+    return { id, stage: 'orient', type: 'signal', kind: null, label: plainLabel(`recurring: ${key}`), at: g?.items.at(-1)?.at ?? null, href: `#signal/${encodeURIComponent(key)}` };
+  }
+  if (id.startsWith('correction:')) {
+    const a = logGet(id.slice('correction:'.length));
+    const c = correctionOf(a);
+    return c ? { id, stage: 'learn', type: 'correction', kind: a.class ?? null, label: plainLabel(`corrected: ${c.reason}`), at: c.at, href: hrefOf(a) } : null;
+  }
+  const o = logGet(id);
+  if (!o) return null;
+  return { id, stage: lineageStage(o), type: o.type, kind: o.kind ?? o.class ?? null, label: plainLabel(o.what ?? o.statement ?? o.title ?? o.question ?? o.detail ?? o.text) || id, at: o.created_at, href: hrefOf(o) };
+}
+// lineage(id): the records it came from (up to 6 steps back) and what came of it (4 steps on), at
+// most max in all. The work graph and conversation are what a record is about: drawn, never followed
+// further. More than five siblings of one type and kind on one side of one neighbour become one node
+// that lists them. The opened record is always the first node.
+function lineage(id, { up = 6, down = 4, max = 120 } = {}) {
+  const L = linkIndex();
+  const root = lineageNode(id);
+  if (!root) return null;
+  const nodes = new Map([[id, root]]);
+  let truncated = false;
+  const walk = (side, hops) => {
+    let front = [id];
+    for (let h = 0; front.length; h++) {
+      const next = [];
+      for (const x of front) {
+        if (x !== id && nodes.get(x).stage === null) continue;
+        for (const e of (side === 'up' ? L.in : L.out).get(x) ?? []) {
+          const y = side === 'up' ? e.from : e.to;
+          if (nodes.has(y)) continue;
+          if (h >= hops || nodes.size >= max) { truncated = true; return; }
+          const n = lineageNode(y);
+          if (n) { nodes.set(y, n); next.push(y); }
+        }
+      }
+      front = next;
+    }
+  };
+  walk('up', up);
+  walk('down', down);
+  let edges = [];
+  for (const x of nodes.keys()) for (const e of L.out.get(x) ?? []) if (nodes.has(e.to)) edges.push({ from: x, to: e.to, why: e.why });
+  // siblings: one type and kind, on one side of one neighbour
+  const sibs = new Map();
+  for (const e of edges) for (const [m, nb, side] of [[e.from, e.to, 'up'], [e.to, e.from, 'down']]) {
+    const n = nodes.get(m);
+    if (m === id || ['signal', 'correction'].includes(n.type)) continue;
+    const k = JSON.stringify([nb, side, n.type, n.kind]);
+    (sibs.get(k) ?? sibs.set(k, new Set()).get(k)).add(m);
+  }
+  const into = new Map();
+  const groups = [];
+  for (const [k, ms] of [...sibs].sort((a, b) => b[1].size - a[1].size)) {
+    const free = [...ms].filter((m) => !into.has(m));
+    if (free.length <= 5) continue;
+    const [nb, , type, kind] = JSON.parse(k);
+    let gid = `group:${nb}:${type}:${kind}`;
+    while (nodes.has(gid) || groups.some((g) => g.id === gid)) gid += '+';
+    const first = nodes.get(free[0]);
+    groups.push({ id: gid, stage: first.stage, type, kind, label: `${free.length} ${kind ? `${kind} ` : ''}${type}s`, at: free.map((m) => nodes.get(m).at).sort().pop() ?? null, href: null, members: free, first: free[0] });
+    for (const m of free) into.set(m, gid);
+  }
+  const list = [];
+  for (const [x, n] of nodes) {
+    if (!into.has(x)) list.push(n);
+    else { const g = groups.find((y) => y.first === x); if (g) { const { first, ...rest } = g; list.push(rest); } }
+  }
+  const seen = new Set();
+  edges = edges.map((e) => ({ from: into.get(e.from) ?? e.from, to: into.get(e.to) ?? e.to, why: e.why })).filter((e) => { const k = `${e.from}\0${e.to}\0${e.why}`; if (e.from === e.to || seen.has(k)) return false; seen.add(k); return true; });
+  return { nodes: list, edges, truncated };
+}
+// The lineage as Mermaid text: a subgraph per stage in the loop's order, what is outside the loop
+// after them, generated node ids (n0 is the opened record, n<i> the i-th node), and labels stripped
+// to plain words, so no record's text or id reaches Mermaid's syntax.
+// A question still the Inbox's and a reading are drawn in their own groups, not with the work graph.
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], ['inbox', 'Asked you'], ['measurement', 'Measured']];
+const LINEAGE_CLASS = { observe: 'stroke:#4f8bd6', orient: 'stroke:#8a63d2', decide: 'stroke:#d29b2a', act: 'stroke:#3a9e6f', learn: 'stroke:#d0566a', inbox: 'stroke:#c2672f', measurement: 'stroke:#2f9bb0' };
+const mermaidText = (s) => String(s ?? '').replace(/[^A-Za-z0-9\s.,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+function lineageMermaid(L) {
+  const n = new Map(L.nodes.map((x, i) => [x.id, `n${i}`]));
+  const node = (x) => { const t = mermaidText(x.label) || mermaidText(x.id) || 'a record'; return x.type === 'signal' || x.members ? `${n.get(x.id)}(["${t}"])` : `${n.get(x.id)}["${t}"]`; };
+  const lines = ['flowchart LR'];
+  for (const [s, title] of LINEAGE_STAGES) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`subgraph s_${s}["${title}"]`, ...xs.map(node), 'end'); }
+  lines.push(...L.nodes.filter((x) => !LINEAGE_STAGES.some(([s]) => s === x.stage)).map(node));
+  for (const e of L.edges) lines.push(`${n.get(e.from)} -->|${mermaidText(e.why)}| ${n.get(e.to)}`);
+  for (const [s, css] of Object.entries(LINEAGE_CLASS)) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`classDef st_${s} ${css},stroke-width:1.5px`, `class ${xs.map((x) => n.get(x.id)).join(',')} st_${s}`); }
+  if (L.nodes.length) lines.push('classDef current stroke-width:3.5px', 'class n0 current');
+  return lines.join('\n');
+}
+// Where an observation sits in the loop, for its card and its sidepeek: ruled noise, ignored at
+// triage, set aside, carried on (the furthest stage it reached), explained (it became knowledge, a
+// problem or an incident), part of a signal (n of the 3 that make one), or not oriented yet. Null
+// for what isn't an observation for Orient (a reading, an outcome, a set-aside itself). What
+// explains a signal by its key (explained().keys, read with covered()) explains an observation on
+// it too: a ruling that names the key, the observations up to the ruling; the open incident that
+// holds the fingerprint, every one while it is open.
+const SET_ASIDE_KINDS = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'];
+let PLACE_CTX = null;
+function placeOf(o) {
+  if (o?.type !== 'observation' || stageOf(o) !== 'observe' || SET_ASIDE_KINDS.includes(o.kind)) return null;
+  if (PLACE_CTX?.log !== readLog()) PLACE_CTX = { log: readLog(), keys: explained().keys, rulings: new Map(logObjects('decision').filter((d) => d.class === 'orient-noise' && liveDecision(d)).sort(byTime).flatMap((d) => (d.refs ?? []).filter((r) => !logGet(r)).map((r) => [r, d]))), ignores: sensorIgnores(), ackHours: loadSettings().finding_ack_hours ?? 24, acks: new Map(logObjects('observation').filter((x) => x.kind === 'finding-ack').sort(byTime).map((x) => [x.source_ref, x])) };
+  const C = PLACE_CTX;
+  const after = (linkIndex().out.get(o.id) ?? []).map((e) => logGet(e.to)).filter(Boolean);
+  const key = signalKeyOf(o);
+  const rule = C.rulings.get(key);
+  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x)) ?? (covered(C.keys, key, o.created_at) && rule?.created_at >= o.created_at ? rule : null);
+  if (noise) return { state: 'noise', ref: noise.id, why: noise.what ?? null };
+  const fp = fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null;
+  const ig = fp ? C.ignores.get(fp) : null;
+  if (ig) return { state: 'ignored', ref: ig.id, why: ig.reason };
+  const ack = o.source_key ? C.acks.get(o.source_key) : null;
+  const until = ack ? new Date(Date.parse(ack.created_at) + C.ackHours * 3600000).toISOString() : null;
+  if (ack && until > nowIso()) return { state: 'set-aside', ref: ack.id, why: ack.detail, until };
+  // what came of it, step by step: the first record it reached at each stage
+  const ORDER = ['orient', 'decide', 'act', 'learn'];
+  const reached = (lineage(o.id, { up: 0, down: 4, max: 60 })?.nodes ?? []).slice(1).filter((n) => ORDER.includes(n.stage) && n.type !== 'signal' && !SET_ASIDE_KINDS.includes(n.kind));
+  const firstAt = ORDER.map((s) => reached.find((n) => n.stage === s)).filter(Boolean);
+  const word = (n) => (n.type === 'knowledge' ? n.kind ?? 'lesson' : n.type === 'problem' ? (isIncident(logGet(n.id)) ? 'incident' : 'problem') : n.type === 'question' ? 'your answer' : n.type === 'observation' ? String(n.kind ?? 'outcome').replace(/-/g, ' ') : n.type);
+  if (firstAt.length === 1 && firstAt[0].stage === 'orient') return { state: 'explained', ref: firstAt[0].id, why: word(firstAt[0]) };
+  if (firstAt.length) return { state: 'carried', ref: firstAt.at(-1).id, why: firstAt.map(word).join(' → ') };
+  const held = covered(C.keys, key, o.created_at) ? openIncidentOf(key) : null;
+  if (held) return { state: 'explained', ref: held.id, why: 'incident' };
+  const g = signalGroups().get(key);
+  if (g && g.items.length > 1) return { state: 'signal', ref: g.key, n: g.items.length, recurring: g.items.length >= 3 && g.spread };
+  return { state: 'new', ref: null };
+}
 // A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
 // only when this machine can read it, else none (a view never fails on a missing checkout).
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
@@ -15590,7 +16378,9 @@ const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--f
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
-  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
+  // where a record sits in the loop, and where an observation came from
+  if (v.record) { const o = logGet(v.record.id); v.stage = stageOf(o); if (o.type === 'observation') v.provenance = provenanceOf(o); }
+  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, status: o.status ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
   if (kind === 'ticket') {
     gitReadCache = new Map();
     const t = tickets().get(id) ?? die(`no ticket ${id}`);
@@ -15654,10 +16444,28 @@ function peekView(kind, id) {
       v.gates = Object.values(Object.fromEntries(runs.map((l) => [l.gate, { gate: l.gate, ok: l.ok, sha: l.sha ?? null, at: l.at }])));
       v.last_merge = last ? { id: last.id, at: last.created_at, ticket: (last.refs ?? []).find((r) => ts.includes(r)) ?? null, sha } : null;
     }
+  } else if (kind === 'signal') {
+    // computed, never stored: what nothing explains yet on its key, and the commands that would explain it
+    v.record = null;
+    const g = signalGroups().get(id);
+    const items = [...(g?.items ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+    const explained = logObjects('observation').filter((o) => signalKeyOf(o) === id && !items.some((i) => i.id === o.id)).map((o) => o.id);
+    if (!items.length && !explained.length) die(`no signal ${id}`);
+    const cite = items.slice(-SET_ASIDE_REFS).map((i) => shq(i.id)).join(' ');
+    v.signal = {
+      key: id, count: items.length, spread: !!g?.spread, recurring: items.length >= 3 && !!g?.spread, explained,
+      items: items.map((i) => ({ id: i.id, at: i.at, by: i.who, detail: i.detail })), first_at: items[0]?.at ?? null, latest_at: items.at(-1)?.at ?? null,
+      unexplained_hours: items.length ? Math.floor((Date.now() - Date.parse(items[0].at)) / 3600000) : null,
+      explain: items.length ? [`knowledge add --kind lesson --scope project --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(id)} ${cite} -- '<why it is noise>'`] : [],
+    };
+    v.history = historyOf(items.map((i) => i.id), { limit: 100 });
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
-    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : [])]);
+    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : []), ...(Array.isArray(o.knowledge) ? o.knowledge : [])]);
+    // a week's learning record: its figures recomputed from the log as it stood at the week's end,
+    // every record each counts (the line's refs are capped), and what each lesson given did since
+    if (o.type === 'observation' && o.kind === 'learning' && /^\d{4}-W\d{2}$/.test(o.week ?? '')) { const r = learningFigures(o.week); v.learning = { week: r.week, from: r.from, cut: r.cut, figures: r.figures, lists: r.lists, efficacy: lessonEfficacy(r.cut) }; }
     if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
     // an incident: its view, what its fingerprints raised, and the latest event of each
     // (production data, scrubbed; the drawer frames it as untrusted)
@@ -15668,11 +16476,19 @@ function peekView(kind, id) {
       v.events = o.fingerprints.map((f) => { const { sensor, key } = splitFpId(f); return { fingerprint: f, cached: jsonOr(path.join(sensorDir(sensor), 'events', fpFile(key)), null) }; });
     }
   }
+  // what a record in the loop, or a recurring signal, came from and what came of it
+  const root = kind === 'signal' ? `signal:${id}` : v.record && stageOf(logGet(v.record.id)) !== null ? v.record.id : null;
+  if (root) { v.lineage = lineage(root); v.lineage_mermaid = v.lineage ? lineageMermaid(v.lineage) : null; }
+  if (v.record?.type === 'observation') v.place = placeOf(logGet(v.record.id));
   return v;
 }
 function cmdPeek() {
   const [kind, id] = positional;
-  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread> <id> [--tickets ids] --json');
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  // a signal no observation is on is no signal, for --mermaid as for --json (lineageNode draws any key)
+  if (kind === 'signal' && !signalGroups().has(id) && !logObjects('observation').some((o) => signalKeyOf(o) === id)) die(`no signal ${id}`);
+  // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
+  if (flags.mermaid) return out(lineageMermaid(lineage(kind === 'signal' ? `signal:${id}` : id) ?? die(`no record ${id}`)));
   json(peekView(kind, id));
 }
 
@@ -16231,10 +17047,10 @@ Decide and act (supervisor.md, constitution.md)
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
-  observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
+  observe --subject s --kind k --detail d [--source owner-chat|owner-answer|owner-thread|retro|…] [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
-  observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)
+  observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing)
@@ -16251,7 +17067,7 @@ Goals and retros
 
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
-  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
   sensor status [--json] | sensor test <name> [--since t] | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
   sensor show <fingerprint> | sensor discover [--record] [--json] | sensor stream <name> (wait runs it) | sensor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   sensor triage [--all] [--peek] [--json] | sensor ignore|unignore <fingerprint> --reason r [--owner] | sensor incident <fingerprint…> --title t | sensor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)
@@ -16265,7 +17081,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
+const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
