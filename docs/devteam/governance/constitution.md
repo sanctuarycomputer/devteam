@@ -95,7 +95,7 @@ A change is a one-way door if reverting it is expensive or impossible once shipp
 - a migration that is not rollback-safe, or any destructive data change
 - a public or cross-component contract change that removes or narrows behaviour
 - a new persistence shape in an append-only or event-sourced store
-- a new top-level dependency, runtime, datastore or vendor
+- a new top-level dependency, runtime, datastore or vendor; a development-only tool (a linter, formatter, type checker or test helper that ships nothing to production) is not one
 - anything touching authentication, authorization, payments or PII
 - anything the owner lists under one-way doors in the settings
 
