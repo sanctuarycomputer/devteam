@@ -214,8 +214,14 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .ctx p, .qcard .d p, .qcard .e p { margin: 0 0 6px; }
+  .ctx p:last-child, .qcard .d p:last-child, .qcard .e p:last-child { margin-bottom: 0; }
+  .ctx ul, .ctx ol, .qcard .d ul, .qcard .d ol, .qcard .e ul, .qcard .e ol { margin: 4px 0 8px; padding-left: 20px; }
+  .ctx li, .qcard .d li, .qcard .e li { margin: 2px 0; }
+  .ctx code, .qcard h4 code { font: 12px var(--mono); }
   .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
+  .qcard .again { margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
   .choice:hover { background: var(--hover); opacity: 1; }
@@ -495,6 +501,14 @@
   .av-bar a.av-btn:hover { background: var(--hover); }
   #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+  /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
+  .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
+  .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+  .av-pins .tl-pin { pointer-events: auto; }
+  /* the viewer: the stage is the whole tab, and nothing else of the dashboard shows */
+  .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
+  .viewer #artifact-view:not([hidden]) { inset: 0; border: 0; border-radius: 0; box-shadow: none; }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
@@ -728,13 +742,18 @@
 <div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-note" class="badge high" hidden></span></div>
+    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
     <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
-    <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
+    <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
-  <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
-  <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+  <!-- the stage: the page in its frame, the thread pins on it, and the overlay Shift raises over it (spec §4) -->
+  <div id="av-stage">
+    <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
+    <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+    <div id="av-pins" class="av-pins"></div>
+    <div id="av-over" class="av-over" hidden></div>
+  </div>
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
 <div id="tl">
@@ -768,6 +787,13 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
+// The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>], one
+// artifact on the stage, the thread layer and the dock over it, and nothing else: no sections, no
+// routes, no /api/data.
+const VIEWER = (() => {
+  const m = /^\/view\/(artifact)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
+  return m ? { kind: m[1], name: m[2], at: new URLSearchParams(location.search).get('at') || 'main' } : null;
+})();
 // The dashboard page this tab loaded, by the server's own fingerprint of it (x-devteam-page).
 let PAGE_VERSION = null;
 // What the cloud box serves to the public (x-devteam-public, set only by its gateway): { project:
@@ -1098,7 +1124,7 @@ function linkify(text) {
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
-    return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener">devteam #${pr}</a>`;
+    return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener noreferrer">devteam #${pr}</a>`;
   });
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
@@ -1223,7 +1249,7 @@ function questionCard(q, o, reasonText, copy = false) {
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${qblock(c.detail, q.links)}</div>` : ''}${c.effect ? `<div class="e">${qblock(c.effect, q.links)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
@@ -1236,8 +1262,9 @@ function questionCard(q, o, reasonText, copy = false) {
       ${rankWhy(q)}
       ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${(q.approves || []).length ? `<div class="meta">Your answer approves each of these, once: ${q.approves.map((a) => !/^(chore|plan)-/.test(a) ? tlink(a) : `<code>${esc(a)}</code>`).join(', ')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
@@ -1268,17 +1295,86 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
+// A question's [[name]] for an artifact opens its viewer in a tab of its own (spec §7), where a thread
+// can start on it; the list under the question keeps the stage here, which says when it changed since.
+function artNameLink(l) {
+  const h = l.href ?? (l.gone || !l.at ? null : artHref(l.artifact, l.at));
+  const m = h && /^#artifact\/(?:main|wt\/([^/]+))\/([^/]+)$/.exec(h);
+  if (!m) return artLinkOf(l, true);
+  let v;
+  try { v = artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'); } catch { return artLinkOf(l, true); }
+  return `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
+}
 function qtext(text, links) {
   return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
     if (i % 2 === 0) return linkify(part);
     const l = (links || []).find((x) => x.name === part);
     // in the sentence the link alone; a changed artifact is flagged in the list below
-    return l ? `<span class="qref">${l.artifact ? artLinkOf(l, true) : linkOf(l)}</span>` : esc(`[[${part}]]`);
+    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
+}
+// Owner-facing prose (a question's context, a choice's detail) as blocks: paragraphs, "- " bullets
+// and "1." numbered lists, a run of "1) … 2) …" on one line too, with **bold** and `code`. The marks
+// are read from the raw text and each piece goes through qtext on its own, so everything is escaped,
+// ids and [[links]] work as anywhere else, and a mark never lands inside a link's href or its title.
+// "2**10" and "src/**/x" stay as written: bold opens after a space and closes before one.
+function qinline(text, links) {
+  return String(text ?? '').split(/(`[^`\n]+`|(?<![\w*])\*\*(?=\S)[^*\n]+?(?<=\S)\*\*(?![\w*]))/).map((seg, i) => (i % 2 === 0 ? qtext(seg, links) : seg[0] === '`' ? `<code>${qtext(seg.slice(1, -1), links)}</code>` : `<b>${qinline(seg.slice(2, -2), links)}</b>`)).join('');
+}
+// "Two ways: 1) wait 2) ship it" → the lead, then each numbered item. Only a run that counts up from
+// 1 with at least two items in one style, each marker after a space or a colon, so "version 2) of"
+// stays prose. A number that closes a parenthesis ("(phase 1) and (phase 2)") is prose. So is a
+// number that ends a sentence ("on Nov 1. Then Nov 2. Done"): "1." opens a run only at the start
+// of the line or straight after a colon.
+function inlineList(line) {
+  const ms = [...line.matchAll(/(^|[\s:])(\()?(\d{1,2})([.)])\s+/g)];
+  let run = [];
+  for (const m of ms) {
+    const n = Number(m[3]);
+    const before = line.slice(0, m.index + m[1].length);
+    if (m[4] === ')' && !m[2] && before.split('(').length > before.split(')').length) continue;
+    if (n === 1) run = m[4] === ')' || !before.trim() || before.trimEnd().endsWith(':') ? [m] : [];
+    else if (run.length && n === run.length + 1 && m[4] === run[0][4] && !m[2] === !run[0][2]) run.push(m);
+  }
+  if (run.length < 2) return null;
+  const at = (m) => m.index + m[1].length;
+  const items = run.map((m, i) => line.slice(m.index + m[0].length, i + 1 < run.length ? at(run[i + 1]) : undefined).trim().replace(/[;,]\s*(and|or)?$/i, '').trim());
+  return { lead: line.slice(0, at(run[0])).trim(), items };
+}
+const NUMBERED = /^\(?(\d{1,2})[.)]\s+(.*)$/;
+function qblock(text, links) {
+  const out = [];
+  let para = [], list = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${para.map((l) => qinline(l, links)).join('<br>')}</p>`); para = []; };
+  // a list that starts at 3 says 3: the owner may be told "do step 3"
+  const flushList = () => { if (list) out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ''}>${list.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</${list.tag}>`); list = null; };
+  const item = (tag, t, n = 1) => { flushPara(); if (list?.tag !== tag) flushList(); list = list ?? { tag, items: [], start: n }; list.items.push(t); };
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const raw = lines[k], line = raw.trim();
+    let m;
+    if (!line) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^[-*•]\s+(.*)$/))) { item('ul', m[1]); continue; }
+    if ((m = line.match(NUMBERED))) {
+      // one line holding the whole list ("1) a 2) b") is split; a line of a list written one per
+      // line is one item, whatever numbers its own words hold
+      const alone = list?.tag !== 'ol' && !NUMBERED.test((lines[k + 1] ?? '').trim());
+      const il = alone ? inlineList(line) : null;
+      if (il && !il.lead) for (const t of il.items) item('ol', t); else item('ol', m[2], Number(m[1]));
+      continue;
+    }
+    if (list && /^\s{2,}\S/.test(raw)) { list.items[list.items.length - 1] += ` ${line}`; continue; }
+    flushList();
+    const il = inlineList(line);
+    if (il) { if (il.lead) para.push(il.lead); flushPara(); out.push(`<ol>${il.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</ol>`); continue; }
+    para.push(line);
+  }
+  flushPara(); flushList();
+  return out.join('');
 }
 // the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
@@ -1400,8 +1496,9 @@ function reviewCard(q, o, reasonText) {
       ${rankWhy(q)}
       ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
       ${ok ? '' : '<p class="err">The page or data changed since the supervisor asked, so it can’t be answered. Send it back, or tell the supervisor to ask again.</p>'}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1599,8 +1696,8 @@ function renderReviewHead(note = '') {
   const links = (DATA?.questions || []).find((q) => q.id === RV.qid)?.links || info.links || [];
   // one line for the question, one for the facts; the rest folds away so the agent's page gets the height
   const more = [rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : '',
-    `<div>${qtext(info.question, links)}</div>`,
-    info.context ? `<p class="ctx">${qtext(info.context, links)}</p>` : '',
+    `<div>${qinline(info.question, links)}</div>`,
+    info.context ? `<div class="ctx">${qblock(info.context, links)}</div>` : '',
     links.length ? `<div class="links"><span class="muted small">Look at:</span>${links.map(linkOf).join('')}</div>` : '',
     `<div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))} · ${pins} · pinned at <code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})${rv.allow_partial ? ' · partial answers allowed' : ''}</div>`].join('');
   $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(qplain(info.question, links))}">${esc(rv.title || qplain(info.question, links))}</h4>${CLOSE}</div>
@@ -1636,7 +1733,7 @@ function answeredActions(info) {
   return `<div class="small"><b>${esc(how)}</b>${info.answered_at ? ` · ${esc(when(info.answered_at))}` : ''}</div>
     ${info.answer ? `<div>${esc(info.answer)}</div>` : ''}
     ${res ? `<div class="small muted">Recorded result: ${esc(res.bytes)} bytes, sha256 <code>${esc(res.sha256.slice(0, 12))}</code> ${info.result_status === 'verified' ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}</div>` : ''}
-    ${res && info.result_status === 'verified' && Array.isArray(info.result_doc?.rows) ? `<a class="linkish small" href="/api/review?${new URLSearchParams({ id: info.id, format: 'tsv' })}" target="_blank" rel="noopener">The result as TSV</a>` : ''}
+    ${res && info.result_status === 'verified' && Array.isArray(info.result_doc?.rows) ? `<a class="linkish small" href="/api/review?${new URLSearchParams({ id: info.id, format: 'tsv' })}" target="_blank" rel="noopener noreferrer">The result as TSV</a>` : ''}
     <p class="meta">The page above is read-only: it shows the answer as recorded.</p>`;
 }
 function updateAnswerButton() {
@@ -3266,15 +3363,15 @@ function openQuestion(id) {
   const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
   const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
   const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
-  showDrawer(`<h2 id="drawer-title">${qtext(q.question, q.links)}</h2>
+  showDrawer(`<h2 id="drawer-title">${qinline(q.question, q.links)}</h2>
     ${attrs({ id, peek: p, type: 'question', computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
-    ${q.context ? `<p class="ctx measure">${qtext(q.context, q.links)}</p>` : ''}
-    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
+    ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
+    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
     ${answeredCard(q)}
     ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
@@ -3306,7 +3403,7 @@ function openFile(params) {
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
-  if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>${tail}`);
+  if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></p>${tail}`);
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
   if (typeof txt !== 'string') return showDrawer(`${head}<p class="err">${esc(txt.error)}</p>${tail}`);
@@ -3372,6 +3469,44 @@ function avHeader() {
   $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
   $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
 }
+// Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
+const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
+// Its viewer, in a tab of its own.
+const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at && at !== 'main' ? `?${new URLSearchParams({ at })}` : ''}`;
+// The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
+// artifact's opaque origin takes '*'), the ids minted for real pointer events, the last reply, and
+// where the lens says each pinned anchor is now (keyed by a thread's id).
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
+// What the lens was asked and has not answered, let go: a waiting click hears it is gone (the page it
+// pointed at is no longer there, so it starts nothing), and no reply to a question from before is taken.
+function tsForget() {
+  for (const f of [...TS.waiters.values()]) f({ gone: true });
+  TS.waiters.clear();
+  TS.minted.clear();
+  TS.hit = null;
+}
+function tsSet(kind, info = {}) {
+  tsForget();
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, watch: '', last: null }, info);
+  for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
+}
+// The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
+// state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null } = {}) {
+  const src = artSrc(slug, at);
+  AV = { at, slug };
+  if (title) {
+    $('av-title').textContent = title;
+    $('av-where').innerHTML = at === 'main' ? 'landed' : String(at).startsWith('tree:') ? 'the published version' : `draft in ${linkify(at)}`;
+  } else avHeader();
+  $('av-note').hidden = !note;
+  $('av-note').textContent = note ?? '';
+  $('av-tab').href = artViewer(slug, at);
+  if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp });
+  else Object.assign(TS, { fp, mainFp });
+  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
+  $('artifact-view').hidden = false;
+}
 function openArtifact(raw) {
   const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
   let at = null, slug = null;
@@ -3379,15 +3514,9 @@ function openArtifact(raw) {
   const note = AV_NOTE;
   AV_NOTE = null;
   if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
-  const src = `/artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${slug}/`;
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
-  AV = { at, slug };
-  avHeader();
-  $('av-note').hidden = !note;
-  $('av-note').textContent = note ?? '';
-  $('av-tab').href = src;
-  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
-  $('artifact-view').hidden = false;
+  const arts = DATA?.library?.artifacts ?? [];
+  showArtifact(slug, at, { note, fp: arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null });
   $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
@@ -3395,6 +3524,8 @@ function openArtifact(raw) {
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
+  tsSet(null);
+  tsPins();
   $('artifact-view').hidden = true;
   $('av-frame').removeAttribute('src');
   // a drawer or a review it was opened over stays, with its scrim
@@ -3402,7 +3533,8 @@ function closeArtifact() {
   avFocus?.focus?.();
   return true;
 }
-function leaveArtifact() { if (AV_FROM) history.back(); else location.hash = '#library'; }
+// a viewer tab has nothing to go back to: it never closes
+function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => { const f = $('av-frame'), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
 // a question's link to a changed artifact says so in the viewer's header
@@ -3709,7 +3841,7 @@ function renderLibrary(lib) {
     const name = a.error ? a.slug : a.title || a.slug;
     const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
     return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
-      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
+      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
       ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
       ${a.at === 'main' && !a.error ? pubLine(a) : ''}
@@ -3907,7 +4039,10 @@ const T_ENC = new TextEncoder();
 const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
 const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
 // One line of plain text, at most n UTF-16 units (what the log's schema counts), never half a pair.
-const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// What a terminal or a reader's eye acts on (a control, a bidi override): the kit's UNSAFE_TEXT, held
+// equal by a test. Only ever used to replace (it is global).
+const T_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -3926,19 +4061,72 @@ function tSubjectAt(el, x, y, sec) {
   const f = (n, a, w) => (w ? Math.min(1, Math.max(0, Math.round(((n - a) / w) * 1000) / 1000)) : 0);
   return { subject: { kind: 'page', view: s.view, at: { x: f(x, s.box.left, s.box.width), y: f(y, s.box.top, s.box.height) }, quote: tCut(tLine(s.heading, 300), 300) }, title: tLine(`the dashboard · ${s.heading || s.view}`, T_TITLE_MAX), el: s.el };
 }
-// A subject cut to the log's cap before it is sent: an element's HTML first, then console errors,
-// then the quote (the dashboard's own subjects are small; a later kit's lenses capture more).
+// What the log takes of a capture: each kind's keys (the kit's SUBJECT_KEYS) and each string's cap in
+// bytes (SUBJECT_CAPS, ANCHOR_CAPS: a test holds the three equal to the kit's).
+const T_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
+const T_ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+const T_SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], artifact: ['slug', 'at', 'fp', 'path', 'anchor', 'point'], preview: ['name', 'route', 'viewport', 'anchor', 'point', 'errors'] };
+const T_ERRORS = 3, T_ERROR_MAX = 200, T_AT_MAX = 100;
+// A box's capability (the kit's BOX_CAPABILITY and its _TAIL, held equal by a test), cut from every
+// string before a cap is, so a cap never leaves half of one that the kit could no longer tell.
+const T_CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
+const T_CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
+const T_BOX_CAPABILITY = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{1,15}${T_CAP_DOT}[\\w-]{16}${T_CAP_DOT}[\\w-]{22}`, 'gi');
+const T_BOX_CAPABILITY_TAIL = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{13,15}${T_CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${T_CAP_DOT}[\\w-]{0,21})?)\u2026?$`, 'i');
+const tUncap = (v) => String(v).replace(T_BOX_CAPABILITY, '[link removed]').replace(T_BOX_CAPABILITY_TAIL, '[link removed]');
+// Names the log matches whole (a ref, a section, a slug, a version, a fingerprint, a preview): one
+// over its cap is dropped, not cut, so the kit refuses the subject rather than point somewhere else.
+const T_WHOLE = ['ref', 'view', 'slug', 'at', 'fp', 'name'];
+// What gives, in order, while a subject is over the log's 2,500 bytes encoded.
+const T_SHRINK = [['anchor', 'html'], ['errors'], ['quote'], ['route'], ['path'], ['anchor', 'selector'], ['anchor', 'text'], ['anchor', 'name'], ['anchor', 'role'], ['anchor', 'tag']];
+// A box of numbers (a rect, a point, a viewport), only when every one is a finite number, in whole
+// pixels unless it is a page's fractions; else null.
+const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k]) && ((k !== 'w' && k !== 'h') || v[k] >= 0)) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
+// An anchor as a lens described it: the kit's keys only, each cut to its cap, its rect and point
+// only when whole; null when there is nothing of one. Its words (all but the element's HTML) drop
+// what T_UNSAFE matches, as the kit refuses them: a bidi override would have the owner's card read
+// the page's words reversed. Dropped before the capability is cut, so none can hide one in two.
+function tAnchor(a) {
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
+  const x = {};
+  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(tUncap(k === 'html' ? a[k] : a[k].replace(T_UNSAFE, '')), T_ANCHOR_CAPS[k]);
+  const rect = tBox(a.rect, ['x', 'y', 'w', 'h']);
+  if (rect) x.rect = rect;
+  const point = tBox(a.point, ['x', 'y']);
+  if (point) x.point = point;
+  return Object.keys(x).length ? x : null;
+}
+// A subject as the log takes it, before it is sent: only its kind's keys, each field cut of any
+// capability and to its own cap (a lens's capture is the framed page's, so nothing in it is trusted
+// to be small), then the whole to the log's 2,500 bytes, T_SHRINK's fields giving in turn: an
+// element's HTML first, then console errors, the quote, the route, the path, the anchor's words.
 function tFit(s) {
-  const x = JSON.parse(JSON.stringify(s));
-  const size = () => tBytes(JSON.stringify(x));
-  for (let i = 0; i < 50 && size() > T_SUBJECT_MAX; i++) {
-    const over = size() - T_SUBJECT_MAX;
-    if (x.anchor?.html) x.anchor.html = tCut(x.anchor.html, Math.max(0, tBytes(x.anchor.html) - over));
-    else if (x.errors?.length) x.errors.pop();
-    else if (x.quote) x.quote = tCut(x.quote, Math.max(0, tBytes(x.quote) - over));
-    else if (x.route) x.route = tCut(x.route, Math.max(0, tBytes(x.route) - over));
-    else break;
+  const keys = s && Object.hasOwn(T_SUBJECT_KEYS, s.kind) ? T_SUBJECT_KEYS[s.kind] : null;
+  if (!keys) return null;
+  const x = { kind: s.kind };
+  for (const k of keys) {
+    const v = s[k];
+    if (v === undefined || v === null) continue;
+    if (k === 'anchor') { const a = tAnchor(v); if (a) x.anchor = a; }
+    else if (k === 'point') { const p = tBox(v, ['x', 'y']); if (p) x.point = p; }
+    else if (k === 'viewport') { const p = tBox(v, ['w', 'h']); if (p) x.viewport = p; }
+    else if (k === 'at' && s.kind === 'page') { const p = tBox(v, ['x', 'y'], false); if (p) x.at = p; }
+    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(tUncap(e), T_ERROR_MAX)); }
+    else if (typeof v !== 'string') continue;
+    else if (T_WHOLE.includes(k)) { if (tBytes(v) <= (k === 'at' ? T_AT_MAX : T_CAPS[k])) x[k] = v; }
+    else x[k] = tCut(tUncap(v), T_CAPS[k]);
   }
+  const size = () => tBytes(JSON.stringify(x));
+  for (let i = 0; i < 100 && size() > T_SUBJECT_MAX; i++) {
+    const over = size() - T_SUBJECT_MAX;
+    const f = T_SHRINK.find(([a, b]) => (b ? x[a]?.[b] : x[a]?.length));
+    if (!f) break;
+    if (f[0] === 'errors') { x.errors.pop(); continue; }
+    const [o, k] = f[1] ? [x[f[0]], f[1]] : [x, f[0]];
+    o[k] = tCut(o[k], Math.max(0, tBytes(o[k]) - over));
+    if (!o[k]) delete o[k];
+  }
+  if (x.anchor && !Object.keys(x.anchor).length) delete x.anchor;
   return x;
 }
 // The line under the turns: nothing once the supervisor has the last word (its reply is the state).
@@ -3972,7 +4160,9 @@ function tWhere(s) {
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
   return 'no subject';
 }
-const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : null);
+// A spot in a framed page, for its key: its anchor as the lens named it, else the point.
+const tFrameSpot = (s) => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`);
+const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${tFrameSpot(s)}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${tFrameSpot(s)}` : null);
 // One pin per subject, for open threads: numbered as the dock numbers them (by when each began), with
 // every thread on it, oldest first.
 function tPins(threads) {
@@ -4009,6 +4199,49 @@ function tLanded(raw, p) {
 }
 // A dot in the dock: the supervisor spoke after the owner last looked at the thread (this browser).
 const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
+// What a lens says (the artifact lens, the preview lens: spec §6, §7). Every message is the framed
+// page's, so its code's, and trusted for nothing: kept only from the frame the page posted to
+// (source), of a kind a lens says, a hit-reply only to an id this page minted for a real pointer
+// event (minted), and rebuilt from that kind's fields, every string cut of a box's capability and
+// to the kit's cap. It is shown as text and starts nothing until the owner writes.
+const T_LENS_SAYS = ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors'];
+function tLensMessage(e, frameWin, minted) {
+  if (!frameWin || e.source !== frameWin) return null;
+  const m = e.data;
+  if (!m || typeof m !== 'object' || m.lens !== 1 || !T_LENS_SAYS.includes(m.type)) return null;
+  const str = (v, n) => (typeof v === 'string' ? tCut(tUncap(v), n) : null);
+  if (m.type === 'hit-reply') {
+    if (typeof m.id !== 'string' || !minted.has(m.id)) return null;
+    const anchor = tAnchor(m.anchor);
+    return { type: 'hit-reply', id: m.id, anchor, rect: anchor?.rect ?? tBox(m.rect, ['x', 'y', 'w', 'h']), route: str(m.route, T_CAPS.route) };
+  }
+  // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
+  if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
+  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
+  if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
+  return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x), T_ERROR_MAX)) };
+}
+// The page inside an artifact, from the path its lens reports: whatever the prefix (main, a draft's
+// worktree, a published tree, the gateway's capability before it), what follows <slug>/, cut to the
+// kit's cap only once the prefix is gone (tLensMessage keeps room for it).
+// A page that is no page in it (a dot segment, an absolute path) is its index.
+function tArtPath(p, slug) {
+  const m = /\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]+)\/([^/]+)\/(.*)$/.exec(String(p ?? ''));
+  if (!m || m[1] !== slug || m[2].startsWith('/') || m[2].split('/').some((x) => x === '..' || x === '.')) return 'index.html';
+  return tCut(m[2], T_CAPS.path) || 'index.html';
+}
+// A thread's title for a spot in a framed page: what is there as the page names it (button "Buy
+// now"), or the page itself. Page-written, so data like the rest of the capture (spec §1).
+function tFrameTitle(s) {
+  const where = s.kind === 'artifact' ? `${s.slug} · /${s.path || 'index.html'}` : `${s.name}${s.route ? ` · ${s.route}` : ''}`;
+  const a = s.anchor;
+  if (!a) return tLine(where, T_TITLE_MAX);
+  const named = tLine(a.name || a.text, 60);
+  return tLine(`${a.role || a.tag || 'element'}${named ? ` "${named}"` : ''}`, T_TITLE_MAX) || tLine(where, T_TITLE_MAX);
+}
+// Whether the stage shows a subject's page now: the same artifact and page, or the same preview and route.
+const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'artifact' ? s.slug === stage.slug && (s.path || 'index.html') === (stage.path || 'index.html') : s.kind === 'preview' && s.name === stage.name && (s.route ?? '') === (stage.route ?? ''));
 /* threads-core end */
 
 /* threads-layer start */
@@ -4031,22 +4264,33 @@ function tlHitAt(x, y) {
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
   return el ? tSubjectAt(el, x, y, tlSection) : null;
 }
+// The pin cursor at a point.
+function tlCursor(x, y) {
+  document.documentElement.classList.add('tl-aiming');
+  const cur = tlEl('tl-cursor');
+  cur.hidden = false;
+  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
+}
+// What is under it outlined (r: its box on the screen; spot: a point, not a thing), with a chip
+// naming it: as text, since on the stage the name is the framed page's.
+function tlMark(r, spot, title, x, y) {
+  const hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
+  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+  hl.classList.toggle('spot', spot);
+  hl.hidden = false;
+  chip.textContent = title;
+  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  chip.hidden = false;
+}
 // The pin cursor at the point, what is under it outlined, and a chip with its name.
 function tlShow(x, y) {
   const hit = tlHitAt(x, y);
   TL.hit = hit ? { ...hit, x, y } : null;
-  document.documentElement.classList.add('tl-aiming');
-  const cur = tlEl('tl-cursor'), hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
-  cur.hidden = false;
-  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
-  if (!hit) { hl.hidden = true; chip.hidden = true; return; }
+  // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
+  if (!hit) { tlHide(); return; }
+  tlCursor(x, y);
   const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
-  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
-  hl.classList.toggle('spot', hit.subject.kind !== 'item');
-  hl.hidden = false;
-  chip.textContent = hit.title;
-  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
-  chip.hidden = false;
+  tlMark(r, hit.subject.kind !== 'item', hit.title, x, y);
 }
 function tlHide() {
   TL.hit = null;
@@ -4060,16 +4304,26 @@ function tlPinMode(on) {
   tlEl('tl-pinbtn')?.setAttribute('aria-pressed', String(on));
   document.documentElement.classList.toggle('tl-pinning', on);
   if (!on) tlHide();
+  // over a frame, pin mode keeps the overlay up (and a wheel there scrolls the page in the frame)
+  tsRaise(on);
 }
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+  if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
   else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+  // Shift over a frame (spec §4): the parent sees the key while it has the focus, and raises the
+  // overlay, so the pointer over the frame is the layer's. The lens tells it when the frame has it.
+  else if (e.key === 'Shift' && tsOn() && !typingIn(document.activeElement)) tsRaise(true);
 }, true);
-window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
-window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) { tlHide(); tsRaise(false); } }, true);
+window.addEventListener('blur', () => { if (!TL.pin) { tlHide(); tsRaise(false); } });
 // Shift shows the pin only once the pointer moves, and never over a field being typed in, so a
 // capital typed in a field doesn't summon it.
 window.addEventListener('pointermove', (e) => {
+  // the parent's own pointer, anywhere, without Shift: an overlay a page's message raised goes,
+  // though the pointer never crossed it
+  if (e.isTrusted && TS.raised && !e.shiftKey && !TL.pin) tsRaise(false);
+  // over the stage's overlay the stage's own listeners point, in the frame's coordinates
+  if (e.target?.closest?.('#av-over')) return;
   if (!(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
   const over = document.elementFromPoint(e.clientX, e.clientY);
   if (tlOwn(over) || typingIn(over)) { tlHide(); return; }
@@ -4080,7 +4334,7 @@ window.addEventListener('pointermove', (e) => {
 // redraw among them) see it. A mouse starts on its click; a finger or a pen on lifting, and the
 // click the browser makes of that lift is swallowed.
 for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, (e) => {
-  if (tlOwn(e.target)) return;
+  if (tlOwn(e.target) || e.target?.closest?.('#av-over')) return;
   if (type === 'pointerdown') { TL.via = e.pointerType; if (TL.pin && e.pointerType !== 'mouse') tlShow(e.clientX, e.clientY); }
   const swallow = Date.now() < TL.swallowUntil && type !== 'pointerdown' && type !== 'pointerup';
   if (!tlShowing() && !swallow) return;
@@ -4115,10 +4369,14 @@ function tlHome(s) {
 }
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
+  if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
+    // a spot on a Loop tab is on that tab: none while another is shown
+    const tab = String(s.view).slice(1).split('/')[1];
+    if (sec?.id === 'loop' && tab && tab !== TAB) return null;
     const b = sec.getBoundingClientRect();
     const x = b.left + (s.at?.x ?? 0) * b.width, y = b.top + (s.at?.y ?? 0) * b.height;
     return { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12, width: 24, height: 24 };
@@ -4127,6 +4385,13 @@ function tlTargetRect(s) {
 }
 // Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
 function tlGoTo(s) {
+  // a spot on an artifact: the stage on it (a published tree's thread opens main's), in the dashboard
+  if (s?.kind === 'artifact') {
+    if (VIEWER) return;
+    const h = artHref(s.slug, String(s.at).startsWith('tree:') ? 'main' : s.at);
+    if (location.hash !== h) location.hash = h;
+    return;
+  }
   if (s?.kind === 'item') {
     const el = tlHome(s);
     if (!el) return;
@@ -4135,7 +4400,69 @@ function tlGoTo(s) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
     el.scrollIntoView({ block: 'center' });
-  } else if (s?.kind === 'page') document.getElementById(String(s.view).slice(1).split('/')[0])?.scrollIntoView();
+  } else if (s?.kind === 'page') {
+    const [sec, tab] = String(s.view).slice(1).split('/');
+    if (sec === 'loop' && tab && document.querySelector(`#loop-tabs [data-tab="${CSS.escape(tab)}"]`)) showTab(tab);
+    document.getElementById(sec)?.scrollIntoView();
+  }
+}
+// Where a frame subject's pin is now, on the screen and in the frame (fx, fy): at its anchor's
+// point inside the rect the lens last gave (clamped to it), or at its point alone; null when the
+// stage doesn't show its page, the lens hasn't found it, or it is scrolled out of the frame.
+function tsRect(s) {
+  if (!tsOn() || !tFrameOn(s, TS)) return null;
+  let x, y;
+  if (s.anchor) {
+    const id = TS.keyOf.get(tKey(s));
+    if (id) {
+      // the lens watches it: its rect, or none while it hasn't found it (or says it can't)
+      const r = TS.rects.get(id)?.rect;
+      if (!r) return null;
+      x = r.x + Math.min(Math.max(0, s.anchor.point?.x ?? r.w), r.w);
+      y = r.y + Math.min(Math.max(0, s.anchor.point?.y ?? 0), r.h);
+    } else if (s.point) ({ x, y } = s.point); // an anchor with no selector to find it by: where it was clicked
+    else return null;
+  } else if (s.point) ({ x, y } = s.point);
+  else return null;
+  const fr = tsFrame().getBoundingClientRect();
+  if (x < 0 || y < 0 || x > fr.width || y > fr.height) return null;
+  const cx = fr.left + x, cy = fr.top + y;
+  return { left: cx - 12, right: cx + 12, top: cy - 12, bottom: cy + 12, width: 24, height: 24, fx: x, fy: y };
+}
+// Ask the lens to watch every open thread's anchor on the page the stage shows, named by the thread's
+// id (decision 7), whenever that set changes; it answers with rects, and sends them again as they
+// move. Only ids and what the lens finds an anchor by (its own words for it) go: never a title, a
+// turn or an outcome.
+function tsWatch() {
+  if (!tsOn() || !TS.ready) return;
+  const groups = tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS) && typeof g.subject.anchor?.selector === 'string');
+  TS.keyOf = new Map(groups.map((g) => [tKey(g.subject), g.ids[0]]));
+  const anchors = groups.map((g) => { const { selector, tag, text, rect } = g.subject.anchor; return { key: g.ids[0], anchor: { selector, tag, text, rect } }; });
+  const sig = anchors.map((a) => a.key).join(' ');
+  if (sig === TS.watch) return;
+  TS.watch = sig;
+  TS.watching = new Set(anchors.map((a) => a.key));
+  for (const k of TS.rects.keys()) if (!TS.watching.has(k)) TS.rects.delete(k); // a rect of a thread no longer watched
+  tsPost({ type: 'resolve', id: `r${++TS.seq}`, anchors });
+}
+// The stage's pins, in the frame's coordinates over it: one per subject on the page it shows.
+function tsPins() {
+  // none until this page's lens is ready: a point is only where the last page's pin was
+  const pins = !tsOn() || !TS.ready ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
+    const r = tsRect(g.subject);
+    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+  }).filter(Boolean);
+  // a stage pin pressed or focused is kept through a redraw as a page pin is (tlHeld): the press is
+  // recorded for it too (the layer's pointerdown), though it sits on the stage, outside #tl
+  tlPinsInto($('av-pins'), pins, tlHeld);
+}
+// An artifact subject's fingerprint now, for "changed since": the stage's when it shows that version,
+// else the dashboard's Library; for a published tree, main's (a tree never changes, so "changed
+// since" means main has moved on from it, spec §5).
+function tArtFpNow(s) {
+  const tree = String(s.at).startsWith('tree:');
+  if (TS.kind === 'artifact' && TS.slug === s.slug && (TS.at === s.at || (tree && TS.mainFp))) return tree ? TS.mainFp : TS.fp;
+  return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
@@ -4163,13 +4490,13 @@ function tlQuestion(q, reasonText) {
   if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
   const open = (DATA?.questions || []).find((x) => x.id === q.id);
   if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
-  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${qinline(q.question, q.links)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
 }
 // A turn's words, or the question it asks.
 function tlTurnBody(u, t) {
   const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
-  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : u.by === 'owner' ? `<div class="tl-text">${linkify(u.text)}</div>` : `<div class="tl-text ctx">${qblock(u.text)}</div>`;
 }
 function tlTurns(t) {
   return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
@@ -4185,7 +4512,14 @@ function tlCardBody(t) {
   if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
   // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
   const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
-  if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
+  if (rk !== TL.readyKey) {
+    // a question answered meanwhile changes the warning, never the words being typed or the caret
+    const was = tlEl('tl-outcome'), kept = was?.value ?? '', focused = document.activeElement === was, caret = was?.selectionStart ?? 0;
+    TL.readyKey = rk;
+    tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t);
+    const now = tlEl('tl-outcome');
+    if (now && kept) { now.value = kept; if (focused) { now.focus(); now.setSelectionRange(caret, caret); } }
+  }
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
@@ -4194,7 +4528,7 @@ function tlCardBody(t) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : '';
+    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -4399,10 +4733,10 @@ const TL_DOT = '<span class="tl-dot" role="img" aria-label="a reply you haven&#3
 // The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
 // a rewrite would drop the focus, or the click a press is half of.
 const tlHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
-window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) || e.target?.closest?.('#av-pins') ? e.target : null; }, true);
 // after the click this release makes; then what the press held back is drawn
 for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); }, 0), true);
-document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target) || e.target?.closest?.('#av-pins')) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
 // When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
@@ -4413,15 +4747,22 @@ function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter
 function tlPins() {
   const box = tlEl('tl-pins');
   const pins = tPins(TL.threads).map((g) => {
+    // a spot in a framed page is the stage's to pin (tsPins), in the frame's own coordinates
+    if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
     const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
-  // each pin kept by its thread and changed in place, never taken out and put back, so a press or the
-  // focus on one survives; one gone stays while it is pressed or focused (the next draw takes it)
+  tlPinsInto(box, pins, tlHeld);
+  tsWatch();
+  tsPins();
+}
+// Each pin kept by its thread and changed in place, never taken out and put back, so a press or the
+// focus on one survives; one gone stays while held says so (pressed or focused: the next draw takes it).
+function tlPinsInto(box, pins, held) {
   const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
-  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !held(b)) b.remove();
   for (const x of pins) {
     let b = have.get(x.id);
     if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
@@ -4488,6 +4829,140 @@ function tlAct(action, body) {
     errId: 'tl',
   });
 }
+// ---- the stage's lens (spec §4, §6): what is where in the framed page ----
+const tsFrame = () => $('av-frame');
+const tsOn = () => !!TS.kind && !$('artifact-view').hidden;
+// To the lens on the stage. An artifact's frame has an opaque origin, so '*', and the artifact's own
+// scripts see these too: string ids, points and anchors from the log, never the owner's words (decision 7).
+function tsPost(m) { const w = tsFrame()?.contentWindow; if (!w || !TS.kind) return; try { w.postMessage({ lens: 1, ...m }, TS.target); } catch {} }
+// An id for one real pointer event, the newest 20 kept: only a reply to one of these is a hit.
+function tsMint(x, y) { const id = `h${++TS.seq}`; TS.minted.set(id, { x, y }); if (TS.minted.size > 20) TS.minted.delete(TS.minted.keys().next().value); return id; }
+// The overlay up (Shift, from either side, or pin mode) or down (Shift up, Esc): while it is up the
+// pointer over the frame is the layer's, and the frame gets its clicks back when it goes.
+function tsRaise(on) {
+  TS.raised = !!on && tsOn();
+  $('av-over').hidden = !TS.raised;
+  if (!TS.raised) { TS.hit = null; TS.last = null; if (!TL.pin) tlHide(); }
+}
+// A thread's subject for a spot on the stage: where the owner pointed, and the lens's anchor there
+// when it has one (none: no lens, an older kit, a page that ignores it, or an answer about somewhere
+// else), so the pin can be drawn at the point either way (spec §4 step 3).
+function tsSubject(anchor, x, y) {
+  if (TS.kind !== 'artifact') return null;
+  return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : {}), point: { x: Math.round(x), y: Math.round(y) } };
+}
+// An anchor the lens gave for a point, only when its box holds that point (a few pixels' slack for
+// rounding): the page says where its element is, and a page that names something elsewhere is not
+// believed about what is under the owner's pointer. An anchor without a rect is never held: the
+// lens always gives one, so one without is a page's say-so about nowhere.
+const tsHolds = (a, at) => !!(a?.rect && at) && at.x >= a.rect.x - 4 && at.x <= a.rect.x + a.rect.w + 4 && at.y >= a.rect.y - 4 && at.y <= a.rect.y + a.rect.h + 4;
+// One redraw of it a frame, however many answers or moves come in it.
+function tsRedraw() {
+  if (TS.drawPending) return;
+  TS.drawPending = true;
+  requestAnimationFrame(() => { TS.drawPending = false; if (TS.raised) tsShowHit(); });
+}
+// The outline and chip for the lens's latest answer, at the pointer.
+function tsShowHit() {
+  const l = TS.last;
+  const a = TS.hit?.anchor;
+  const s = l && tsSubject(a, l.x, l.y);
+  if (!s) return;
+  const fr = tsFrame().getBoundingClientRect();
+  const r = a?.rect ? { left: fr.left + a.rect.x, top: fr.top + a.rect.y, width: a.rect.w, height: a.rect.h } : { left: l.cx - 12, top: l.cy - 12, width: 24, height: 24 };
+  tlMark(r, !a?.rect, tFrameTitle(s), l.cx, l.cy);
+}
+// Where a pointer event is, in the frame's coordinates and the window's.
+const tsAt = (e) => { const fr = tsFrame().getBoundingClientRect(); return { x: e.clientX - fr.left, y: e.clientY - fr.top, cx: e.clientX, cy: e.clientY }; };
+// A click (a mouse) or a lift (a finger, a pen) starts a thread on what the lens says is there, given
+// 150 ms (TS.waitMs) to answer this event's own question, else on the point; nothing is written until the owner
+// writes, and then only through tFit.
+async function tsPick(e) {
+  if (!e.isTrusted) return;
+  e.preventDefault();
+  e.stopPropagation();
+  // the parent's own event says whether Shift is down: an overlay a page raised is no pin
+  if (!e.shiftKey && !TL.pin) { tsRaise(false); return; }
+  const at = tsAt(e);
+  const id = tsMint(at.x, at.y);
+  tsPost({ type: 'hit', id, x: at.x, y: at.y });
+  const reply = await new Promise((resolve) => {
+    const timer = setTimeout(() => { TS.waiters.delete(id); resolve(null); }, TS.waitMs);
+    TS.waiters.set(id, (v) => { clearTimeout(timer); TS.waiters.delete(id); resolve(v); });
+  });
+  // the page it pointed at went (a load, another artifact) before the answer came: nothing starts
+  if (reply?.gone) return;
+  const s = tsSubject(reply?.anchor ?? null, at.x, at.y);
+  tsRaise(TL.pin);
+  tlHide();
+  if (s) tlStart({ subject: s, title: tFrameTitle(s), x: at.cx, y: at.cy });
+}
+const tsOver = $('av-over');
+// One question a frame: the newest point, at most once per animation frame (spec §4 step 2).
+tsOver.addEventListener('pointermove', (e) => {
+  if (!e.isTrusted) return;
+  // the parent's own pointer events carry Shift as it is: an overlay a page's message raised (or
+  // left up) goes as soon as the pointer moves without it
+  if (!e.shiftKey && !TL.pin) { tsRaise(false); return; }
+  TS.last = tsAt(e);
+  tlCursor(e.clientX, e.clientY);
+  tsRedraw();
+  if (TS.rafPending) return;
+  TS.rafPending = true;
+  requestAnimationFrame(() => { TS.rafPending = false; const l = TS.last; if (l && TS.raised) tsPost({ type: 'hit', id: tsMint(l.x, l.y), x: l.x, y: l.y }); });
+});
+tsOver.addEventListener('pointerleave', () => { TS.last = null; TS.hit = null; tlHide(); });
+// a press without Shift lowers the overlay at once, but is still its own: the frame never saw the
+// press, so its click can't fall through (spec §4 step 4), and the next one reaches the page
+tsOver.addEventListener('pointerdown', (e) => { TS.via = e.pointerType; e.preventDefault(); if (!e.shiftKey && !TL.pin) tsRaise(false); });
+tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsPick(e); });
+tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
+// in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
+tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
+// What a lens says redraws the layer once a frame, however much of it comes.
+function tsDrawSoon() {
+  if (TS.pinsPending) return;
+  TS.pinsPending = true;
+  requestAnimationFrame(() => { TS.pinsPending = false; tlDraw(); });
+}
+// Each page the frame loads is asked what it is: its lens answers ready.
+tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
+window.addEventListener('message', (e) => {
+  if (!TS.kind) return;
+  const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
+  if (!m) return;
+  // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
+  // and once it has, what it watches for the pins is asked of it afresh. Once a load (the frame's
+  // load lets it go): a page that says ready again and again would otherwise have every one redraw
+  // and ask its lens to watch again, and a loop of them would hold the owner's tab.
+  if (m.type === 'ready') { if (TS.ready) return; TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); TS.watch = ''; tsDrawSoon(); return; }
+  // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
+  // up, constructor or __proto__ among them, is one); the pins, and an open card beside its pin,
+  // follow
+  if (m.type === 'rects') {
+    for (const r of m.rects) if (TS.watching.has(r.key)) TS.rects.set(r.key, r);
+    tsDrawSoon();
+    return;
+  }
+  // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
+  // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
+  // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
+  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame ends pin mode only.
+  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { if (TL.pin) tlPinMode(false); } else if (m.shift) tsRaise(true); return; }
+  if (m.type === 'hit-reply') {
+    // one answer a question: its id let go of as it is taken, so a page that answers it again is
+    // dropped by tLensMessage and costs nothing more
+    const at = TS.minted.get(m.id);
+    TS.minted.delete(m.id);
+    const hit = { anchor: tsHolds(m.anchor, at) ? m.anchor : null, n: Number(m.id.slice(1)) };
+    // a click's own question is answered first; then the newest question's answer only, so a slow
+    // reply to an older point never replaces it
+    TS.waiters.get(m.id)?.(hit);
+    if (TS.hit && TS.hit.n >= hit.n) return;
+    TS.hit = hit;
+    tsRedraw();
+  }
+});
 /* threads-layer end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
@@ -4554,6 +5029,9 @@ function drawOrHold(d, force = false) {
 
 let loading = null;
 async function load({ force = false } = {}) {
+  // a viewer tab has no dashboard to read for: press() reads after every send (the layer's Send and
+  // Resolve go through it), and drawing the hidden page would put its title over the viewer's
+  if (VIEWER) return;
   // one refresh at a time; a forced one waits for the one in flight, then runs
   if (loading) { if (!force) return; await loading.catch(() => {}); }
   loading = loadNow();
@@ -4871,9 +5349,68 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
-loadSchemaDocs();
-load();
-setInterval(load, 10000);
+// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, and the
+// instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
+async function viewerBoot() {
+  document.documentElement.classList.add('viewer');
+  // what /api/view said: the artifact there, or its status (404: nothing there; else 0 for no answer)
+  const info = async (slug, at) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return { status: r.status, d: r.ok ? await r.json() : null }; } catch { return { status: 0, d: null }; } };
+  let at = VIEWER.at;
+  let got = await info(VIEWER.name, at);
+  let note = null;
+  // a published tree this checkout lacks, or a draft gone (a 404, and only that): main's, said so
+  // (spec §8), shown in place. A describe that failed says so, and shows the version asked for.
+  // Nothing here navigates or rewrites the URL: inside the owner wrapper it carries the gateway's
+  // grant (w=), which a reload needs, and which nothing passes on to the frame.
+  // Framed (the owner wrapper), it stays on the version asked for: the gateway lets a frame show
+  // only the published tree it granted, so main's would be an empty frame under a note saying it is main.
+  let held = null;
+  if (got.status === 404 && at !== 'main') {
+    if (window.parent !== window) held = String(at).startsWith('tree:') ? "The published version isn't in this checkout; open it from the Library." : "This draft isn't here any more; open it from the Library.";
+    else { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; got = await info(VIEWER.name, at); }
+  }
+  const d = got.d;
+  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+  document.title = `${$('av-title').textContent} · devteam`;
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
+  hello();
+  setInterval(hello, 30000);
+  // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
+  const hint = () => { $('av-hint').hidden = window.parent === window || document.hasFocus(); };
+  // again whenever the keyboard may have moved: into this page or a frame in it (focusin), the tab
+  // shown again, and a tick after a blur, once the focus has landed wherever it went
+  hint();
+  addEventListener('focus', hint);
+  addEventListener('focusin', hint);
+  document.addEventListener('visibilitychange', hint);
+  addEventListener('blur', () => setTimeout(hint, 0));
+  // and twice a second: a click straight into the artifact from the page around this one moves the
+  // keyboard into this page's frame without an event here (Chrome sends none), and hasFocus is cheap
+  setInterval(hint, 500);
+  await tlRefresh();
+  // a #talk/<id> link opens its card here: route() never runs in a viewer (decision 22)
+  viewerTalk();
+  addEventListener('hashchange', viewerTalk);
+  setInterval(() => { if (document.visibilityState === 'visible') tlRefresh(); }, 5000);
+}
+// #talk/<id> in a viewer tab, and nothing else of the dashboard's routes.
+function viewerTalk() {
+  if (!location.hash.startsWith('#talk/')) return;
+  let id = '';
+  try { id = decodeURIComponent(location.hash.slice(6)); } catch {}
+  if (/^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) tlOpen(id);
+}
+// In a viewer tab, a link into the dashboard (a ref in a turn, the Inbox) opens the dashboard in a tab
+// of its own; a thread's own link (#talk/) opens its card here.
+document.addEventListener('click', (e) => {
+  const a = VIEWER && e.target.closest?.('a[href^="#"]:not([href^="#talk/"])');
+  if (!a) return;
+  e.preventDefault();
+  const h = a.getAttribute('href');
+  window.open(`/${h}`, '_blank', 'noopener,noreferrer');
+});
+if (VIEWER) viewerBoot();
+else { loadSchemaDocs(); load(); setInterval(load, 10000); }
 </script>
 </body>
 </html>
