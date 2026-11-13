@@ -1622,6 +1622,16 @@ function ratingHistory(q) {
 const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
+// A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
+// whatever its kind (ask now records those as kind one-way-door; older lines may not). Only the
+// question is classified here: what it approves is still the owner's own answer on the fold
+// (questionView's status "answered", bound to the question's hash), never a default or a line the
+// supervisor wrote, and the class is hashed, so setting it after the answer reopens the question.
+const isDoorQuestion = (v) => v?.kind === 'one-way-door' || v?.class === 'one-way-door';
+// A door answer approves a plan only as recommended: an owner who chose otherwise said no to the
+// plan built on the recommendation. A door asked with no recommendation is the owner's open choice.
+const doorAgreed = (v) => !v.recommendation || v.matched === true;
+
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
   const hash = questionHash(q);
@@ -1656,7 +1666,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
@@ -4755,21 +4765,92 @@ function cmdAsk() { out(askLine().id); }
 // and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
 // (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
 const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
-function askLikeWarnings({ text, cls, kind }) {
-  if (!text.trim() || KIT_WORDED(cls, kind)) return;
+// A decision the owner has made is never put to them again (supervisor.md §6): ask refuses a
+// question as close as those above to one the owner answered (their own line, bound to the question
+// as asked; never a default or an open one) about the same work: a ticket or incident both name, or
+// the same goal or feature, and neither about other tickets; or neither about any work at all.
+// --new-because says what materially changed, and the owner reads it first. Not for the questions
+// whose answers lapse by design (a trust step's evidence, an incident's fix, a remediation's window,
+// a sensor's token, asked again only after the owner's own sensor reconsider),
+// nor for the kit's own wordings, nor for an answer already spent: one answer approves one call (one
+// per item it approves), so a yes that approved its call can't be cited again, and the next call of
+// the kind is a new question (the warning below still shows the earlier answer). A one-way door is
+// never spent: it covers each plan inside it.
+const REASK_EXEMPT = (cls, kind) => KIT_WORDED(cls, kind) || !['owner-decision', 'one-way-door', 'owner-action'].includes(kind) || ['incident-fix', 'production-remediation'].includes(cls);
+// An answer settles a question in its own class (an answer in another class can't be cited for this
+// one: the kit refuses it, so asking in the right class is no re-ask), or a one-way door's answer
+// settles a door asked again in any shape: what the owner was re-asked here.
+const settlesClass = (v, cls, kind) => (v.class ?? null) === (cls ?? null) || (isDoorQuestion(v) && (isDoorQuestion({ kind, class: cls }) || !cls || cls === 'approve-plan'));
+function sameWork(a, b) {
+  // a request for secrets is about what it asks for: the same secret to the same place, or not the same
+  const sinks = (x) => (x.secrets ?? []).map((y) => `${y.name}\n${y.sink}`);
+  if (sinks(a).length || sinks(b).length) return sinks(a).some((y) => sinks(b).includes(y));
+  // a question pinned to a text (a draft's blob, an artifact's hash) is about that text: a new draft is a new decision
+  const pins = (x) => ((x.id ? logGet(x.id)?.links : x.links) ?? []).filter(isObj).map((l) => l.blob ?? l.sha256).filter(Boolean);
+  if (pins(a).length || pins(b).length) { if (!pins(a).some((y) => pins(b).includes(y))) return false; }
+  const ta = [a.ticket, ...(a.blocks ?? [])].filter(Boolean);
+  const tb = [b.ticket, ...(b.blocks ?? [])].filter(Boolean);
+  if (ta.some((x) => tb.includes(x))) return true;
+  // about two different tickets: two decisions (a question that only blocks a ticket may still be the goal's)
+  if (a.ticket && b.ticket) return false;
+  if (!ta.length && !tb.length && !a.goal && !b.goal) return true;
+  if (a.goal && a.goal === b.goal) return true;
+  return sharesWork(questionAbout(a), questionAbout(b));
+}
+// The search above finds questions alike enough to mention; a refusal needs more: the two questions
+// themselves (not their context) share most of their words, every word counted whole ("v0.3.0" and
+// "v0.4.0", "UK" and "US" differ), only the glue words left out.
+const REASK_GLUE = new Set(['a', 'an', 'the', 'and', 'or', 'to', 'of', 'for', 'in', 'on', 'at', 'is', 'it', 'be', 'we', 'i', 'you', 'should', 'would', 'could', 'can', 'do', 'does', 'shall', 'will', 'please', 'this', 'that']);
+const questionWords = (t) => new Set((String(t ?? '').toLowerCase().match(/[\p{L}\p{N}]+(?:[.'’-][\p{L}\p{N}]+)*/gu) ?? []).filter((w) => !REASK_GLUE.has(w)));
+function nearlySameQuestion(a, b) {
+  const x = questionWords(a);
+  const y = questionWords(b);
+  if (!x.size || !y.size) return false;
+  const both = [...x].filter((w) => y.has(w)).length;
+  return both / (x.size + y.size - both) >= 0.7;
+}
+function answerSpent(v) {
+  if (isDoorQuestion(v)) return false;
+  // a goal change records its answer on the goal line, not as a call
+  if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === v.id))) return true;
+  const used = calls().filter((c) => c.approved_by === v.id);
+  const declared = v.approves ?? [];
+  if (!declared.length) return used.length > 0;
+  const done = new Set(used.flatMap((c) => (c.refs ?? []).flatMap((x) => String(x).split(','))));
+  return declared.every((a) => done.has(a));
+}
+function reaskWords(v) {
+  const door = isDoorQuestion(v);
+  const cite = v.recommendation && v.matched === false && !door ? `they answered other than your recommendation, and that is their decision; act on it, and use it in your recommendations` : `cite the answer instead (--approved ${v.id} on decide or act${door ? `; for a plan under it, act --class approve-plan --approved ${v.id}, and when it was asked for the goal, "- Goal-level door: ${v.id} covers this plan" in the plan review` : ''})`;
+  return `the owner already decided this: ${v.id} ${quoteData(capBytes300(v.question))} (answered ${quoteData(capBytes300(v.answer))} on ${String(v.answered_at).slice(0, 10)}). Never ask the owner a decision they have made: ${cite}. If something material changed since, ask again with --new-because "<what changed>", which the owner reads first (supervisor.md §6)`;
+}
+// Returns the --new-because to record: left off when nothing the owner answered is like this.
+function askLikeWarnings({ text, question, cls, kind, about, newBecause }) {
+  if (!text.trim() || KIT_WORDED(cls, kind)) return newBecause;
   const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
   const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
   const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context, x.recommendation, (x.choices ?? []).map((c) => c?.label)) }] }))];
-  if (!docs.length) return;
+  if (!docs.length) return newBecause ? (warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'), null) : newBecause;
   const ix = searchIndex(docs);
   const close = ix.docs.map((d) => ({ d, ...searchSimilar(ix, text, d) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
   const line = (s) => quoteData(capBytes300(s));
+  const reaskable = (k, secrets) => !(k === 'owner-action' && !(secrets ?? []).length);
+  const like = (c) => c.d.q && c.d.q.answered_by === 'owner' && !REASK_EXEMPT(c.d.q.class, c.d.q.kind) && reaskable(c.d.q.kind, c.d.q.secrets) && settlesClass(c.d.q, cls, kind) && nearlySameQuestion(question, c.d.q.question) && sameWork(about, c.d.q) && !answerSpent(c.d.q);
+  const same = close.find(like);
+  if (same && !REASK_EXEMPT(cls, kind) && !about.sensor && reaskable(kind, about.secrets) && !newBecause) die(reaskWords(same.d.q));
+  // asked again: the owner reads why only on a question that asks again what they decided
+  if (newBecause && !same) { warn('--new-because is for asking again a decision the owner made; nothing they answered is that decision, so it is left off'); newBecause = null; }
   for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
     const k = c.d.rule;
     if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
     else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
   }
-  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  // An answered one-way door covers each plan inside it, whatever kind it was asked as: cited, never asked again.
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) {
+    if (isDoorQuestion(c.d.q)) warn(`the owner answered a similar one-way door before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it covers this decision, withdraw this and cite it, never ask it again (supervisor.md §6): act --class approve-plan --approved ${c.d.q.id}, with "- Goal-level door: ${c.d.q.id} covers this plan" in the plan review when it was asked for the goal`);
+    else warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+  }
+  return newBecause;
 }
 // Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
 // paragraphs reach the dashboard as written (supervisor.md §6). Only where it can't be anything else:
@@ -4828,9 +4909,15 @@ function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
   let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
-  const kind = flagStr('kind') ?? 'owner-decision';
-  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const cls = flagStr('class') ?? null;
+  // A question in the owner-only class one-way-door is a one-way door: left without --kind it is
+  // asked as one, and asked as another kind it is refused, so the owner's answer is the one-way-door
+  // answer approve-plan and the plan review cite (and never re-asked as one), and the kind's own
+  // rules (no default, below; the Inbox's floor) hold. Refused, not rewritten: another kind given on purpose
+  // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
+  const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
+  if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
     const g = logGet(flagStr('goal') ?? '');
@@ -4906,6 +4993,8 @@ function askLine({ thread } = {}) {
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   // silence is never a yes on a one-way door or on what is the owner's alone (constitution.md §1)
   if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
+  // a door's answer approves a plan only as recommended (doorAgreed), so a door says what it recommends
+  if (kind === 'one-way-door' && !flagStr('recommendation')?.trim()) die('a one-way door needs --recommendation: the owner\'s yes to it is what approves the plan built on it');
   if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
@@ -5080,9 +5169,12 @@ function askLine({ thread } = {}) {
   ratingWarnings({ ...rating, blocks, def });
   askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence: flagNum('confidence'), recommendation, L });
   // what the owner may already have said about it: never in the way of asking
-  try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
+  // and a decision they already made is refused, unless something material changed (--new-because)
+  let newBecause = flagStr('new-because');
+  if (newBecause !== undefined && !newBecause.trim()) die('--new-because says what materially changed since the owner answered; it can\'t be blank');
+  try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
@@ -7558,7 +7650,7 @@ function cmdQuestions() {
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
-    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
+    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}${q.new_because ? `\n  Asked again because: ${q.new_because}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
@@ -7616,17 +7708,18 @@ function authorise(cls, scope, approved, refs, verb) {
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
   // the act checks it against the ticket's goals and its plan review, not as an approve-plan answer.
-  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  const doorCited = cls === 'approve-plan' && isDoorQuestion(approval);
   if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     const declared = approval.approves ?? [];
     if (declared.length) {
       const part = refs.flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
       if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this ${verb === 'decide' ? 'decision' : 'act'} is for in --refs`);
-      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part));
+      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part) && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} for ${part} (${used.id}); ask again for another`);
     } else {
-      const used = calls().find((a) => a.approved_by === approved);
+      // a door's answer cited for the plans it covers (approve-plan) never uses it up for its own class
+      const used = calls().find((a) => a.approved_by === approved && !(a.class === 'approve-plan' && isDoorQuestion(approval)));
       if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} (${used.id}); ask again for another`);
     }
   }
@@ -7685,7 +7778,7 @@ function decisionAuthorityGap(d) {
   const ownerOnly = (L.owner_only ?? []).includes(d.class);
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
-  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && isDoorQuestion(v)));
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
@@ -7710,11 +7803,11 @@ function decisionAuthorityGap(d) {
 function answerUseGap(d, v) {
   const refs = (d.refs ?? []).flatMap((x) => String(x).split(','));
   if (v.ticket && !refs.includes(v.ticket) && !(v.approves ?? []).some((a) => refs.includes(a))) return `${v.id} was asked about ${v.ticket}, not ${refs.join(', ') || 'nothing'}`;
-  if (d.class === 'approve-plan' && v.kind === 'one-way-door') return null; // a goal-level door covers each plan it names (approve-plan's own check)
+  if (d.class === 'approve-plan' && isDoorQuestion(v)) return null; // a goal-level door covers each plan it names (approve-plan's own check)
   const declared = v.approves ?? [];
   const part = declared.length ? refs.find((r) => declared.includes(r)) : null;
   if (declared.length && !part) return `${v.id} approves ${declared.join(', ')}, and this names none of them`;
-  const first = calls().filter((c) => c.approved_by === v.id && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
+  const first = calls().filter((c) => c.approved_by === v.id && !(c.class === 'approve-plan' && isDoorQuestion(v)) && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
   return first && first.id !== d.id ? `${v.id} already approved ${first.type === 'decision' ? 'a decision' : 'an act'}${part ? ` for ${part}` : ''} (${first.id})` : null;
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
@@ -7825,7 +7918,7 @@ function cmdAct() {
   if (decision) {
     const q = approved?.startsWith('q-') ? logGet(approved) : null;
     const approval = q?.type === 'question' ? questionView(q) : null;
-    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && approval?.kind === 'one-way-door' };
+    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && isDoorQuestion(approval) };
   } else auth = authorise(cls, scope, approved, refs, 'act');
   const { approval, doorCited } = auth;
   // Classes that are about one ticket name it first in refs; checkTicket finds approvals by it.
@@ -7837,13 +7930,16 @@ function cmdAct() {
     if (doorCited) {
       if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
       if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (!doorAgreed(approval)) die(`${approved} was answered "${String(approval.answer ?? '').slice(0, 80)}", not its recommendation ("${approval.recommendation}"): a plan built on the recommendation isn't what the owner said yes to; replan to their answer and ask about that`);
       if (approval.ticket !== t.id) {
+        // a question asked for one ticket is that ticket's door, never a goal-level one for another
+        if (approval.ticket) die(`${approved} was asked for ${approval.ticket}, not ${t.id}: a ticket's door answer covers that ticket only`);
         const goals = features().get(t.feature)?.goals ?? [];
         if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
         if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
         goalDoor = approved;
       }
-    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
@@ -14834,7 +14930,7 @@ async function cmdRemediate() {
   // (never a standing rule or the class's rung); the question was asked about this remediation (and
   // this release), and the answer is its recommendation, or its default applied at or after its deadline.
   if (!['answer', 'default'].includes(d.authority) || !q) die(`${d.id} rests on ${d.authority ?? 'nothing'}${d.approved_by ? ` (${d.approved_by})` : ''}: a remediation runs only on the owner's answer to a production-remediation question, or its default`);
-  if (q.class !== 'production-remediation' && !(q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
+  if (q.class !== 'production-remediation' && !(isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door'))) die(`${q.id} was asked in class ${q.class ?? '(none)'}, not production-remediation`);
   if (!(q.blocks ?? []).includes(remediationRef(action))) die(`${q.id} was asked about ${(q.blocks ?? []).filter((x) => String(x).startsWith('remediation:')).join(', ') || 'no remediation'}, not ${remediationRef(action)}`);
   const qrel = (q.blocks ?? []).find((x) => String(x).startsWith('release:')) ?? null;
   const drel = (d.refs ?? []).find((x) => String(x).startsWith('release:')) ?? null;
@@ -14862,7 +14958,7 @@ async function cmdRemediate() {
     if (to !== rel) die(`${d.id} decided a rollback to ${rel ?? 'no release'}, not ${to}`);
     const crossed = migrationsSince(to);
     if (!crossed) die(`no deploy of release ${to} was observed by a sensor: a rollback goes to a release the sensors saw`);
-    if (crossed.length && !(q && q.status === 'answered' && !q.default && (q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
+    if (crossed.length && !(q && q.status === 'answered' && !q.default && (isDoorQuestion(q) || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's answer to an ask --kind one-way-door with no default (decide --approved <qid>)`);
   }
   const m = { name: `remediation-${action}`, kind: 'probe', probe: r.script, params: { ...r.params, ...(to ? { to } : {}) }, uses: r.uses, credentials: r.credentials };
   let env, redact, src;
