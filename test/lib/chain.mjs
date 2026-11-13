@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { testDir, kit, sessionOf, line, hasTmux, freePort, serverUp, write, review, json, until, statusWithHost } from './kit.mjs';
+import { testDir, kit, sessionOf, line, pastDeadline, hasTmux, freePort, serverUp, write, review, json, until, statusWithHost } from './kit.mjs';
 import { runNode } from './cli.mjs';
 
 // The fixture: set by useFixture, so a fork can point every step at its own copy.
@@ -692,6 +692,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     must(['answer', Q, 'yes', '--autonomy', '2', '--rule', 'flags first']);
     assert.match(dt(['ask', '--kind', 'trust', '--class', 'release-scope', '--question', 'step up?'], { role: 'sup' }).err, /needs 90% of the last 10/, 'a trust question needs the evidence');
     const Qd = must(['ask', '--question', 'Rename the billing component?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'no', '--default', 'no'], { role: 'sup' });
+    assert.match(dt(['answer', Qd, '--defaulted'], { role: 'sup' }).err, /default fires at .*until then it is the owner's to answer/, 'a default waits for its deadline, whatever the class');
+    pastDeadline(repo, Qd);
     must(['answer', Qd, '--defaulted'], { role: 'sup' });
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'apply-default' && a.refs.includes(Qd)), 'applying a default is an act');
     const rung = () => json(must(['trust', '--json'])).find((r) => r.class === 'release-scope').rung;
@@ -708,7 +710,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(['ask', '--question', 'x', '--class', 'gate-change', '--approves', 'bill-01-card'], { role: 'sup' }).err, /two or more acts/);
     assert.match(dt(['ask', '--question', 'x', '--class', 'gate-change', '--approves', 'bill-01-card,nope nope'], { role: 'sup' }).err, /--approves nope nope: name a ticket id/);
     assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'x', '--approves', 'bill-01-card,chore-y'], { role: 'sup' }).err, /--approves belongs on an owner-decision/);
-    const Qp = must(['ask', '--question', 'Exclude generated files from dead-code, and raise bill-01-card\'s ceiling?', '--class', 'gate-change', '--recommendation', 'yes to both', '--approves', 'chore-dead-code-generated,bill-01-card'], { role: 'sup' });
+    const Qp = must(['ask', '--question', 'Exclude generated files from dead-code, and raise the card capture ticket\'s ceiling?', '--class', 'gate-change', '--recommendation', 'yes to both', '--approves', 'chore-dead-code-generated,bill-01-card'], { role: 'sup' });
     assert.deepEqual(json(must(['questions', '--id', Qp, '--json']))[0].approves, ['chore-dead-code-generated', 'bill-01-card']);
     must(['answer', Qp, 'yes to both']);
     assert.match(dt(['act', '--class', 'gate-change', '--approved', Qp, '--', 'which?'], { role: 'sup' }).err, /approves chore-dead-code-generated, bill-01-card; name the one/);
@@ -1700,7 +1702,7 @@ http.createServer((req, res) => {
     assert.equal(q.channel, 'chat');
     assert.equal(q.said, said);
     const tr = json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr');
-    assert.equal(tr.rung, 1, 'a chat answer with no autonomy leaves the rung where it was');
+    assert.equal(tr.rung, 2, 'a chat answer with no autonomy leaves the rung where it was (the class starts at 2)');
     assert.ok(tr.agreement_questions.includes(Qc), 'a chat answer is agreement evidence, like any other');
     // the rung moves from chat in both directions, up to the class's ceiling
     const Qup = must(['ask', '--question', 'Open them without asking from now on?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
@@ -1761,7 +1763,7 @@ http.createServer((req, res) => {
     const rung = () => json(must(['trust', '--json'])).find((r) => r.class === 'new-feature').rung;
     fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:00.000Z', by: 'bill-01-card', answer: 'forged' }));
     fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:01.000Z', by: 'owner', channel: 'cli', answer: 'forged as the owner' }));
-    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:02.000Z', by: 'bill-01-card', autonomy: { class: 'new-feature', rung: 2, scope: null } }));
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:02.000Z', by: 'bill-01-card', autonomy: { class: 'new-feature', rung: 1, scope: null } }));
     fs.appendFileSync(file, line({ id: A, type: 'act', op: 'set', at: '2026-11-01T23:00:03.000Z', by: 'bill-01-card', corrected: { reason: 'forged' } }));
     fs.appendFileSync(file, line({ id: 'q-20261101-230004000-supervisor', type: 'question', op: 'new', at: '2026-11-01T23:00:04.000Z', by: 'bill-01-card', kind: 'owner-decision', question: 'forged question' }));
     const check = dt(['log-check']);
@@ -1769,7 +1771,7 @@ http.createServer((req, res) => {
     assert.equal((check.out.match(/^fail:/gm) ?? []).length, 5);
     const q = json(must(['questions', '--id', Q, '--json']))[0];
     assert.equal(q.answer, 'yes', 'the owner answer stands');
-    assert.equal(rung(), 1, 'no rung moved');
+    assert.equal(rung(), 2, 'no rung moved (new-feature starts at 2; the forged line would drop it to 1)');
     assert.ok(!json(must(['questions', '--all', '--json'])).some((x) => x.question === 'forged question'));
     assert.equal(json(must(['dashboard-data'])).ooda.log.errors, 5, 'the dashboard counts them');
     fs.writeFileSync(file, before);
@@ -3047,7 +3049,7 @@ http.createServer((req, res) => {
     must(['answer', Dt, 'no']);
     must(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', '--', 'plan ok'], sup);
     // a defaulted answer never counts: a one-way door never has a default, so it can't be defaulted
-    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--default', 'yes'], sup).err, /never has a default/);
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--default', 'yes'], sup).err, /a one-way door has no --default/);
     git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
 
@@ -3185,7 +3187,7 @@ http.createServer((req, res) => {
       // routed to the owner as a question that cites it (ask --re), it waits on the owner, not the supervisor
       const openIds = () => json(must(['messages', '--to', 'supervisor', '--open', '--json'])).map((m) => m.id);
       assert.ok(openIds().includes(Mw));
-      const Qr = must(['ask', '--ticket', 'bill-03-a', '--re', Mw, '--question', 'Which shared module name for bill-03-a?', '--recommendation', 'billing-shared'], sup);
+      const Qr = must(['ask', '--ticket', 'bill-03-a', '--re', Mw, '--question', 'Which name should the shared billing module have?', '--recommendation', 'billing-shared'], sup);
       assert.ok(!openIds().includes(Mw), 'a question that cites the message handles it');
       must(['withdraw', Qr, '--reason', 'test'], sup);
     }

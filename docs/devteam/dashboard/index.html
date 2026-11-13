@@ -206,7 +206,12 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .ctx p, .qcard .d p, .qcard .e p { margin: 0 0 6px; }
+  .ctx p:last-child, .qcard .d p:last-child, .qcard .e p:last-child { margin-bottom: 0; }
+  .ctx ul, .ctx ol, .qcard .d ul, .qcard .d ol, .qcard .e ul, .qcard .e ol { margin: 4px 0 8px; padding-left: 20px; }
+  .ctx li, .qcard .d li, .qcard .e li { margin: 2px 0; }
+  .ctx code, .qcard h4 code { font: 12px var(--mono); }
   .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
   .qcard .again { margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
@@ -1226,7 +1231,7 @@ function questionCard(q, o, reasonText, copy = false) {
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${qblock(c.detail, q.links)}</div>` : ''}${c.effect ? `<div class="e">${qblock(c.effect, q.links)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
@@ -1240,8 +1245,8 @@ function questionCard(q, o, reasonText, copy = false) {
       ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${(q.approves || []).length ? `<div class="meta">Your answer approves each of these, once: ${q.approves.map((a) => !/^(chore|plan)-/.test(a) ? tlink(a) : `<code>${esc(a)}</code>`).join(', ')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
@@ -1293,6 +1298,65 @@ function qtext(text, links) {
     // in the sentence the link alone; a changed artifact is flagged in the list below
     return l ? `<span class="qref">${l.artifact ? artNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
+}
+// Owner-facing prose (a question's context, a choice's detail) as blocks: paragraphs, "- " bullets
+// and "1." numbered lists, a run of "1) … 2) …" on one line too, with **bold** and `code`. The marks
+// are read from the raw text and each piece goes through qtext on its own, so everything is escaped,
+// ids and [[links]] work as anywhere else, and a mark never lands inside a link's href or its title.
+// "2**10" and "src/**/x" stay as written: bold opens after a space and closes before one.
+function qinline(text, links) {
+  return String(text ?? '').split(/(`[^`\n]+`|(?<![\w*])\*\*(?=\S)[^*\n]+?(?<=\S)\*\*(?![\w*]))/).map((seg, i) => (i % 2 === 0 ? qtext(seg, links) : seg[0] === '`' ? `<code>${qtext(seg.slice(1, -1), links)}</code>` : `<b>${qinline(seg.slice(2, -2), links)}</b>`)).join('');
+}
+// "Two ways: 1) wait 2) ship it" → the lead, then each numbered item. Only a run that counts up from
+// 1 with at least two items in one style, each marker after a space or a colon, so "version 2) of"
+// stays prose. A number that closes a parenthesis ("(phase 1) and (phase 2)") is prose. So is a
+// number that ends a sentence ("on Nov 1. Then Nov 2. Done"): "1." opens a run only at the start
+// of the line or straight after a colon.
+function inlineList(line) {
+  const ms = [...line.matchAll(/(^|[\s:])(\()?(\d{1,2})([.)])\s+/g)];
+  let run = [];
+  for (const m of ms) {
+    const n = Number(m[3]);
+    const before = line.slice(0, m.index + m[1].length);
+    if (m[4] === ')' && !m[2] && before.split('(').length > before.split(')').length) continue;
+    if (n === 1) run = m[4] === ')' || !before.trim() || before.trimEnd().endsWith(':') ? [m] : [];
+    else if (run.length && n === run.length + 1 && m[4] === run[0][4] && !m[2] === !run[0][2]) run.push(m);
+  }
+  if (run.length < 2) return null;
+  const at = (m) => m.index + m[1].length;
+  const items = run.map((m, i) => line.slice(m.index + m[0].length, i + 1 < run.length ? at(run[i + 1]) : undefined).trim().replace(/[;,]\s*(and|or)?$/i, '').trim());
+  return { lead: line.slice(0, at(run[0])).trim(), items };
+}
+const NUMBERED = /^\(?(\d{1,2})[.)]\s+(.*)$/;
+function qblock(text, links) {
+  const out = [];
+  let para = [], list = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${para.map((l) => qinline(l, links)).join('<br>')}</p>`); para = []; };
+  // a list that starts at 3 says 3: the owner may be told "do step 3"
+  const flushList = () => { if (list) out.push(`<${list.tag}${list.start > 1 ? ` start="${list.start}"` : ''}>${list.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</${list.tag}>`); list = null; };
+  const item = (tag, t, n = 1) => { flushPara(); if (list?.tag !== tag) flushList(); list = list ?? { tag, items: [], start: n }; list.items.push(t); };
+  const lines = String(text ?? '').replace(/\r\n?/g, '\n').split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const raw = lines[k], line = raw.trim();
+    let m;
+    if (!line) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^[-*•]\s+(.*)$/))) { item('ul', m[1]); continue; }
+    if ((m = line.match(NUMBERED))) {
+      // one line holding the whole list ("1) a 2) b") is split; a line of a list written one per
+      // line is one item, whatever numbers its own words hold
+      const alone = list?.tag !== 'ol' && !NUMBERED.test((lines[k + 1] ?? '').trim());
+      const il = alone ? inlineList(line) : null;
+      if (il && !il.lead) for (const t of il.items) item('ol', t); else item('ol', m[2], Number(m[1]));
+      continue;
+    }
+    if (list && /^\s{2,}\S/.test(raw)) { list.items[list.items.length - 1] += ` ${line}`; continue; }
+    flushList();
+    const il = inlineList(line);
+    if (il) { if (il.lead) para.push(il.lead); flushPara(); out.push(`<ol>${il.items.map((i) => `<li>${qinline(i, links)}</li>`).join('')}</ol>`); continue; }
+    para.push(line);
+  }
+  flushPara(); flushList();
+  return out.join('');
 }
 // the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
@@ -1415,8 +1479,8 @@ function reviewCard(q, o, reasonText) {
       ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       ${q.new_because ? `<p class="again"><b>Asked again because:</b> ${esc(q.new_because)}</p>` : ''}
-      <h4>${qtext(q.question, q.links)}</h4>
-      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
+      <h4>${qinline(q.question, q.links)}</h4>
+      ${q.context ? `<div class="ctx">${qblock(q.context, q.links)}</div>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
       ${ok ? '' : '<p class="err">The page or data changed since the supervisor asked, so it can’t be answered. Send it back, or tell the supervisor to ask again.</p>'}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1614,8 +1678,8 @@ function renderReviewHead(note = '') {
   const links = (DATA?.questions || []).find((q) => q.id === RV.qid)?.links || info.links || [];
   // one line for the question, one for the facts; the rest folds away so the agent's page gets the height
   const more = [rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : '',
-    `<div>${qtext(info.question, links)}</div>`,
-    info.context ? `<p class="ctx">${qtext(info.context, links)}</p>` : '',
+    `<div>${qinline(info.question, links)}</div>`,
+    info.context ? `<div class="ctx">${qblock(info.context, links)}</div>` : '',
     links.length ? `<div class="links"><span class="muted small">Look at:</span>${links.map(linkOf).join('')}</div>` : '',
     `<div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))} · ${pins} · pinned at <code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})${rv.allow_partial ? ' · partial answers allowed' : ''}</div>`].join('');
   $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(qplain(info.question, links))}">${esc(rv.title || qplain(info.question, links))}</h4>${CLOSE}</div>
@@ -3022,15 +3086,15 @@ function openQuestion(id) {
   const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
   const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
   const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
-  showDrawer(`<h2 id="drawer-title">${qtext(q.question, q.links)}</h2>
+  showDrawer(`<h2 id="drawer-title">${qinline(q.question, q.links)}</h2>
     ${attrs({ id, peek: p, type: 'question', computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
-    ${q.context ? `<p class="ctx measure">${qtext(q.context, q.links)}</p>` : ''}
-    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
+    ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
+    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
     ${answeredCard(q)}
     ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
@@ -4129,13 +4193,13 @@ function tlQuestion(q, reasonText) {
   if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
   const open = (DATA?.questions || []).find((x) => x.id === q.id);
   if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
-  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${qinline(q.question, q.links)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
 }
 // A turn's words, or the question it asks.
 function tlTurnBody(u, t) {
   const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
-  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : u.by === 'owner' ? `<div class="tl-text">${linkify(u.text)}</div>` : `<div class="tl-text ctx">${qblock(u.text)}</div>`;
 }
 function tlTurns(t) {
   return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
