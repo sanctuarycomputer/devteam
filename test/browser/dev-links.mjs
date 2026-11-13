@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // The dev links chain in a real browser: Chrome over the DevTools protocol against a real dashboard,
 // a real Vite app, (between them) the thread layer, and (the second half) a real gateway on
-// *.localhost, by hand (needs Chrome and npm's network once; not in CI). Node 22+.
+// *.localhost, with its preview lens and the owner's view of a public page, first against a stand-in
+// instance and then against this dashboard's own viewer. Run by hand (needs Chrome
+// and npm's network once; not in CI). Node 22+.
 //   node test/browser/dev-links.mjs [--only threads]
 // A synthetic test can't show what a popup, the hub's sandboxed frame, a clipboard or an HMR socket
 // does: this drives them with real input events.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -90,13 +94,18 @@ class Browser {
     if (m.method === 'Network.webSocketCreated') s.sockets.push({ url: m.params.url, requestId: m.params.requestId, status: null, frames: [] });
     if (m.method === 'Network.webSocketHandshakeResponseReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.status = m.params.response.status; }
     if (m.method === 'Network.webSocketFrameReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.frames.push(m.params.response.payloadData); }
-    if (m.method === 'Network.requestWillBeSent') s.requests.push(m.params.request.url);
+    if (m.method === 'Network.requestWillBeSent') { s.requests.push(m.params.request.url); s.urls.set(m.params.requestId, m.params.request.url); }
+    if (m.method === 'Network.loadingFailed') s.failed.push({ url: s.urls.get(m.params.requestId), blockedReason: m.params.blockedReason ?? null, errorText: m.params.errorText });
     if (m.method === 'Network.loadingFinished') s.bytes += m.params.encodedDataLength;
     if (m.method === 'Page.frameNavigated' && !m.params.frame.parentId) { s.url = m.params.frame.url; s.navigations += 1; }
+    // each frame's page's own world, for evalMain
+    if (m.method === 'Runtime.executionContextCreated' && m.params.context.auxData?.isDefault) s.worlds.set(m.params.context.auxData.frameId, m.params.context.id);
+    if (m.method === 'Runtime.executionContextDestroyed') for (const [k, v] of s.worlds) if (v === m.params.executionContextId) s.worlds.delete(k);
+    if (m.method === 'Runtime.executionContextsCleared') s.worlds.clear();
     return undefined;
   }
   async attached({ sessionId, targetInfo, waitingForDebugger }) {
-    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], navigations: 0, bytes: 0 };
+    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], urls: new Map(), failed: [], navigations: 0, bytes: 0, worlds: new Map() };
     this.sessions.set(sessionId, s);
     const c = this.cdp;
     if (['page', 'iframe'].includes(targetInfo.type)) {
@@ -118,13 +127,19 @@ class Browser {
     await this.cdp.send('Page.navigate', { url }, s.sessionId);
     await until(() => s.navigations > before, `the tab to navigate to ${url}`);
   }
+  // A session's frame tree, or null: a target that never answers (one left waiting as a popup closed
+  // under it) is passed over after 2 s, never waited on forever.
+  async treeOf(s) {
+    let t;
+    try { return await Promise.race([this.cdp.send('Page.getFrameTree', {}, s.sessionId), new Promise((r) => { t = setTimeout(() => r(null), 2000); })]); } catch { return null; } finally { clearTimeout(t); }
+  }
   // The frame (in any session) whose URL starts with prefix, or the session's main frame.
   async frameWhere(prefix) {
     const walk = (t, out) => { out.push(t.frame); for (const c of t.childFrames ?? []) walk(c, out); return out; };
     for (const s of this.sessions.values()) {
       if (!['page', 'iframe'].includes(s.type)) continue;
-      let tree;
-      try { tree = await this.cdp.send('Page.getFrameTree', {}, s.sessionId); } catch { continue; }
+      const tree = await this.treeOf(s);
+      if (!tree) continue;
       const f = walk(tree.frameTree, []).find((x) => x.url.startsWith(prefix));
       if (f) return { session: s, frameId: f.id, url: f.url };
     }
@@ -140,6 +155,31 @@ class Browser {
     const r = await this.cdp.send('Runtime.evaluate', { expression, contextId: executionContextId, awaitPromise: true, returnByValue: true }, f.session.sessionId);
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r.result.value;
+  }
+  // In the page's own world, where its scripts' globals are (an isolated world sees only the DOM);
+  // gesture: as if inside the user's click, so a window.open isn't blocked.
+  async evalMain(prefix, expression, { gesture = false } = {}) {
+    const f = await this.frameWhere(prefix);
+    if (!f) throw new Error(`no frame ${prefix}`);
+    const s = [f.session, ...this.sessions.values()].find((x) => x.worlds?.has(f.frameId));
+    if (!s) throw new Error(`no page world yet in ${prefix}`);
+    const r = await this.cdp.send('Runtime.evaluate', { expression, contextId: s.worlds.get(f.frameId), awaitPromise: true, returnByValue: true, userGesture: gesture }, s.sessionId);
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
+    return r.result.value;
+  }
+  // A frame the browser refused to load (its error page in place), by the URL it was asked for.
+  async refusedFrame(pred) {
+    const walk = (t, out) => { out.push(t.frame); for (const c of t.childFrames ?? []) walk(c, out); return out; };
+    for (const s of this.sessions.values()) {
+      if (!['page', 'iframe'].includes(s.type)) continue;
+      const tree = await this.treeOf(s);
+      if (!tree) continue;
+      const f = walk(tree.frameTree, []).find((x) => x.unreachableUrl && pred(x.unreachableUrl));
+      // why it failed: Chrome reports a frame-ancestors block as ERR_BLOCKED_BY_RESPONSE (blockedReason
+      // "other"; "csp" for some builds), so a refusal is that, never a refused connection or a 404
+      if (f) { const why = s.failed.find((x) => x.url === f.unreachableUrl); return why && why.blockedReason !== 'csp' && why.errorText !== 'net::ERR_BLOCKED_BY_RESPONSE' ? null : f; }
+    }
+    return null;
   }
   // A real click at a real place on the screen, so a popup and a clipboard write count as the user's.
   async click(pagePrefix, framePrefix, selector) {
@@ -174,7 +214,17 @@ class Browser {
   async shift(page, down) { await this.cdp.send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: down ? 8 : 0 }, page.sessionId); }
   async typeIn(page, text) { await this.cdp.send('Input.insertText', { text }, page.sessionId); }
   async enter(page) { for (const type of ['keyDown', 'keyUp']) await this.cdp.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) }, page.sessionId); }
-  async kill() { try { this.proc?.kill('SIGKILL'); } catch {} }
+  // Ask Chrome to quit, wait up to 5 s for it, then SIGKILL: a Chrome that ignores SIGTERM can't hang the cleanup.
+  async kill() {
+    const p = this.proc;
+    if (!p || p.exitCode !== null || p.signalCode) return;
+    const gone = new Promise((r) => p.once('exit', r));
+    try { p.kill('SIGTERM'); } catch {}
+    let t;
+    await Promise.race([gone, new Promise((r) => { t = setTimeout(r, 5000); })]);
+    clearTimeout(t);
+    if (p.exitCode === null && !p.signalCode) { try { p.kill('SIGKILL'); } catch {} }
+  }
 }
 
 // ===== the throwaway project =====
@@ -274,7 +324,7 @@ async function laptop({ HUB, DASH, app }) {
 }
 
 // ===== the gateway half: a real gateway on box.localhost, a real passkey (a virtual authenticator) =====
-async function viaGateway({ DASH, HUB, app, G }) {
+async function viaGateway({ DASH, HUB, app, G, SP, goal }) {
   const pub = `http://box.localhost:${G}`;
   const hubUrl = `${pub}/`;
   const dashUrl = `http://${DASH}.box.localhost:${G}/`;
@@ -348,6 +398,9 @@ async function viaGateway({ DASH, HUB, app, G }) {
   const viaGw = await loadTwice(previewUrl);
   const straight = await loadTwice(direct);
   say(`measure  no-store: second load through the gateway ${viaGw.bytes} bytes in ${viaGw.ms} ms; straight to the server ${straight.bytes} bytes in ${straight.ms} ms`);
+  // the session from the sign-in above carries on into the gateway's half of viewers
+  await gatewayViewers({ G, HUB, SP, tab, app });
+  await kitViewers({ G, DASH, tab, goal });
 }
 
 // ===== threads: Shift and point on the dashboard, a turn typed into a stand-in supervisor's pane =====
@@ -414,6 +467,325 @@ async function threads({ DASH, pane }) {
   await browser.click(dash, dash, '#tl-pill');
   await until(() => browser.evalIn(dash, `!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`), 'listed under Resolved');
   stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
+  return G;
+}
+
+// ===== the gateway's half of viewers: the lens on a preview's name, the owner's view on the public
+// name, against a stand-in instance: its hello says viewer: 1, and its pages carry the kit's kinds of
+// policy in its loopback origin, as the kit's do. kitViewers runs the owner's view against the real one. =====
+// A server of the test's own on 127.0.0.1, closed (its open connections too) with everything else.
+async function serve(port, handler) {
+  const srv = http.createServer(handler);
+  await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(port, '127.0.0.1', resolve); });
+  procs.push({ kill: () => { srv.closeAllConnections(); srv.close(); } });
+  return srv;
+}
+async function gatewayViewers({ G, HUB, SP, tab, app }) {
+  const pub = `http://box.localhost:${G}`;
+  const inst = `http://${SP}.box.localhost:${G}`;
+  const self = `http://127.0.0.1:${SP}`;
+  const T = 'e'.repeat(40);
+  // an app that refuses every frame, as many do: only its lens's own load may hold it. Its console
+  // error comes 1.5 s after load, so the lens has attached by then (its poll is 250 ms): don't shorten it.
+  // Two buttons try to move it as the viewer would: a real postMessage to the lens (from the app, so
+  // not the viewer's), and a made-up message event dispatched on the lens's window, claiming the
+  // viewer as its source and origin, which only isTrusted tells apart.
+  const goSecond = "{ lens: 1, type: 'go', route: '/second' }";
+  const appPage = (title) => `<!doctype html><title>${title}</title><body style="margin:0;height:3000px"><button id="buy">Buy now</button><div id="card" style="padding:24px"><span>one</span><span><b>deep</b> two</span></div><p id="long">${'é'.repeat(600)}</p><button id="forge" onclick="parent.postMessage(${goSecond}, '*')">forge</button><button id="synth" onclick="parent.dispatchEvent(new MessageEvent('message', { data: ${goSecond}, origin: parent.location.ancestorOrigins[0], source: parent.parent }))">synth</button><script>setTimeout(() => console.error('boom from the app'), 1500)</script></body>`;
+  const appPort = await freePort();
+  await serve(appPort, (q, s) => {
+    s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
+    s.end(appPage(q.url.startsWith('/second') ? 'Second' : 'First'));
+  });
+  // and one that sends no framing headers at all, as dev servers (Vite, Next) do by default
+  const plainPort = await freePort();
+  await serve(plainPort, (q, s) => { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); s.end(appPage('Plain')); });
+  const plainName = 'plain-app';
+  const plainLens = `http://${plainName}.box.localhost:${G}/.devteam/lens`;
+  // The stand-in instance lists both, not the repo's dashboard: the app's relaxed policy names only the
+  // instance that lists a preview, so only that instance's viewer may hold the app (spec §7).
+  const name = 'framed-app';
+  const lensUrl = `http://${name}.box.localhost:${G}/.devteam/lens`;
+
+  // the stand-in instance: a viewer page that frames what it's given and keeps what it hears in #got,
+  // posting whatever the test puts in data-send. Its hello says devteam: 1, so the hub (the real
+  // dashboard's) shows it as a tab of its own, "standin"; nothing here looks at the hub's tabs again.
+  // A second, "other", on the next port, frames the same lens and lists nothing.
+  const viewerPage = (src, sandbox) => `<!doctype html><title>Stand-in viewer</title><iframe id="f" src="${src}" ${sandbox} style="width:800px;height:600px;border:0"></iframe><pre id="got"></pre><script>
+const f = document.getElementById('f');
+const got = document.getElementById('got');
+addEventListener('message', (e) => { if (e.source === f.contentWindow) got.textContent += JSON.stringify({ origin: e.origin, data: e.data }) + '\\n'; });
+new MutationObserver(() => { const m = document.body.dataset.send; if (!m) return; delete document.body.dataset.send; f.contentWindow.postMessage(JSON.parse(m), new URL(f.src, location.href).origin); }).observe(document.body, { attributes: true });
+</script>`;
+  const policy = (extra) => `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; ${extra}; frame-ancestors 'self' http://127.0.0.1:${HUB}`;
+  const dir = `${self}/artifact/tree/${T}/mock/`;
+  const artPolicy = `default-src 'none'; style-src 'unsafe-inline' ${dir}; frame-ancestors ${self} http://127.0.0.1:${HUB}; sandbox allow-scripts`;
+  await serve(SP, (q, s) => {
+    const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [{ name, port: appPort, project: 'standin', session: 'standin-01-x', label: 'framed', at: new Date().toISOString(), up: true, run: false }, { name: plainName, port: plainPort, project: 'standin', session: 'standin-01-x', label: 'plain', at: new Date().toISOString(), up: true, run: false }] }));
+    if (q.url.startsWith(`/view/preview/${plainName}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${plainName}.box.localhost:${G}`), viewerPage(`${plainLens}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(`${lensUrl}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    // its tab in the hub: the same viewer, so the whole chain is hub, this instance, the lens, the app
+    if (q.url === '/' || q.url.startsWith('/?')) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(hubLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    if (q.url.startsWith('/view/artifact/mock')) return send('text/html; charset=utf-8', policy("frame-src 'self'"), viewerPage(`/artifact/tree/${T}/mock/index.html`, ''));
+    if (q.url === `/artifact/tree/${T}/mock/index.html`) return send('text/html; charset=utf-8', artPolicy, '<!doctype html><link rel="stylesheet" href="s.css"><p id="art">the instance at the published tree</p>');
+    if (q.url === `/artifact/tree/${T}/mock/s.css`) return send('text/css; charset=utf-8', artPolicy, '#art { color: rgb(1, 2, 3) }');
+    s.writeHead(404);
+    return s.end();
+  });
+  const otherLens = `${lensUrl}?route=%2F&from=other`;
+  const hubLens = `${lensUrl}?route=%2F&from=hub`;
+  await serve(SP + 1, (q, s) => {
+    const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'other', root: '/srv/other', port: SP + 1, viewer: 1, inbox: 0, previews: [] }));
+    if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(otherLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    if (q.url.startsWith(`/view/preview/${plainName}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${plainName}.box.localhost:${G}`), viewerPage(`${plainLens}?route=%2F&from=other`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    s.writeHead(404);
+    return s.end();
+  });
+  // listed by the hub before the lens asks the gateway for the app
+  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && (x.previews ?? []).some((p) => p.name === name) && (x.previews ?? []).some((p) => p.name === plainName)), 'the hub to list the framed apps');
+  // and, as the gateway reads it for the owner's view of a public page (below), with its root and viewers
+  assert.ok((await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && x.root === '/srv/standin' && x.viewer === 1), 'the hub lists the stand-in with its root and viewer: 1');
+
+  // --- the lens ---
+  const viewer = `${inst}/view/preview/${name}`;
+  await browser.navigate(tab, viewer);
+  await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+  const inApp = (expr) => browser.evalIn(lensUrl, `(() => { const d = document.getElementById('app').contentDocument; return ${expr}; })()`);
+  await until(() => inApp(`d && d.getElementById('buy') && d.getElementById('buy').textContent`), 'the app inside the lens');
+  stepOk('the lens on the preview\'s name frames an app that sends X-Frame-Options: DENY and frame-ancestors \'none\'');
+  const tell = (m) => browser.evalIn(viewer, `document.body.dataset.send = ${JSON.stringify(JSON.stringify({ lens: 1, ...m }))}`);
+  const heard = async () => (await browser.evalIn(viewer, 'document.getElementById(\'got\').textContent')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const hear = (pred, what) => until(async () => (await heard()).find((x) => pred(x.data)), what, 10000);
+  await tell({ type: 'hello' });
+  const ready = await hear((d) => d.type === 'ready' && d.route === '/', 'ready');
+  assert.equal(ready.origin, `http://${name}.box.localhost:${G}`, 'from the preview\'s own origin');
+  const centre = (id) => inApp(`(() => { const r = d.getElementById('${id}').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await tell({ type: 'hit', id: 'h1', ...(await centre('buy')) });
+  const buy = (await hear((d) => d.type === 'hit-reply' && d.id === 'h1', 'the hit on the button')).data.anchor;
+  assert.deepEqual([buy.selector, buy.tag, buy.role, buy.text, buy.name, buy.html], ['#buy', 'button', 'button', 'Buy now', 'Buy now', '<button id="buy">Buy now</button>']);
+  assert.ok(buy.rect.w > 0 && buy.rect.h > 0 && Math.abs(buy.point.x - buy.rect.w / 2) <= 1, JSON.stringify(buy));
+  const corner = await inApp(`(() => { const r = d.getElementById('card').getBoundingClientRect(); return { x: r.left + 4, y: r.top + 4 }; })()`);
+  await tell({ type: 'hit', id: 'h2', ...corner });
+  const card = (await hear((d) => d.type === 'hit-reply' && d.id === 'h2', 'the hit on the card')).data.anchor;
+  assert.equal(card.html, '<div id="card" style="padding:24px"><span>…</span><span>…</span></div>', 'its children kept, their contents collapsed');
+  await tell({ type: 'hit', id: 'h3', ...(await centre('long')) });
+  const long = (await hear((d) => d.type === 'hit-reply' && d.id === 'h3', 'the hit on the long text')).data.anchor;
+  assert.ok(long.text.length === 40 && Buffer.byteLength(long.name) <= 80 && Buffer.byteLength(long.html) <= 1024 && long.html.endsWith('…'), JSON.stringify(long));
+  await tell({ type: 'resolve', id: 'r1', anchors: [{ key: 'buy', anchor: buy }, { key: 'gone', anchor: { selector: '#gone', tag: 'p', text: 'nothing like it' } }] });
+  const r1 = (await hear((d) => d.type === 'rects' && d.id === 'r1', 'rects')).data.rects;
+  assert.deepEqual(r1.map((x) => [x.key, x.rect && x.rect.y]), [['buy', buy.rect.y], ['gone', null]]);
+  stepOk('the lens names what is under a point (selector, role, text, the HTML with its children collapsed, within spec §5\'s caps) and finds it again');
+  await tell({ type: 'scroll-by', dx: 0, dy: 300, x: 5, y: 5 });
+  await hear((d) => d.type === 'rects' && d.id === undefined && d.rects[0].rect && d.rects[0].rect.y === buy.rect.y - 300, 'the rect to move with a scroll');
+  stepOk('scroll-by scrolls the app, and the watched rect follows, unasked');
+  // newPage turned on focus emulation, so a headless tab holds focus. If a Chrome still keeps the key
+  // out of the frame, click the button first with a real mouse event (mouseAt at the iframe's offset
+  // plus the button's centre) and dispatch Shift after that.
+  await inApp(`(d.getElementById('buy').focus(), true)`);
+  await browser.shift(tab, true);
+  await hear((d) => d.type === 'key' && d.key === 'Shift' && d.shift === true, 'Shift, seen inside the app');
+  await browser.shift(tab, false);
+  await hear((d) => d.type === 'key' && d.key === 'Shift' && d.shift === false, 'Shift up');
+  stepOk('Shift held with the app focused reaches the viewer as key {shift}');
+  await hear((d) => d.type === 'errors' && d.errors.some((e) => e.includes('boom from the app')), 'the app\'s console error');
+  stepOk('a console error in the app reaches the viewer');
+  // Both tries are in the lens's queue (the made-up one ran at once, inside the click) before the
+  // viewer's resolve below is sent, so its answer means they were weighed: a go taken would have set
+  // the frame's src at once.
+  await inApp(`(d.getElementById('forge').click(), d.getElementById('synth').click(), true)`);
+  await tell({ type: 'resolve', id: 'r2', anchors: [] });
+  await hear((d) => d.type === 'rects' && d.id === 'r2', 'the lens to answer after the app\'s tries');
+  assert.deepEqual(await browser.evalIn(lensUrl, `[document.getElementById('app').getAttribute('src'), document.getElementById('app').contentDocument.location.pathname]`), ['/', '/'], 'neither the app\'s message nor a made-up event took the lens anywhere');
+  await tell({ type: 'go', route: '/second' });
+  await hear((d) => d.type === 'ready' && d.route === '/second' && d.title === 'Second', 'the app at /second');
+  stepOk('go takes the app to its own path; the same go posted by the app, or dispatched as a made-up event claiming the viewer, moved nothing');
+  // the hub frames the owning instance, which frames the lens, which frames the app: every ancestor is allowed
+  await browser.navigate(tab, `${pub}/`);
+  await until(() => browser.evalIn(`${pub}/`, `[...document.querySelectorAll('[role=tab]')].some((t) => t.textContent.includes('standin'))`), 'the stand-in\'s tab in the hub');
+  await browser.evalIn(`${pub}/`, `[...document.querySelectorAll('[role=tab]')].find((t) => t.textContent.includes('standin')).click()`);
+  await until(() => browser.evalIn(hubLens, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the app in the lens in the owning instance in the hub');
+  stepOk('in the hub, the owning instance\'s viewer holds the lens and the app in it');
+  // the app that sends no framing headers, in its owner's viewer: the policy the lens's load gets lets it in
+  await browser.navigate(tab, `${inst}/view/preview/${plainName}`);
+  await until(() => browser.evalIn(`${plainLens}?route=%2F`, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the header-less app in its owner\'s viewer');
+  stepOk('an app that sends no framing headers shows in the lens in the owning instance\'s viewer');
+  // Another instance's viewer may hold the lens (its policy is the same on every preview's name), but
+  // the app's policy names only the instance that lists it: the lens shows an empty frame. Its own
+  // script runs, which is what says the refusal is the app's. A refused frame is Chrome's error
+  // page, an opaque origin, so the lens loses its document: that, not a pause, is the refusal seen.
+  const refused = async (lens, what) => {
+    await until(() => browser.evalIn(lens, `(() => { const f = document.getElementById('app'); return !!f && f.contentDocument === null; })()`), `the app's frame to be refused (${what})`, 15000);
+    assert.equal(await browser.evalIn(lens, `(() => { try { return !!frames[0].document; } catch (e) { return 'cross-origin'; } })()`), 'cross-origin', `${what}: not the app's origin`);
+  };
+  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${name}`);
+  await refused(otherLens, 'X-Frame-Options and frame-ancestors \'none\'');
+  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${plainName}`);
+  await refused(`${plainLens}?route=%2F&from=other`, 'no framing headers');
+  stepOk('another instance\'s viewer holds the lens, but the app inside it is refused, with framing headers or none: its policy names only the instance that lists the preview');
+
+  // --- the owner's view of a public page: what the box serves for standin/mock, bound to the stand-in ---
+  const gwDir = path.join(base, 'gateway');
+  const copy = '<!doctype html><p id="art">the box\'s own copy</p>';
+  const sha = crypto.createHash('sha256').update(copy).digest('hex');
+  fs.mkdirSync(path.join(gwDir, 'public', 'blobs'), { recursive: true });
+  fs.writeFileSync(path.join(gwDir, 'public', 'blobs', sha), copy);
+  const sf = path.join(gwDir, 'state.json');
+  const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
+  st.public = { ...(st.public ?? {}), standin: { root: '/srv/standin', port: SP, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(copy) } } } } } };
+  fs.writeFileSync(sf, JSON.stringify(st, null, 2));
+  const page = `http://public.box.localhost:${G}/standin/mock/`;
+  await browser.navigate(tab, page);
+  // the gateway reads the hub's list every 10 s: the stand-in has been listed far longer than that
+  const viewerFrame = await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}&w=`), 'the viewer in the owner\'s view, under the wrapper\'s grant');
+  assert.match(viewerFrame.url, /&w=\d+\.[\w-]{22}$/, viewerFrame.url);
+  const shown = await until(() => browser.evalIn(`${inst}/c/`, `(() => { const p = document.getElementById('art'); return p && p.textContent + '|' + getComputedStyle(p).color; })()`), 'the artifact in the viewer in the owner\'s view');
+  assert.equal(shown, 'the instance at the published tree|rgb(1, 2, 3)');
+  assert.match(await browser.evalIn(page, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);
+  stepOk('signed in, the public link is the owner\'s view: the viewer at the published tree, the artifact under its capability, each frame allowed by every ancestor');
+  await browser.click(page, page, 'header a');
+  await until(() => (tab.url ?? '').endsWith('/standin/mock/?plain'), 'the plain link');
+  assert.equal(await browser.evalIn(`${page}?plain`, 'document.getElementById(\'art\').textContent + \'|\' + document.querySelectorAll(\'iframe\').length'), 'the box\'s own copy|0');
+  stepOk('"Open it as the public sees it" is the box\'s own copy, plain');
+}
+
+// ===== the same chain against the real kit (PR 3): the owner's view of a public page frames the
+// project's own dashboard's viewer, which frames the artifact at the published tree, with its lens.
+// Every frame must be allowed by every ancestor: the wrapper (public name), the viewer (instance,
+// under the wrapper's w= grant), the artifact (instance, under its capability, at the bound tree). =====
+async function kitViewers({ G, DASH, tab, goal }) {
+  const pub = `http://public.box.localhost:${G}`;
+  const inst = `http://${DASH}.box.localhost:${G}`;
+  const rel = 'docs/devteam/project/artifacts/mock';
+  // the page writes its own address (under /c/<capability>/ when framed on a box) into its title and
+  // an attribute, so the lens's every answer about it has the capability to leave out
+  const page = '<!doctype html><html><head><style>body{margin:0}#art{position:absolute;left:20px;top:20px;width:200px;height:40px;margin:0}</style></head><body><p id="art">the kit\'s published mock</p><script>document.title = "Mock at " + location.href; document.getElementById("art").dataset.from = location.pathname;</script></body></html>';
+  fs.mkdirSync(path.join(repo, rel), { recursive: true });
+  fs.writeFileSync(path.join(repo, rel, 'artifact.json'), JSON.stringify({ v: 1, title: 'Mock', summary: 'A published page', by: 'supervisor', for: [] }));
+  fs.writeFileSync(path.join(repo, rel, 'index.html'), page);
+  git(['add', '-A', rel]);
+  git(['commit', '-qm', 'artifact: mock']);
+  const T = git(['rev-parse', `HEAD:${rel}`]);
+  // the box's copy of what was published, bound to this dashboard
+  const gwDir = path.join(base, 'gateway');
+  const sha = crypto.createHash('sha256').update(page).digest('hex');
+  fs.mkdirSync(path.join(gwDir, 'public', 'blobs'), { recursive: true });
+  fs.writeFileSync(path.join(gwDir, 'public', 'blobs', sha), page);
+  const sf = path.join(gwDir, 'state.json');
+  const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
+  st.public = { ...(st.public ?? {}), demo: { root: fs.realpathSync(repo), port: DASH, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(page) } } } } } };
+  fs.writeFileSync(sf, JSON.stringify(st, null, 2));
+  const wrapper = `${pub}/demo/mock/`;
+  const viewer = `${inst}/view/artifact/mock?at=tree:${T}`;
+  await browser.navigate(tab, wrapper);
+  await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+  const vf = await until(() => browser.frameWhere(viewer), 'the kit\'s viewer in the owner\'s view');
+  assert.match(vf.url, /^[^#]*\?at=tree:[0-9a-f]{40}&w=\d+\.[\w-]{22}$/, `the viewer under the wrapper's grant: ${vf.url}`);
+  await until(() => browser.evalMain(viewer, `document.getElementById('av-title').textContent === 'Mock' && document.getElementById('av-where').textContent === 'the published version' && TS.ready`), 'the viewer\'s bar, and its lens answering through the chain');
+  const shown = await until(() => browser.evalIn(`${inst}/c/`, `(() => { const p = document.getElementById('art'); return p && p.textContent; })()`), 'the artifact at the published tree, under its capability');
+  assert.equal(shown, 'the kit\'s published mock');
+  assert.match(await browser.evalIn(`${inst}/c/`, 'location.pathname'), new RegExp(`^/c/\\d+\\.[\\w-]{16}\\.[\\w-]{22}/artifact/tree/${T}/mock/$`));
+  stepOk('signed in, the public link frames the real kit\'s viewer (under the wrapper\'s w= grant) at the published tree, and the artifact in it (at the bound tree, under its capability) answers through its lens');
+
+  // the keyboard, before any click: the wrapper's frame has autofocus (decision 16), so Shift reaches
+  // the viewer; a Chrome that keeps it out must show the hint instead. The hint is checked twice a
+  // second, so wait for it to agree with where the focus is.
+  const focused = await until(async () => { const [f, h] = await browser.evalIn(viewer, `[document.hasFocus(), document.getElementById('av-hint').hidden]`); return f === h ? { f } : null; }, 'the hint to say where the keyboard is');
+  if (focused.f) {
+    await browser.shift(tab, true);
+    await until(() => browser.evalIn(viewer, `!document.getElementById('av-over').hidden`), 'the overlay, Shift held with no click first');
+    await browser.shift(tab, false);
+    await until(() => browser.evalIn(viewer, `document.getElementById('av-over').hidden`), 'the overlay down with Shift');
+    stepOk('with no click first, the wrapper\'s autofocus gives the viewer the keyboard: Shift raises the overlay, and no hint shows');
+  } else {
+    assert.equal(await browser.evalIn(viewer, `document.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
+    stepOk('with no click first and no keyboard in the viewer, its hint says to click the page');
+  }
+
+  // what the lens says to the viewer from here on, heard in the viewer's own page; a reload of the
+  // frame makes it say ready again, with the page's title
+  await browser.evalMain(viewer, `(() => { const f = document.getElementById('av-frame'); window.dtHeard = []; addEventListener('message', (e) => { if (e.source === f.contentWindow && e.data && e.data.lens === 1) dtHeard.push(JSON.stringify(e.data)); }); document.getElementById('av-reload').click(); return true; })()`);
+  await until(() => browser.evalMain(viewer, `TS.ready && dtHeard.some((m) => JSON.parse(m).type === 'ready')`), 'the lens to say ready again, heard');
+
+  // a thread on the published page, from inside the owner's view: the viewer's own fetches through the gateway
+  const off = await browser.evalIn(wrapper, `(() => { const r = document.querySelector('iframe').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+  const inner = await browser.evalIn(viewer, `(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
+  const x = off.x + inner.x + 60;
+  const y = off.y + inner.y + 30;
+  // a click in the viewer's bar makes sure of the keyboard either way
+  const bar = await browser.evalIn(viewer, `(() => { const r = document.getElementById('av-title').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await browser.mouseAt(tab, off.x + bar.x, off.y + bar.y, 0, true);
+  await until(() => browser.evalIn(viewer, `document.hasFocus() && document.getElementById('av-hint').hidden`), 'no "click the page" hint once the viewer has the keyboard');
+  await browser.shift(tab, true);
+  await until(() => browser.evalIn(viewer, `!document.getElementById('av-over').hidden`), 'the overlay, Shift held');
+  await browser.mouseAt(tab, x, y, 8);
+  await until(() => browser.evalIn(viewer, `document.getElementById('tl-chip').textContent.length > 0 && !document.getElementById('tl-hl').hidden`), 'the paragraph named');
+  await browser.mouseAt(tab, x, y, 8, true);
+  await browser.shift(tab, false);
+  await until(() => browser.evalMain(viewer, `TL.draft?.subject?.anchor?.selector === '#art'`), 'a thread about to start on it');
+  await browser.evalIn(viewer, `document.getElementById('tl-c-text').focus()`);
+  await browser.typeIn(tab, 'Say who it is for');
+  await browser.enter(tab);
+  const th = await until(() => JSON.parse(dt(['thread', 'list', '--json'])).find((x2) => x2.subject?.kind === 'artifact' && x2.subject.slug === 'mock'), 'the thread in the log');
+  assert.deepEqual([th.subject.at, th.subject.path, th.subject.anchor?.selector, th.turns[0].text], [`tree:${T}`, 'index.html', '#art', 'Say who it is for']);
+  await until(() => browser.evalIn(viewer, `!!document.querySelector('#av-pins .tl-pin')`), 'its pin on the published page');
+  stepOk('a Shift+click in the owner\'s view starts a thread on the published version, and pins it');
+
+  // the capability the artifact's frame is under is in none of it: not in what the lens said (its
+  // ready, its answers about the point, the rects for the pin), not in the saved subject, not in the log
+  const cap = (await browser.evalIn(`${inst}/c/`, 'location.pathname')).split('/')[2];
+  const [, sid, capMac] = cap.split('.');
+  const heard = (await browser.evalMain(viewer, 'dtHeard')).join('\n');
+  for (const t of ['ready', 'hit-reply', 'rects']) assert.ok(heard.includes(`"type":"${t}"`), `the lens said ${t}: ${heard.slice(0, 400)}`);
+  assert.ok(heard.includes(`/artifact/tree/${T}/mock/`), `the page told its own address, cut: ${heard.slice(0, 400)}`);
+  const logs = [path.join(repo, 'docs/devteam/run'), path.join(repo, 'docs/devteam/project/log')].filter((d) => fs.existsSync(d)).flatMap((d) => fs.readdirSync(d, { recursive: true }).filter((f) => String(f).endsWith('.jsonl')).map((f) => fs.readFileSync(path.join(d, String(f)), 'utf8'))).join('\n');
+  assert.ok(logs.includes('Say who it is for'), 'the log files read are the ones the thread is in');
+  for (const [what, text] of [['a lens message', heard], ['the saved subject', JSON.stringify(th.subject) + dt(['thread', 'show', th.id, '--json'])], ['the log', logs]]) {
+    for (const bit of ['/c/', sid, capMac]) assert.ok(!text.includes(bit), `${what} holds ${bit === '/c/' ? 'a /c/ path' : 'the capability'}: ${text.slice(Math.max(0, text.indexOf(bit) - 80), text.indexOf(bit) + 80)}`);
+  }
+  stepOk('no /c/ capability in any lens message, the saved subject or the log, though the page wrote its own address into what the lens reads');
+
+  // the wrapper's grant stays in the viewer's URL, so a reload inside the wrapper is still allowed there
+  assert.match(await browser.evalIn(viewer, 'location.search'), /[?&]w=\d+\.[\w-]{22}$/);
+  await browser.evalIn(viewer, 'location.reload(), true').catch(() => {});
+  await until(() => browser.evalMain(viewer, `TS.ready && document.getElementById('av-title').textContent === 'Mock' && !!document.querySelector('#av-pins .tl-pin')`), 'the viewer again after a reload in the wrapper');
+  assert.match((await browser.frameWhere(viewer)).url, /&w=\d+\.[\w-]{22}$/);
+  stepOk('the viewer keeps the wrapper\'s grant in its URL: reloaded inside the wrapper, it loads, its lens and pin with it');
+
+  // A new tab from the viewer inside the wrapper has no handle on it: the viewer's own way out, a link
+  // into the dashboard in a turn (a real click; the viewer opens it noopener), and a window.open that
+  // asks for one, which the wrapper's opener policy cuts (a cross-origin frame in a same-origin-COOP
+  // page opens popups with no opener).
+  dt(['thread', 'reply', th.id, `It is for the goal ${goal}`], { DEVTEAM_ROLE: 'supervisor' });
+  // the pin opens the card; it is drawn again as the thread's turns come in, so click it until the card is open
+  await until(async () => {
+    if (await browser.evalIn(viewer, `!!document.querySelector('#tl-c-turns a[href^="#goal/"]')`)) return true;
+    if (await browser.evalIn(viewer, `document.getElementById('tl-card').hidden`)) await browser.click(wrapper, viewer, '#av-pins .tl-pin').catch(() => {});
+    return false;
+  }, 'the supervisor\'s turn, with the goal linked, in the card');
+  const popup = async (open, what) => {
+    const before = new Set(browser.pages().map((s) => s.targetId));
+    const handle = await open();
+    const p = await until(() => browser.pages().find((s) => !before.has(s.targetId) && (s.url ?? '').startsWith(`${inst}/`)), `the new tab (${what})`);
+    const opener = await until(async () => { const tree = await browser.treeOf(p); if (!tree) return null; const r = await browser.evalFrame({ session: p, frameId: tree.frameTree.frame.id }, `document.readyState !== 'loading' && String(window.opener === null)`); return r || null; }, `the new tab to load (${what})`);
+    await browser.cdp.send('Target.closeTarget', { targetId: p.targetId });
+    await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+    assert.equal(opener, 'true', `${what}: window.opener in the new tab`);
+    return handle;
+  };
+  await popup(() => browser.click(wrapper, viewer, '#tl-c-turns a[href^="#goal/"]'), 'a link in a turn');
+  const handle = await popup(() => browser.evalMain(viewer, `window.open('/', '_blank') === null`, { gesture: true }), 'window.open asking for an opener');
+  assert.equal(handle, true, 'window.open gave the viewer no handle on the new tab');
+  stepOk('a tab opened from the viewer inside the wrapper has window.opener === null: from a link in a turn, and from a window.open that asks for one');
+
+  // and the grants are what let them in: the viewer without w=, or the artifact at a version the
+  // binding didn't publish (main), is refused inside the wrapper
+  await browser.evalIn(viewer, `(document.getElementById('av-frame').src = '/artifact/main/mock/', true)`);
+  await until(() => browser.refusedFrame((u) => u.startsWith(`${inst}/c/`) && u.endsWith('/artifact/main/mock/')), 'main\'s artifact to be refused in the owner\'s view', 15000);
+  await browser.evalIn(wrapper, `(document.querySelector('iframe').src = ${JSON.stringify(viewer)}, true)`);
+  await until(() => browser.refusedFrame((u) => u === viewer), 'the viewer without the wrapper\'s grant to be refused', 15000);
+  stepOk('inside the wrapper, the viewer without its w= grant is refused, and so is the artifact at a version the binding didn\'t publish');
 }
 
 async function main() {
@@ -433,16 +805,32 @@ async function main() {
   browser = await new Browser().start(path.join(base, 'chrome'));
   // the laptop half leaves the hub open, framing this same dashboard: closed, so a step here reads the thread tab's page
   if (!only) { const lap = await laptop({ HUB, DASH, app }); await browser.cdp.send('Target.closeTarget', { targetId: lap.hub.targetId }); }
-  await threads({ DASH, pane });
-  if (!only) await viaGateway({ HUB, DASH, app, G: block + 30 });
+  const goal = await threads({ DASH, pane });
+  if (!only) await viaGateway({ HUB, DASH, app, G: block + 30, SP: block + 20, goal });
   say('all steps passed');
 }
 
+// Chrome, the servers, the gateway and tmux go however the run ends: a failure, a pass, Ctrl-C, or
+// a throw outside the steps (stdout closed under it, by a pipe into head, is one).
+let cleaned = false;
+async function cleanUp(code) {
+  if (cleaned) return;
+  cleaned = true;
+  try { await browser?.kill(); } catch {}
+  for (const p of procs) { try { p.kill(); } catch {} }
+  // $TMUX, set when this runs inside a tmux pane, wins over TMUX_TMPDIR: without deleting it this kills the developer's own server.
+  const tenv = { ...process.env, TMUX_TMPDIR: tmuxDir }; delete tenv.TMUX; delete tenv.TMUX_PANE;
+  spawnSync('tmux', ['kill-server'], { env: tenv });
+  await sleep(500);
+  // a process still writing under base can make the removal throw (ENOTEMPTY): that must not lose the exit code below
+  if (!process.env.DEVTEAM_TEST_KEEP) { try { fs.rmSync(base, { recursive: true, force: true, maxRetries: 3 }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } catch (e) { console.log(`left ${base}: ${e.code ?? e.message}`); } } else console.log(`kept ${base}`);
+  process.exit(exitCode || code);
+}
+// A failure reported while a passing run is cleaning up (an unhandled rejection) still sets the exit code, so output and code agree.
+let exitCode = 0;
+const stop = (why) => { exitCode = 1; try { console.error(`FAIL ${why}`); } catch {} cleanUp(1); };
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => stop(`stopped by ${sig}`));
+for (const ev of ['uncaughtException', 'unhandledRejection']) process.on(ev, (e) => stop(e?.stack ?? e));
 let failed = false;
 try { await main(); } catch (e) { failed = true; console.error(`FAIL ${e.stack ?? e}`); }
-try { await browser?.kill(); } catch {}
-for (const p of procs) { try { p.kill(); } catch {} }
-spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } });
-await sleep(500);
-if (!process.env.DEVTEAM_TEST_KEEP) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } else console.log(`kept ${base}`);
-process.exit(failed ? 1 : 0);
+await cleanUp(failed ? 1 : 0);

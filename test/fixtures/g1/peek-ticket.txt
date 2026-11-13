@@ -1,0 +1,223 @@
+exit 0
+--- stdout
+{
+  "kind": "ticket",
+  "id": "g1-01-a",
+  "record": {
+    "id": "g1-01-a",
+    "type": "ticket",
+    "created_by": "supervisor",
+    "updated_by": null,
+    "fields": {
+      "title": "g1-01-a",
+      "feature": "g1-work",
+      "component": "g1",
+      "kind": "build",
+      "size": "S",
+      "risk": "normal",
+      "serves": [
+        "G1-S1"
+      ],
+      "depends_on": [],
+      "touches": [
+        "src/**"
+      ],
+      "done_when": [
+        "the src test passes in CI"
+      ]
+    },
+    "set_by": {}
+  },
+  "stage": null,
+  "ticket": {
+    "id": "g1-01-a",
+    "type": "ticket",
+    "title": "g1-01-a",
+    "feature": "g1-work",
+    "component": "g1",
+    "kind": "build",
+    "size": "S",
+    "risk": "normal",
+    "serves": [
+      "G1-S1"
+    ],
+    "depends_on": [],
+    "touches": [
+      "src/**"
+    ],
+    "done_when": [
+      "the src test passes in CI"
+    ],
+    "created_by": "supervisor",
+    "updates": [],
+    "stage": "in-review",
+    "merge_sha": null,
+    "branch": "refs/heads/ticket/g1-01-a",
+    "deps_merged": true,
+    "held": null,
+    "phase": null,
+    "task": null,
+    "note": null,
+    "usd": null,
+    "waiting": null
+  },
+  "files": [
+    {
+      "title": "spec",
+      "path": "docs/devteam/project/tickets/g1-01-a/spec.md",
+      "ref": "refs/heads/ticket/g1-01-a"
+    },
+    {
+      "title": "plan",
+      "path": "docs/devteam/project/tickets/g1-01-a/plan.md",
+      "ref": "refs/heads/ticket/g1-01-a"
+    },
+    {
+      "title": "verification",
+      "path": "docs/devteam/project/tickets/g1-01-a/verification.md",
+      "ref": "refs/heads/ticket/g1-01-a"
+    }
+  ],
+  "reviews": [
+    {
+      "file": "final-1.md",
+      "stage": "final",
+      "pass": 1,
+      "verdict": "APPROVE",
+      "reviewer": "reviewer-b"
+    }
+  ],
+  "history": [
+    {
+      "v": 1,
+      "id": "g1-01-a",
+      "type": "ticket",
+      "op": "new",
+      "by": "supervisor",
+      "title": "g1-01-a",
+      "feature": "g1-work",
+      "component": "g1",
+      "kind": "build",
+      "size": "S",
+      "risk": "normal",
+      "serves": [
+        "G1-S1"
+      ],
+      "depends_on": [],
+      "touches": [
+        "src/**"
+      ],
+      "done_when": [
+        "the src test passes in CI"
+      ]
+    },
+    {
+      "v": 1,
+      "id": "a-<sha>-<sha>-supervisor",
+      "type": "act",
+      "op": "new",
+      "by": "supervisor",
+      "class": "add-ticket",
+      "what": "added ticket g1-01-a",
+      "refs": [
+        "g1-01-a"
+      ],
+      "reversible": true
+    },
+    {
+      "v": 1,
+      "id": "g1-02-b",
+      "type": "ticket",
+      "op": "new",
+      "by": "supervisor",
+      "title": "g1-02-b",
+      "feature": "g1-work",
+      "component": "g1",
+      "kind": "build",
+      "size": "S",
+      "risk": "normal",
+      "serves": [
+        "G1-S1"
+      ],
+      "depends_on": [
+        "g1-01-a",
+        "g1-99-missing"
+      ],
+      "touches": [
+        "src/b/**"
+      ],
+      "done_when": [
+        "the src test passes in CI"
+      ]
+    },
+    {
+      "v": 1,
+      "id": "a-<sha>-<sha>-supervisor",
+      "type": "act",
+      "op": "new",
+      "by": "supervisor",
+      "class": "approve-spec",
+      "what": "spec ok",
+      "refs": [
+        "g1-01-a"
+      ],
+      "reversible": true
+    },
+    {
+      "v": 1,
+      "id": "a-<sha>-<sha>-supervisor",
+      "type": "act",
+      "op": "new",
+      "by": "supervisor",
+      "class": "approve-plan",
+      "what": "plan ok",
+      "refs": [
+        "g1-01-a"
+      ],
+      "reversible": true
+    },
+    {
+      "v": 1,
+      "id": "q-<sha>-<sha>-supervisor",
+      "type": "question",
+      "op": "new",
+      "by": "supervisor",
+      "kind": "owner-decision",
+      "ticket": "g1-01-a",
+      "question": "Ship g1 behind a flag?",
+      "options": [],
+      "choices": [
+        {
+          "label": "yes",
+          "detail": "behind a flag"
+        },
+        {
+          "label": "no"
+        }
+      ],
+      "links": [
+        {
+          "title": "The spec",
+          "path": "docs/devteam/project/tickets/g1-01-a/spec.md",
+          "ref": "ticket/g1-01-a"
+        }
+      ],
+      "recommendation": "yes",
+      "blocks": [],
+      "evidence": [],
+      "why_asked": {
+        "reasons": []
+      }
+    }
+  ],
+  "deps": {
+    "waits_on": [],
+    "blocks": [
+      "g1-02-b"
+    ]
+  },
+  "handoff": null,
+  "spend": []
+}
+--- stderr
+

@@ -45,6 +45,15 @@ Add accessibility and lab performance once there is a UI, evals with thresholds 
 
 Default tools: TypeScript Biome (or ESLint + Prettier), `tsc --noEmit`, vitest (`sequence.shuffle`), knip, jscpd; Ruby RuboCop, RSpec `--order random`, SimpleCov, debride, flay; Python ruff, pyright, pytest + pytest-randomly, coverage.py, vulture; Go gofmt + golangci-lint, `go test -shuffle on -cover`, staticcheck, dupl; Rust rustfmt + clippy, nextest, cargo-llvm-cov, cargo-machete. Secrets: gitleaks everywhere. Record the choice in the settings.
 
+**Secrets.** gitleaks scans the history, run from the repository root, and the history holds the kit's log. gitleaks' `generic-api-key` rule reads the log's `source_key` (the key that groups repeats of one signal, a slug such as `spend-spike-nov9-10`) as a key when its value has a digit in it, so the kit ships `docs/devteam/gitleaks.toml`: gitleaks' default rules, plus one allowlist on that rule for a `source_key` whose value is a slug, matched on the JSON key. A real secret anywhere else on a log line (its `detail`, a sensor's `sample`), or a `source_key` value that isn't a slug, still fails, and every other rule still sees `source_key`. `init` writes a `.gitleaks.toml` that extends it where a project has none; a kit sync adds that file where main has none (`supervisor.md` §9). A project that already has a `.gitleaks.toml` extends the kit's from it, beside its own rules and allowlists:
+
+```toml
+[extend]
+path = "docs/devteam/gitleaks.toml"
+```
+
+That replaces `useDefault = true`, which the kit's file already sets (gitleaks takes one `[extend]`). One whose `[extend]` already names another file copies the kit's `[[rules]]` block instead. A gate that passes `--config` names `.gitleaks.toml` or the kit's file. Allowlist nothing else for the log: a finding there is a secret until shown otherwise.
+
 **Modes.** A gate is **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises, or a changed line violates). A tool with its own baseline (`rubocop --auto-gen-config`, a brakeman ignore file, a coverage floor) ratchets itself. For a pass/fail command, `"mode": "ratchet"` in the gate makes `merge` rerun a failing gate at the merge base and let the PR through, with a warning, if it fails there too. Adopting an existing codebase, turn each gate on in ratchet mode with its count recorded in the settings, open one chore ticket per component to bring it to green, and flip it to enforced when that lands. Workers bring the legacy lines they change up to the code rules and leave the rest.
 
 **Comments and readability** are the reviewer's: a non-obvious decision with no comment saying why, a name that needs a comment, or a comment that restates the code is a Minor finding.
