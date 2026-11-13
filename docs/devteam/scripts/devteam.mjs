@@ -2529,43 +2529,82 @@ function paneWaitingIn(window) {
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
 // window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
-// Enter and log it. That Enter can be lost the same way (seen on a loaded machine), so the text still
-// sitting there LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all. The
-// text is never retyped; the record is claimed (moved aside) before each key, so however many passes
-// or processes look, one press happens per claim, and they stop once the text is gone.
+// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
+// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
+// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
+// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
+// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
+// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
+// is claimed (moved aside) and read again before each key, so however many passes or processes look,
+// and however stale their first read, one press happens per claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
 const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
-const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+const squash = (t) => t.replace(/[\s─-╿]+/g, '');
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
   try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
 }
+// A claim left by a process that died between its claim and its writeback: dropped, so the
+// sent directory doesn't collect them (that delivery's rescue ends with it).
+function dropDeadClaims(file) {
+  const dir = path.dirname(file);
+  const prefix = `${path.basename(file)}.claim-`;
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.startsWith(prefix)); } catch { return; }
+  for (const n of names) {
+    const pid = /^\d+$/.test(n.slice(prefix.length)) ? Number(n.slice(prefix.length)) : 0; // not a writeback's .tmp
+    if (!pid || pid === process.pid) continue;
+    try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') { try { fs.unlinkSync(path.join(dir, n)); } catch {} } }
+  }
+}
 function resendLostEnter(key, target, lines) {
   const file = sentFile(key);
+  dropDeadClaims(file);
+  const ripe = (r) => typeof r?.text === 'string' && (Date.now() - Date.parse(r.at)) / 1000 >= LOST_ENTER_SECONDS;
   let rec;
   try { rec = readJson(file); } catch { return; }
-  const age = (Date.now() - Date.parse(rec.at)) / 1000;
   const tail = squash(rec.text ?? '').slice(-40);
-  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  if (!tail || !ripe(rec)) return;
   const bottom = lines.slice(-8);
+  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
   const claimed = `${file}.claim-${process.pid}`;
-  const claim = () => { try { fs.renameSync(file, claimed); return true; } catch { return false; } };
   const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
+  // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
+  // fails if the name is taken, where a rename would replace it): then the claim is just dropped.
+  const putBack = () => { try { fs.linkSync(claimed, file); } catch {} drop(); };
+  // Claimed, and read again: a pass whose first read is stale (another process pressed and wrote
+  // the record back since) finds a fresh time, or another text, and leaves it as it was.
+  const claim = () => {
+    try { fs.renameSync(file, claimed); } catch { return null; }
+    let now = null;
+    try { now = readJson(claimed); } catch {}
+    if (now?.text === rec.text && ripe(now)) return now;
+    putBack();
+    return null;
+  };
   if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
   if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
-  if (!claim()) return;
+  if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
+  // tests only: the pause a loaded machine can put between the first read and the claim
+  const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
+  if (pause > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pause);
+  const cur = claim();
+  if (!cur) return;
+  const done = Math.max(0, Number(cur.tries) || 0);
+  // after a press, only an untouched pane: a reply, a submission or a line being typed ends the rescue
+  if (done >= LOST_ENTER_TRIES || (done > 0 && cur.bottom !== digest)) return void drop();
   const pressed = tmux(['send-keys', '-t', target, 'Enter']);
-  const tries = (Number(rec.tries) || 0) + 1;
-  // another try later, unless that was the last, the key failed, or a newer delivery took the slot
-  if (pressed && tries < LOST_ENTER_TRIES && !fs.existsSync(file)) { try { writeJson(claimed, { ...rec, tries, at: nowIso(), typed_at: rec.typed_at ?? rec.at }); fs.renameSync(claimed, file); } catch { drop(); } } else drop();
+  const tries = done + 1;
+  const typedAt = cur.typed_at ?? cur.at;
+  // another try later, unless that was the last or the key failed; a newer delivery keeps the slot
+  if (pressed && tries < LOST_ENTER_TRIES) { try { writeJson(claimed, { ...cur, tries, bottom: digest, at: nowIso(), typed_at: typedAt }); putBack(); } catch { drop(); } } else drop();
   if (!pressed) return;
-  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
-  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(rec.typed_at ?? rec.at)) / 1000)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.typed_at ?? rec.at}`, measure: { value: Math.round(age), unit: 's' } });
+  const hash = crypto.createHash('sha1').update(cur.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter (try ${tries} of ${LOST_ENTER_TRIES}): text typed ${Math.round((Date.now() - Date.parse(typedAt)) / 1000)}s ago was still unsubmitted in an idle pane ("${cur.text.slice(0, 60)}${cur.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${typedAt}`, measure: { value: Math.round((Date.now() - Date.parse(cur.at)) / 1000), unit: 's' } });
 }
 // The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
 // tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
