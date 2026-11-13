@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
+import { PORTS, kit, freePort, write, json, pastDeadline, fleetFixture, bareProject, startDashboard, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 // A wait on a condition in a page. Page.navigate answers before the new page is parsed, so an
@@ -414,6 +414,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const Q2 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
   const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make'], SUP);
   const Q3 = dt(['ask', '--question', 'Which port?', '--default', '8080'], SUP);
+  pastDeadline(root, Q3);
   dt(['answer', Q3, '--defaulted'], SUP);
   const port = await freePort();
   const dash = startDashboard(root, env, ['--port', String(port)]);
