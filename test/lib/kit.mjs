@@ -23,6 +23,10 @@ export const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 process.env.DEVTEAM_CSWAP = 'off';
 // A fixture's stand-in supervisor runs under whatever agent runs the tests; it isn't that agent.
 process.env.DEVTEAM_SUPERVISOR_UP = 'off';
+// The kit won't start a session while the machine's memory is over its ceiling: a test reads a
+// machine of its own (DEVTEAM_CGROUP, DEVTEAM_MEMINFO), or none, never the one it runs on.
+process.env.DEVTEAM_CGROUP ??= path.join(os.tmpdir(), 'dt-no-such-machine');
+process.env.DEVTEAM_MEMINFO ??= path.join(os.tmpdir(), 'dt-no-such-machine');
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 // tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
 // and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs

@@ -496,6 +496,11 @@ const SETTINGS_DEFAULTS = {
   // planning gets one unless its design waits on another goal's (goal set --plan-after). They don't
   // count against max_active_tickets.
   max_active_planners: null,
+  // The share of the machine's memory (its cgroup cap, else the host's) at or above which a new
+  // worker or planner doesn't start (--force does anyway); a resume always does. The machine is
+  // shared with other fleets, so this is the supervisor's, like the caps above: 0.5 to 0.95, and
+  // an invalid value counts as the default.
+  machine_memory_ceiling: 0.8,
   stale_after_minutes: 30,
   // A goal parked this long (not by a fleet op) is worth asking the owner about again.
   hold_review_days: 14,
@@ -2978,6 +2983,7 @@ function cmdValidate() {
     const s = loadSettings();
     const reg = registryProblems(s);
     errors.push(...reg.errors, ...sensorProblems(s));
+    { const p = memoryCeilingProblem(s.machine_memory_ceiling); if (p) errors.push(p); }
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
     // here, in the words merge refuses with, before the first PR meets it.
@@ -10805,6 +10811,9 @@ function collectMetrics(since) {
   for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
   // An old fleet drain in force starts nothing; goal holds start nothing for their goals.
   const drained = !!draining();
+  // over the machine's memory ceiling, no finding suggests starting a session; memory-full says why
+  const memFull = memoryFull(settings);
+  let idlePlanning = 0;
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
   // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
@@ -10866,12 +10875,15 @@ function collectMetrics(since) {
     }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
     const cap = settings.max_active_planners;
     // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
-    if (!drained && waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
+    if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
+    if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   // a ready fix ticket may use an incident slot past the cap
   const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
-  if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0)) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
-  if (!drained && ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
+  if (!drained && ready.length && active < settings.max_active_tickets && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  // the slots and planning above that the machine's memory leaves no room for: say that instead
+  if (memFull && (idlePlanning || (!drained && ((ready.length && active < settings.max_active_tickets) || (readyFix.length && active < settings.max_active_tickets + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${settings.max_active_tickets} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
@@ -12419,6 +12431,42 @@ function versionBefore(a, b) {
 const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) }); return 'up'; } catch { return 'DOWN'; } };
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
+// The machine's memory in bytes, { inUse, max, source }, or null when nothing says (macOS: no cgroup
+// and no /proc/meminfo) or a file can't be read. The cgroup's cap first, since a platform caps the
+// container there (cgroup v2's files: on v1, or a cap set on a parent cgroup, this reads the host's):
+// in use is what the kernel can't drop, memory.current less the page cache it can (memory.stat's
+// file, less its shmem, which lives in tmpfs and /dev/shm and can't be dropped). With no cap (no
+// cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
+// DEVTEAM_CGROUP and DEVTEAM_MEMINFO point both elsewhere (tests).
+function machineMemory() {
+  try {
+    const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
+    const max = readNum(path.join(cg, 'memory.max'));
+    const current = readNum(path.join(cg, 'memory.current'));
+    if (max > 0 && current !== null) {
+      const stat = readText(path.join(cg, 'memory.stat')) ?? '';
+      const field = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1] ?? 0);
+      return { inUse: Math.max(0, current - Math.max(0, field('file') - field('shmem'))), max, source: 'cgroup' };
+    }
+    const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
+    const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
+    const total = kb('MemTotal'), avail = kb('MemAvailable');
+    if (!(total > 0) || !Number.isFinite(avail)) return null;
+    return { inUse: Math.max(0, total - avail) * 1024, max: total * 1024, source: 'meminfo' };
+  } catch { return null; }
+}
+const GiB = (b) => (b / 1073741824).toFixed(1);
+const MEMORY_CEILING_DEFAULT = 0.8;
+const memoryCeilingProblem = (v) => (typeof v === 'number' && v >= 0.5 && v <= 0.95 ? null : `settings.machine_memory_ceiling is ${JSON.stringify(v) ?? String(v)}: it is the share of the machine's memory at which new workers stop starting, a number from 0.5 to 0.95 (default ${MEMORY_CEILING_DEFAULT}); until it is, ${MEMORY_CEILING_DEFAULT} applies`);
+// The machine's memory at or over the supervisor's ceiling: { words, … }, or null when under it or
+// when nothing says (never a block where the kit can't read memory). An invalid ceiling counts as
+// the default, so no value widens what a supervisor may start.
+function memoryFull(s = loadSettings()) {
+  const ceiling = memoryCeilingProblem(s.machine_memory_ceiling) ? MEMORY_CEILING_DEFAULT : s.machine_memory_ceiling;
+  const m = machineMemory();
+  if (!m || m.inUse < ceiling * m.max) return null;
+  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%), at or over its ${Math.round(ceiling * 100)}% ceiling` };
+}
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -12430,17 +12478,8 @@ function machineLine(last) {
   const trend = moved ? ` (${d > 0 ? '+' : ''}${Math.round(d)}G in ${Math.trunc((now - (last.at ?? now)) / 60)}m)` : '';
   const low = free < 20971520 || Math.floor((free * 100) / (total + 1)) < 15 ? ' LOW' : '';
   const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
-  const max = readText(path.join(cg, 'memory.max'))?.trim();
-  let mem;
-  if (max && max !== 'max') {
-    // in use: what the kernel can't drop (the page cache it can), against the cap
-    const file = Number(/^file (\d+)$/m.exec(readText(path.join(cg, 'memory.stat')) ?? '')?.[1] ?? 0);
-    mem = `${(Math.max(0, (readNum(path.join(cg, 'memory.current')) ?? 0) - file) / 1073741824).toFixed(1)} GB in use of ${(Number(max) / 1073741824).toFixed(1)} GB`;
-  } else {
-    const info = readText('/proc/meminfo');
-    const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
-    mem = info ? `${(kb('MemAvailable') / 1048576).toFixed(1)} GB free of ${(kb('MemTotal') / 1048576).toFixed(1)} GB` : `${(os.freemem() / 1073741824).toFixed(1)} GB free of ${(os.totalmem() / 1073741824).toFixed(1)} GB`;
-  }
+  const m = machineMemory();
+  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
   // the CPUs it may use, and how much of the last minute every task stood waiting for one
   const [quota, period] = (readText(path.join(cg, 'cpu.max')) ?? '').trim().split(/\s+/);
   const cpus = quota && quota !== 'max' && Number(period) > 0 ? String(Number((Number(quota) / Number(period)).toPrecision(6))) : String(os.cpus().length || '?');
@@ -13775,6 +13814,14 @@ function makeSession(role) {
   const started = role === 'worker' ? !!lastPhaseOf(id) : !!resolveCommit(`refs/heads/plan/${id}`);
   const refused = ['park', 'let-go'].includes(mode) || (mode === 'drain' && !started);
   if (refused && !flags.force) die(legacyDrain ? `the fleet is drained by an old drain (${legacyDrain.id}): fleet unpark first (supervisor.md §12); to start this one anyway, add --force (it is logged)` : `its goal is ${holdWords(mode)}: ${mode === 'drain' ? 'a draining goal finishes what is running and starts nothing new' : 'nothing starts for it'} (planning.md §1, holds). To start it anyway, add --force (it is logged)`);
+  // The machine is shared with other fleets: a new session doesn't start while its memory is at the
+  // supervisor's ceiling (supervisor.md §5). A resume of one that already ran always does, so a
+  // dead machine's sessions all come back; --resume on one that never ran is a new start.
+  // A planner moved from another machine has its plan branch on origin only, and continues from it.
+  const ran = started || (role === 'planner' && !!resolveCommit(`refs/remotes/origin/plan/${id}`));
+  const memNow = memoryFull();
+  const memFull = flags.resume && ran ? null : memNow;
+  if (memFull && !flags.force) die(`${memFull.words}: start this ${role} when some sessions finish, or pass --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
   // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
@@ -13883,7 +13930,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused || memFull ? ` while ${[refused && `its goal is ${holdWords(mode)}`, memFull?.words].filter(Boolean).join(' and ')}, with --force` : memNow && !resume ? `, a resume that started fresh while ${memNow.words}` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {
@@ -17129,7 +17176,7 @@ Setup and roles
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
   machine status [--questions | --knowledge] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest (with when the operator's daily review is due, from --notes), or the open questions, or the accepted knowledge, not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
-  worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
+  worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, or (a resume of one that ran aside) while the machine's memory is at its machine_memory_ceiling, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 

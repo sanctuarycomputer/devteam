@@ -365,6 +365,10 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
   assert.match(machine(['machine', 'status'], { DEVTEAM_CGROUP: cg }).stdout, /^machine: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+[ ;].*load /m);
+  // the host's own: MemAvailable of MemTotal (what the kit's memory ceiling reads too)
+  const meminfo = path.join(cg, 'meminfo');
+  fs.writeFileSync(meminfo, 'MemTotal:       8388608 kB\nMemFree:          524288 kB\nMemAvailable:    3145728 kB\n');
+  assert.match(machine(['machine', 'status'], { DEVTEAM_CGROUP: cg, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
 });
 
 // Every read the operator is allowed, against a repo with something in it: the log, git status and

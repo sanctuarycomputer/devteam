@@ -14,6 +14,11 @@ jobs:
         node: [18, 20, 22, 24]
         part: [chain, rest]
     runs-on: ubuntu-latest
+    # the kit won't start a worker while the machine's memory is over its ceiling: the tests read a
+    # machine of their own (or none), never the runner's
+    env:
+      DEVTEAM_CGROUP: /nonexistent/devteam-cgroup
+      DEVTEAM_MEMINFO: /nonexistent/devteam-meminfo
     # a hung test should fail the job, not hold it for hours
     timeout-minutes: 30
     steps:
