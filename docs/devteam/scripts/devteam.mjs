@@ -10760,8 +10760,9 @@ const RESTART_MAX = 3;
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
-// How long a dashboard read waits on a dashboard-data run before it has the last good data instead.
-const DATA_WAIT_MS = Number(process.env.DEVTEAM_DATA_WAIT_MS ?? 20000);
+// How long a dashboard read waits on a dashboard-data run before it has the last good data instead
+// (0 is no wait at all; anything that isn't a number is the default).
+const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
@@ -12207,7 +12208,7 @@ async function cmdDashboard() {
   let lastData = null;
   const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
     dataRun = null;
-    if (!err) lastData = stdout;
+    if (!err && stdout) lastData = stdout;
     resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
   })));
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
@@ -12261,7 +12262,8 @@ async function cmdDashboard() {
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
-      const r = await (lastData === null ? dashboardData() : Promise.race([dashboardData(), new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); })]));
+      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); });
+      const r = await (lastData ? Promise.race([dashboardData(), slow]) : dashboardData());
       clearTimeout(waited);
       if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
       // The page in use says which version of itself it is: an open tab keeps the code it loaded,

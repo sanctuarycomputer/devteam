@@ -4942,6 +4942,8 @@ async function loadNow() {
   const late = DATA ? setTimeout(() => stop.abort(), READ_GIVE_UP_MS) : null;
   try {
     const r = await fetch('/api/data', { signal: stop.signal });
+    // the body first: a read given up on mid-body leaves none of what its headers say applied
+    const body = await r.text();
     const pv = r.headers.get('x-devteam-page');
     if (pv) { if (!PAGE_VERSION) PAGE_VERSION = pv; else if (pv !== PAGE_VERSION) $('updated').hidden = false; }
     // what the cloud box serves; absent on a laptop, and a header that doesn't parse counts as absent
@@ -4949,7 +4951,6 @@ async function loadNow() {
     try { if (r.headers.get('x-devteam-public')) PUBLIC = JSON.parse(r.headers.get('x-devteam-public')); } catch {}
     PREVIEWS = r.headers.get('x-devteam-previews') === '1';
     STALE = r.headers.get('x-devteam-stale') === 'true';
-    const body = await r.text();
     try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
   } catch (e) {

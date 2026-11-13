@@ -330,7 +330,8 @@ const POLL_FAST = `(() => {
   window.__answerHold = null;
   const inner = async (u, o) => {
     // each read's start and end (a held one starts when the gate opens), so a wait that times out can
-    // say whether a read was stuck on the server, and for how long
+    // say whether a read was stuck on the server, and for how long. The page gives up on a read after
+    // 30 s from its fetch, gate included: a gate held that long reads as a read given up at 0 ms.
     if (String(u).startsWith('/api/data')) {
       window.__polls++;
       if (window.__gate) await window.__gate;
@@ -692,7 +693,7 @@ test('a slow data run: a read with data to fall back on has it at once, marked s
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   // waiting no time at all on a run: every read after the first is the last good data
   const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_HUB_PORT: String(PORTS + 40), DEVTEAM_PORT_BASE: String(PORTS + 41), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
-  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'slow');
   const ask = (q) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', q], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
   ask('First?');
