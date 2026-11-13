@@ -2742,3 +2742,80 @@ test("a goal at its target: the card's Mark met is an owner action, same-origin 
   assert.match(html, /g\.status === 'ready' && g\.at_target \? `<div class="holdbar"><button type="button" data-met-id=/, 'the card draws Mark met for a running goal at its target');
   assert.match(html, /build: \(\) => \(\{ action: 'goal-met', body: \{ id \} \}\)/);
 });
+
+// The Loop's sidepeeks (the OODA spec, PR 3): every card opens one when clicked anywhere on it; an
+// observation's says where it came from and where it sits; a signal opens by its key, / and all.
+test('the Loop: a card opens its sidepeek; an observation says where it came from and where it sits; a signal opens by its key', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const F = fleetFixture('loop-peeks');
+  t.after(() => F.done());
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const O1 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow'], SUP);
+  const O2 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', `slower than ${O1}`], SUP);
+  // two more that became a lesson: each has a lineage to draw
+  const O3 = F.ok(F.old, ['observe', '--subject', 'pay', '--kind', 'timeout', '--detail', 'payments timed out'], SUP);
+  const O4 = F.ok(F.old, ['observe', '--subject', 'pay', '--kind', 'timeout', '--detail', 'payments timed out again'], SUP);
+  const K = F.ok(F.old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'payments time out under load', '--evidence', O3, O4], SUP).match(/k-\S+/)[0];
+  // a finding whose subject holds a /, three times on two days: a recurring signal
+  const logDir = path.join(F.old, 'docs/devteam/run/log');
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  for (const h of [30, 28, 2]) {
+    const d = new Date(Date.now() - h * 3600000);
+    fs.appendFileSync(path.join(logDir, `supervisor-${d.toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, op: 'new', type: 'observation', id: `o-${stamp(d)}-supervisor`, at: d.toISOString(), by: 'supervisor', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed, then passed', source_key: 'metrics:flaky-gate:web/e2e' })}\n`);
+  }
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => dash.stop());
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#loop` });
+  const soon = async (expr, what) => { for (let i = 0; i < 400; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  const card = (sel) => `#observations [data-open="observation/${sel}"]`;
+  await soon(`!!document.querySelector('${card(O1)}')`, 'the observation card');
+  assert.equal(await p.ev(`document.querySelector('${card(O1)} .place').textContent`), 'Part of a recurring signal (2 of 3)');
+  // an o- id in text links to its sidepeek
+  assert.equal(await p.ev(`document.querySelector('${card(O2)}').querySelector('a[href="#observation/${O1}"]') !== null`), true, 'an o- id in text is a link');
+  // a click anywhere on the card (here its detail, no link in it) opens it
+  await p.click(`${card(O1)} > div`);
+  await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
+  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
+  // an attribute's value, by its label (the label's tooltip is in its text)
+  const attr = (label) => p.ev(`[...document.querySelectorAll('#drawer-body .attrs dt')].find((x) => x.textContent.startsWith(${JSON.stringify(label)}))?.nextElementSibling?.textContent ?? null`);
+  assert.equal(await attr('Where it sits'), 'Part of a recurring signal (2 of 3)', 'two slow-test notes on app, of the three a signal takes');
+  assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
+  // a signal whose key holds a /: its card opens #signal/<key>
+  await p.ev(`document.getElementById('drawer-close').click()`);
+  await p.click('[data-tab="orient"]');
+  const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
+  await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
+  // thirty hours unexplained: orientation debt, whose card opens the same signal
+  assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
+  await p.click(`${sig} > div`);
+  await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
+  await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
+  assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
+  assert.equal(await attr('Unexplained for'), '30 hours');
+  // the lineage: Mermaid blocked, the list stands in, every record in it a link
+  await p.ev(`document.getElementById('drawer-close').click(); void (MERMAID = Promise.reject(new Error('blocked')))`);
+  await p.ev(`location.hash = '#observation/${O3}'`);
+  await soon(`document.querySelectorAll('#drawer-body .lineage-list a[href]').length === 2`, 'the lineage as a list');
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#drawer-body .lineage-list a[href]')].map((a) => a.getAttribute('href'))`), [`#observation/${O3}`, `#lesson/${K}`]);
+  assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage-list [aria-current]').getAttribute('href')`), `#observation/${O3}`);
+  assert.equal(await p.ev(`/flowchart/.test(document.getElementById('drawer-body').textContent)`), false, 'never the Mermaid source');
+  // Mermaid available (it loads from its CDN, so a machine offline keeps the list): each node opens its sidepeek
+  await p.ev(`document.getElementById('drawer-close').click(); MERMAID = null`);
+  await p.ev(`location.hash = '#observation/${O4}'`);
+  await soon(`!!document.querySelector('#drawer-body .lineage-list, #drawer-body .lineage svg')`, 'the lineage');
+  let drawn = false;
+  for (let i = 0; i < 300 && !drawn; i++) { drawn = await p.ev(`!!document.querySelector('#drawer-body .lineage svg a.lineage-node')`); if (!drawn) await new Promise((r) => setTimeout(r, 100)); }
+  if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
+  assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
+  assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  await p.click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
+  await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
+});

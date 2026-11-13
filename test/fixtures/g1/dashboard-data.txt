@@ -354,6 +354,10 @@ exit 0
         "provenance": {
           "from": "owner",
           "ref": null
+        },
+        "place": {
+          "state": "new",
+          "ref": null
         }
       },
       {
@@ -373,6 +377,12 @@ exit 0
         "provenance": {
           "from": "owner",
           "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
         }
       },
       {
@@ -391,6 +401,12 @@ exit 0
         "provenance": {
           "from": "supervisor",
           "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
         }
       },
       {
@@ -409,6 +425,12 @@ exit 0
         "provenance": {
           "from": "supervisor",
           "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
         }
       }
     ],
@@ -425,6 +447,9 @@ exit 0
         "latest": "slow 3"
       }
     ],
+    "debt": {
+      "signals": []
+    },
     "knowledge": [
       {
         "id": "k-<sha>-<sha>-owner",

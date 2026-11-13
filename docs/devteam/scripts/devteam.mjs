@@ -8611,12 +8611,15 @@ function explained() {
   return { ids, keys };
 }
 const covered = (keys, key, at) => keys.has(key) && at <= keys.get(key);
-// Recurring signals nothing explains yet (explained, above): three or more observations (or
-// corrections) on one key, from at least two writers or on at least two days.
-function orientClusters() {
+// The observations (and corrections) nothing explains yet (explained, above), grouped on the key
+// they recur on, each group with whether it spreads (two writers or two days): every group, however
+// small, so a card can say how near a signal one is; computed once per read of the log.
+let SIGNALS = null;
+function signalGroups() {
+  if (SIGNALS?.log === readLog()) return SIGNALS.groups;
   const { ids: linked, keys } = explained();
   const groups = new Map();
-  const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
+  const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
@@ -8627,14 +8630,24 @@ function orientClusters() {
     const c = correctionOf(a);
     if (c && !linked.has(a.id)) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by, valence: -2, detail: c.reason });
   }
+  for (const g of groups.values()) g.spread = new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2;
+  return (SIGNALS = { log: readLog(), groups }).groups;
+}
+// Recurring signals: three or more of one group that spreads.
+function orientClusters() {
   const res = [];
-  for (const [key, items] of groups) {
-    const spread = new Set(items.map((i) => i.who)).size >= 2 || new Set(items.map((i) => dateOnly(i.at))).size >= 2;
+  for (const { key, items, spread } of signalGroups().values()) {
     if (items.length < 3 || !spread) continue;
     const v = items.reduce((s, i) => s + i.valence, 0) / items.length;
     res.push({ key, count: items.length, valence: +v.toFixed(1), ids: items.map((i) => i.id), latest: items.map((i) => i.detail).pop() });
   }
   return res.sort((a, b) => b.count - a.count);
+}
+// Recurring signals left unexplained for more than a day, oldest first: what Orient owes.
+function orientationDebt() {
+  const now = Date.now();
+  return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
+    .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
 }
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
@@ -10509,8 +10522,12 @@ function collectOoda() {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map(withOoda),
+    // each with where it sits in the loop, so its card can say so without the whole index
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
+    // orientation debt: recurring signals nothing has explained for more than a day, oldest first
+    // (resolved incidents nobody learned from join it in PR 4)
+    debt: { signals: orientationDebt() },
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
@@ -15467,6 +15484,196 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
+// ---- lineage: what a record in the loop came from and what came of it ----
+// Whether a record's approved_by is an approval the owner gave, for the lineage's word: a decision whose
+// authority checks out (decisionAuthorityGap), an act carrying one out, or an act of its own resting
+// on an owner's accepted rule or an answered question. Anything else only cites it: a supervisor's
+// lesson is never the owner approving.
+function approvalHolds(o) {
+  if (o.type === 'decision') return !decisionAuthorityGap(o);
+  if (o.type !== 'act') return false;
+  if (o.decision) { const d = logGet(o.decision); return d?.type === 'decision' && !decisionAuthorityGap(d); }
+  const r = logGet(o.approved_by ?? '');
+  if (r?.type === 'knowledge') return writerClass(r.created_by) === 'owner' && r.status === 'accepted';
+  return r?.type === 'question' && ['answered', 'defaulted'].includes(questionView(r).status);
+}
+// One index of the links between records, built once per read of the log: an edge from each record
+// a field cites to the record citing it (cited before citing, for every field), read off the fields
+// that cite, never a walk over strings. The ticket an add-ticket act made comes after the act. Then
+// the computed steps: an observation recurs in its signal, and a correction follows the call.
+const LINK_FIELDS = { evidence: 'evidence', refs: 'about', blocks: 'asks about', knowledge: 'rests on' };
+let LINKS = null;
+function linkIndex() {
+  if (LINKS?.log === readLog()) return LINKS;
+  const out = new Map(), inn = new Map(), seen = new Map();
+  // one edge a pair: a second field citing the same pair adds its why to it ("evidence, about")
+  const edge = (from, to, why) => {
+    const k = `${from}\0${to}`;
+    if (from === to) return;
+    const had = seen.get(k);
+    if (had) { if (!had[0].why.split(', ').includes(why)) for (const e of had) e.why = `${e.why}, ${why}`; return; }
+    const pair = [{ to, why }, { from, why }];
+    seen.set(k, pair);
+    (out.get(from) ?? out.set(from, []).get(from)).push(pair[0]);
+    (inn.get(to) ?? inn.set(to, []).get(to)).push(pair[1]);
+  };
+  const known = (t) => typeof t === 'string' && readLog().objects.has(t);
+  for (const o of readLog().objects.values()) {
+    for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
+      if (!known(t)) continue;
+      if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
+      else edge(t, o.id, why);
+    }
+    if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
+    if (known(o.decision)) edge(o.decision, o.id, 'carried out');
+  }
+  // An incident holds what its fingerprints raise while it is open, not only what it cited when it
+  // opened (sensor incident snapshots its refs): each observation on one of them from its opening to
+  // its resolution (the last update that resolved it; open-ended while it isn't resolved).
+  for (const p of incidentList()) {
+    const end = p.status === 'resolved' ? [...(p.updates ?? [])].reverse().find((u) => u.status === 'resolved')?.at ?? null : null;
+    for (const f of p.fingerprints) for (const o of fpObservations(f)) if (o.created_at >= p.created_at && (!end || o.created_at <= end)) edge(o.id, p.id, 'held');
+  }
+  for (const c of orientClusters()) for (const id of c.ids) edge(id, `signal:${c.key}`, 'recurs');
+  for (const a of calls()) if (correctionOf(a)) edge(a.id, `correction:${a.id}`, 'corrected');
+  return (LINKS = { log: readLog(), out, in: inn });
+}
+// Where each record opens on the dashboard: its sidepeek's address.
+const PEEK_HASH = { observation: 'observation', knowledge: 'lesson', problem: 'problem', decision: 'decision', act: 'act', question: 'q', ticket: 'ticket', goal: 'goal', feature: 'feature', message: 'thread', thread: 'talk' };
+const hrefOf = (o) => { const k = o?.type === 'observation' ? { retro: 'retro', learning: 'learning' }[o.kind] ?? 'observation' : PEEK_HASH[o?.type]; return k ? `#${k}/${encodeURIComponent(o.id)}` : null; };
+const plainLabel = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+// A question is the Inbox's; one answered in a ladder class is the owner's call, drawn in Decide.
+const lineageStage = (o) => { const s = stageOf(o); return s === 'inbox' && questionView(o).status === 'answered' && ladder().classes[o.class] ? 'decide' : s; };
+function lineageNode(id) {
+  if (id.startsWith('signal:')) {
+    const key = id.slice('signal:'.length);
+    const g = signalGroups().get(key);
+    return { id, stage: 'orient', type: 'signal', kind: null, label: plainLabel(`recurring: ${key}`), at: g?.items.at(-1)?.at ?? null, href: `#signal/${encodeURIComponent(key)}` };
+  }
+  if (id.startsWith('correction:')) {
+    const a = logGet(id.slice('correction:'.length));
+    const c = correctionOf(a);
+    return c ? { id, stage: 'learn', type: 'correction', kind: a.class ?? null, label: plainLabel(`corrected: ${c.reason}`), at: c.at, href: hrefOf(a) } : null;
+  }
+  const o = logGet(id);
+  if (!o) return null;
+  return { id, stage: lineageStage(o), type: o.type, kind: o.kind ?? o.class ?? null, label: plainLabel(o.what ?? o.statement ?? o.title ?? o.question ?? o.detail ?? o.text) || id, at: o.created_at, href: hrefOf(o) };
+}
+// lineage(id): the records it came from (up to 6 steps back) and what came of it (4 steps on), at
+// most max in all. The work graph and conversation are what a record is about: drawn, never followed
+// further. More than five siblings of one type and kind on one side of one neighbour become one node
+// that lists them. The opened record is always the first node.
+function lineage(id, { up = 6, down = 4, max = 120 } = {}) {
+  const L = linkIndex();
+  const root = lineageNode(id);
+  if (!root) return null;
+  const nodes = new Map([[id, root]]);
+  let truncated = false;
+  const walk = (side, hops) => {
+    let front = [id];
+    for (let h = 0; front.length; h++) {
+      const next = [];
+      for (const x of front) {
+        if (x !== id && nodes.get(x).stage === null) continue;
+        for (const e of (side === 'up' ? L.in : L.out).get(x) ?? []) {
+          const y = side === 'up' ? e.from : e.to;
+          if (nodes.has(y)) continue;
+          if (h >= hops || nodes.size >= max) { truncated = true; return; }
+          const n = lineageNode(y);
+          if (n) { nodes.set(y, n); next.push(y); }
+        }
+      }
+      front = next;
+    }
+  };
+  walk('up', up);
+  walk('down', down);
+  let edges = [];
+  for (const x of nodes.keys()) for (const e of L.out.get(x) ?? []) if (nodes.has(e.to)) edges.push({ from: x, to: e.to, why: e.why });
+  // siblings: one type and kind, on one side of one neighbour
+  const sibs = new Map();
+  for (const e of edges) for (const [m, nb, side] of [[e.from, e.to, 'up'], [e.to, e.from, 'down']]) {
+    const n = nodes.get(m);
+    if (m === id || ['signal', 'correction'].includes(n.type)) continue;
+    const k = JSON.stringify([nb, side, n.type, n.kind]);
+    (sibs.get(k) ?? sibs.set(k, new Set()).get(k)).add(m);
+  }
+  const into = new Map();
+  const groups = [];
+  for (const [k, ms] of [...sibs].sort((a, b) => b[1].size - a[1].size)) {
+    const free = [...ms].filter((m) => !into.has(m));
+    if (free.length <= 5) continue;
+    const [nb, , type, kind] = JSON.parse(k);
+    let gid = `group:${nb}:${type}:${kind}`;
+    while (nodes.has(gid) || groups.some((g) => g.id === gid)) gid += '+';
+    const first = nodes.get(free[0]);
+    groups.push({ id: gid, stage: first.stage, type, kind, label: `${free.length} ${kind ? `${kind} ` : ''}${type}s`, at: free.map((m) => nodes.get(m).at).sort().pop() ?? null, href: null, members: free, first: free[0] });
+    for (const m of free) into.set(m, gid);
+  }
+  const list = [];
+  for (const [x, n] of nodes) {
+    if (!into.has(x)) list.push(n);
+    else { const g = groups.find((y) => y.first === x); if (g) { const { first, ...rest } = g; list.push(rest); } }
+  }
+  const seen = new Set();
+  edges = edges.map((e) => ({ from: into.get(e.from) ?? e.from, to: into.get(e.to) ?? e.to, why: e.why })).filter((e) => { const k = `${e.from}\0${e.to}\0${e.why}`; if (e.from === e.to || seen.has(k)) return false; seen.add(k); return true; });
+  return { nodes: list, edges, truncated };
+}
+// The lineage as Mermaid text: a subgraph per stage in the loop's order, what is outside the loop
+// after them, generated node ids (n0 is the opened record, n<i> the i-th node), and labels stripped
+// to plain words, so no record's text or id reaches Mermaid's syntax.
+// A question still the Inbox's and a reading are drawn in their own groups, not with the work graph.
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], ['inbox', 'Asked you'], ['measurement', 'Measured']];
+const LINEAGE_CLASS = { observe: 'stroke:#4f8bd6', orient: 'stroke:#8a63d2', decide: 'stroke:#d29b2a', act: 'stroke:#3a9e6f', learn: 'stroke:#d0566a', inbox: 'stroke:#c2672f', measurement: 'stroke:#2f9bb0' };
+const mermaidText = (s) => String(s ?? '').replace(/[^A-Za-z0-9\s.,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+function lineageMermaid(L) {
+  const n = new Map(L.nodes.map((x, i) => [x.id, `n${i}`]));
+  const node = (x) => { const t = mermaidText(x.label) || mermaidText(x.id) || 'a record'; return x.type === 'signal' || x.members ? `${n.get(x.id)}(["${t}"])` : `${n.get(x.id)}["${t}"]`; };
+  const lines = ['flowchart LR'];
+  for (const [s, title] of LINEAGE_STAGES) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`subgraph s_${s}["${title}"]`, ...xs.map(node), 'end'); }
+  lines.push(...L.nodes.filter((x) => !LINEAGE_STAGES.some(([s]) => s === x.stage)).map(node));
+  for (const e of L.edges) lines.push(`${n.get(e.from)} -->|${mermaidText(e.why)}| ${n.get(e.to)}`);
+  for (const [s, css] of Object.entries(LINEAGE_CLASS)) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`classDef st_${s} ${css},stroke-width:1.5px`, `class ${xs.map((x) => n.get(x.id)).join(',')} st_${s}`); }
+  if (L.nodes.length) lines.push('classDef current stroke-width:3.5px', 'class n0 current');
+  return lines.join('\n');
+}
+// Where an observation sits in the loop, for its card and its sidepeek: ruled noise, ignored at
+// triage, set aside, carried on (the furthest stage it reached), explained (it became knowledge, a
+// problem or an incident), part of a signal (n of the 3 that make one), or not oriented yet. Null
+// for what isn't an observation for Orient (a reading, an outcome, a set-aside itself). What
+// explains a signal by its key (explained().keys, read with covered()) explains an observation on
+// it too: a ruling that names the key, the observations up to the ruling; the open incident that
+// holds the fingerprint, every one while it is open.
+const SET_ASIDE_KINDS = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'];
+let PLACE_CTX = null;
+function placeOf(o) {
+  if (o?.type !== 'observation' || stageOf(o) !== 'observe' || SET_ASIDE_KINDS.includes(o.kind)) return null;
+  if (PLACE_CTX?.log !== readLog()) PLACE_CTX = { log: readLog(), keys: explained().keys, rulings: new Map(logObjects('decision').filter((d) => d.class === 'orient-noise' && liveDecision(d)).sort(byTime).flatMap((d) => (d.refs ?? []).filter((r) => !logGet(r)).map((r) => [r, d]))), ignores: sensorIgnores(), ackHours: loadSettings().finding_ack_hours ?? 24, acks: new Map(logObjects('observation').filter((x) => x.kind === 'finding-ack').sort(byTime).map((x) => [x.source_ref, x])) };
+  const C = PLACE_CTX;
+  const after = (linkIndex().out.get(o.id) ?? []).map((e) => logGet(e.to)).filter(Boolean);
+  const key = signalKeyOf(o);
+  const rule = C.rulings.get(key);
+  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x)) ?? (covered(C.keys, key, o.created_at) && rule?.created_at >= o.created_at ? rule : null);
+  if (noise) return { state: 'noise', ref: noise.id, why: noise.what ?? null };
+  const fp = fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null;
+  const ig = fp ? C.ignores.get(fp) : null;
+  if (ig) return { state: 'ignored', ref: ig.id, why: ig.reason };
+  const ack = o.source_key ? C.acks.get(o.source_key) : null;
+  const until = ack ? new Date(Date.parse(ack.created_at) + C.ackHours * 3600000).toISOString() : null;
+  if (ack && until > nowIso()) return { state: 'set-aside', ref: ack.id, why: ack.detail, until };
+  // what came of it, step by step: the first record it reached at each stage
+  const ORDER = ['orient', 'decide', 'act', 'learn'];
+  const reached = (lineage(o.id, { up: 0, down: 4, max: 60 })?.nodes ?? []).slice(1).filter((n) => ORDER.includes(n.stage) && n.type !== 'signal' && !SET_ASIDE_KINDS.includes(n.kind));
+  const firstAt = ORDER.map((s) => reached.find((n) => n.stage === s)).filter(Boolean);
+  const word = (n) => (n.type === 'knowledge' ? n.kind ?? 'lesson' : n.type === 'problem' ? (isIncident(logGet(n.id)) ? 'incident' : 'problem') : n.type === 'question' ? 'your answer' : n.type === 'observation' ? String(n.kind ?? 'outcome').replace(/-/g, ' ') : n.type);
+  if (firstAt.length === 1 && firstAt[0].stage === 'orient') return { state: 'explained', ref: firstAt[0].id, why: word(firstAt[0]) };
+  if (firstAt.length) return { state: 'carried', ref: firstAt.at(-1).id, why: firstAt.map(word).join(' → ') };
+  const held = covered(C.keys, key, o.created_at) ? openIncidentOf(key) : null;
+  if (held) return { state: 'explained', ref: held.id, why: 'incident' };
+  const g = signalGroups().get(key);
+  if (g && g.items.length > 1) return { state: 'signal', ref: g.key, n: g.items.length, recurring: g.items.length >= 3 && g.spread };
+  return { state: 'new', ref: null };
+}
 // A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
 // only when this machine can read it, else none (a view never fails on a missing checkout).
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
@@ -15540,6 +15747,21 @@ function peekView(kind, id) {
       v.gates = Object.values(Object.fromEntries(runs.map((l) => [l.gate, { gate: l.gate, ok: l.ok, sha: l.sha ?? null, at: l.at }])));
       v.last_merge = last ? { id: last.id, at: last.created_at, ticket: (last.refs ?? []).find((r) => ts.includes(r)) ?? null, sha } : null;
     }
+  } else if (kind === 'signal') {
+    // computed, never stored: what nothing explains yet on its key, and the commands that would explain it
+    v.record = null;
+    const g = signalGroups().get(id);
+    const items = [...(g?.items ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+    const explained = logObjects('observation').filter((o) => signalKeyOf(o) === id && !items.some((i) => i.id === o.id)).map((o) => o.id);
+    if (!items.length && !explained.length) die(`no signal ${id}`);
+    const cite = items.slice(-SET_ASIDE_REFS).map((i) => shq(i.id)).join(' ');
+    v.signal = {
+      key: id, count: items.length, spread: !!g?.spread, recurring: items.length >= 3 && !!g?.spread, explained,
+      items: items.map((i) => ({ id: i.id, at: i.at, by: i.who, detail: i.detail })), first_at: items[0]?.at ?? null, latest_at: items.at(-1)?.at ?? null,
+      unexplained_hours: items.length ? Math.floor((Date.now() - Date.parse(items[0].at)) / 3600000) : null,
+      explain: items.length ? [`knowledge add --kind lesson --scope project --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(id)} ${cite} -- '<why it is noise>'`] : [],
+    };
+    v.history = historyOf(items.map((i) => i.id), { limit: 100 });
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
@@ -15554,11 +15776,19 @@ function peekView(kind, id) {
       v.events = o.fingerprints.map((f) => { const { sensor, key } = splitFpId(f); return { fingerprint: f, cached: jsonOr(path.join(sensorDir(sensor), 'events', fpFile(key)), null) }; });
     }
   }
+  // what a record in the loop, or a recurring signal, came from and what came of it
+  const root = kind === 'signal' ? `signal:${id}` : v.record && stageOf(logGet(v.record.id)) !== null ? v.record.id : null;
+  if (root) { v.lineage = lineage(root); v.lineage_mermaid = v.lineage ? lineageMermaid(v.lineage) : null; }
+  if (v.record?.type === 'observation') v.place = placeOf(logGet(v.record.id));
   return v;
 }
 function cmdPeek() {
   const [kind, id] = positional;
-  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread> <id> [--tickets ids] --json');
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  // a signal no observation is on is no signal, for --mermaid as for --json (lineageNode draws any key)
+  if (kind === 'signal' && !signalGroups().has(id) && !logObjects('observation').some((o) => signalKeyOf(o) === id)) die(`no signal ${id}`);
+  // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
+  if (flags.mermaid) return out(lineageMermaid(lineage(kind === 'signal' ? `signal:${id}` : id) ?? die(`no record ${id}`)));
   json(peekView(kind, id));
 }
 
@@ -16137,7 +16367,7 @@ Goals and retros
 
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
-  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json | --mermaid   what a dashboard sidepeek shows beyond the data: history, its kind's details and, for a record in the loop (observation, signal, lesson, problem, decision, act, learning), its lineage; --mermaid prints the lineage as Mermaid text
   sensor status [--json] | sensor test <name> [--since t] | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
   sensor show <fingerprint> | sensor discover [--record] [--json] | sensor stream <name> (wait runs it) | sensor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   sensor triage [--all] [--peek] [--json] | sensor ignore|unignore <fingerprint> --reason r [--owner] | sensor incident <fingerprint…> --title t | sensor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)
@@ -16151,7 +16381,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
+const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
