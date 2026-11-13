@@ -1542,9 +1542,10 @@ const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e
 // after, and noWsEnded says the other end ended). sockets: those open now.
 // pages: a page of the test's own for a path (its query aside), in place of that one.
 async function fakeApp(headers = {}, pages = {}) {
-  const A = { seen: [], headers, sockets: new Set() };
+  const A = { seen: [], marks: [], headers, sockets: new Set() };
   A.srv = http.createServer((q, s) => {
     A.seen.push({ method: q.method, url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
+    A.marks.push(q.headers['x-devteam-relay'] ?? null);
     if (q.url === '/go') { s.writeHead(302, { location: `http://localhost:${A.port}/there` }); return s.end(); }
     s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...A.headers });
     const own = q.url.split('?')[0];
@@ -2380,7 +2381,7 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   assert.equal(await r.text(), G.PREVIEW_LENS);
   // the hub, every instance in the block, and this dashboard itself (pinned here outside the block), each once
   const instances = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${PORTS + 1 + i}`);
-  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([...new Set([`http://127.0.0.1:${PORTS}`, ...instances, `http://127.0.0.1:${port}`])].join(' ')));
+  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([...new Set([`http://127.0.0.1:${PORTS}`, ...instances, `http://127.0.0.1:${port}`, `http://localhost:${port}`])].join(' ')));
   assert.deepEqual(app.seen.filter((x) => x.url !== '/api/hello'), [], 'the lens never asks the app (the relay\'s one look at /api/hello, to know it isn\'t a dashboard, aside)');
   // any other method or path there is the app's
   for (const [method, p] of [['HEAD', '/.devteam/lens'], ['POST', '/.devteam/lens'], ['GET', '/.devteam/lens/x'], ['GET', '/.devteam/lensx']]) {
@@ -2405,7 +2406,7 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   assert.equal(r.headers.get('x-frame-options'), 'DENY');
   assert.match(r.headers.get('content-security-policy'), new RegExp(`frame-ancestors 'none'; connect-src ws://127\\.0\\.0\\.1:${R}$`));
   // framed from its own origin, which is how its lens holds it: given way to the lens, the hub and this dashboard
-  const ancestors = `'self' http://127.0.0.1:${PORTS} http://127.0.0.1:${port}`;
+  const ancestors = `'self' http://127.0.0.1:${PORTS} http://127.0.0.1:${port} http://localhost:${port}`;
   r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
   assert.equal(r.headers.get('x-frame-options'), null);
   assert.equal(r.headers.get('content-security-policy'), `default-src 'self'; frame-ancestors ${ancestors}; connect-src ws://127.0.0.1:${R}`);
@@ -2516,6 +2517,46 @@ test("the laptop's relay never serves a dashboard: not this one's own port, not 
     assert.deepEqual([r.origin, r.opened], [null, false], `${n} is not relayed`);
   }
   assert.equal(stray, 0, 'nothing but the hello reached it');
+});
+test("what the relay forwards carries a mark every owner route refuses, and a target that turns into a dashboard closes its relay", async (t) => {
+  const F = threadsFixture('relay-mark');
+  t.after(() => F.done());
+  const pages = { '/': '<title>App</title>' };
+  const app = await fakeApp({}, pages);
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'mark']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const rel = v.origin;
+  // a normal app sees all its traffic, each request marked, whatever the page sent
+  const n = app.marks.length;
+  await fetch(`${rel}/a`, { headers: { 'x-devteam-relay': '0' } });
+  await fetch(`${rel}/b`, { method: 'POST', body: 'x', headers: { origin: rel } });
+  assert.deepEqual(app.marks.slice(n), ['1', '1'], 'set fresh, a page\'s own copy replaced');
+  assert.equal(app.seen.at(-1).url, '/b');
+  // the dashboard refuses a marked request on every route, with localhost as Host and Origin as the relay sends them
+  const as = (route, method = 'GET') => fetch(`${B}${route}`, { method, headers: { host: `localhost:${port}`, origin: `http://localhost:${port}`, 'x-devteam-relay': '1', 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, ...(method === 'POST' ? { body: '{}' } : {}) });
+  for (const [route, method] of [['/api/action', 'POST'], ['/api/answer', 'POST'], ['/api/threads', 'GET'], ['/api/data', 'GET'], ['/api/hello', 'GET'], ['/api/view?kind=preview&name=' + name, 'GET'], ['/', 'GET'], ['/view/preview/' + name, 'GET']]) {
+    const r = await statusWithHost(port, route, `localhost:${port}`, method, { origin: `http://localhost:${port}`, 'x-devteam-relay': '1', 'sec-fetch-site': 'same-origin' });
+    assert.equal(r, 403, `${method} ${route}`);
+  }
+  assert.equal(await statusWithHost(port, '/api/hello', `localhost:${port}`), 200, 'unmarked, the same host is served');
+  // the target now answers as a dashboard: the tick closes the relay
+  pages['/api/hello'] = '{"devteam":1,"viewer":1}';
+  await until(async () => { try { await fetch(`${rel}/x`); return false; } catch { return true; } }, 'the relay closed once its target answered as a dashboard');
+  assert.ok(!d.out().includes('Error'), d.out());
+});
+test("a preview can't be registered on a port settings.md pins for this checkout's dashboard", async (t) => {
+  const F = threadsFixture('pinned-dash');
+  t.after(() => F.done());
+  const pin = await freePort();
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', `"gates": {}, "dashboard_port": ${pin}`));
+  assert.match(F.fails(['preview', String(pin)], F.SUP), /own dashboard/);
 });
 test("the laptop's relay carries a preview's WebSockets: from its own Origin only, with localhost as the app's Host and Origin", async (t) => {
   const F = threadsFixture('relay-ws');

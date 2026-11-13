@@ -6107,7 +6107,8 @@ function previewPort(v) {
   if (ok !== true) die(`preview: ${v}: ${ok}`);
   if (RELAY_PORTS.includes(port)) die(`preview: ${v}: ${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`);
   // this checkout's own dashboard, when its port was saved: a relay for it would serve the dashboard under the owner's pointer
-  if (port === readNum(path.join(runDir, 'dashboard-port'))) die(`preview: ${v}: ${port} is this checkout's own dashboard`);
+  // (a pinned port, which pickDashboardPort never saves, is settings.md's dashboard_port)
+  if ([readNum(path.join(runDir, 'dashboard-port')), Number(loadSettings().dashboard_port)].includes(port)) die(`preview: ${v}: ${port} is this checkout's own dashboard`);
   return port;
 }
 // A dashboard of any checkout answering on the port (its hello), which is never a preview's app: a
@@ -12663,7 +12664,8 @@ async function cmdDashboard() {
   const relays = new Map();
   // who may hold the lens here: the hub, every instance in the block, and this dashboard (its port may
   // be pinned outside the block), each once (decision 4)
-  const relayLensCsp = () => previewLensCsp([...new Set([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`), `http://127.0.0.1:${port}`])].join(' '));
+  const relayLensCsp = () => previewLensCsp([...new Set([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`), `http://127.0.0.1:${port}`, `http://localhost:${port}`])].join(' '));
+  const RELAY_MARK = 'x-devteam-relay';
   const RELAY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded']);
   const RELAY_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   // Every route answers only on the relay's own address: a page elsewhere that points its own name at
@@ -12671,7 +12673,9 @@ async function cmdDashboard() {
   const relayOwnHost = (R, req) => [`127.0.0.1:${R.port}`, `localhost:${R.port}`].includes(req.headers.host ?? '');
   const relayUpHeaders = (req, R) => {
     const h = {};
-    for (const [k, v] of Object.entries(req.headers)) if (!RELAY_HOP.has(k) && !k.startsWith('x-forwarded-')) h[k] = v;
+    for (const [k, v] of Object.entries(req.headers)) if (!RELAY_HOP.has(k) && !k.startsWith('x-forwarded-') && k !== RELAY_MARK) h[k] = v;
+    // set fresh on everything forwarded: a dashboard that ends up on the target refuses it everywhere
+    h[RELAY_MARK] = '1';
     h.host = `localhost:${R.app}`;
     // the relay's own origin, by either of its names, is the app's; any other passes as it is, for the app to refuse
     if (req.headers.origin === `http://${req.headers.host}`) h.origin = `http://localhost:${R.app}`;
@@ -12685,7 +12689,7 @@ async function cmdDashboard() {
     }
     if (framedBySelf) {
       // the lens, the hub and this dashboard, which frames the lens: no other instance's page holds the app
-      const ancestors = `'self' http://127.0.0.1:${HUB_PORT} http://127.0.0.1:${port}`;
+      const ancestors = `'self' http://127.0.0.1:${HUB_PORT} http://127.0.0.1:${port} http://localhost:${port}`;
       delete out['x-frame-options'];
       const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
       if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
@@ -12846,7 +12850,14 @@ async function cmdDashboard() {
     return R.ready;
   };
   // a relay for a record gone, or one now on another port, closes on the tick after
-  const relaysTidy = () => { const live = new Map(readPreviews().map((r) => [r.name, r.port])); for (const [n, R] of [...relays]) if (live.get(n) !== R.app) relayClose(n); };
+  // and one whose target now answers as a dashboard (one that came up there after the relay did)
+  const relaysTidy = () => {
+    const live = new Map(readPreviews().map((r) => [r.name, r.port]));
+    for (const [n, R] of [...relays]) {
+      if (live.get(n) !== R.app) relayClose(n);
+      else if (R.port) previewPortIsDashboard(R.app).then((is) => { if (is && relays.get(n) === R) { log(`previews: ${n}: port ${R.app} now answers as a devteam dashboard, relay closed`); relayClose(n); } });
+    }
+  };
   // Where a preview's lens is, for its viewer (spec §7): its own name through the box's gateway, which
   // serves the lens there; else this laptop's relay, opened only when open is set (/api/view's ask);
   // null on a box whose gateway doesn't serve previews, where the loopback is out of the browser's
@@ -12938,6 +12949,8 @@ async function cmdDashboard() {
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
+    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
