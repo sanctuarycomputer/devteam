@@ -2009,6 +2009,13 @@ function cmdLogCheck() {
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
+  // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
+  // rung 1, however its lines were written. A call that stands on one fails; the default alone warns.
+  const voidDefaults = new Map();
+  for (const q of logObjects('question')) { const v = questionView(q); const why = v.status === 'defaulted' ? defaultGap(v) : null; if (why) voidDefaults.set(v.id, why); }
+  const standing = new Set();
+  for (const c of calls()) if (voidDefaults.has(c.approved_by)) { standing.add(c.approved_by); fails.push(`${c.id} stands on ${c.approved_by}'s default, which approves nothing: ${voidDefaults.get(c.approved_by)}`); }
+  for (const [id, why] of voidDefaults) if (!standing.has(id)) out(`warn: ${id}'s default approves nothing: ${why}`);
   report(fails, `${n} log line(s)`);
 }
 
@@ -4764,10 +4771,63 @@ function askLikeWarnings({ text, cls, kind }) {
   }
   for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
 }
+// Text the owner reads: a literal "\n" typed in a shell argument becomes a line break, so lists and
+// paragraphs reach the dashboard as written (supervisor.md §6). Only where it can't be anything else:
+// text that already has real line breaks is left alone, and so are `code`, a Windows path
+// (C:\new\node_modules) and an escaped backslash (\\n).
+const ownerText = (t) => (t == null || String(t).includes('\n') ? t : String(t).split(/(`[^`]*`|\b[A-Za-z]:\\\S*)/).map((p, i) => (i % 2 ? p : p.replace(/(?<!\\)\\n/g, '\n'))).join(''));
+// The owner reads every question cold, on the dashboard, without the fleet's context or its words
+// (supervisor.md §6, Ask less, act more). What ask refuses, and what it warns about.
+// A question about asking the owner: "should I ask you for…", "want me to request access?", "is it ok
+// to ask for the key?". Asking someone else ("should I ask the vendor for a refund?", "request a key
+// from Stripe?") or a product's own prompt ("should the app request access to contacts?") is not one.
+const OWNER_GIVES = String.raw`(?:access|permissions?|logins?|keys?|tokens?|secrets?|certificates?|passwords?|passphrases?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env)`;
+// Someone other than the owner, before the verb ("let users request access", "require customers to
+// ask for access") or between it and the thing asked for: a question about the product, not about
+// asking the owner. And "ask you to <do something> each time / from now on" is about the owner's part
+// in the process, not whether to ask them once.
+const THIRD_PARTY = String.raw`(?:users?|customers?|clients?|members?|people|visitors?|guests?|admins?|them|they|anyone|everyone|someone)`;
+const NOT_THIRD = (n) => String.raw`(?:(?!\b${THIRD_PARTY}\b)[^?.]){0,${n}}?`;
+const META_ASK = new RegExp(String.raw`\b(?:should|shall|can|may|could|might|want|need|do you mind|would you (?:like|mind|prefer)|is it (?:ok(?:ay)?|fine|all ?right)|are you (?:ok(?:ay)?|fine|happy) (?:with|for)|would it (?:help|be (?:ok(?:ay)?|useful|helpful|better))|does it make sense)\b${NOT_THIRD(40)}(?:\b(?:i|we|me|us)\b${NOT_THIRD(24)}|\bto\s+)\b(?:ask(?:ing|ed)?|request(?:ing|ed)?|prompt(?:ing|ed)?)\s+(?:you\b(?!\s+to\s+(?!(?:share|send|give|provide|paste|post|supply|set|add|grant|create|generate|upload)\b)[^?.]*\b(?:each|every|always|from now on|going forward|in (?:the )?future|as well)\b)|(?:for\s+)?(?:(?:the|a|an|your|some|more|those|these|that|this)\s+)?(?:(?!${THIRD_PARTY}\b)[\w.-]+\s+){0,2}?${OWNER_GIVES}\b(?!\s+(?:from|of)\s+(?!you\b)))`, 'i');
+const CRED_WORDS = /\b(?:passwords?|passphrases?|api[ _-]?keys?|access[ _-]?keys?|secret[ _-]?keys?|private[ _-]?keys?|(?:auth|access|api|bearer|personal access) tokens?|credentials?|env(?:ironment)?[ _-]?var(?:iable)?s?|\.env\b)/i;
+const KIT_ID = /\b(?:q|[gkapmodt])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/;
+// A credential asked for in a decision's words ("can you share the staging password?", "may I have
+// the API key?"): the owner would have to type it into an answer. It is an owner-action with --secrets.
+const CRED_REQUEST = new RegExp(String.raw`\b(?:(?:share|send|give|provide|paste|post|supply)\s+(?:me|us)\b\s*(?:with\s+)?(?:(?:the|a|an|your|our|that|those)\s+)?|(?:(?:can|could|will|would) you|please|do you want to|would you like to|i need you to)\s+(?:\w+\s+){0,2}?(?:share|send|give|provide|paste|post|supply)\s+(?:the|a|an|your|that|those)\s+|(?:may|can|could) (?:i|we) (?:have|get)\s+(?:(?:the|a|an|your|that|those)\s+)?)(?:[\w.-]+\s+){0,3}?${CRED_WORDS.source}(?!\s+from\s+(?!you\b))`, 'i');
+// "dry-run/staging" is the project's; run/… on its own is the kit's folder
+const KIT_WORDS = /\b(?:rungs?|trust ladder|worktrees?|secret sinks?|devteam\.mjs|DEVTEAM_[A-Z_]+|(?<![\w/-])run\/[\w./-]+)\b/i;
+function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, recommendation, L }) {
+  if (!q || KIT_WORDED(cls, kind)) return;
+  if (META_ASK.test(q)) die(`don't ask whether to ask: ask for the thing itself. A credential, key or password is an owner-action with --secrets naming it, so the owner gets the paste box at once (supervisor.md §6, Ask less, act more)`);
+  if (!secrets?.length && kind !== 'owner-action' && CRED_REQUEST.test(q)) die(`don't ask for a credential in a decision's words: the owner would have to type it into an answer. Ask with --kind owner-action and --secrets naming each one and where it goes, so the owner gets the paste box at once (supervisor.md §6, Secrets)`);
+  if (KIT_ID.test(q)) die(`the question names a kit id (${q.match(KIT_ID)[0]}): the owner doesn't know it. Say what it is in words; a link or --refs carries the id`);
+  const tid = [...tickets().keys()].find((t) => new RegExp(`(?<![\\w-])${escRe(t)}(?![\\w-])`, 'i').test(q));
+  if (tid) die(`the question names the ticket ${tid}: the owner doesn't know it by its id. Say what it is in words; --ticket or a link carries the id`);
+  // --plain-ok <word>…: the question is about that very thing (a git worktree, the trust ladder
+  // itself), so that word may stay. Only the words named; ids, asking about asking and credentials
+  // never pass.
+  // a word and its plural are one word: --plain-ok worktree covers "worktrees"
+  const stem = (w) => String(w).toLowerCase().replace(/s$/, '');
+  const plainOk = new Set(asList(flags['plain-ok']).map(stem));
+  const classes = [...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? [])];
+  const cw = classes.find((c) => c.includes('-') && !plainOk.has(stem(c)) && new RegExp(`\\b${c.replace(/[-]/g, '\\-')}\\b`).test(q));
+  if (cw) die(`the question says "${cw}", a class name the owner doesn't use. Say in plain words what is being decided; --class carries it (if the question is about that class itself, --plain-ok ${cw})`);
+  const jw = [...q.matchAll(new RegExp(KIT_WORDS.source, 'gi'))].map((m) => m[0]).find((w) => !plainOk.has(stem(w)));
+  if (jw) die(`the question uses the kit's own word "${jw}". Ask it as you would a person who has never seen the fleet; the dashboard shows the kit's details itself. If the question is about that very thing, keep the word and say so: --plain-ok ${shq(stem(jw))}`);
+  if (plainOk.size) warn(`--plain-ok ${[...plainOk].join(' ')}: the owner reads those words as they are, so make sure the question explains them`);
+  if (q.length > 300) die(`the question is ${q.length} characters: lead with the decision in one or two sentences (300 at most) and put the rest in --context, as a list where it is one`);
+  if (context && KIT_ID.test(context)) warn(`--context names a kit id (${context.match(KIT_ID)[0]}): fine as a link, but say in words what it is`);
+  if (context && KIT_WORDS.test(context)) warn(`--context uses the kit's word "${context.match(KIT_WORDS)[0]}": say it in plain words, the owner hasn't got the fleet's vocabulary`);
+  if (context && context.length > 600 && !/\n\s*(?:[-*•]|\d{1,2}[.)])\s/.test(context)) warn(`--context is ${context.length} characters of prose: break it into short paragraphs or a list ("- " or "1. " lines) so it can be read at a glance`);
+  if (!secrets?.length && (CRED_WORDS.test(q) || (kind === 'owner-action' && CRED_WORDS.test(context ?? '')))) warn(`this looks like it needs a credential. Ask for it directly: --kind owner-action with --secrets naming each one and where it goes, so the owner pastes it on the dashboard (supervisor.md §6, Secrets)`);
+  if (['owner-decision', 'clarification', 'one-way-door'].includes(kind) && !recommendation) warn('no --recommendation: say what you would do and how sure you are (--confidence); the owner answers faster with a pick to agree or disagree with');
+  // only when low confidence is the whole reason: a question asked for another reason too stands on that
+  if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
-  let q = flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question'));
+  let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const kind = flagStr('kind') ?? 'owner-decision';
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const cls = flagStr('class') ?? null;
@@ -4844,6 +4904,9 @@ function askLine({ thread } = {}) {
   const reasons = asList(flags.reasons);
   const known = L.reasons.map((r) => r.id);
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
+  // silence is never a yes on a one-way door or on what is the owner's alone (constitution.md §1)
+  if (def !== null && (kind === 'one-way-door' || reasons.includes('one-way-door'))) die('a one-way door has no --default: only the owner\'s answer goes through it');
+  if (def !== null && (L.owner_only ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md §1): no --default, only their answer approves it`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
   // a remediation question names the remediation (and a rollback its release), so the answer
@@ -4868,8 +4931,6 @@ function askLine({ thread } = {}) {
     const rec = flagStr('recommendation');
     if (!rec) die('a production-remediation question needs --recommendation');
     if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
-    // at rung 1 a default can never fire, so it would only be a promise the kit can't keep
-    if (def && rungFor('production-remediation') < 2) die(`production-remediation is on rung ${rungFor('production-remediation')}: no --default until it's on rung 2`);
     // after the owner's no, not again for the same remediation and target, whichever incident is named
     const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
@@ -4902,7 +4963,7 @@ function askLine({ thread } = {}) {
   // the owner said not to use this sensor: nothing asks about it again until they reverse that
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
-  let context = flagStr('context');
+  let context = ownerText(flagStr('context'));
   if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
@@ -4917,6 +4978,9 @@ function askLine({ thread } = {}) {
     scope = want;
     if (releasesOnMerge()) context = [context, 'Merging deploys this fix to production (release: "merge").'].filter(Boolean).join('\n\n');
   }
+  // Below rung 2 a default can never fire, so it would only be a promise the kit can't keep; and the
+  // rung it was asked on is recorded (why_asked), so a later promotion never wakes it (defaultGap).
+  if (def !== null && onLadder && rungFor(cls, scope) < 2) die(`${cls}${scope ? ` (${scope})` : ''} is on rung ${rungFor(cls, scope)}: no --default until it's on rung 2`);
   // --deadline 15m|2h|<time>: the default may fire before question_default_after_hours
   const dl = flagStr('deadline');
   if (dl !== undefined && !def) die('--deadline goes with --default: it is when the default may be applied');
@@ -5014,10 +5078,11 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence: flagNum('confidence'), recommendation, L });
   // what the owner may already have said about it: never in the way of asking
   try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
@@ -5069,8 +5134,8 @@ function cmdAnswer() {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
-    // an incident fix's default fires at its deadline, not before
-    if (['incident-fix', 'production-remediation'].includes(v.class) && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
+    // a default fires at its deadline, not before, and only where it could fire when asked (defaultGap)
+    { const why = defaultGap(v, new Date().toISOString()); if (why) die(why); }
     // a default never overrides the owner's later no on the same remediation and target
     if (v.class === 'production-remediation') {
       const rem = (v.blocks ?? []).find((b) => b.startsWith('remediation:'));
@@ -7546,6 +7611,7 @@ function authorise(cls, scope, approved, refs, verb) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    if (approval.status === 'defaulted') { const why = defaultGap(approval); if (why) die(`${why}: its default approves nothing; ask again`); }
     reviewApproves(approval, `${verb} --approved`);
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
@@ -7601,6 +7667,19 @@ function decisionFor(id) {
   if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
   return d;
 }
+// Whether an applied default stands in for the owner. Only where it could fire when the owner saw the
+// question: its class on rung 2 or above as asked (why_asked.rung, in the line the question's hash
+// covers, so a class promoted later doesn't wake an old rung-1 default), and only once its deadline
+// passed with no answer. answer --defaulted asks it of now; authorise, a decision's authority and
+// log-check ask it of when the default was applied, so a defaulted line written by hand approves
+// nothing either. A question from before defaults had deadlines is judged on its rung alone.
+function defaultGap(v, now = null) {
+  const rung = v.why_asked?.rung;
+  if (typeof rung === 'number' && rung < 2) return `${v.id} was asked on rung ${rung} (${RUNG[rung] ?? '?'}), where a default never stands in for the owner`;
+  const at = now ?? v.answered_at;
+  if (v.deadline && at && Date.parse(at) < Date.parse(v.deadline)) return now ? `${v.id}'s default fires at ${v.deadline}; until then it is the owner's to answer` : `${v.id} was defaulted before its deadline (${v.deadline})`;
+  return null;
+}
 function decisionAuthorityGap(d) {
   const L = ladder();
   const ownerOnly = (L.owner_only ?? []).includes(d.class);
@@ -7616,8 +7695,7 @@ function decisionAuthorityGap(d) {
     case 'default': {
       if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
       if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
-      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
-      return answerUseGap(d, v);
+      return defaultGap(v) ?? answerUseGap(d, v);
     }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
@@ -12258,7 +12336,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -14606,8 +14684,8 @@ function verifyIncidents() {
       const prob = logObjects('problem').find((x) => (x.refs ?? []).includes(o.id) && !isIncident(x)) ?? appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
       const q = logObjects('question').find((x) => (x.evidence ?? []).includes(prob.id)) ?? appendLog({
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
-        context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
-        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
+        context: `The same errors came back after the fix was deployed (${recurred.join(', ')}).\n\n- **Sound call, failed fix**: deciding to fix it was right and the fix was not. It stays an open problem (${prob.id}), and nothing changes in what I decide alone.\n- **Wrong call**: fixing it this way was the wrong decision. You record that yourself (\`devteam.mjs correct ${dec?.id ?? '<decision>'} --reason "…"\`), and from then on I ask you before every production fix.\n\nErrors can come back for innocent reasons too: stale dynos, cached client bundles, replayed jobs, or a second cause that looks the same.`,
+        recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: 'Keep the problem open and fix forward. Nothing changes in what I decide alone.' }, { label: 'Wrong call', detail: 'You correct the decision yourself. From then on I ask you before every production fix.' }],
         blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
