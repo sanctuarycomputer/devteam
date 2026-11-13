@@ -1488,7 +1488,8 @@ const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e
 // A dev server of the test's own: what it was asked (method, url, Host, Origin) is kept; its framing
 // headers are the test's (none, as dev servers send by default); it redirects /go to its own origin,
 // and answers a WebSocket upgrade with one line, then echoes what it is sent until the other end
-// ends. sockets: those open now.
+// ends (on /no-ws it answers 400 instead and holds its side open: what it is sent after is kept as
+// after, and noWsEnded says the other end ended). sockets: those open now.
 async function fakeApp(headers = {}) {
   const A = { seen: [], headers, sockets: new Set() };
   A.srv = http.createServer((q, s) => {
@@ -1499,10 +1500,12 @@ async function fakeApp(headers = {}) {
   });
   A.srv.on('upgrade', (q, socket) => {
     A.seen.push({ method: 'UPGRADE', url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\nhello from the app\n');
     A.sockets.add(socket);
     socket.on('close', () => A.sockets.delete(socket));
     socket.on('error', () => {});
+    // /no-ws: it won't upgrade, says why, and keeps its side open (as a keep-alive server would)
+    if (q.url.startsWith('/no-ws')) { socket.on('data', (d) => { A.after = (A.after ?? '') + d; }); socket.on('end', () => { A.noWsEnded = true; }); return socket.write('HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\ncontent-length: 7\r\nconnection: keep-alive\r\n\r\nno, ws\nand then more bytes the relay never sends\n'); }
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\nhello from the app\n');
     socket.on('data', (d) => socket.write(d));
     // as a WebSocket server does: the other end gone, it ends its own
     socket.on('end', () => socket.end());
@@ -1523,8 +1526,9 @@ function rawRequest(port, lines) {
   });
 }
 // A socket by hand, kept open: what it has been sent so far, and closed once either end has closed it.
-function rawSocket(port, lines) {
-  const c = net.connect(port, '127.0.0.1', () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
+// halfOpen: it never ends its own side, so only the other end's destroy closes it.
+function rawSocket(port, lines, { halfOpen = false } = {}) {
+  const c = net.connect({ port, host: '127.0.0.1', allowHalfOpen: halfOpen }, () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
   const S = { c, got: '', closed: false };
   c.once('close', () => { S.closed = true; });
   c.on('data', (d) => { S.got += d; });
@@ -2271,7 +2275,7 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   const v = asks.find((a) => a.opened) ?? asks[0];
   assert.deepEqual(asks.map((a) => a.opened).sort(), [false, false, false, false, false, true], 'exactly one ask opened it');
   assert.ok(asks.every((a) => a.origin === v.origin), 'all of them the one relay');
-  assert.deepEqual(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json(), { origin: v.origin, opened: false }, 'the next finds it open');
+  assert.deepEqual((({ origin, opened }) => ({ origin, opened }))(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), { origin: v.origin, opened: false }, 'the next finds it open');
   const R = Number(/^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin)?.[1]);
   assert.ok(R >= RELAY_LO && R <= RELAY_HI, `a relay in the range it was given: ${v.origin}`);
   const rel = `http://127.0.0.1:${R}`;
@@ -2361,7 +2365,7 @@ test("the laptop's relay: a port anything holds is passed over, none free keeps 
   const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
   t.after(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
-  const view = async () => (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const view = async () => (({ origin, opened }) => ({ origin, opened }))(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json());
   // every port of the range held (those free now, by this test)
   const hold = (p, h) => new Promise((resolve) => { const s = net.createServer(); s.once('error', () => resolve(null)); s.listen(p, h, () => resolve(s)); });
   const held = new Map();
@@ -2422,7 +2426,8 @@ test("the laptop's relay carries a preview's WebSockets: from its own Origin onl
   assert.match(await rawRequest(R, ['GET /hmr HTTP/1.1', `Host: rebound.example:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', `Origin: ${v.origin}`]), /^HTTP\/1\.1 421 /, 'DNS rebinding');
   assert.match(await rawRequest(R, ask(v.origin, `127.0.0.1:${R}`, 'http://elsewhere.example/hmr')), /^HTTP\/1\.1 400 /, 'origin-form only');
   assert.equal(app.seen.length, n, 'none of those reached the app');
-  // both ways, after the handshake
+  // both ways, after the handshake: the handshakes above let go first, so the app's count is this one's
+  await until(() => app.sockets.size === 0, 'the handshakes above let go');
   const one = rawSocket(R, ask(v.origin));
   await until(() => /hello from the app\n/.test(one.got), 'the handshake');
   await until(() => app.sockets.size === 1, 'the app holds it');
@@ -2436,7 +2441,8 @@ test("the laptop's relay carries a preview's WebSockets: from its own Origin onl
   await until(() => app.sockets.size === 1, 'the app holds the next');
   two.c.destroy();
   await until(() => app.sockets.size === 0, 'the app\'s side closed with the page\'s');
-  // 32 at once, and no more; one let go makes room
+  // 32 at once, and no more; one let go makes room (none of the above still holds a slot)
+  assert.equal(app.sockets.size, 0);
   const held = [];
   t.after(() => { for (const s of held) s.c.destroy(); });
   for (let i = 0; i < 32; i++) held.push(rawSocket(R, ask(v.origin)));
@@ -2464,6 +2470,110 @@ test("the laptop's relay carries a preview's WebSockets: from its own Origin onl
   await until(() => lost.closed, 'closed, with nothing to carry it to');
   assert.equal(lost.got, '', 'nothing to answer it');
   assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`)).status, 200, 'the dashboard carries on');
+});
+test("the laptop's relay ends a socket the app won't upgrade once it has answered, and one it refuses even if the page holds on", async (t) => {
+  const F = threadsFixture('relay-ws-end');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ws']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500', ...RELAY_ENV }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const R = Number(/:(\d+)$/.exec(v.origin)[1]);
+  const ask = (url, origin = v.origin) => ['GET ' + url + ' HTTP/1.1', `Host: 127.0.0.1:${R}`, 'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13', 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', `Origin: ${origin}`];
+  // A page that never ends its own side sees the relay's close only when it next writes: so it
+  // writes, every 100 ms, until that close comes back. Without it the relay would read on for good.
+  const pester = (S) => () => { if (!S.closed) S.c.write('more from the page\n'); return S.closed; };
+  // a 400 to the handshake: the page gets that answer, its body and no more, and both sides end,
+  // though the page holds its own open and the app would keep going
+  const no = rawSocket(R, ask('/no-ws'), { halfOpen: true });
+  await until(() => no.got.includes('no, ws\n'), 'the answer');
+  await until(pester(no), 'the page\'s side closed after the answer');
+  assert.match(no.got, /^HTTP\/1\.1 400 Bad Request\r\n/);
+  assert.match(no.got, /\r\nconnection: close\r\n/i);
+  assert.doesNotMatch(no.got, /keep-alive/i);
+  assert.ok(no.got.endsWith('\r\n\r\nno, ws\n'), JSON.stringify(no.got));
+  await until(() => app.noWsEnded, 'the relay\'s side to the app ended too');
+  assert.equal(app.after, undefined, 'nothing of the page\'s reached the app after the answer');
+  // a refused socket is closed, not just ended, so a page that never ends its side holds nothing here
+  const n = app.seen.length;
+  const refused = rawSocket(R, ask('/hmr', 'http://evil.example'), { halfOpen: true });
+  await until(() => /^HTTP\/1\.1 403 /.test(refused.got), 'the refusal');
+  await until(pester(refused), 'the refused socket closed though the page held on');
+  assert.match(refused.got, /^HTTP\/1\.1 403 /);
+  assert.equal(app.seen.length, n, 'which never reached the app');
+});
+// A preview's viewer: on this laptop the relay's origin, once the page's own ask has opened it (a GET
+// of the viewer never does); on a box its own name through the gateway, or nothing when the gateway
+// doesn't serve previews. The dashboard's page names exactly those, never a wildcard.
+test("a preview's viewer: its route, frame-src naming exactly where its lens is, and the dashboard's own frames", async (t) => {
+  const F = threadsFixture('preview-view');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  let d = null;
+  t.after(() => d?.stop());
+  const start = async (env) => {
+    d = startDashboard(F.old, F.env(env), ['--port', String(port)]);
+    await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  };
+  await start(RELAY_ENV);
+  const csp = async (p) => (await fetch(`${B}${p}`)).headers.get('content-security-policy');
+  const tail = `frame-ancestors 'self' http://127.0.0.1:${PORTS}`;
+  const viewer = `/view/preview/${name}`;
+  // before any relay: a GET of the viewer opens none, and every page frames only itself, as before
+  let r = await fetch(`${B}${viewer}`);
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8'));
+  assert.equal(r.headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'a navigation opens no relay');
+  assert.deepEqual([r.headers.get('x-frame-options'), r.headers.get('referrer-policy'), r.headers.get('cache-control')], [null, 'no-referrer', 'no-store']);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
+  assert.equal((await fetch(`${B}${viewer}`)).headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'nor does a second');
+  // the page's own ask opens it, and says so: a page loaded before it reloads (the viewer) or says to (the stage)
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  const relay = /^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin ?? '');
+  assert.ok(relay && Number(relay[1]) >= RELAY_LO && Number(relay[1]) <= RELAY_HI, v.origin);
+  assert.deepEqual(v, { name, label: 'Checkout', session: v.session, project: v.project, up: v.up, origin: relay[0], opened: true, lens: `${relay[0]}/.devteam/lens`, served: false });
+  assert.equal(typeof v.session, 'string');
+  assert.equal(typeof v.project, 'string');
+  assert.equal((await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()).opened, false, 'the next ask finds it open');
+  // from then on the viewer and the dashboard name that relay, and nothing else; an artifact's viewer frames only its own
+  assert.equal(await csp(viewer), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/'), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/index.html'), `frame-src 'self' ${relay[0]}; ${tail}`);
+  assert.equal(await csp('/view/artifact/some-mock'), `frame-src 'self'; ${tail}`);
+  // only a preview here, by its own name; what was asked is never said back
+  for (const bad of ['/view/preview/no-such', '/view/preview/Not_A_Name', `${viewer}/x`, '/view/preview/', `/view/preview/${name}%3Cb%3E`, `/view/preview/%3Cscript%3E`]) {
+    const b = await fetch(`${B}${bad}`);
+    assert.deepEqual([b.status, await b.text()], [404, 'not found'], bad);
+  }
+  assert.notEqual((await fetch(`${B}${viewer}`, { method: 'POST' })).status, 200, 'a GET only');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=no-such`)).status, 404);
+  await d.stop();
+  // on a box whose gateway serves previews: the preview's own name, which the gateway leaves as it is
+  await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1', ...RELAY_ENV });
+  const own = `https://${name}.box.example.com`;
+  assert.equal(await csp(viewer), `frame-src 'self' ${own}; ${tail}`);
+  assert.equal(await csp('/'), `frame-src 'self' ${own}; ${tail}`, 'each preview\'s own name, never a wildcard');
+  const other = /preview (\S+) /.exec(F.sup(['preview', String(app.port + 1 > 65535 ? app.port - 1 : app.port + 1), '--label', 'Other']))[1];
+  assert.equal(await csp('/'), `frame-src 'self' ${[name, other].sort().map((n) => `https://${n}.box.example.com`).join(' ')}; ${tail}`, 'every preview on the box, read per request');
+  assert.equal(await csp(viewer), `frame-src 'self' ${own}; ${tail}`, 'a viewer frames its own preview only');
+  assert.deepEqual((({ origin, lens, served, opened }) => [origin, lens, served, opened])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [own, `${own}/.devteam/lens`, true, false]);
+  F.sup(['preview', 'stop', other]);
+  assert.equal(await csp('/'), `frame-src 'self' ${own}; ${tail}`, 'a preview stopped is framed no more');
+  await d.stop();
+  // a box whose gateway doesn't: nothing to frame, and the viewer says so; the page's ask opens no relay
+  await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com', ...RELAY_ENV });
+  assert.equal(await csp(viewer), `frame-src 'self'; ${tail}`);
+  assert.deepEqual((({ origin, lens, served, opened }) => [origin, lens, served, opened])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [null, null, false, false]);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.

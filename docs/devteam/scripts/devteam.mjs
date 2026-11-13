@@ -11933,8 +11933,9 @@ async function cmdDashboard() {
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(kitDir, 'dashboard', 'index.html');
-  // The page's policy, at / and at /view/: its frames are its own pages, and only it and the hub frame it.
-  const PAGE_CSP = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
+  // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
+  // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
+  const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
@@ -12155,11 +12156,14 @@ async function cmdDashboard() {
   // A preview's sockets (HMR, mostly), as previewUpgrade carries them on a box: on the relay's own
   // address, from a page of its own origin under that name (a page elsewhere can't open the app's
   // socket through it), a cap per preview so a client's reconnect loop can't exhaust the dashboard,
-  // and the bytes relayed raw after the request, both ways. No cookie rules here (decision 1), so the
-  // app's answer to the handshake passes as it is.
+  // and the bytes relayed raw after a 101, both ways. No cookie rules here (decision 1), so the app's
+  // 101 passes as it is; any other answer is relayed, then both sides end.
   const RELAY_SOCKETS = 32;
+  const RELAY_LINGER_MS = 2000;
+  // ended, then closed shortly after whether or not the page ends its side: a page that holds on keeps nothing here
+  const relayEnd = (socket) => { socket.end(); setTimeout(() => socket.destroy(), RELAY_LINGER_MS).unref(); };
   const relayUpgrade = (R, req, socket, head) => {
-    const refuse = (code, msg) => socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`);
+    const refuse = (code, msg) => { socket.write(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); relayEnd(socket); };
     socket.on('error', () => {});
     if (!relayOwnHost(R, req)) return refuse(421, 'Misdirected Request');
     if (req.headers.origin !== `http://${req.headers.host}`) return refuse(403, 'Forbidden');
@@ -12172,8 +12176,10 @@ async function cmdDashboard() {
       const up = net.connect(R.app, hosts[0]);
       let open = false;
       let next = false;
-      up.on('error', (e) => { if (!open && e.code === 'ECONNREFUSED' && hosts.length > 1) next = true; else socket.destroy(); });
-      up.once('close', () => { if (next && !socket.destroyed) connect(hosts.slice(1)); else socket.destroy(); });
+      // answered without an upgrade: the page's side ends on its own once the answer is written
+      let answered = false;
+      up.on('error', (e) => { if (!open && e.code === 'ECONNREFUSED' && hosts.length > 1) next = true; else if (!answered) socket.destroy(); });
+      up.once('close', () => { if (next && !socket.destroyed) connect(hosts.slice(1)); else if (!answered) socket.destroy(); });
       up.once('connect', () => {
         open = true;
         if (socket.destroyed) return up.destroy();
@@ -12183,8 +12189,38 @@ async function cmdDashboard() {
         h.upgrade = req.headers.upgrade;
         up.write(`GET ${req.url} HTTP/1.1\r\n${Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`).join('\r\n')}\r\n\r\n`);
         if (head?.length) up.write(head);
-        pipeline(up, socket, () => {});
-        pipeline(socket, up, () => {});
+        // The answer's head, held until it is whole: a 101 is relayed as it is, then the bytes both
+        // ways; anything else is the answer to one request, so it and its body (by content-length,
+        // else until the app ends it) are all the page gets, and both sides end after it.
+        let held = Buffer.alloc(0);
+        const onHead = (chunk) => {
+          held = Buffer.concat([held, chunk]);
+          const end = held.indexOf('\r\n\r\n');
+          if (end < 0) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+          up.off('data', onHead);
+          const top = held.subarray(0, end).toString('latin1');
+          const rest = held.subarray(end + 4);
+          if (/^HTTP\/1\.[01] 101\b/.test(top)) {
+            socket.write(held);
+            pipeline(up, socket, () => {});
+            pipeline(socket, up, () => {});
+            return;
+          }
+          answered = true;
+          const rows = top.split('\r\n').filter((row, i) => i === 0 || !/^(connection|keep-alive)[ \t]*:/i.test(row));
+          socket.write(`${rows.join('\r\n')}\r\nconnection: close\r\n\r\n`, 'latin1');
+          const len = /\r\ncontent-length:[ \t]*(\d+)[ \t]*(?:\r\n|$)/i.exec(top);
+          let left = len ? Number(len[1]) : Infinity;
+          let done = false;
+          const finish = () => { if (done) return; done = true; clearTimeout(cap); up.destroy(); relayEnd(socket); };
+          const body = (b) => { const part = b.subarray(0, Math.min(b.length, left)); if (part.length) socket.write(part); left -= part.length; if (left <= 0) finish(); };
+          const cap = setTimeout(finish, 5000);
+          up.on('data', body);
+          up.once('end', finish);
+          up.once('close', finish);
+          body(rest);
+        };
+        up.on('data', onHead);
         return undefined;
       });
     };
@@ -12238,6 +12274,11 @@ async function cmdDashboard() {
     const p = await relayFor(rec);
     return p ? { origin: `http://127.0.0.1:${p}`, opened: mine } : { origin: null, opened: false };
   };
+  // Where the dashboard's own stage may frame a preview's lens, as of this request (decision 5): each
+  // preview's own name through the box's gateway, or this laptop's relays open now, each as
+  // previewStage gives it. Never a wildcard: an agent can answer on any instance name. With none,
+  // 'self' alone, as before.
+  const stageFrames = () => (previewBox() ? (previewServed() ? readPreviews().map(previewLink) : []) : [...relays.values()].filter((R) => R.port).map((R) => R.own));
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
@@ -12308,7 +12349,7 @@ async function cmdDashboard() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': PAGE_CSP });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': pageCsp(stageFrames()) });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
@@ -12330,7 +12371,19 @@ async function cmdDashboard() {
     const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
     if (vw) {
       if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': PAGE_CSP });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp() });
+      return res.end(fs.readFileSync(page));
+    }
+    // A preview's viewer: the same page, framing the preview's lens where it is served (previewStage):
+    // frame-src names exactly that origin, the preview's own name on a box (the gateway rewrites no
+    // dev port) or this laptop's relay (decision 5). Never opens a relay: any page can navigate here
+    // (decision 3); the page's own /api/view does, and says so.
+    const vp = req.method === 'GET' ? /^\/view\/preview\/([^/]+)$/.exec(u.pathname) : null;
+    if (vp) {
+      const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
+      if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      const { origin } = await previewStage(rec);
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': pageCsp(origin ? [origin] : []) });
       return res.end(fs.readFileSync(page));
     }
     // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
@@ -12348,7 +12401,7 @@ async function cmdDashboard() {
         if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
         // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
         const { origin, opened } = await previewStage(rec, { open: true });
-        return send(res, 200, 'application/json', JSON.stringify({ origin, opened }));
+        return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
       }
       if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
       const key = `${slug}|${at}`;
