@@ -1485,6 +1485,36 @@ addEventListener('message', (e) => { const m = e.data; if (e.source === parent &
 };
 // What an artifact's own scripts post to the page, kept for a test.
 const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); }); })();";
+// A dev server of the test's own: what it was asked (method, url, Host, Origin) is kept; its framing
+// headers are the test's (none, as dev servers send by default); it redirects /go to its own origin,
+// and answers a WebSocket upgrade by echoing one line.
+async function fakeApp(headers = {}) {
+  const A = { seen: [], headers };
+  A.srv = http.createServer((q, s) => {
+    A.seen.push({ method: q.method, url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
+    if (q.url === '/go') { s.writeHead(302, { location: `http://localhost:${A.port}/there` }); return s.end(); }
+    s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...A.headers });
+    s.end(`<!doctype html><title>App</title><button id="buy">Buy now</button><p id="url">${q.url}</p>`);
+  });
+  A.srv.on('upgrade', (q, socket) => {
+    A.seen.push({ method: 'UPGRADE', url: q.url, host: q.headers.host, origin: q.headers.origin ?? null });
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\nhello from the app\n');
+  });
+  await new Promise((r) => A.srv.listen(0, '127.0.0.1', r));
+  A.port = A.srv.address().port;
+  A.close = () => { A.srv.closeAllConnections?.(); A.srv.close(); };
+  return A;
+}
+// An HTTP/1.1 request by hand (fetch can't set Host or keep a socket open): the status line and headers.
+function rawRequest(port, lines) {
+  return new Promise((resolve, reject) => {
+    const c = net.connect(port, '127.0.0.1', () => c.write(`${lines.join('\r\n')}\r\n\r\n`));
+    let got = '';
+    c.on('data', (d) => { got += d; if (/\r\n\r\n[\s\S]*\n/.test(got) || /^HTTP\/1\.1 [45]/.test(got)) { c.destroy(); resolve(got); } });
+    c.on('error', reject);
+    setTimeout(() => { c.destroy(); resolve(got); }, 3000);
+  });
+}
 test('the viewer: one artifact on a stage the size of the tab, the threads and hello polled, never /api/data', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
@@ -2198,6 +2228,130 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await p.ev(`location.hash = '#artifact/main/viewer-mock'`);
   await soon(`!document.getElementById('artifact-view').hidden`, 'the stage');
   assert.deepEqual(await link('#av-tab'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in new tab']);
+});
+test("the laptop's relay: the lens on GET alone, the app with localhost as its Host and Origin, its framing given way only to its lens", async (t) => {
+  const F = threadsFixture('relay-http');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  // an app that refuses every frame, and names its own socket's origin in its policy
+  app.headers = { 'x-frame-options': 'DENY', 'content-security-policy': `default-src 'self'; frame-ancestors 'none'; connect-src ws://localhost:${app.port}` };
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'relay']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500' }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  // another site's page can't open one, and a GET of anything else here opens none
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'another site\'s page can\'t open one');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=quiet-otter`)).status, 404, 'no such preview');
+  const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  assert.equal(v.opened, true, 'this ask opened it');
+  assert.deepEqual(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json(), { origin: v.origin, opened: false }, 'the next finds it open');
+  const R = Number(/^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin)?.[1]);
+  assert.ok(R >= 4800 && R <= 4899, `a relay in 4800-4899: ${v.origin}`);
+  const rel = `http://127.0.0.1:${R}`;
+  // the lens, as the gateway serves it, under a policy for the hub and every instance here
+  let r = await fetch(`${rel}/.devteam/lens?route=%2F`);
+  assert.equal(r.status, 200);
+  const G = await import('../cloud/gateway.mjs');
+  assert.equal(await r.text(), G.PREVIEW_LENS);
+  // the hub, every instance in the block, and this dashboard itself (pinned here outside the block), each once
+  const instances = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${PORTS + 1 + i}`);
+  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([...new Set([`http://127.0.0.1:${PORTS}`, ...instances, `http://127.0.0.1:${port}`])].join(' ')));
+  assert.equal(app.seen.length, 0, 'the lens never asks the app');
+  // any other method or path there is the app's
+  for (const [method, p] of [['HEAD', '/.devteam/lens'], ['POST', '/.devteam/lens'], ['GET', '/.devteam/lens/x'], ['GET', '/.devteam/lensx']]) {
+    r = await fetch(`${rel}${p}`, { method });
+    assert.equal(r.status, 200, `${method} ${p}`);
+    assert.deepEqual([app.seen.at(-1).method, app.seen.at(-1).url], [method, p]);
+  }
+  // the app sees localhost, as the gateway gives it: its Host, and an Origin that was the relay's
+  await fetch(`${rel}/page?x=1`, { method: 'POST', headers: { origin: rel }, body: 'x' });
+  assert.deepEqual(app.seen.at(-1), { method: 'POST', url: '/page?x=1', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` });
+  assert.equal(await statusWithHost(R, '/page', `localhost:${R}`, 'POST', { origin: `http://localhost:${R}` }), 200);
+  assert.deepEqual(app.seen.at(-1), { method: 'POST', url: '/page', host: `localhost:${app.port}`, origin: `http://localhost:${app.port}` }, 'the relay\'s other name for itself too');
+  await fetch(`${rel}/page`, { method: 'POST', headers: { origin: 'http://evil.example' }, body: 'x' });
+  assert.equal(app.seen.at(-1).origin, 'http://evil.example', 'another Origin passes as it is, for the app to refuse');
+  await fetch(`${rel}/page`, { method: 'POST', headers: { origin: B }, body: 'x' });
+  assert.equal(app.seen.at(-1).origin, B, 'the dashboard\'s own Origin is not the relay\'s');
+  // its own origin in a policy or a redirect is the relay's
+  r = await fetch(`${rel}/go`, { redirect: 'manual' });
+  assert.equal(r.headers.get('location'), `${rel}/there`);
+  // a top-level load: the app's own framing headers
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
+  assert.equal(r.headers.get('x-frame-options'), 'DENY');
+  assert.match(r.headers.get('content-security-policy'), new RegExp(`frame-ancestors 'none'; connect-src ws://127\\.0\\.0\\.1:${R}$`));
+  // framed from its own origin, which is how its lens holds it: given way to the lens, the hub and this dashboard
+  const ancestors = `'self' http://127.0.0.1:${PORTS} http://127.0.0.1:${port}`;
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(r.headers.get('x-frame-options'), null);
+  assert.equal(r.headers.get('content-security-policy'), `default-src 'self'; frame-ancestors ${ancestors}; connect-src ws://127.0.0.1:${R}`);
+  for (const h of [{ 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site' }, { 'sec-fetch-dest': 'frame', 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'same-origin' }]) assert.equal((await fetch(`${rel}/`, { headers: h })).headers.get('x-frame-options'), 'DENY', JSON.stringify(h));
+  // an app that says nothing of frames gets that policy as its own, on that load only
+  app.headers = {};
+  r = await fetch(`${rel}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(r.headers.get('content-security-policy'), `frame-ancestors ${ancestors}`);
+  assert.equal((await fetch(`${rel}/`)).headers.get('content-security-policy'), null);
+  // only on its own address (DNS rebinding), and no service worker, which would outlive this preview on its port
+  const seen = app.seen.length;
+  assert.equal(await statusWithHost(R, '/', `rebound.example:${R}`), 421);
+  assert.equal(await statusWithHost(R, '/.devteam/lens', `rebound.example:${R}`), 421);
+  assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'service-worker': 'script' }), 403);
+  assert.equal(await statusWithHost(R, '/sw.js', `127.0.0.1:${R}`, 'GET', { 'sec-fetch-dest': 'serviceworker' }), 403);
+  assert.equal(app.seen.length, seen, 'none of those reached the app');
+  // a dev server can't take a relay's port
+  assert.match(F.fails(['preview', '4801'], F.SUP), /4801 is where the dashboard's preview relays listen \(4800-4899\)/);
+  // a record from before the range stays a preview: only a new registration is refused
+  const old = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
+  write(old, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-http', session: 'supervisor', label: 'old', port: 4802, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  assert.ok(JSON.parse(F.sup(['preview', 'list', '--json'])).some((x) => x.name === 'quiet-otter' && x.port === 4802), 'still listed');
+  fs.rmSync(old);
+  // the record gone, the relay closes
+  F.sup(['preview', 'stop', name]);
+  await until(async () => { try { await fetch(`${rel}/`); return false; } catch { return true; } }, 'the relay closed with its record');
+});
+test("the laptop's relay: a port anything holds is passed over, none free keeps nothing, and a record moved closes its relay", async (t) => {
+  const F = threadsFixture('relay-ports');
+  t.after(() => F.done());
+  const app = await fakeApp();
+  t.after(() => app.close());
+  const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'ports']))[1];
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_PREVIEW_TICK_MS: '500' }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const view = async () => (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  // every port of the range held (those free now, by this test)
+  const hold = (p, h) => new Promise((resolve) => { const s = net.createServer(); s.once('error', () => resolve(null)); s.listen(p, h, () => resolve(s)); });
+  const held = new Map();
+  t.after(() => { for (const s of held.values()) s.close(); });
+  for (let p = 4800; p <= 4899; p++) { const s = await hold(p, '127.0.0.1'); if (s) held.set(p, s); }
+  assert.ok(held.size >= 3, `three ports of 4800-4899 free to test with: ${held.size}`);
+  assert.deepEqual(await view(), { origin: null, opened: false }, 'none free');
+  assert.deepEqual(await view(), { origin: null, opened: false }, 'and asked again, it looks again');
+  // three let go: the first now a dev server's on ::1 alone (localhost), the second an old record's
+  const [a, b, c] = [...held.keys()];
+  for (const p of [a, b, c]) { await new Promise((r) => held.get(p).close(r)); held.delete(p); }
+  const six = await hold(a, '::1');
+  if (six) held.set(-1, six);
+  const rec = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
+  write(rec, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-ports', session: 'supervisor', label: 'old', port: b, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  const v = await view();
+  assert.deepEqual(v, { origin: `http://127.0.0.1:${six ? c : a}`, opened: true }, 'the first port nothing holds');
+  assert.equal((await fetch(`${v.origin}/x`)).status, 200);
+  assert.equal(app.seen.at(-1).url, '/x');
+  // its record now names another port: the relay closes on the tick after, and the next ask opens one for it
+  const app2 = await fakeApp();
+  t.after(() => app2.close());
+  const file = path.join(F.old, 'docs/devteam/run/previews', `${name}.json`);
+  write(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), port: app2.port }));
+  await until(async () => { try { await fetch(`${v.origin}/`); return false; } catch { return true; } }, 'the relay closed with its record\'s port');
+  const v2 = await view();
+  assert.equal(v2.opened, true);
+  await fetch(`${v2.origin}/moved`);
+  assert.equal(app2.seen.at(-1).url, '/moved');
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.

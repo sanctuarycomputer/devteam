@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
+import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 // ===== 1. helpers =====
@@ -5887,10 +5888,14 @@ function previewLabel() {
   if (label.length > PREVIEW_LABEL_MAX) die(`preview --label is at most ${PREVIEW_LABEL_MAX} characters`);
   return label.trim();
 }
+// A port for a new registration: previewPortOk's rules, and none of the relays' range. That rule is
+// for new ones only: readPreviews checks every record with previewPortOk, so one made before the
+// range existed stays a preview (decision 3).
 function previewPort(v) {
   const port = /^\d+$/.test(String(v)) ? Number(v) : NaN;
   const ok = previewPortOk(port);
   if (ok !== true) die(`preview: ${v}: ${ok}`);
+  if (RELAY_PORTS.includes(port)) die(`preview: ${v}: ${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`);
   return port;
 }
 // What other instances on this machine list, from the hub (one agent-written list among others,
@@ -6296,6 +6301,9 @@ const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${previewL
 // every policy that says: the gateway's own (a test holds them equal), for the relay's one relaxation.
 const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
 const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
+// Where a laptop dashboard's preview relays listen, one per preview its viewer has opened (spec §7):
+// off the instance block and PREVIEW_PICK, and no new preview may take one (previewPort).
+const RELAY_PORTS = Array.from({ length: 100 }, (_, i) => 4800 + i);
 // The dashboard's own: the last probe of each name. A preview command has no tick to ask, and
 // dashboard-data is a child process, so the dashboard hands it over in the environment.
 const previewUp = new Map();
@@ -12053,10 +12061,136 @@ async function cmdDashboard() {
   const runPreviewTick = () => {
     if (previewTicking) return;
     previewTicking = true;
-    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; });
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
   };
   runPreviewTick();
   setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
+  // ----- the laptop's preview relay (spec §7): a loopback listener per preview, opened when its viewer
+  // is first asked for and closed with its record. It serves the lens on GET /.devteam/lens and
+  // forwards everything else to the app as the box's gateway does (proxyPreview, downstreamHeaders):
+  // localhost as Host and Origin, the app's loopback origin mapped to the relay's, and its framing
+  // headers given way for one load only, the app framed from its own origin, which is how its lens
+  // holds it. No session (it is loopback, like the dev server) and no cookie rules (no cookie of the
+  // owner's to protect): decision 1.
+  const relays = new Map();
+  // who may hold the lens here: the hub, every instance in the block, and this dashboard (its port may
+  // be pinned outside the block), each once (decision 4)
+  const relayLensCsp = () => previewLensCsp([...new Set([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`), `http://127.0.0.1:${port}`])].join(' '));
+  const RELAY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded']);
+  const RELAY_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
+  // Every route answers only on the relay's own address: a page elsewhere that points its own name at
+  // 127.0.0.1 (DNS rebinding) sends its own Host, and reaches neither the lens nor the app.
+  const relayOwnHost = (R, req) => [`127.0.0.1:${R.port}`, `localhost:${R.port}`].includes(req.headers.host ?? '');
+  const relayUpHeaders = (req, R) => {
+    const h = {};
+    for (const [k, v] of Object.entries(req.headers)) if (!RELAY_HOP.has(k) && !k.startsWith('x-forwarded-')) h[k] = v;
+    h.host = `localhost:${R.app}`;
+    // the relay's own origin, by either of its names, is the app's; any other passes as it is, for the app to refuse
+    if (req.headers.origin === `http://${req.headers.host}`) h.origin = `http://localhost:${R.app}`;
+    return h;
+  };
+  const relayDownHeaders = (h, R, framedBySelf) => {
+    const out = {};
+    for (const [k, v] of Object.entries(h)) {
+      if (['connection', 'keep-alive', 'transfer-encoding'].includes(k)) continue;
+      out[k] = k !== 'content-security-policy' && k !== 'location' ? v : String(v).replace(RELAY_LOOP, (all, scheme, p) => (Number(p) !== R.app ? all : scheme === 'ws' ? R.own.replace(/^http/, 'ws') : R.own));
+    }
+    if (framedBySelf) {
+      // the lens, the hub and this dashboard, which frames the lens: no other instance's page holds the app
+      const ancestors = `'self' http://127.0.0.1:${HUB_PORT} http://127.0.0.1:${port}`;
+      delete out['x-frame-options'];
+      const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
+      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
+      // The app said nothing of frames by policy: by X-Frame-Options alone, or not at all (a dev
+      // server's default). Either way a policy of its own keeps every other instance's page out.
+      else out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
+    }
+    return out;
+  };
+  const relayRequest = (R) => (req, res) => {
+    const say = (code, text) => { res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(text); };
+    if (!relayOwnHost(R, req)) return say(421, 'this relay answers only on its own address');
+    // origin-form only, as the gateway takes it
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return say(400, 'bad request');
+    let url;
+    try { url = new URL(req.url, R.own); } catch { return say(400, 'bad request'); }
+    // A service worker registered here would outlive this preview, and answer for the next one given its port.
+    if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return say(403, 'no service workers on a preview');
+    // the lens: static, the gateway's bytes, and never the app's; any other method or path is the app's
+    if (req.method === 'GET' && url.pathname === '/.devteam/lens') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': relayLensCsp(), 'referrer-policy': 'no-referrer' });
+      return res.end(PREVIEW_LENS);
+    }
+    const framedBySelf = req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin';
+    let current = null;
+    res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
+    // 127.0.0.1, then ::1 when that is refused; the body starts only once a connection is up, so a
+    // refused attempt has taken none of it. agent: false, a fresh connection each time, as the gateway's.
+    const attempt = (hosts) => {
+      let connected = false;
+      const up = http.request({ host: hosts[0], port: R.app, agent: false, method: req.method, path: req.url, headers: relayUpHeaders(req, R) }, (ur) => {
+        res.writeHead(ur.statusCode, { ...relayDownHeaders(ur.headers, R, framedBySelf), 'cache-control': 'no-store' });
+        pipeline(ur, res, () => {});
+      });
+      current = up;
+      up.on('socket', (s) => { const go = () => { connected = true; pipeline(req, up, () => {}); }; if (s.connecting) s.once('connect', go); else go(); });
+      up.on('error', (e) => {
+        if (!connected && e.code === 'ECONNREFUSED' && hosts.length > 1) return attempt(hosts.slice(1));
+        if (res.headersSent) return res.destroy();
+        if (res.destroyed) return undefined;
+        return say(502, `Nothing answers on port ${R.app}.`);
+      });
+    };
+    return attempt(['127.0.0.1', '::1']);
+  };
+  // Task 3 fills this in; until then a socket to a relay is refused
+  const relayUpgrade = (R, req, socket) => socket.end('HTTP/1.1 501 Not Implemented\r\nconnection: close\r\ncontent-length: 0\r\n\r\n');
+  const relayCloseOne = (R) => { for (const s of R.sockets) s.destroy(); R.server?.closeAllConnections?.(); R.server?.close(); };
+  const relayClose = (name) => { const R = relays.get(name); if (!R) return; relays.delete(name); relayCloseOne(R); };
+  // A relay for this preview, on the first port of the range nothing holds; null when none is free.
+  const relayFor = (rec) => {
+    const had = relays.get(rec.name);
+    if (had?.app === rec.port) return had.ready;
+    if (had) relayClose(rec.name);
+    const R = { name: rec.name, app: rec.port, port: null, own: null, server: null, sockets: new Set() };
+    R.ready = (async () => {
+      const held = new Set(readPreviews().map((r) => r.port));
+      for (const p of RELAY_PORTS) {
+        // nothing answering there on either family (a dev server on ::1 would take localhost), and no record's
+        if (held.has(p) || [...relays.values()].some((x) => x !== R && x.port === p) || !(await portFree(p))) continue;
+        const srv = keepAlive(http.createServer());
+        if (!(await new Promise((resolve) => { srv.once('error', () => resolve(false)); srv.listen(p, '127.0.0.1', () => resolve(true)); }))) continue;
+        Object.assign(R, { port: p, own: `http://127.0.0.1:${p}`, server: srv });
+        srv.on('request', relayRequest(R));
+        srv.on('upgrade', (req, socket, head) => relayUpgrade(R, req, socket, head));
+        srv.on('error', (e) => log(`previews: relay for ${R.name} on ${p}: ${e?.message ?? e}`));
+        // closed before it was up (its record gone meanwhile): not kept
+        if (relays.get(rec.name) !== R) { relayCloseOne(R); return null; }
+        return p;
+      }
+      // none free: nothing kept, so the next ask tries again
+      if (relays.get(rec.name) === R) relays.delete(rec.name);
+      return null;
+    })();
+    relays.set(rec.name, R);
+    return R.ready;
+  };
+  // a relay for a record gone, or one now on another port, closes on the tick after
+  const relaysTidy = () => { const live = new Map(readPreviews().map((r) => [r.name, r.port])); for (const [n, R] of [...relays]) if (live.get(n) !== R.app) relayClose(n); };
+  // Where a preview's lens is, for its viewer (spec §7): its own name through the box's gateway, which
+  // serves the lens there; else this laptop's relay, opened only when open is set (/api/view's ask);
+  // null on a box whose gateway doesn't serve previews, where the loopback is out of the browser's
+  // reach (decision 7). opened: this ask opened the relay, so a page loaded before it lacks it in its
+  // policy (decision 6).
+  const previewStage = async (rec, { open = false } = {}) => {
+    if (previewServed()) return { origin: previewLink(rec), opened: false };
+    if (previewBox()) return { origin: null, opened: false };
+    const had = relays.get(rec.name);
+    if (had?.app === rec.port && had.port) return { origin: had.own, opened: false };
+    if (!open) return { origin: null, opened: false };
+    const p = await relayFor(rec);
+    return p ? { origin: `http://127.0.0.1:${p}`, opened: true } : { origin: null, opened: false };
+  };
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
@@ -12162,6 +12296,13 @@ async function cmdDashboard() {
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       const slug = u.searchParams.get('slug') ?? '';
       const at = u.searchParams.get('at') || 'main';
+      if (u.searchParams.get('kind') === 'preview') {
+        const rec = readPreviews().find((r) => r.name === u.searchParams.get('name') && PREVIEW_NAME.test(r.name));
+        if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
+        // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
+        const { origin, opened } = await previewStage(rec, { open: true });
+        return send(res, 200, 'application/json', JSON.stringify({ origin, opened }));
+      }
       if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
       const key = `${slug}|${at}`;
       let job = describing.get(key);
