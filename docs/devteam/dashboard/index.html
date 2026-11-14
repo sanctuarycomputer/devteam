@@ -250,6 +250,11 @@ try {
   .choice.rec { border-color: color-mix(in srgb, var(--blue) 45%, var(--line-2)); }
   .choice.picked { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent); }
   .choice .tag { display: inline-flex; margin-left: 6px; font-size: 11px; font-weight: 500; color: var(--blue-fg); }
+  /* words with no pick: the card asks which choice they mean before posting */
+  .which { margin: 10px 0 4px; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--blue) 6%, transparent); }
+  .which p { margin: 0 0 6px; font-weight: 600; font-size: 13.5px; }
+  .which .choices { margin: 0; }
+  .which .choice { grid-template-columns: minmax(0, 1fr); width: 100%; }
   .links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
   .links a, .linkish, .qref a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -1223,6 +1228,20 @@ function choicesOf(q) {
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
 const picks = {};
+// Words typed with no choice picked, on a question with choices and a recommendation: the card asks
+// which choice they mean before anything is posted, so the owner, never the supervisor, says whether
+// their words were the recommendation. ASKS[id] is the copy that asked: 'q' the Inbox's, 't' a thread's.
+const ASKS = {};
+const needsWhich = (q) => !!q && !!q.recommendation && choicesOf(q).length > 0 && !['goal-approval', 'review'].includes(q.kind) && !(q.secrets || []).length;
+const whichAsk = (q, list) => `
+      <div class="which" data-which-for="${esc(q.id)}" role="group" aria-label="Which choice">
+        <p>Which choice do your words mean?</p>
+        <div class="choices">${list.map((c) => `
+          <button type="button" class="choice${c.rec ? ' rec' : ''}" data-which="${esc(q.id)}" value="${esc(c.label)}"><span><b>${esc(c.label)}</b>${c.rec ? '<span class="tag">Recommended</span>' : ''}</span></button>`).join('')}
+          <button type="button" class="choice" data-which="${esc(q.id)}" data-which-none value=""><span><b>None of them</b><div class="d">Post my words as they are.</div></span></button>
+        </div>
+      </div>`;
+const dropAsk = (id, card = null) => { delete ASKS[id]; for (const el of (card || document).querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`)) el.remove(); };
 // Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
 // refresh. Each goes straight from the browser to the owner's process and on to its sink.
 const SECRET_DRAFTS = new Map();
@@ -1311,6 +1330,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
+      ${ASKS[q.id] === (copy ? 't' : 'q') ? whichAsk(q, list) : ''}
       <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
@@ -5439,6 +5459,7 @@ document.addEventListener('click', async (ev) => {
   const pick = ev.target.closest('input[data-pick]');
   if (pick) {
     picks[pick.dataset.pick] = pick.value;
+    dropAsk(pick.dataset.pick);
     // one pick per question, made in whichever copy: the Inbox's card and the thread's show it alike
     for (const el of document.querySelectorAll(`input[data-pick="${CSS.escape(pick.dataset.pick)}"]`)) { el.checked = el.value === pick.value; el.closest('.choice')?.classList.toggle('picked', el.checked); }
     if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
@@ -5519,24 +5540,36 @@ document.addEventListener('click', async (ev) => {
     answerPress(id, card, errId, answer, () => ({ action: 'answer', body: { id, answer, seen } }));
     return;
   }
-  const btn = ev.target.closest('[data-answer]');
+  // Answer, or a choice in the card's ask (which choice the words mean; None posts them as they are)
+  const btn = ev.target.closest('[data-answer], button[data-which]');
   if (btn) {
-    const id = btn.dataset.answer;
+    const id = btn.dataset.answer ?? btn.dataset.which;
+    const chose = btn.dataset.which !== undefined ? btn.value : null;
     const { card, errId } = qcardOf(btn);
     const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
-    const picked = picks[id] && picks[id] !== '__other' ? picks[id] : '';
+    const picked = chose ?? (picks[id] && picks[id] !== '__other' ? picks[id] : '');
     const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
     const err = $(`e-${errId}`);
+    // the words went while the ask was up: nothing to say which choice they mean
+    if (chose !== null && !note) { dropAsk(id, card); if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
     const goalId = btn.dataset.goalAsk;
+    const qv = DATA.questions.find((x) => x.id === id);
+    if (chose === null && !picked && !goalId && needsWhich(qv)) {
+      // on this copy only: an ask the other copy raised goes
+      if (!card?.querySelector('[data-which-for]')) { dropAsk(id); card?.querySelector('.row-inline')?.insertAdjacentHTML('beforebegin', whichAsk(qv, choicesOf(qv))); }
+      ASKS[id] = card?.id.startsWith('t-') ? 't' : 'q';
+      return;
+    }
+    dropAsk(id);
     if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = card?.querySelector('input[data-auto]:checked')?.value;
     const asRule = card?.querySelector('input[data-rulebox]')?.checked;
     if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
     // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
-    const qText = DATA.questions.find((x) => x.id === id)?.question || '';
+    const qText = qv?.question || '';
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
