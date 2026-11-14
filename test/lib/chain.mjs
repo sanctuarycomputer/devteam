@@ -4221,7 +4221,9 @@ http.createServer((req, res) => {
       fs.appendFileSync(ownerFile, act('owner', pub));
       must(['log-check']);
       for (const [by, body, re] of [
-        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish only/],
+        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish and pane-answer only/],
+        ['owner', { ...pub, class: 'pane-answer' }, /a pane-answer act says what was answered and names no artifact/],
+        ['supervisor', { class: 'pane-answer', what: 'answered it myself' }, /pane-answer is the owner's/],
         ['owner', { ...pub, tree: undefined }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'unpublish' }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'shout', tree: undefined }, /publish with its tree or unpublish without one/],

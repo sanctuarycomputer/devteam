@@ -573,6 +573,13 @@ try {
   .tl-resolved summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
+  /* what the supervisor's terminal asks: its words as the terminal has them, one button an option */
+  .ask { border-left: 4px solid var(--red); }
+  .ask-q { margin: 8px 0; padding: 8px 10px; max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  .ask-opts { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
+  .ask-opts button { margin: 0; text-align: left; white-space: normal; overflow-wrap: anywhere; min-height: 36px; }
+  .tl-card .ask, .tl-panel .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
+  .tl-card .ask-q, .tl-panel .ask-q { max-height: 120px; }
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 </style>
 </head>
@@ -615,6 +622,7 @@ try {
 
   <section id="inbox">
     <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
+    <div id="ask-inbox"></div>
     <div id="questions"></div>
     <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
@@ -789,6 +797,7 @@ try {
   <div id="tl-dock" class="tl-dock">
     <div id="tl-panel" class="tl-panel" hidden>
       <div class="tl-dock-head"><b>Threads</b><span class="grow"></span><button type="button" class="ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something to start a thread: for a phone, or for a long look around">Pin</button><button type="button" class="ghost" data-tl-new>New thread</button></div>
+      <div id="ask-dock"></div>
       <div id="tl-list"></div>
     </div>
     <button type="button" id="tl-pill" class="ghost tl-pill" aria-expanded="false"><i class="icon-messages-square" aria-hidden="true"></i> Threads</button>
@@ -4242,6 +4251,8 @@ function tCardState(t, now, typed, pane) {
   const last = t.turns[t.turns.length - 1];
   if (!last || last.by !== 'owner') return null;
   if (last.pending) return 'Sending…';
+  // its terminal is asking a question: these words wait, and are never the answer to it
+  if (typed === 'held' && pane) return "Held: the supervisor's terminal is asking a question. Answer it on the card; these words reach it after.";
   if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
   return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
 }
@@ -4593,7 +4604,7 @@ function tArtFpNow(s) {
   return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
-  <div id="tl-c-ready"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
   <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Enter sends; Shift+Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
@@ -4671,7 +4682,7 @@ function tlCardBody(t) {
     turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
     turns.scrollTop = turns.scrollHeight;
   }
-  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id], TL.pane) ?? '';
+  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
 // on the page (or it has none); a bottom sheet on a narrow screen.
@@ -4730,7 +4741,53 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlCard(); tlDock(); tlPins(); }
+function tlDraw() { tlCard(); tlDock(); tlPins(); askDraw(); }
+// What the supervisor's terminal is asking (a tool that wants a person's yes), as /api/threads has
+// it: at the top of the Inbox, in the dock and on the open thread's card, where the owner was
+// talking. A click posts the question's digest and the option's number; the server reads the
+// terminal again and sends that digit only. Every word here is the terminal's: escaped, never markup.
+// One answered here stays hidden until the server's next look at the terminal shows it gone or
+// another (30 s at most), so a read begun before the answer doesn't put it back; what was sent is
+// said in its place for 20 s.
+const ASK = { q: null, sent: null, sentAt: 0, note: '', busy: false, err: '' };
+const ASK_DRAWN = new WeakMap();
+// how long "Sent to the supervisor's terminal" stays where the card was
+const ASK_NOTE_MS = 20000;
+const askShown = () => (ASK.q && ASK.q.digest !== ASK.sent ? ASK.q : null);
+function askHtml() {
+  const q = askShown();
+  if (!q) return ASK.note && Date.now() - ASK.sentAt < ASK_NOTE_MS ? `<div class="card small ask done"><i class="icon-circle-check" aria-hidden="true"></i> Sent to the supervisor's terminal: <b>${esc(ASK.note)}</b></div>` : '';
+  return `<div class="card ask" data-ask="${esc(q.digest)}"><div><i class="icon-triangle-alert" aria-hidden="true"></i> <b>The supervisor's terminal is asking</b></div>
+    <pre class="ask-q">${esc(q.question || '(no words above the options)')}</pre>
+    <div class="ask-opts">${q.options.map((o) => `<button type="button" class="ghost" data-ask-option="${esc(o.n)}"${ASK.busy || !(o.n >= 1 && o.n <= 9) ? ' disabled' : ''}>${esc(`${o.n}. ${o.label}`)}</button>`).join('')}</div>
+    <div class="small muted">Your click sends that option's number to the terminal and nothing else. Words in a thread never answer it; they wait until it is answered.</div>
+    <div class="err small">${esc(ASK.err)}</div></div>`;
+}
+function askDraw() {
+  if (ASK.sent && (!ASK.q || ASK.q.digest !== ASK.sent || Date.now() - ASK.sentAt > 30000)) ASK.sent = null;
+  const html = askHtml();
+  // only when it changed: a card rewritten on every poll would drop a press on a button
+  for (const id of ['ask-inbox', 'ask-dock', 'tl-c-ask']) { const el = document.getElementById(id); if (el && ASK_DRAWN.get(el) !== html) { ASK_DRAWN.set(el, html); el.innerHTML = html; } }
+}
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest?.('[data-ask-option]');
+  const digest = b?.closest('[data-ask]')?.dataset.ask;
+  if (!b || !digest || ASK.busy) return;
+  ASK.busy = true;
+  ASK.err = '';
+  askDraw();
+  try {
+    const r = await fetch('/api/pane-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ digest, option: Number(b.dataset.askOption) }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { ASK.sent = digest; ASK.sentAt = Date.now(); ASK.note = String(j.out || '').replace(/^answered: /, '').slice(0, 300); setTimeout(askDraw, ASK_NOTE_MS + 100); }
+    else ASK.err = String(j.error || `the dashboard answered ${r.status}`).slice(0, 400);
+  } catch { ASK.err = 'The dashboard did not answer; look at the terminal before trying again.'; }
+  ASK.busy = false;
+  askDraw();
+  // the server reads the terminal again after an answer, taken or refused: its next word is the state
+  tlRefresh();
+  setTimeout(tlRefresh, 2000);
+});
 // A read lands only if none begun after it has landed already: a poll begun before a send can
 // answer after the send's own read, and would put back the threads as they were. Any newer answer
 // lands, so reads slower than the polls still bring the threads in.
@@ -4745,6 +4802,8 @@ async function tlRefresh() {
     TL.raw = j.threads || [];
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
+    const q = j.supervisor?.question;
+    ASK.q = q && typeof q.digest === 'string' && Array.isArray(q.options) ? q : null;
     TL.have = n;
   } catch { return; }
   tlDraw();
@@ -4835,7 +4894,7 @@ function tlSend() {
     onOk: (out) => {
       p.confirmed = true;
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
-      TL.typed[p.real] = /supervisor's pane/.test(out.out || '');
+      TL.typed[p.real] = /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
       if (TL.open === p.thread && p.real !== p.thread) TL.open = p.real;
       tlRelay();
       tlRefresh();
@@ -4917,7 +4976,7 @@ function tlDock() {
   const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
   const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
   // set only when it changed: a pill rewritten on every poll would drop a press on it
-  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}`;
+  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
   const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);

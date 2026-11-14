@@ -794,7 +794,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   let r = await get();
   assert.equal(r.status, 200);
   let j = await r.json();
-  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false }], 'no threads, and no supervisor pane');
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null }], 'no threads, no supervisor pane, and so nothing its terminal asks');
   const heads = [];
   for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
   assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
