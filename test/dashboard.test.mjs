@@ -417,7 +417,7 @@ function artLensRun({ ancestor = 'http://127.0.0.1:4321', title = 'A mock', path
 test('presses: the page answers before the server, and a refusal puts it back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-press-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 90), DEVTEAM_PORT_BASE: String(PORTS + 91), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 58), DEVTEAM_PORT_BASE: String(PORTS + 59), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'press');
   const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
@@ -530,7 +530,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
   // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 56), DEVTEAM_PORT_BASE: String(PORTS + 57), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'focus');
   const ask = (q, ...more) => {

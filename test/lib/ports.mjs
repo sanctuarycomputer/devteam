@@ -1,8 +1,23 @@
 // Each test process owns a block of 100 ports between 20000 and 32699 (below 32768, where Linux
-// starts handing out ephemeral ports; macOS starts at 49152): the file-wide hub and instance block at PORTS, the ports test at
-// PORTS+30, the hub test at PORTS+60. The dashboard test's preview relays listen at PORTS+62..79, inside the hub test's instance block: they share it, so those two never run at once (serial only). A block is claimed with a lock file in the temp dir, so the
-// suite's files running side by side, and another checkout's suite, never share one. The lock goes
-// when the process exits; one left by a process that died is cleared once it is an hour old.
+// starts handing out ephemeral ports; macOS starts at 49152). A block is claimed with a lock file in
+// the temp dir, so the suite's files running side by side, and another checkout's suite, never share
+// one. The lock goes when the process exits; one left by a process that died is cleared once it is
+// an hour old.
+//
+// Inside a block, a test names a hub port and an instance base. Only a dashboard that picks its own
+// port, or a hub asked for its list (/instances.json), scans base..base+24, so such a base must be
+// +75 or lower to stay in the block. A test that pins its dashboard with --port, and never asks the
+// hub's list, scans nothing: only its hub port is bound, and that must be in the block. Tests in one
+// file run one at a time, so their ranges may overlap, but a port one test binds should be one no
+// test before it in that file can still be holding.
+// The layout, by offset:
+// - +0 the file-wide hub, +1..25 its instances (lib/kit.mjs's defaults, and the gateway test's)
+// - +10/11 next-step's dashboard (pinned)
+// - +30/31..55 the ports and viewer tests
+// - +40/41, +42/43 the data-wait tests (pinned)
+// - +56/57 focus, +58/59 presses (pinned, never asking the hub's list: their bases scan nothing)
+// - +60/61..85 the hub test; the preview relays bind +62..79 inside it (never at once: serial only)
+// - +70/71..95 accounts (its own file)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
