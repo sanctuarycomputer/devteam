@@ -86,8 +86,8 @@ under test believe it is on that box, whatever the test's environment says.
    Tests (machine.test.mjs), on `bareProject` fixtures `app` (the kit run) and `app-api` (standing
    in for home; a prefix check would wrongly pass it), each run folder seeded by one `observe` run
    with no `DEVTEAM_RUN` (`status` writes nothing): refused, from `app` with `DEVTEAM_RUN=<app-api>/docs/devteam/run`:
-   `phase spec` (as a worker), `observe …` and `status` each exit non-zero with the message above
-   (both paths in it), and `app-api`'s run folder is byte-for-byte unchanged. Taken: `DEVTEAM_RUN`
+   `phase spec` (as a worker), `observe …`, `status` and `log` each exit non-zero with stderr holding
+   exactly `DEVTEAM_RUN=<app-api>/docs/devteam/run is not inside this kit's home (<app>): `, and `app-api`'s run folder is byte-for-byte unchanged. Taken: `DEVTEAM_RUN`
    as `app`'s own run folder, a symlink to it, a not-yet-made folder inside `app`, and unset, from
    `app`; from a `git worktree` of `app` with `app`'s run folder (a worker in home's worktree); from
    a third repo's checkout with `DEVTEAM_HOME=<app>` and `app`'s kit by absolute path (a worker in a
@@ -96,22 +96,27 @@ under test believe it is on that box, whatever the test's environment says.
    **Must not break** (m-20261114-224640331-supervisor): a worker on a repo link, cwd in the link
    repo's worktree, `DEVTEAM_HOME=<home>`, `DEVTEAM_RUN=<home>/docs/devteam/run` (as kit-46 and this
    ticket's worker run today) keeps every command it uses: `phase`, `send`, `gate`, `send … --kind
-   merge-request` exit 0 with their lines in home's run, and `check-ticket` is never refused by the
-   guard (it may fail on the ticket's own merits).
+   merge-request` exit 0 with their lines (phase, gate, both sends) in home's run, and
+   `check-ticket` is never refused by the guard (it may fail on the ticket's own merits). The link
+   repo is a real one: home's settings.md names it (`links.linked`, kind repo, its remote and path),
+   so the commands take a link worker's code paths.
    Not defended (P6): a `DEVTEAM_RUN` that names, on purpose, a folder inside the kit's home other
-   than its run folder, or a kit copied into home's own tree.
+   than its run folder.
 
 7. **A kit nested in a home without a repo of its own can't take that home** (m-20261114-224904663).
    A kit copied into a folder inside home's checkout that has no `.git` of its own (a fixture made
    without `git init`) resolves home's git, so it would run against home's project and live log.
-   When the running kit's script is not `<its checkout's top level>/docs/devteam/scripts/` (by real
-   path; `git rev-parse --show-toplevel` from the script's folder), every command but `help` dies:
+   The check runs first, in the block that re-execs the main checkout's kit (devteam.mjs ~34), so a
+   copy that differs from home's kit can't hand the command to home's own kit either: when the
+   script's folder is in a git checkout and `<script folder>/../../../.git` doesn't exist (the copy
+   isn't its checkout's own `docs/devteam`), every command but `help` dies (a kit in no git checkout,
+   as a box image's `/opt/devteam/kit`, skips the check):
    `this kit (<script>) is not its checkout's own (<top level>/docs/devteam): a copy inside another
    repo can't run against that repo's home; give the copy a repo of its own (git init)`. And
    `bareProject` asserts each fixture is a repo of its own (its top level is itself). Tests: a copy
    of the kit under `<home>/fixtures/plain/docs/devteam`, no `git init`: `status` and `observe` die
-   with that message, and home's run folder is unchanged; `bareProject`'s fixtures pass the new
-   assertion (every test that uses it).
+   with that message, again after the copy is changed so it differs from home's kit, and home's run
+   folder is unchanged; `bareProject`'s fixtures pass the new assertion (every test that uses it).
 
 ## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 

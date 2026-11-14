@@ -39,6 +39,16 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   const self = fileURLToPath(import.meta.url);
   let common = null;
   try { common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  // A kit copied into a folder inside another checkout with no repo of its own (a fixture made
+  // without git init) would take that checkout's git, and so its kit, home and live log: a kit in a
+  // repo runs only as that checkout's own docs/devteam. (A kit in no repo, as a box image's, is free.)
+  const cmd = process.argv[2];
+  if (common && cmd && !['help', '--help'].includes(cmd) && !fs.existsSync(path.join(path.dirname(self), '..', '..', '..', '.git'))) {
+    let top = null;
+    try { top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+    process.stderr.write(`devteam: this kit (${self}) is not its checkout's own (${path.join(top ?? path.dirname(common), 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)\n`);
+    process.exit(1);
+  }
   const kitMain = common && path.join(path.dirname(common), 'docs', 'devteam');
   const mainScript = kitMain && path.join(kitMain, 'scripts', 'devteam.mjs');
   if (mainScript && !process.env.DEVTEAM_OWN_KIT && path.resolve(mainScript) !== path.resolve(self) && fs.existsSync(path.join(kitMain, 'project')) && fs.existsSync(mainScript) && fs.readFileSync(mainScript, 'utf8') !== fs.readFileSync(self, 'utf8')) {
@@ -418,11 +428,6 @@ const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.
 const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
 // The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
 const repoLinksIn = (file) => { try { const m = readText(file)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); return Object.entries(JSON.parse(m[1]).links ?? {}).filter(([, l]) => l?.kind === 'repo' && typeof l.remote === 'string'); } catch { return []; } };
-// A kit copied into a folder inside another checkout with no repo of its own (a fixture made without
-// git init) would take that checkout's git, and so its home, project and live log: a kit in a repo
-// runs only from that checkout's own docs/devteam.
-const kitCheckout = path.resolve(here, '..', '..', '..');
-if (command && !['help', '--help'].includes(command) && !fs.existsSync(path.join(kitCheckout, '.git')) && commonOf(here)) die(`this kit (${fileURLToPath(import.meta.url)}) is not its checkout's own (${path.join(git(['rev-parse', '--show-toplevel'], here) ?? kitCheckout, 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)`);
 // { common, proj }: home's git common dir, and its project folder when DEVTEAM_HOME named it.
 const homeAt = (() => {
   const env = process.env.DEVTEAM_HOME;

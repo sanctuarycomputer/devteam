@@ -173,8 +173,7 @@ test('a kit refuses a run folder outside its home: a worker\'s DEVTEAM_RUN leake
     const r = dtIn(app, args, { DEVTEAM_RUN: runOf(api), ...env });
     assert.notEqual(r.status, 0, `${args[0]} is refused`);
     assert.match(r.stderr, LEAKED, args[0]);
-    assert.ok(r.stderr.includes(runOf(api)) || r.stderr.includes(fs.realpathSync(runOf(api))), `${args[0]} names the run folder`);
-    assert.ok(r.stderr.includes(`(${app})`) || r.stderr.includes(`(${fs.realpathSync(app)})`), `${args[0]} names the kit's home`);
+    assert.ok(r.stderr.includes(`DEVTEAM_RUN=${runOf(api)} is not inside this kit's home (${app}): `), `${args[0]} names both, exactly: ${r.stderr}`);
   }
   assert.deepEqual(snapshot(runOf(api)), before, 'not a byte written in the other home\'s run folder');
   // the machine's own commands run from anywhere and keep no run folder: never refused
@@ -216,8 +215,16 @@ test('a worker on a repo link keeps every command it uses: cwd in the link\'s wo
   const home = seeded(base, 'home');
   const linked = path.join(base, 'linked');
   fs.mkdirSync(linked);
-  execFileSync('sh', ['-c', 'git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && git worktree add -q ../linked-wt -b ticket/x-1'], { cwd: linked });
+  execFileSync('sh', ['-c', 'git init -q -b main && git remote add origin https://github.com/me/linked.git && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && git worktree add -q ../linked-wt -b ticket/x-1'], { cwd: linked });
+  // home names it a repo link, as settings.md does for the kit's own repo in devteam-dev
+  const settings = path.join(home, 'docs/devteam/project/settings.md');
+  const txt = fs.readFileSync(settings, 'utf8');
+  const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const j = JSON.parse(m[1]);
+  j.links = { ...j.links, linked: { kind: 'repo', title: 'Linked', remote: 'me/linked', path: linked } };
+  fs.writeFileSync(settings, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
   const wt = path.join(base, 'linked-wt');
+  assert.match(dtAt(home, wt, ['whoami'], { DEVTEAM_HOME: home, DEVTEAM_RUN: runOf(home), ...WORKER }).stdout, /repo=/, 'the link worker\'s whoami');
   const env = { DEVTEAM_HOME: home, DEVTEAM_RUN: runOf(home), ...WORKER };
   const run = (args) => dtAt(home, wt, args, env);
   for (const args of [['phase', 'build', '--task', 'T1'], ['send', 'supervisor', 'a link worker\'s line', '--kind', 'info'], ['gate', 'test', '--', process.execPath, '-e', '0'], ['send', 'supervisor', 'x-1 ready to merge', '--kind', 'merge-request'], ['whoami']]) {
@@ -227,7 +234,7 @@ test('a worker on a repo link keeps every command it uses: cwd in the link\'s wo
   // check-ticket judges the ticket (there is none here), never the run folder
   const ct = run(['check-ticket', 'x-1']);
   assert.doesNotMatch(ct.stderr, LEAKED);
-  assert.ok(logged(runOf(home), 'a link worker\'s line'), 'the link worker\'s lines are in home\'s run folder');
+  for (const said of ['"type":"phase"', 'a link worker\'s line', 'x-1 ready to merge', '"type":"gate"']) assert.ok(logged(runOf(home), said), `${said} is in home's run folder`);
 });
 
 test('a kit copied into a home\'s tree without a repo of its own refuses to run against that home', () => {
@@ -236,11 +243,15 @@ test('a kit copied into a home\'s tree without a repo of its own refuses to run 
   const plain = path.join(home, 'fixtures', 'plain');
   fs.cpSync(kit, path.join(plain, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
   const before = snapshot(runOf(home));
-  for (const args of [['status'], OBSERVE]) {
+  const refused = () => { for (const args of [['status'], OBSERVE]) {
     const r = dtAt(plain, plain, args);
     assert.notEqual(r.status, 0, args[0]);
     assert.match(r.stderr, /is not its checkout's own .*: a copy inside another repo can't run against that repo's home/, args[0]);
-  }
+  } };
+  refused();
+  // a copy that differs from home's kit would otherwise hand the command to home's own kit
+  fs.appendFileSync(kitOf(plain), '\n// a copy, changed\n');
+  refused();
   assert.deepEqual(snapshot(runOf(home)), before, 'home\'s run folder is untouched');
 });
 
