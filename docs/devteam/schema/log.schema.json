@@ -982,7 +982,7 @@
             "pattern": "^(all|project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+|link:[a-z0-9-]+)$"
           },
           "status": {
-            "description": "candidate until you keep it; accepted ones go into the instructions of every agent they apply to; stale or retired ones no longer do.",
+            "description": "candidate until it is kept: the supervisor accepts a lesson about how the agents work itself, and only one it sent you (for_owner) waits for you. Accepted ones go into the instructions of every agent they apply to; stale or retired ones no longer do. You can retire any of them.",
             "enum": [
               "candidate",
               "accepted",
@@ -1016,6 +1016,17 @@
           "kit_lesson": {
             "description": "The supervisor's own tag on knowledge it wrote: this looks like it would hold for any project on the kit, so the box's operator reads it first when it looks for an upstream change. It grants nothing: no prompt, status, approval or trust reads it. Only the supervisor's lines carry it, and only on its own entries.",
             "type": "boolean"
+          },
+          "for_owner": {
+            "description": "The supervisor sent this candidate to you: it would change something you set (the product's direction, a goal, a rule you gave, or a kind of call only you make), so it waits in your Inbox and only you keep it. Without it, a candidate is about how the agents work, and the supervisor accepts or retires it itself. Set once, never taken back; it grants nothing.",
+            "const": true
+          },
+          "plain": {
+            "description": "What a lesson sent to you (for_owner) would change and why you should care, in plain words: no commands, flags, code or ids. Your Inbox card shows it first, with the technical statement under it.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "pattern": "^[^`\\r\\n]+$"
           }
         },
         "additionalProperties": false,
@@ -2436,7 +2447,9 @@
           "confidence",
           "statement",
           "scope",
-          "kit_lesson"
+          "kit_lesson",
+          "for_owner",
+          "plain"
         ],
         "owner": [
           "status",
