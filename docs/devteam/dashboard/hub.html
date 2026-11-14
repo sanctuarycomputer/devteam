@@ -126,6 +126,75 @@
   .ov-foot .k { color: var(--muted); font-size: 11px; }
   .ov-none { color: var(--fg-2); font-size: 12.5px; }
   @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: minmax(0, 1fr); } }
+  /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
+  #ov-body { min-width: 0; }
+  #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
+  #tl[hidden] { display: none; }
+  #tl button, .tl-pin { font: inherit; cursor: pointer; }
+  #tl .btn { font-size: 12px; font-weight: 500; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); white-space: nowrap; flex: 0 0 auto; }
+  #tl .btn:hover { opacity: .88; }
+  #tl .btn:disabled { opacity: .5; cursor: default; }
+  #tl .btn.ghost { background: var(--surface); color: var(--fg); border-color: var(--line-2); }
+  #tl .btn.ghost:hover:not(:disabled) { background: var(--hover); opacity: 1; }
+  #tl .btn.ghost[aria-pressed="true"] { border-color: var(--blue); color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 10%, var(--surface)); }
+  #tl .btn.x { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+  #tl textarea { font: inherit; font-size: 13px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; width: 100%; min-height: 56px; margin-top: 6px; padding: 8px 10px; resize: vertical; }
+  #tl textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  #tl .muted { color: var(--fg-2); }
+  #tl .small { font-size: 12px; }
+  #tl .err { color: var(--red-fg); font-size: 12px; }
+  #tl .grow { flex: 1 1 auto; }
+  #tl .empty { color: var(--muted); font-size: 12px; margin: 0; padding: 6px; }
+  #tl .meta { font-size: 12px; color: var(--muted); }
+  #tl .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--fg-2); }
+  .tl-aiming, .tl-aiming * { cursor: none !important; }
+  .tl-pinning { touch-action: none; }
+  .tl-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+  .tl-cursor path { fill: var(--blue); stroke: #fff; stroke-width: 2; }
+  .tl-cursor circle { fill: #fff; }
+  .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
+  .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* fixed, beside its pin: the Overview scrolls inside its own box, and the card is placed again as it does */
+  .tl-card { position: fixed; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
+  .tl-card[hidden], .tl-panel[hidden], .tl-hl[hidden], .tl-chip[hidden], .tl-cursor[hidden] { display: none; }
+  .tl-card.in-dock { right: 16px; bottom: 64px; }
+  .tl-card.sheet { left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .tl-head { display: flex; align-items: center; gap: 6px; }
+  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
+  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; min-width: 0; }
+  .tl-ctx summary::-webkit-details-marker { display: none; }
+  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; min-width: 0; }
+  .tl-ctx summary span { flex: 0 0 auto; }
+  .tl-ctx dl { margin: 6px 0 2px; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  .tl-ctx dt { color: var(--muted); }
+  .tl-ctx dd { margin: 0; overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
+  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* in the Overview's own box, so a pin scrolls with what it is on */
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
+  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin sup { font-size: 9px; margin-left: 1px; }
+  .tl-dock { position: fixed; right: 16px; bottom: max(16px, env(safe-area-inset-bottom)); z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  #tl .tl-pill { border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.12); display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; }
+  .tl-pill svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .tl-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: 0 0 auto; }
+  .tl-panel { width: 320px; max-width: calc(100vw - 32px); max-height: 60vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .tl-dock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .tl-op { display: flex; align-items: center; gap: 8px; padding: 6px; margin-bottom: 4px; border-radius: 6px; background: var(--well); font-size: 12px; color: var(--fg-2); }
+  .tl-op.warn { color: var(--amber-fg); }
+  .tl-op span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  #tl button.tl-row { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px; color: var(--fg); font-size: 12.5px; }
+  #tl button.tl-row:hover { background: var(--hover); }
+  .tl-row .tl-r { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-row .tl-r span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
+  .tl-closed summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
+  @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
 </style>
 </head>
 <body>
@@ -134,8 +203,23 @@
   <span id="notify"></span>
   <span id="box-links" hidden></span>
 </header>
-<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"></section></main>
+<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"><div id="ov-body"></div><div id="tl-pins" class="tl-pins"></div></section></main>
 <div id="drop-hint" hidden></div>
+<!-- the thread layer: outside what the Overview redraws every 10 s (the pins are in its box, beside it) -->
+<div id="tl" hidden>
+  <div id="tl-hl" class="tl-hl" hidden></div>
+  <div id="tl-chip" class="tl-chip" hidden></div>
+  <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
+  <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the operator" hidden></div>
+  <div id="tl-dock" class="tl-dock">
+    <div id="tl-panel" class="tl-panel" hidden>
+      <div class="tl-dock-head"><b>Threads</b><span class="small muted">with the operator</span><span class="grow"></span><button type="button" class="btn ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something on the Overview to start a thread about it: for a phone, or for a long look around">Pin</button><button type="button" class="btn ghost" id="tl-new">New thread</button></div>
+      <div id="tl-op" class="tl-op" hidden></div>
+      <div id="tl-list"></div>
+    </div>
+    <button type="button" id="tl-pill" class="btn ghost tl-pill" aria-expanded="false"></button>
+  </div>
+</div>
 <script>
 // An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
 for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
@@ -174,6 +258,7 @@ const TERM = '\u0000terminal';
 let term = null; // { tab, frame }
 const OVERVIEW = '\u0000overview';
 const ovEl = $('overview');
+const ovBody = $('ov-body');
 let ovTab = null;
 const byRoot = (a, b) => String(a).localeCompare(String(b));
 const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
@@ -182,6 +267,9 @@ const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); 
 function showOnly(key) {
   if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW ? 0 : -1; }
   ovEl.hidden = key !== OVERVIEW;
+  // the thread layer is the Overview's: its dock, its pins and its polls go with it
+  $('tl').hidden = key !== OVERVIEW;
+  if (key !== OVERVIEW) tlLeave();
   if (term) { term.tab.setAttribute('aria-selected', String(key === TERM)); term.tab.tabIndex = key === TERM ? 0 : -1; if (term.frame) term.frame.hidden = key !== TERM; }
   for (const [r, o] of items) {
     o.tab.setAttribute('aria-selected', String(r === key));
@@ -194,6 +282,7 @@ function selectOverview() {
   history.replaceState(null, '', '#overview');
   showOnly(OVERVIEW);
   paintOverview();
+  tlRefresh();
 }
 function selectTerminal() {
   if (!term) return;
@@ -310,6 +399,9 @@ const stateOf = (it) => {
   return st;
 };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = String(text); return e; };
+// A part of the Overview a thread can be pinned on (the thread layer, below): named, with what it
+// says, so a pin finds it again after a redraw.
+const pinOn = (e, part, says) => { e.dataset.pin = part; if (says !== undefined) e.dataset.says = String(says); return e; };
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 function agoText(iso) {
   const t = Date.parse(iso ?? '');
@@ -373,6 +465,7 @@ function fleetControl(it) {
     b.onclick = () => { if (mode === 'park' && !confirmed(key)) return; setFleet([root], mode); };
     seg.append(b);
   }
+  pinOn(ctl, 'fleet', `Fleet: ${now}`);
   ctl.append(seg);
   if (busy?.asking) ctl.append(el('span', 'msg', busy.asking));
   else if (busy?.error) ctl.append(el('span', 'msg err', busy.error));
@@ -384,34 +477,37 @@ function overviewCard(it, newest) {
   const st = stateOf(it);
   const S = STATES[st];
   const card = el('article', `ov-card${S.tone === 'red' ? ' bad' : S.tone === 'amber' ? ' warn' : ''}`);
+  card.dataset.root = x.root;
+  pinOn(card, 'card', `${x.name}: ${S.label}`);
   const top = el('div', 'ov-top');
   const name = el('button', 'ov-name', x.name);
   name.dataset.k = `${x.root}:name`;
   name.title = `Open ${x.name}'s dashboard\n${x.root}`;
   name.onclick = () => select(x.root);
+  pinOn(name, 'name', x.name);
   const pills = el('span', 'ov-pills');
   // partly blocked is beside what the project is doing: it is still doing it
   if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber', 'Partly blocked'); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; pills.append(pb); }
-  pills.append(el('span', `pill ${S.tone}`, S.label));
+  pills.append(pinOn(el('span', `pill ${S.tone}`, S.label), 'state', S.label));
   top.append(name, pills);
   card.append(top);
 
   const stats = el('div', 'ov-stats');
-  const stat = (k, v, cls = '', onclick = null) => { const s_ = el('div', 'ov-stat'); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.dataset.k = `${x.root}:inbox`; vv.title = `Open ${x.name}'s dashboard, where its Inbox is`; } s_.append(vv); stats.append(s_); };
+  const stat = (part, k, v, cls = '', onclick = null) => { const s_ = pinOn(el('div', 'ov-stat'), part, `${k} ${v}`); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.dataset.k = `${x.root}:inbox`; vv.title = `Open ${x.name}'s dashboard, where its Inbox is`; } s_.append(vv); stats.append(s_); };
   const kit = x.kit ?? '?';
   const nums = relNums(kit);
   const behind = newest && nums && relCmp(nums, newest) < 0;
-  stat('Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
+  stat('kit', 'Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
   if (behind) stats.lastChild.title = `Behind the newest kit here (v${newest.join('.')})`;
   else if (/\+local$/.test(String(kit))) stats.lastChild.title = 'This release, with local changes to the kit';
   const inbox = typeof x.inbox === 'number' ? x.inbox : null;
-  stat('Inbox', inbox ?? '–', inbox ? 'red' : '', inbox ? () => select(x.root) : null);
-  stat('Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
-  stat('Last moved', p ? agoText(p.last_activity) : '–');
+  stat('inbox', 'Inbox', inbox ?? '–', inbox ? 'red' : '', inbox ? () => select(x.root) : null);
+  stat('working', 'Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
+  stat('moved', 'Last moved', p ? agoText(p.last_activity) : '–');
   card.append(stats);
 
   if (p?.goal) {
-    const g = el('div', 'ov-goal');
+    const g = pinOn(el('div', 'ov-goal'), 'goal', `Goal: ${p.goal.title}`);
     const more = (Number(p.goals_open) || 1) - 1;
     g.append(el('span', 'k', 'Goal'), el('span', 't', p.goal.title), el('span', 'n', `${p.goal.total ? `${p.goal.done} of ${p.goal.total}` : 'not planned yet'}${more > 0 ? ` · +${more} more` : ''}`));
     g.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
@@ -422,6 +518,7 @@ function overviewCard(it, newest) {
     const total = p.open_tickets + p.done_tickets;
     const prog = el('div', 'ov-prog');
     const heldN = Math.max(0, Number(p.blocked_tickets) || 0);
+    pinOn(prog, 'progress', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged` : 'No tickets planned yet');
     prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged${heldN ? `, ${heldN} waiting on you` : ''}` : 'No tickets planned yet'));
     const bar = el('div', 'ov-bar');
     const fill = el('span');
@@ -439,13 +536,13 @@ function overviewCard(it, newest) {
   const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
-    for (const n of notes.slice(0, 5)) ul.append(el('li', n.red ? 'red' : '', n.t));
+    for (const n of notes.slice(0, 5)) ul.append(pinOn(el('li', n.red ? 'red' : '', n.t), 'attention', tLine(n.t, 200)));
     card.append(ul);
   } else if (p) card.append(el('div', 'ov-ok', st === 'idle' ? 'Nothing open. Waiting for a new goal.' : inbox ? 'Moving without you. The questions can wait.' : 'Nothing needs you.'));
   else if (!it.goneAt && inbox !== null) card.append(el('div', 'ov-none', 'Update its kit to see what it is doing and how far along it is.'));
 
   if (Array.isArray(p?.activity) && p.activity.length) {
-    const foot = el('div', 'ov-foot');
+    const foot = pinOn(el('div', 'ov-foot'), 'activity', 'Activity');
     foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
     card.append(foot);
   }
@@ -464,9 +561,9 @@ function paintOverview() {
   const full = count('blocked') + count('waiting');
   const partly = all.filter((it) => it.x.pulse?.blocking === 'partial' && stateOf(it) !== 'blocked').length;
   const head = el('div', 'ov-head');
-  head.append(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'));
+  head.append(pinOn(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'), 'headline'));
   const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, count('parked') ? `${count('parked')} parked` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
-  head.append(el('span', 'sum', parts.join(' · ')));
+  head.append(pinOn(el('span', 'sum', parts.join(' · ')), 'summary'));
   // every fleet at once: Park all (confirmed), and Resume all while any is held
   const can = all.filter(steerable);
   const acts = el('div', 'acts');
@@ -478,12 +575,604 @@ function paintOverview() {
   if (acts.childElementCount) head.append(acts);
   const grid = el('div', 'ov-grid');
   // one answer in the block that isn't shaped like a hello costs its own card, not the page
-  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'ov-card bad'); c.append(el('div', 'ov-name', it.x.name), el('div', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
+  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'ov-card bad'); c.dataset.root = it.x.root; pinOn(c, 'card', `${it.x.name}: can't be read`); c.append(el('div', 'ov-name', it.x.name), el('div', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
-  const at = ovEl.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-  ovEl.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
+  const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+  ovBody.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
+  // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
+  tlDraw();
+}
+// ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
+// The dock, the pin and the card of a project's dashboard (index.html, "threads"), ported: here every
+// thread is with the machine's operator, kept by the hub's server (operator/threads) and typed into
+// the operator's session. Hold Shift and click a part of the Overview, or use the dock's Pin, and a
+// thread starts about it. What a pin is on is named, never located: a project's root and one of
+// OP_PARTS (the kit's OPERATOR_PARTS), so it finds its place again after every redraw. Everything a
+// thread holds, the operator's words and the server's own included, goes in as text.
+const OP_PARTS = ['headline', 'summary', 'card', 'name', 'state', 'kit', 'inbox', 'working', 'moved', 'goal', 'progress', 'attention', 'activity', 'fleet'];
+const OP_PART_WORDS = { state: 'its state', kit: 'Kit', inbox: 'Inbox', working: 'Working', moved: 'Last moved', goal: 'its goal', progress: 'tickets merged', attention: 'what needs you', activity: 'activity', fleet: 'Run, Drain, Park' };
+const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
+const T_ENC = new TextEncoder();
+const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
+const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
+// the kit's UNSAFE_TEXT: what a terminal or a reader's eye acts on (a control, a bidi override)
+const T_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+const when = (iso) => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const lsGet = (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+const lsDel = (k) => { try { localStorage.removeItem(k); } catch {} };
+const TL = { avail: null, why: '', op: null, threads: [], raw: [], pend: [], open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, said: {}, seq: 0, have: 0, openAt: -1, polled: false, polling: null, pressed: null, chain: new Map(), turnsSig: '', listSig: '', opNote: '' };
+const tlOwn = (e) => !!e?.closest?.('#tl, #tl-pins');
+const tlActive = () => selected === OVERVIEW && document.visibilityState === 'visible';
+const tlShowing = () => !$('tl-cursor').hidden;
+const typingIn = (e) => !!e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT' || e.isContentEditable);
+// A thread as the page uses it, from whatever answered: anything not shaped like one is left out.
+function tThread(x) {
+  if (!x || typeof x !== 'object' || typeof x.id !== 'string' || typeof x.created_at !== 'string' || !Array.isArray(x.turns)) return null;
+  const s = x.subject && typeof x.subject === 'object' && x.subject.kind === 'overview' && x.subject.anchor && OP_PARTS.includes(x.subject.anchor.selector) ? { root: typeof x.subject.root === 'string' ? x.subject.root : null, name: typeof x.subject.name === 'string' ? x.subject.name : null, selector: x.subject.anchor.selector, label: typeof x.subject.anchor.label === 'string' ? x.subject.anchor.label : '' } : null;
+  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(u.signed === false ? { unsigned: true } : {}) }));
+  return { id: x.id, title: String(x.title ?? ''), subject: s, status: x.status === 'closed' ? 'closed' : 'open', turns, created_at: x.created_at, closed_at: typeof x.closed_at === 'string' ? x.closed_at : null, activity_at: typeof x.activity_at === 'string' ? x.activity_at : x.created_at };
+}
+// What a point is on: the part of the Overview under it that paintOverview named (data-pin), with
+// its project when it is in a card. Blank space names nothing, and gets no pin.
+function tlHitAt(x, y) {
+  const at = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
+  const part = at && ovBody.contains(at) ? at.closest('[data-pin]') : null;
+  if (!part || !OP_PARTS.includes(part.dataset.pin)) return null;
+  const selector = part.dataset.pin;
+  const label = tCut(tLine(part.dataset.says ?? part.textContent, 200), 300);
+  const card = part.closest('.ov-card');
+  if (!card) return ['headline', 'summary'].includes(selector) ? { el: part, title: label || 'The Overview', subject: { selector, label, root: null, name: null } } : null;
+  const root = card.dataset.root;
+  const it = root ? items.get(root) : null;
+  // a root the kit would refuse (not a path, not one line, too long) is no subject
+  if (!it || !root.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(root) || tLine(root, 600) !== root || tBytes(root) > 500) return null;
+  const name = tCut(tLine(it.x.name, 120), 120) || 'project';
+  return { el: part, title: tLine(['card', 'name'].includes(selector) || !label ? name : `${name}: ${label}`, T_TITLE_MAX), subject: { selector, label, root, name } };
+}
+// A subject as the hub's server takes it (the kit's operatorSubjectProblem).
+const tWire = (s) => (!s ? undefined : { kind: 'overview', ...(s.root ? { root: s.root, name: s.name } : {}), anchor: { selector: s.selector, ...(s.label ? { label: s.label } : {}) } });
+const tKey = (s) => (!s ? null : `${s.root ?? ''}|${s.selector}|${s.selector === 'attention' ? s.label : ''}`);
+// Where a subject is drawn now: its project's card by root, then its part; an attention line by
+// its words, and when the line has gone, the list it was in, then the card. null: not on the page.
+function tlTarget(s) {
+  if (!s) return null;
+  if (!s.root) return ovBody.querySelector(`[data-pin="${s.selector}"]`);
+  const card = [...ovBody.querySelectorAll('.ov-card')].find((c) => c.dataset.root === s.root);
+  if (!card) return null;
+  if (s.selector === 'card') return card;
+  if (s.selector === 'attention') return [...card.querySelectorAll('[data-pin="attention"]')].find((e) => e.dataset.says === s.label) ?? card.querySelector('.ov-att') ?? card;
+  return card.querySelector(`[data-pin="${s.selector}"]`) ?? card;
+}
+const tWhere = (s) => (!s ? 'no subject' : !s.root ? 'the Overview' : `${s.name}${Object.hasOwn(OP_PART_WORDS, s.selector) ? `, ${OP_PART_WORDS[s.selector]}` : ''}`);
+// One pin per subject, for open threads: numbered as the dock numbers them (by when each began).
+function tPins(threads) {
+  const open = threads.filter((t) => t.status === 'open').sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const by = new Map();
+  open.forEach((t, i) => { const k = tKey(t.subject); if (!k) return; const g = by.get(k) ?? { key: k, subject: t.subject, n: i + 1, ids: [] }; g.ids.push(t.id); by.set(k, g); });
+  return [...by.values()];
+}
+// Where a card opens: beside what it is about, on whichever side keeps it on screen; a bottom
+// sheet under 640 px.
+function tPlace(r, w, h, vw, vh) {
+  if (vw < 640) return { sheet: true };
+  const gap = 10;
+  const left = r.right + gap + w <= vw - 8 ? r.right + gap : Math.max(8, r.left - gap - w);
+  const top = Math.min(Math.max(8, r.top), Math.max(8, vh - h - 8));
+  return { sheet: false, left: Math.round(left), top: Math.round(top) };
+}
+// The owner's turn, shown before the server has it, and a thread the owner is starting likewise.
+const tPendingTurn = (text, at) => ({ id: '', by: 'owner', at, text, pending: true });
+const tPendId = (p) => p.real ?? p.firstOf?.real ?? p.thread;
+// The threads as the owner's presses will leave them: each pending send's turn on its thread (or
+// its new thread), and a thread closed or reopened, until the server's threads show it.
+function tOverlay(raw, pend) {
+  const threads = raw.map((t) => ({ ...t, turns: [...t.turns] }));
+  for (const p of pend) {
+    const id = tPendId(p);
+    const t = threads.find((x) => x.id === id);
+    if (p.status) { if (t) t.status = p.status; continue; }
+    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.status = 'open'; } }
+    else if (p.fresh) threads.push({ id, title: p.fresh.title, subject: p.fresh.subject, status: 'open', turns: [p.turn], created_at: p.turn.at, closed_at: null, activity_at: p.turn.at, pending: true });
+  }
+  return threads;
+}
+function tLanded(raw, p) {
+  const t = raw.find((x) => x.id === tPendId(p));
+  if (!t) return false;
+  return p.status ? t.status === p.status : t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length > p.had;
+}
+const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'operator' && (!seenAt || u.at > seenAt));
+// What the operator is at, in the owner's words: for the dock, and under a turn it hasn't taken.
+function tOpWords(op) {
+  if (!op) return { text: '', ok: true };
+  const where = op.box ? 'the Terminal tab (window 0)' : `its terminal (tmux attach -t ${op.session})`;
+  const st = op.state;
+  if (st === 'ready' || st === 'busy') return { text: '', ok: true };
+  if (st === 'starting') return { text: 'The operator is starting. It reads what is waiting first.', ok: true };
+  if (st === 'missing') return { text: op.box ? 'This box has no operator running (window 0 of its terminal). The boot starts it: restart the box, or start it from the Terminal tab.' : 'No operator is running on this machine. Your first message starts one.', ok: !op.box };
+  if (st === 'stopped') return { text: op.box ? 'The operator has exited: its window is at a shell prompt. Start it again from the Terminal tab (window 0).' : 'The operator has exited. Your next message starts it again.', ok: !op.box };
+  if (st === 'dialog') return { text: `The operator is waiting at a dialog. Answer it in ${where}.`, ok: false };
+  if (st === 'limit') return { text: 'The operator is at a usage limit. It reads what you send once that lifts.', ok: false };
+  if (st === 'typing') return { text: 'Something is typed in the operator\'s input, so nothing is typed over it. It reads what you send when it next checks.', ok: false };
+  if (st === 'no-tmux') return { text: 'An operator needs tmux, and there is none on this machine.', ok: false };
+  return { text: `The operator's session isn't at its prompt (look in ${where}). It reads what you send when it next checks.`, ok: false };
+}
+// The line under the turns: nothing once the operator has the last word. Else what the send said
+// (typed into its session, or only recorded and why); after a reload, or 10 minutes, what is known.
+function tCardState(t, now, said, op) {
+  const last = t.turns[t.turns.length - 1];
+  if (!last || last.by !== 'owner') return null;
+  if (last.pending) return 'Sending…';
+  const up = ['ready', 'busy'].includes(op?.state);
+  if (now - Date.parse(last.at) > T_WAIT_MS) return up ? "The operator hasn't replied yet." : tOpWords(op).text || 'Sent; the operator will read it when it next checks.';
+  if (said === true) return 'Sent.';
+  if (typeof said === 'string' && said) return `${said.charAt(0).toUpperCase()}${said.slice(1)}.`;
+  return up ? 'Sent.' : tOpWords(op).text || 'Sent; the operator will read it when it next checks.';
+}
+// The pin cursor at a point, what is under it outlined, and a chip with its name.
+function tlShow(x, y) {
+  const hit = tlHitAt(x, y);
+  TL.hit = hit ? { ...hit, x, y } : null;
+  if (!hit) { tlHide(); return; }
+  document.documentElement.classList.add('tl-aiming');
+  const cur = $('tl-cursor');
+  cur.hidden = false;
+  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
+  const r = hit.el.getBoundingClientRect();
+  const hl = $('tl-hl'), chip = $('tl-chip');
+  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+  hl.hidden = false;
+  chip.textContent = hit.title;
+  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  chip.hidden = false;
+}
+function tlHide() {
+  TL.hit = null;
+  document.documentElement.classList.remove('tl-aiming');
+  for (const id of ['tl-cursor', 'tl-hl', 'tl-chip']) $(id).hidden = true;
+}
+// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or Pin again.
+function tlPinMode(on) {
+  TL.pin = on;
+  $('tl-pinbtn').setAttribute('aria-pressed', String(on));
+  document.documentElement.classList.toggle('tl-pinning', on);
+  if (!on) tlHide();
+}
+// Another tab chosen: the layer is the Overview's alone.
+function tlLeave() { if (TL.pin) tlPinMode(false); tlHide(); }
+const tlCan = () => selected === OVERVIEW && TL.avail === true;
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (tlShowing() || TL.pin) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+  else if (tlOwn(document.activeElement) && !$('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+}, true);
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
+window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
+// Shift shows the pin only once the pointer moves, and never over a field being typed in.
+window.addEventListener('pointermove', (e) => {
+  if (!tlCan() || !(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
+  const over = document.elementFromPoint(e.clientX, e.clientY);
+  if (tlOwn(over) || typingIn(over)) { tlHide(); return; }
+  tlShow(e.clientX, e.clientY);
+}, true);
+// A click while the pin shows starts a thread and is the layer's alone: neither the browser's own
+// Shift+click nor the Overview's buttons see it. A mouse starts on its click; a finger or a pen on
+// lifting, and the click the browser makes of that lift is swallowed.
+for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, (e) => {
+  if (tlOwn(e.target)) return;
+  if (type === 'pointerdown') { TL.via = e.pointerType; if (tlCan() && TL.pin && e.pointerType !== 'mouse') tlShow(e.clientX, e.clientY); }
+  const swallow = Date.now() < TL.swallowUntil && type !== 'pointerdown' && type !== 'pointerup';
+  if (!tlShowing() && !swallow) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!tlShowing()) return;
+  const lift = type === 'pointerup' && e.pointerType !== 'mouse';
+  if (!lift && !(type === 'click' && TL.via === 'mouse')) return;
+  const at = tlHitAt(e.clientX, e.clientY);
+  const hit = TL.hit ?? (at && { ...at, x: e.clientX, y: e.clientY });
+  if (lift) TL.swallowUntil = Date.now() + 700;
+  tlHide();
+  if (hit) tlStart(hit);
+}, true);
+// A card for a thread about to start; nothing is written until the owner sends the first words.
+function tlStart(hit) {
+  TL.open = null;
+  TL.draft = { subject: hit.subject, title: hit.title };
+  tlDraftPrune();
+  tlDraw();
+  $('tl-c-text')?.focus();
+}
+// Beside what it is about, wherever that is drawn now; in the dock when it isn't on the page (or the
+// thread has no subject); a bottom sheet on a narrow screen.
+function tlPlaceCard() {
+  const card = $('tl-card');
+  if (card.hidden || (TL.pressed && card.contains(TL.pressed))) return;
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const target = tlTarget(t ? t.subject : TL.draft?.subject);
+  const r = target?.getBoundingClientRect();
+  // what it is about, scrolled out of the Overview's box: the card waits in the dock
+  const box = ovEl.getBoundingClientRect();
+  const seen = r && r.bottom > box.top && r.top < box.bottom;
+  const p = seen ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
+  card.classList.toggle('sheet', !!p.sheet);
+  card.classList.toggle('in-dock', !p.sheet && !!p.dock);
+  card.style.left = p.sheet || p.dock ? '' : `${p.left}px`;
+  card.style.top = p.sheet || p.dock ? '' : `${p.top}px`;
+}
+// The draft is kept in this browser, so a reload or another card keeps it: per thread, and for a
+// thread not yet started per subject, let go after 7 days.
+const tlDraftKey = (key) => `devteam.hub.thread.draft.${key}`;
+const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d?.text === 'string' ? d.text : ''; };
+const tlDraftSet = (key, text) => (text ? lsSet(tlDraftKey(key), { text, at: Date.now() }) : lsDel(tlDraftKey(key)));
+function tlDraftPrune() {
+  try { for (const k of Object.keys(localStorage)) if ([tlDraftKey('new:'), tlDraftKey('pending-')].some((x) => k.startsWith(x)) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k); } catch {}
+}
+function tlBytes() { const n = tBytes($('tl-c-text').value.trim()); const b = $('tl-c-bytes'); b.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; b.classList.toggle('err', n > T_TURN_MAX); }
+// The card's frame, made once per thread (or draft) and kept, so its composer keeps what is typed
+// in it and the focus; tlCardBody fills it.
+function tlCardFrame(card) {
+  const head = el('div', 'tl-head');
+  const title = el('span', 'tl-title');
+  title.id = 'tl-c-title';
+  const acts = el('span');
+  acts.id = 'tl-c-acts';
+  const x = el('button', 'btn ghost x', '×');
+  x.type = 'button';
+  x.dataset.tlClose = '';
+  x.title = 'Put this card away';
+  x.setAttribute('aria-label', 'Put this card away');
+  head.append(title, el('span', 'grow'), acts, x);
+  const ctx = el('div');
+  ctx.id = 'tl-c-ctx';
+  const turns = el('div', 'tl-turns');
+  turns.id = 'tl-c-turns';
+  const state = el('div', 'small muted');
+  state.id = 'tl-c-state';
+  const compose = el('div', 'tl-compose');
+  const ta = el('textarea');
+  ta.id = 'tl-c-text';
+  ta.rows = 2;
+  ta.placeholder = 'Write to the operator. Enter sends; Shift+Enter is a new line.';
+  const row = el('div', 'row-inline');
+  const bytes = el('span', 'small');
+  bytes.id = 'tl-c-bytes';
+  const err = el('span', 'err');
+  err.id = 'e-tl';
+  const send = el('button', 'btn', 'Send');
+  send.type = 'button';
+  send.dataset.tlSend = '';
+  row.append(bytes, err, el('span', 'grow'), send);
+  compose.append(ta, row);
+  card.replaceChildren(head, ctx, turns, state, compose);
+}
+// What the thread is about, as the page named it then: the project, the part, what it showed.
+function tlCtx(s, title) {
+  const d = el('details', 'tl-ctx');
+  const sum = el('summary');
+  sum.append(el('b', '', title), el('span', 'muted small', tWhere(s)));
+  const dl = el('dl');
+  const row = (k, v) => { if (v) dl.append(el('dt', '', k), el('dd', '', v)); };
+  if (s.root) { row('Project', s.name); row('Path', s.root); }
+  row('Pinned on', s.root ? (OP_PART_WORDS[s.selector] ?? (s.selector === 'name' ? 'its name' : 'its card')) : `the Overview's ${s.selector}`);
+  row('It showed', s.label);
+  if (s.root && !tlTarget(s)) row('Now', 'this project is not on the Overview');
+  d.append(sum, dl);
+  return d;
+}
+function tlCardBody(t) {
+  const title = t ? t.title : TL.draft.title || 'New thread';
+  $('tl-c-title').textContent = title;
+  $('tl-c-title').title = title;
+  // Close and Reopen are the thread's; the × only puts the card away
+  const acts = !t || t.pending ? '' : t.status === 'closed' ? 'Reopen' : 'Close thread';
+  const actsEl = $('tl-c-acts');
+  if (actsEl.dataset.is !== acts) {
+    actsEl.dataset.is = acts;
+    actsEl.replaceChildren();
+    if (acts) { const b = el('button', 'btn ghost', acts); b.type = 'button'; b.dataset[acts === 'Reopen' ? 'tlReopen' : 'tlEnd'] = ''; b.title = acts === 'Reopen' ? 'Open this thread again' : 'This thread is done: the operator is told nothing more in it'; actsEl.append(b); }
+  }
+  const s = t ? t.subject : TL.draft.subject;
+  const ctxEl = $('tl-c-ctx');
+  const ctxSig = s ? `${tKey(s)}|${title}|${!!tlTarget(s)}` : '';
+  if (ctxEl.dataset.is !== ctxSig) { const was = ctxEl.querySelector('details')?.open; ctxEl.dataset.is = ctxSig; ctxEl.replaceChildren(...(s ? [tlCtx(s, title)] : [])); if (was) ctxEl.querySelector('details').open = true; }
+  const turns = $('tl-c-turns');
+  const sig = t ? JSON.stringify(t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned])) : '';
+  if (sig !== TL.turnsSig) {
+    TL.turnsSig = sig;
+    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : 'You') : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
+    turns.scrollTop = turns.scrollHeight;
+  }
+  if (t && !t.pending) tlSeen(t);
+  $('tl-c-state').textContent = !t ? (tOpWords(TL.op).text) : t.status === 'closed' ? 'Closed. Writing reopens it.' : tCardState(t, Date.now(), TL.said[t.id], TL.op) ?? '';
+}
+function tlCard() {
+  const card = $('tl-card');
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  // a thread just started isn't in threads read before it was written: the card stays as it is
+  // until a read begun after the send says it isn't there
+  if (TL.open && !t) { if (TL.have <= TL.openAt) return; TL.open = null; }
+  if (!t) { clearInterval(TL.polling); TL.polling = null; }
+  if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; return; }
+  // an unsent draft is kept per subject, so words left on one card don't appear on another
+  const key = t ? t.id : `new:${tKey(TL.draft.subject) ?? 'none'}`;
+  if (card.dataset.key !== key) {
+    // the first words make the draft a thread, and the card its own: the composer keeps the focus
+    const writing = document.activeElement?.id === 'tl-c-text';
+    card.dataset.key = key;
+    tlCardFrame(card);
+    $('tl-c-text').value = tlDraftGet(key);
+    tlBytes();
+    TL.turnsSig = '\u0000';
+    if (writing) $('tl-c-text').focus();
+  }
+  card.hidden = false;
+  tlCardBody(t);
+  tlPlaceCard();
+  // one card poll at a time, and only while the Overview is what the owner is looking at
+  if (t && !TL.polling) TL.polling = setInterval(() => { if (!tlActive() || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
+}
+function tlDraw() { tlCard(); tlDock(); tlPins(); }
+// A read lands only if none begun after it has landed already: a poll begun before a send can
+// answer after the send's own read, and would put back the threads as they were.
+async function tlRefresh() {
+  const n = ++TL.seq;
+  try {
+    const r = await fetch('operator/threads', { signal: AbortSignal.timeout(10000) });
+    // behind a gateway, a session that ended: load the page again, which signs in first
+    if (r.status === 401) return void location.reload();
+    let j = null;
+    try { j = await r.json(); } catch {}
+    if (n <= TL.have) return;
+    if (!r.ok || !j || !Array.isArray(j.threads)) {
+      // a hub served by a project on a kit from before these threads answers 404
+      TL.avail = false;
+      TL.why = typeof j?.error === 'string' && r.status !== 404 ? j.error : 'The hub here is served by a project on an older kit, which keeps no threads with the operator. Update that project\'s kit.';
+    } else {
+      TL.avail = true;
+      TL.raw = j.threads.map(tThread).filter(Boolean);
+      const o = j.operator;
+      TL.op = o && typeof o === 'object' && typeof o.state === 'string' ? { state: o.state, can_start: o.can_start === true, box: o.box === true, session: tLine(o.session, 80) } : null;
+      tlRelay();
+    }
+    TL.have = n;
+  } catch { return; }
+  tlDraw();
+}
+function tlRelay() {
+  TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
+  TL.threads = tOverlay(TL.raw, TL.pend);
+}
+function tlClose() { TL.open = null; TL.draft = null; tlDraw(); }
+async function tlOpen(id, go = true) {
+  if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t) return;
+  TL.draft = null;
+  TL.open = id;
+  TL.openAt = -1;
+  // from the dock, what it is about is brought into view first
+  if (go) tlTarget(t.subject)?.scrollIntoView({ block: 'nearest' });
+  tlDraw();
+}
+async function tlPost(action, body) {
+  try {
+    const r = await fetch(`operator/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.status === 401) { location.reload(); return { error: 'signed out' }; }
+    let j = null;
+    try { j = await r.json(); } catch {}
+    if (!r.ok || !j) return { error: typeof j?.error === 'string' && j.error ? j.error : `the hub answered ${r.status}` };
+    return { out: String(j.out ?? '') };
+  } catch (e) { return { error: `could not send: ${e.message || e}` }; }
+}
+// One request at a time per thread, in the order pressed: a second Send on a thread still being
+// started waits for the first, and by then knows the thread's name.
+function tlQueue(key, job) {
+  const run = (TL.chain.get(key) ?? Promise.resolve()).then(job).finally(() => { if (TL.chain.get(key) === run) TL.chain.delete(key); });
+  TL.chain.set(key, run);
+  return run;
+}
+let tlFresh = 0;
+const tHad = (t, text) => t.turns.filter((u) => u.by === 'owner' && u.text === text && !u.pending).length + TL.pend.filter((x) => !x.confirmed && x.turn?.text === text && tPendId(x) === t.id).length;
+// Send: the first words start the thread (its title what the pin showed, or the words themselves
+// from the dock), a word on a closed thread reopens it, anything else is a turn.
+function tlSend() {
+  const ta = $('tl-c-text');
+  const text = ta.value.trim();
+  const err = $('e-tl');
+  if (!text) return;
+  if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
+  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
+  const key = $('tl-card').dataset.key;
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const draft = TL.draft;
+  const named = t && !String(t.id).startsWith('pending-');
+  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(text, new Date().toISOString()), had: t ? tHad(t, text) : 0, fresh: t ? null : { title: draft?.title || tLine(text, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
+  if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
+  const closed = t?.status === 'closed';
+  // the turn is in the card at once; a new thread opens with it, under an id of the page's own
+  // until the server names it
+  TL.pend.push(p);
+  err.textContent = '';
+  lsDel(tlDraftKey(key));
+  ta.value = '';
+  tlBytes();
+  if (!t) { TL.draft = null; TL.open = p.thread; TL.openAt = TL.seq; }
+  tlRelay();
+  tlDraw();
+  tlQueue(p.thread, async () => {
+    const id = p.real ?? p.firstOf?.real ?? null;
+    let r;
+    // the first words were refused, so there is no thread to say this into
+    if (!id && p.firstOf) r = { error: "the thread wasn't started (its first words weren't saved), so this wasn't sent either" };
+    else { if (id) p.real = id; r = await tlPost(id ? (closed ? 'thread-reopen' : 'thread-say') : 'thread-new', id ? { id, text } : { title: p.fresh.title, subject: tWire(p.fresh.subject), text }); }
+    if (r.error) {
+      TL.pend = TL.pend.filter((x) => x !== p);
+      if (!t && TL.open === p.thread) { TL.open = null; TL.draft = draft; }
+      tlRelay();
+      tlDraw();
+      const box = $('tl-c-text');
+      // after the words an earlier refusal put back, never over them
+      if (box) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet($('tl-card').dataset.key, box.value); tlBytes(); }
+      if ($('e-tl')) $('e-tl').textContent = `Not sent: ${r.error}`;
+      return;
+    }
+    // the first line of the command's output is the thread's id; the second says whether the
+    // operator's session took it, or why it was only recorded
+    const [first, second = ''] = r.out.split('\n');
+    p.confirmed = true;
+    if (!p.real) p.real = first.trim();
+    TL.said[p.real] = /^sent to the operator's pane/.test(second) ? true : tLine(second, 300);
+    if (TL.open === p.thread && p.real !== p.thread) TL.open = p.real;
+    // drawn under its real name at once: a row or a pin pressed before the next read opens it
+    tlRelay();
+    tlDraw();
+    await tlRefresh();
+  });
+}
+// Close and Reopen: one request at a time, as a send is.
+function tlAct(action, id) {
+  const t = TL.threads.find((x) => x.id === id);
+  const status = action === 'thread-close' ? 'closed' : 'open';
+  if (!t || t.pending || TL.pend.some((x) => !x.confirmed && x.thread === id && x.status === status)) return;
+  const p = { thread: id, real: id, status, confirmed: false };
+  const wasOpen = TL.open;
+  TL.pend.push(p);
+  if (status === 'closed') TL.open = null;
+  tlRelay();
+  tlDraw();
+  tlQueue(id, async () => {
+    const r = await tlPost(action, { id });
+    if (r.error) { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'closed') TL.open = wasOpen; tlRelay(); tlDraw(); if ($('e-tl')) $('e-tl').textContent = `Not saved: ${r.error}`; return; }
+    p.confirmed = true;
+    await tlRefresh();
+  });
+}
+// The dock's own button: the laptop's operator, started (never a second one: the kit checks).
+async function tlStartOperator(b) {
+  b.disabled = true;
+  const r = await tlPost('start', {});
+  TL.opNote = r.error ? `Not started: ${r.error}` : '';
+  await tlRefresh();
+  tlDock();
+}
+document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet($('tl-card').dataset.key, e.target.value); tlBytes(); });
+document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
+document.addEventListener('click', (e) => {
+  if (!tlOwn(e.target)) return;
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (t && e.target.closest('[data-tl-end]')) return void tlAct('thread-close', t.id);
+  if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', t.id);
+  const pin = e.target.closest('[data-tl-pin]');
+  if (pin) return void tlOpen(pin.dataset.tlPin, false);
+  const row = e.target.closest('[data-tl-open]');
+  if (row) { $('tl-panel').hidden = true; $('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
+  if (e.target.closest('#tl-pill')) { const panel = $('tl-panel'); panel.hidden = !panel.hidden; $('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
+  if (e.target.closest('#tl-new')) { $('tl-panel').hidden = true; $('tl-pill').setAttribute('aria-expanded', 'false'); TL.open = null; TL.draft = { subject: null, title: '' }; tlDraw(); return void $('tl-c-text')?.focus(); }
+  if (e.target.closest('#tl-pinbtn')) { const on = !TL.pin; if (on) { $('tl-panel').hidden = true; $('tl-pill').setAttribute('aria-expanded', 'false'); } return void tlPinMode(on); }
+  const start = e.target.closest('[data-tl-start]');
+  if (start) return void tlStartOperator(start);
+  if (e.target.closest('[data-tl-close]')) return void tlClose();
+  if (e.target.closest('[data-tl-send]')) return void tlSend();
+});
+addEventListener('resize', () => tlDraw());
+ovEl.addEventListener('scroll', () => tlPlaceCard(), { passive: true });
+document.addEventListener('visibilitychange', () => { if (tlActive()) tlRefresh(); });
+// The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
+// a rewrite would drop the focus, or the click a press is half of.
+const tlHeld = (e) => e.contains(document.activeElement) || (!!TL.pressed && e.contains(TL.pressed));
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);
+for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); tlPlaceCard(); }, 0), true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
+// When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
+const TL_SEEN = 'devteam.hub.thread.seen';
+const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
+function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter((u) => !u.pending).pop()?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
+// The pins: one numbered disc per subject, at the top right corner of what it is on, for open
+// threads only, in the Overview's own box so each scrolls with its card. Placed again after every
+// redraw (the cards are made anew each time), when the threads change and on a resize; a subject
+// that isn't drawn gets none (the dock still lists it).
+function tlPins() {
+  const box = $('tl-pins');
+  const o = ovEl.getBoundingClientRect();
+  const pins = TL.avail !== true ? [] : tPins(TL.threads).map((g) => {
+    const r = tlTarget(g.subject)?.getBoundingClientRect();
+    if (!r || !r.width) return null;
+    // never past the box's right edge, where it would give a narrow screen something to scroll to
+    const x = Math.min(r.right - 10 - o.left + ovEl.scrollLeft, ovEl.clientWidth - 24), y = Math.max(2, r.top - 10 - o.top + ovEl.scrollTop);
+    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}: ${tWhere(g.subject)}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, n: String(g.n), more: g.ids.length > 1 ? String(g.ids.length) : '' };
+  }).filter(Boolean);
+  // each pin kept by its thread and changed in place, so a press or the focus on one survives
+  const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const x of pins) {
+    let b = have.get(x.id);
+    if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
+    if (b.className !== x.cls) b.className = x.cls;
+    if (b.style.left !== x.left) b.style.left = x.left;
+    if (b.style.top !== x.top) b.style.top = x.top;
+    if (b.getAttribute('aria-label') !== x.label) { b.setAttribute('aria-label', x.label); b.title = x.label; }
+    if (b.dataset.is !== `${x.n}/${x.more}`) { b.dataset.is = `${x.n}/${x.more}`; b.replaceChildren(x.n, ...(x.more ? [el('sup', '', x.more)] : [])); }
+  }
+}
+const TL_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+// The dock: a pill with the open threads' count and a dot for a reply not seen; opened, what the
+// operator is at when that isn't "up", every open thread, newest activity first, numbered as its
+// pin, with where its subject is; then the last 50 closed, each reopenable from its card.
+function tlDock() {
+  const open = TL.threads.filter((t) => t.status === 'open');
+  const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
+  const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
+  const pill = $('tl-pill');
+  // set only when it changed: a pill rewritten on every poll would drop a press on it
+  const pillSig = `${open.length}|${unread}`;
+  if (pill.dataset.is !== pillSig) {
+    pill.dataset.is = pillSig;
+    // the icon is the page's own markup, nothing of a thread's
+    pill.innerHTML = TL_ICON;
+    pill.append(`Threads${open.length ? ` · ${open.length}` : ''}`);
+    if (unread) { const d = el('span', 'tl-dot'); d.setAttribute('role', 'img'); d.setAttribute('aria-label', "a reply you haven't seen"); pill.append(d); }
+  }
+  if ($('tl-panel').hidden) return;
+  const can = TL.avail === true;
+  $('tl-pinbtn').disabled = !can;
+  $('tl-new').disabled = !can;
+  const opEl = $('tl-op');
+  const w = can ? tOpWords(TL.op) : { text: TL.avail === false ? TL.why : 'Reading the threads…', ok: TL.avail !== false };
+  const note = TL.opNote || w.text;
+  const starts = can && TL.op?.can_start === true;
+  const opSig = `${note}|${starts}|${w.ok}`;
+  if (opEl.dataset.is !== opSig && !tlHeld(opEl)) {
+    opEl.dataset.is = opSig;
+    opEl.hidden = !note;
+    opEl.className = `tl-op${w.ok && !TL.opNote ? '' : ' warn'}`;
+    opEl.replaceChildren(el('span', '', note));
+    if (starts) { const b = el('button', 'btn ghost', 'Start the operator'); b.type = 'button'; b.dataset.tlStart = ''; b.title = 'Starts the operator in a tmux session of its own, with its own conversation if it has one. Never a second one.'; opEl.append(b); }
+  }
+  const row = (t) => {
+    const b = el('button', 'tl-row');
+    b.type = 'button';
+    b.dataset.tlOpen = t.id;
+    if (t.status === 'open') b.append(el('span', 'tl-n', nums.get(t.id)));
+    const r = el('span', 'tl-r');
+    r.append(el('b', '', t.title), el('span', 'small muted', `${tWhere(t.subject)}${t.subject?.root && !tlTarget(t.subject) ? ' · not on the Overview now' : ''}`));
+    b.append(r);
+    if (t.status === 'open' && tUnread(t, tlSeenAt(t.id))) { const d = el('span', 'tl-dot'); d.setAttribute('role', 'img'); d.setAttribute('aria-label', "a reply you haven't seen"); b.append(d); }
+    return b;
+  };
+  const closed = TL.threads.filter((t) => t.status === 'closed').sort((a, b) => (b.closed_at || '').localeCompare(a.closed_at || '')).slice(0, 50);
+  const shown = [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at));
+  const sig = JSON.stringify([can, shown.map((t) => [t.id, t.title, tWhere(t.subject), nums.get(t.id), tUnread(t, tlSeenAt(t.id)), !!tlTarget(t.subject)]), closed.map((t) => [t.id, t.title])]);
+  const list = $('tl-list');
+  // only when it changed, and not under a press or the focus on a row (the next draw does it)
+  if (sig === TL.listSig || tlHeld(list)) return;
+  TL.listSig = sig;
+  const wasOpen = list.querySelector('.tl-closed')?.open;
+  list.replaceChildren(...(shown.length ? shown.map(row) : can ? [el('p', 'empty', 'No open threads. Hold Shift and click anything on the Overview, or start one here.')] : []));
+  if (closed.length) { const d = el('details', 'tl-closed'); d.open = !!wasOpen; d.append(el('summary', '', `Closed (${closed.length})`), ...closed.map(row)); list.append(d); }
 }
 function paintTab(it) {
   const { x, tab } = it;
@@ -649,6 +1338,8 @@ async function draw() {
     else selectOverview();
   }
   paintOverview();
+  // the threads with the operator, on the same 10 s, and only while the Overview is what shows
+  if (tlActive() && !firstDraw) tlRefresh();
   firstDraw = false;
 }
 window.addEventListener('hashchange', () => {

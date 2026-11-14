@@ -6,8 +6,8 @@
 // are under /auth on the box's name, so an installed hub signs in without leaving its own scope.
 // Every agent runs as the box's user and can change files and take ports, so the box and term names
 // serve only bytes the gateway holds: its own copy of the hub page and of ttyd's page, and its own
-// pages. Only the hub's JSON list and the terminal's socket come from behind it. An agent's page
-// can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
+// pages. Only the hub's JSON (its list, and the owner's threads with the operator) and the
+// terminal's socket come from behind it. An agent's page can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
@@ -161,6 +161,22 @@ function publicUrl(raw = env.DEVTEAM_PUBLIC_URL) {
 }
 const gatewayDir = () => env.DEVTEAM_GATEWAY_DIR ?? path.join(env.HOME ?? '.', '.devteam-gateway');
 
+// The key the gateway signs the owner's thread presses with, for the hub (devteam.mjs,
+// gatewayProofProblem): Ed25519, made the first time it's asked for, kept with the passkeys.
+export function threadKey(store) {
+  const now = store.load();
+  if (now.threadKey?.privateKey && now.threadKey?.publicKey) return now.threadKey;
+  const pair = crypto.generateKeyPairSync('ed25519');
+  const made = { privateKey: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }) };
+  store.save({ ...now, threadKey: made });
+  return made;
+}
+// The headers a signed press carries: the route, when, a nonce, and the body's hash, signed. The
+// hub checks each within two minutes and takes each nonce once.
+export function hubSignature(privateKeyPem, route, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`devteam-operator-post-v1\n${route}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -1175,6 +1191,43 @@ export function createGateway(opts = {}) {
     deadline = setTimeout(() => { up.destroy(); none(); }, opts.hubDeadlineMs ?? 15000);
   });
   const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
+  // The owner's threads with the box's operator (the Overview's dock): the hub keeps them and types
+  // each owner turn into the operator's pane, so the box's name passes these few requests to it, after
+  // the session check, as the hub's own page would send them on the machine. What comes back is JSON
+  // the page shows as text, whatever holds the port; whatever holds it also reads what the owner
+  // wrote there, as anything running as the box's user can read the threads' file.
+  // Each press is signed (hubSignature), with a key kept with the passkeys: every agent runs as the
+  // hub's own Unix user and can send the hub any header, so on a box the hub takes a press only
+  // with this signature, checked against the public half the boot gave root (gateway.mjs thread-key).
+  const HUB_POSTS = ['thread-new', 'thread-say', 'thread-close', 'thread-reopen', 'start'];
+  const hubAsk = (method, p, body = null) => new Promise((settle) => {
+    let deadline = null;
+    const resolve = (v) => { clearTimeout(deadline); settle(v); };
+    const none = () => resolve(null);
+    const data = body === null ? null : Buffer.from(JSON.stringify(body));
+    const up = http.request({ host: '127.0.0.1', port: HUB_PORT, path: p, method, timeout: 150000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin', ...(data ? { origin: `http://127.0.0.1:${HUB_PORT}`, 'content-type': 'application/json', 'content-length': data.length, ...hubSignature(threadKey(store).privateKey, p, data) } : {}) } }, (ur) => {
+      const chunks = [];
+      let size = 0;
+      ur.on('data', (c) => { size += c.length; if (size > 4 * 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
+      ur.on('end', () => { try { resolve({ status: ur.statusCode, json: JSON.parse(Buffer.concat(chunks).toString('utf8')) }); } catch { resolve({ status: ur.statusCode, json: null }); } });
+      ur.on('error', none);
+      ur.on('close', none);
+    });
+    up.on('timeout', () => up.destroy());
+    up.on('error', none);
+    // a read waits no longer than the list does; a press waits out the owner's command behind it
+    deadline = setTimeout(() => { up.destroy(); none(); }, data ? 160000 : opts.hubDeadlineMs ?? 15000);
+    up.end(data ?? undefined);
+  });
+  // An answer the hub gave as JSON goes back as it is, 200 or a refusal with its reason. Anything
+  // else (no hub, a hub on a kit from before these threads, something else on the port) is a 502.
+  const operatorThreads = async (req, res, action) => {
+    let body = null;
+    if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); }
+    const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
+    if (r && r.json && typeof r.json === 'object' && !Array.isArray(r.json) && [200, 400].includes(r.status)) return json(res, r.status, r.json);
+    return json(res, 502, { error: r ? 'the hub on this box is served by a kit from before threads with the operator' : 'the hub on this box is not answering' });
+  };
 
   // --- previews: the name-to-port map, from the same list ---------------------------------------
   // Nothing is stored: the map is whatever the list said last, and a hub that doesn't answer lists
@@ -1946,6 +1999,8 @@ export function createGateway(opts = {}) {
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
       if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
+      if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
+      if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10));
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
@@ -2180,7 +2235,7 @@ export function createGateway(opts = {}) {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = REQUEST_MS;
-  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext, wrapGrant };
+  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext, wrapGrant, threadPublicKey: () => threadKey(store).publicKey };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
@@ -2356,8 +2411,12 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       const store = stateStore(gatewayDir());
       store.save({ ...store.load(), passkeys: [], sessions: [], pushSubs: [] });
       process.stdout.write(`every passkey and session is forgotten. Claim the box again: ${claimUrl(pub, newClaim(store))}\n`);
+    } else if (cmd === 'thread-key') {
+      // The public half of the key that signs the owner's thread presses, for the boot to put where
+      // only root can write and every user can read (cloud/Dockerfile, /etc/devteam/thread-key.pub).
+      process.stdout.write(threadKey(stateStore(gatewayDir())).publicKey);
     } else {
-      process.stderr.write('usage: node gateway.mjs [serve | reclaim]\n');
+      process.stderr.write('usage: node gateway.mjs [serve | reclaim | thread-key]\n');
       process.exit(2);
     }
   } catch (e) {

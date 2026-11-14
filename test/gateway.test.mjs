@@ -651,6 +651,87 @@ test('installing the hub needs no sign-in, and the page may use what it installs
   } finally { await gw.close(); }
 });
 
+// The Overview's threads with the operator: the hub keeps them, so the box's name passes a read and
+// the owner's few presses to it, behind the passkey and the Origin rule, as the hub's own page would
+// send them on the machine. Whatever holds the port answers as data.
+test('the owner\'s threads with the operator reach the hub through the box\'s name, and only the owner\'s', async () => {
+  const gw = await gateway('operator-threads');
+  const seen = [];
+  let answer = (req) => (req.method === 'GET' ? [200, { operator: { state: 'ready' }, threads: [{ id: 'ot-1', title: '<b>x</b>' }] }] : [200, { ok: true, out: 'ot-1\nsent to the operator\'s pane' }]);
+  const hub = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      const [code, body] = answer(req);
+      res.writeHead(code, { 'content-type': typeof body === 'string' ? 'text/plain' : 'application/json', 'set-cookie': 'a=1' });
+      res.end(typeof body === 'string' ? body : JSON.stringify(body));
+    });
+  });
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.equal((await gw.req('GET', '/operator/threads', { cookie: '' })).status, 401, 'a read is the owner\'s');
+    const read = await gw.req('GET', '/operator/threads');
+    assert.equal(read.status, 200);
+    assert.equal(read.json.threads[0].title, '<b>x</b>', 'as data: the page shows it as text');
+    assert.equal(read.headers['set-cookie'], undefined, 'nothing of the answer but its JSON');
+    assert.deepEqual([seen.at(-1).method, seen.at(-1).url, seen.at(-1).headers.host, seen.at(-1).headers['sec-fetch-site']], ['GET', '/operator/threads', `127.0.0.1:${HUB}`, 'same-origin']);
+    assert.equal(seen.at(-1).headers.cookie, undefined, 'the owner\'s session never goes behind the gateway');
+
+    const say = { body: { id: 'ot-20261114-101500123-abcdef', text: 'hello; there' } };
+    const n = seen.length;
+    assert.equal((await gw.req('POST', '/operator/thread-say', { ...say, cookie: '' })).status, 401);
+    assert.equal((await gw.req('POST', '/operator/thread-say', { ...say, headers: { origin: gw.inst(P) } })).status, 403, 'not from a dashboard\'s page');
+    assert.equal((await gw.req('POST', '/operator/thread-say', { ...say, headers: { origin: 'https://evil.example' } })).status, 403);
+    assert.equal(seen.length, n, 'none of those reached the hub');
+    const ok = await gw.req('POST', '/operator/thread-say', say);
+    assert.deepEqual([ok.status, ok.json], [200, { ok: true, out: 'ot-1\nsent to the operator\'s pane' }]);
+    const sent = seen.at(-1);
+    assert.deepEqual([sent.method, sent.url, sent.headers.origin, sent.headers['sec-fetch-site'], sent.headers['content-type']], ['POST', '/operator/thread-say', `http://127.0.0.1:${HUB}`, 'same-origin', 'application/json'], 'as the hub\'s own page would send it');
+    assert.deepEqual(JSON.parse(sent.body), say.body);
+    // signed, with the key kept with the passkeys: every agent is the hub's user and can send the
+    // page's headers, so on a box the hub takes a press only with this
+    const pub = crypto.createPublicKey(gw.g.threadPublicKey());
+    const signedAs = (x) => Buffer.from(`devteam-operator-post-v1\n${x.url}\n${x.headers['x-devteam-gateway-ts']}\n${x.headers['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(x.body).digest('hex')}`);
+    assert.ok(crypto.verify(null, signedAs(sent), pub, Buffer.from(sent.headers['x-devteam-gateway-sig'], 'base64url')), 'the hub can check it with the public half');
+    assert.ok(Math.abs(Date.now() - Number(sent.headers['x-devteam-gateway-ts'])) < 60000);
+    assert.equal(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8').includes('PRIVATE KEY'), true, 'the private half stays in the gateway\'s own folder');
+    assert.equal(seen.filter((x) => x.method === 'GET').every((x) => x.headers['x-devteam-gateway-sig'] === undefined), true, 'a read is not signed');
+    // and the kit's own check, as a box's hub hands it to the owner's command, takes what the gateway signed
+    const box = fs.mkdtempSync(path.join(tmp, 'kit-box-'));
+    fs.writeFileSync(path.join(box, 'thread-key.pub'), gw.g.threadPublicKey());
+    const newer = await gw.req('POST', '/operator/thread-new', { body: { text: 'hello from the gateway' } });
+    assert.equal(newer.status, 200);
+    const x = seen.at(-1);
+    const proof = { path: x.url, ts: x.headers['x-devteam-gateway-ts'], nonce: x.headers['x-devteam-gateway-nonce'], sig: x.headers['x-devteam-gateway-sig'], body: Buffer.from(x.body).toString('base64') };
+    const kitEnv = { ...process.env, HOME: box, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: path.join(box, 'thread-key.pub'), DEVTEAM_OPERATOR_COMMAND: '' };
+    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX', 'TMUX_PANE']) delete kitEnv[k];
+    const kitRun = (input) => spawnSync(process.execPath, [path.join(kit, 'scripts', 'devteam.mjs'), 'operator-thread', 'new', '--', 'hello from the gateway'], { cwd: box, encoding: 'utf8', env: kitEnv, input });
+    const took = kitRun(JSON.stringify(proof));
+    assert.equal(took.status, 0, took.stderr);
+    assert.match(took.stdout, /^ot-/);
+    assert.equal(kitRun('').status, 1, 'without it, refused');
+    for (const a of ['thread-new', 'thread-close', 'thread-reopen', 'start']) assert.equal((await gw.req('POST', `/operator/${a}`, { body: {} })).status, 200, a);
+    assert.equal((await gw.req('POST', '/operator/thread-say', { body: [1] })).status, 400, 'a body is an object');
+    assert.equal((await gw.req('POST', '/operator/instances.json', { body: {} })).status, 404, 'only the thread actions');
+    assert.equal((await gw.req('POST', '/operator/../instances.json', { body: {} })).status, 404);
+
+    // a refusal with its reason comes back as it is; anything else on the port is a 502, never its bytes
+    answer = () => [400, { error: 'ot-1 is closed; reopen it first' }];
+    const no = await gw.req('POST', '/operator/thread-say', say);
+    assert.deepEqual([no.status, no.json.error], [400, 'ot-1 is closed; reopen it first']);
+    answer = () => [404, 'not found'];
+    const old = await gw.req('GET', '/operator/threads');
+    assert.equal(old.status, 502);
+    assert.match(old.json.error, /a kit from before threads with the operator/);
+    answer = () => [200, '<script>alert(1)</script>'];
+    assert.equal((await gw.req('GET', '/operator/threads')).status, 502);
+    await new Promise((r) => hub.close(r));
+    assert.match((await gw.req('GET', '/operator/threads')).json.error, /not answering/);
+  } finally { hub.close(); await gw.close(); }
+});
+
 test('the gateway tells every subscribed browser when an Inbox goes up, with no page open', async () => {
   const sent = [];
   let status = 201;
