@@ -12287,7 +12287,9 @@ function supervisorTranscript() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
   let files = [];
   try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m).slice(0, 5); } catch { return null; }
-  const read = (f, tail) => { const fd = fs.openSync(f, 'r'); try { const size = fs.fstatSync(fd).size; const n = Math.min(size, tail ? 1024 * 1024 : 65536); const b = Buffer.alloc(n); return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, tail ? size - n : 0)); } finally { fs.closeSync(fd); } };
+  // The head is read far enough to reach the first user message: Claude Code can write large
+  // attachment and snapshot lines before it (85 KB of them in one supervisor's transcript).
+  const read = (f, tail) => { const fd = fs.openSync(f, 'r'); try { const size = fs.fstatSync(fd).size; const n = Math.min(size, tail ? 1024 * 1024 : 4 * 1024 * 1024); const b = Buffer.alloc(n); return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, tail ? size - n : 0)); } finally { fs.closeSync(fd); } };
   const lines = (t) => t.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
   for (const { f } of files) {
     try {
