@@ -105,6 +105,7 @@
 
 ## Rulings and notes
 
+- m-20261114-215435068-supervisor: plan approved. kit-46 depends on kit-201-tests-isolated-on-box, which lands first: merge main after it before the merge request. T3 keeps the check that an unsigned press from the hub's own page (`own` headers only) is refused.
 - Plan review 2 (CHANGES 013ae42): P2-1..P2-5 fixed (a port per hub, listed; T3's hub spawned with its own env; T4's alert before the close; T2's hex run named; cleanup skips an exited child), and the size re-checked after SIGTERM.
 - Plan review 1 (CHANGES 36f1b24): P1-1..P1-12 fixed in the steps above (async status run, `ownKitVersion` name, a log that must rotate, a port per hub, the hex run, T3's in-block port, retries counted from the first line, a project per T2 run, the rejection wording, T4's extra cases, waits, group kill).
 - Spec review 2 (APPROVE 2ce8e94), F2-1: the spec's own-kit guard for `kit` applies to the standalone hub only; a dashboard's hub reports `kitVersion()` unguarded, as done-when 1 says. F2-2: the test's kit copy lives outside the hub's cwd.
