@@ -6946,20 +6946,49 @@ function artifactSource(at, slug) {
 function artifactAt(at, slug) {
   if (!String(at).startsWith('tree:')) return artifactSource(at, slug);
   const tree = at.slice(5);
-  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree)) return null;
+  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree, slug)) return null;
   const entries = treeIdEntries(tree);
   return entries.length ? { entries } : null;
 }
-// Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
-// any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
-// can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
-// Remembered once true: a tree id never changes.
+// Is this id an artifact folder's tree, and was it <slug>'s folder on main? A commit's id, or the
+// root tree's, would let <id>:<path> name any committed file, so it must be a tree with an
+// artifact.json at its top (decision 12). And another artifact's tree under this slug would show its
+// files under this one's name, so it must be main's tree for that folder now, or have been, by main's
+// history of the folder: only the commits that touch it are walked, a merge against main's previous
+// state. Remembered once true (a tree id never changes, and main's history only grows); a no is asked
+// again, since main can come to have it. A shallow clone's history stops short, so an older version
+// there is no one's, and the viewer shows main. gitReadCache, when a read-only command turns it on,
+// keeps these reads for that one process only.
 const artifactTrees = new Set();
-const artifactTreeOk = (id) => (artifactTrees.has(id) ? Promise.resolve(true) : new Promise((resolve) => execFile('git', ['cat-file', '-t', id], { cwd: mainRoot, encoding: 'utf8' }, (e1, type) => {
-  if (e1 || type.trim() !== 'tree') return resolve(false);
-  return execFile('git', ['cat-file', '-e', `${id}:artifact.json`], { cwd: mainRoot }, (e2) => { if (!e2) artifactTrees.add(id); resolve(!e2); });
-})));
-const artifactTreeOkSync = (id) => artifactTrees.has(id) || (git(['cat-file', '-t', id], mainRoot) === 'tree' && git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) !== null && !!artifactTrees.add(id));
+const treeFolderArgs = (ref, slug) => ({
+  now: ['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slug}`],
+  log: ['log', '--format=', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', `${ARTIFACTS_REL}/${slug}`],
+});
+const treeNow = (ls) => /^040000 tree ([0-9a-f]+)\t/.exec(ls ?? '')?.[1] ?? null;
+const treeInHistory = (raw, slug, tree) => (raw ?? '').split('\n').some((l) => { const m = /^:\d+ \d+ [0-9a-f]+ ([0-9a-f]+) \S+\t(.*)$/.exec(l); return !!m && m[1] === tree && m[2] === `${ARTIFACTS_REL}/${slug}`; });
+const gitAsync = (args) => new Promise((resolve) => execFile('git', args, { cwd: mainRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }, (e, so) => resolve(e ? null : so)));
+async function artifactTreeOk(id, slug) {
+  const key = `${slug}\0${id}`;
+  if (artifactTrees.has(key)) return true;
+  if ((await gitAsync(['cat-file', '-t', id]))?.trim() !== 'tree' || (await gitAsync(['cat-file', '-e', `${id}:artifact.json`])) === null) return false;
+  const ref = mainRef();
+  if (!ref) return false;
+  const a = treeFolderArgs(ref, slug);
+  const ok = treeNow(await gitAsync(a.now)) === id || treeInHistory(await gitAsync(a.log), slug, id);
+  if (ok) artifactTrees.add(key);
+  return ok;
+}
+function artifactTreeOkSync(id, slug) {
+  const key = `${slug}\0${id}`;
+  if (artifactTrees.has(key)) return true;
+  if (git(['cat-file', '-t', id], mainRoot) !== 'tree' || git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) === null) return false;
+  const ref = mainRef();
+  if (!ref) return false;
+  const a = treeFolderArgs(ref, slug);
+  const ok = treeNow(git(a.now, mainRoot)) === id || treeInHistory(git(a.log, mainRoot), slug, id);
+  if (ok) artifactTrees.add(key);
+  return ok;
+}
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -13299,7 +13328,7 @@ async function cmdDashboard() {
         // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
         // against a commit or the root tree as well, which would serve any committed file. A tree
         // never changes: what was published is what is shown.
-        if (await artifactTreeOk(am[2])) bytes = await blobAt(`${am[2]}:${rel}`);
+        if (await artifactTreeOk(am[2], am[3])) bytes = await blobAt(`${am[2]}:${rel}`);
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {

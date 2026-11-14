@@ -417,7 +417,7 @@ function artLensRun({ ancestor = 'http://127.0.0.1:4321', title = 'A mock', path
 test('presses: the page answers before the server, and a refusal puts it back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-press-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 90), DEVTEAM_PORT_BASE: String(PORTS + 91), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 58), DEVTEAM_PORT_BASE: String(PORTS + 59), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'press');
   const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
@@ -530,7 +530,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
   // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 56), DEVTEAM_PORT_BASE: String(PORTS + 57), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'focus');
   const ask = (q, ...more) => {
@@ -1206,6 +1206,21 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   r = await view({ slug: 'no-such', at: 'main' });
   assert.deepEqual([r.status, await r.json()], [404, { error: 'no artifact no-such at main' }], 'nothing there, in words of its own: never what describe printed');
   assert.equal((await view({ slug: 'viewer-mock', at: 'demo-01-gone' })).status, 404, 'a worktree that is not there');
+  // describe failing for another reason (a folder it can't read) is a 500 in words of its own, never
+  // taken for nothing there; as root a mode holds nothing back, so it is not asked
+  if (process.getuid?.() !== 0) {
+    const draft = path.join(F.old, '.worktrees/demo-01-locked/docs/devteam/project/artifacts/viewer-mock');
+    for (const [rel, text] of Object.entries(VIEWER_MOCK)) write(path.join(draft, rel), text);
+    fs.mkdirSync(path.join(draft, 'locked'));
+    fs.chmodSync(path.join(draft, 'locked'), 0);
+    try {
+      r = await view({ slug: 'viewer-mock', at: 'demo-01-locked' });
+      assert.deepEqual([r.status, await r.json()], [500, { error: 'the artifact could not be read' }]);
+    } finally {
+      fs.chmodSync(path.join(draft, 'locked'), 0o755);
+      fs.rmSync(path.join(F.old, '.worktrees/demo-01-locked'), { recursive: true, force: true });
+    }
+  }
   const many = await Promise.all([1, 2, 3].map(() => view({ slug: 'viewer-mock', at: 'main' }).then((x) => x.json())));
   assert.deepEqual(many.map((x) => x.fp), [lib.fp, lib.fp, lib.fp], 'asks at once share one run, and each has its answer');
   assert.equal((await view({ slug: 'viewer-mock', at: '../x' })).status, 400);
@@ -1219,6 +1234,20 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
   assert.match(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: 'b'.repeat(64) })]), /^main has changed viewer-mock since this published version$/m);
   assert.match(F.sup(['thread', 'show', on({ at: 'demo-01-gone', fp: lib.fp })]), /^the artifact viewer-mock is no longer at "demo-01-gone"$/m, 'a draft whose worktree is gone');
+  // a published tree is served only under the slug whose folder it was on main: another artifact's
+  // tree under this name would show its files as this one's, in the bar and in a thread's subject
+  const T2 = landArtifact(F, 'other-mock', { ...VIEWER_MOCK, 'artifact.json': JSON.stringify({ v: 1, title: 'Other mock', summary: 'Another page', by: 'supervisor', for: [] }) });
+  assert.equal((await fetch(`${B}/artifact/tree/${T2}/viewer-mock/`)).status, 404, 'another artifact\'s tree under this slug');
+  assert.equal((await view({ slug: 'viewer-mock', at: `tree:${T2}` })).status, 404);
+  assert.equal(F.run(F.old, ['artifact', 'describe', 'viewer-mock', `--at=tree:${T2}`]).status, 3, 'nothing there');
+  assert.equal((await fetch(`${B}/artifact/tree/${T2}/other-mock/`)).status, 200, 'under its own');
+  // a version main has moved on from is still its slug's, by main's history of that folder
+  write(path.join(F.old, 'docs/devteam/project/artifacts/viewer-mock/style.css'), '#art { color: rgb(4, 5, 6) }');
+  const T3 = landArtifact(F, 'viewer-mock', {});
+  assert.notEqual(T3, T);
+  assert.equal((await fetch(`${B}/artifact/tree/${T}/viewer-mock/`)).status, 200, 'the older version, by history');
+  assert.equal(F.run(F.old, ['artifact', 'describe', 'viewer-mock', `--at=tree:${T}`]).status, 0, 'and in a process of its own, nothing remembered');
+  assert.equal((await fetch(`${B}/artifact/tree/${T}/other-mock/`)).status, 404, 'still never under another slug');
   // and once main no longer has it, a thread on a published version says so
   const pub = on({ at: `tree:${T}`, fp: lib.fp });
   F.g(['rm', '-rq', 'docs/devteam/project/artifacts/viewer-mock'], F.old);
@@ -3158,6 +3187,32 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');
     } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
     await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /EU first/.test(document.getElementById('tl-c-turns').textContent)`, 'the answer as the log has it');
+    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
+    await p.ev('window.__obs.disconnect(); void 0');
+  });
+
+  await t.test("answered elsewhere (the terminal), with the page's data newer than the card's read: its answer, never \"Answer it in the Inbox\"", async () => {
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
+    // a read of the threads let through and held, so it says open; any Inbox link drawn noted
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
+    await p.ev('window.__stale = window.__threadsQueue.length; void 0');
+    try {
+      F.owner(['answer', Q, 'Not this quarter']);
+      // the page's data lands with the answer, while every read of the threads is still held
+      await p.ev('load({ force: true }); void 0');
+      await soon(`(DATA?.ooda?.answered || []).some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page\'s data, with the answer');
+      await soon(`/Not this quarter/.test(document.getElementById('tl-c-turns').textContent)`, 'the open card redrawn with it, before any read of the threads');
+      // the stale reads land: the card draws a copy from before the answer
+      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
+      await p.ev('window.__still()');
+      await p.ev('window.__stir()');
+      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
+      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
+      assert.ok(await p.ev(`(() => { const s = document.getElementById('tl-c-turns').textContent; return /Not this quarter/.test(s) && /answered in your terminal/.test(s); })()`), 'its answer, and where from');
+    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
+    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered'`, 'the answer as the log has it');
     assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
     await p.ev('window.__obs.disconnect(); void 0');
   });
