@@ -206,6 +206,10 @@ test('a kit takes a run folder inside its home, however it is reached: its own, 
     assert.equal(r.status, 0, `${args[0]}: ${r.stderr}`);
   }
   assert.ok(logged(runOf(app), '"x-1"') && logged(runOf(app), 'from the worktree'), 'the worktree\'s lines are in home\'s run folder');
+  // as a hook or rebase --exec runs it there: git has set GIT_DIR to the worktree's own
+  const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt, encoding: 'utf8' }).trim();
+  const hooked = dtAt(wt, wt, ['status'], { DEVTEAM_RUN: runOf(app), GIT_DIR: gitDir, ...WORKER });
+  assert.equal(hooked.status, 0, `with GIT_DIR: ${hooked.stderr}`);
   // a home whose run folder is a symlink out of the checkout
   const ln = seeded(base, 'app-ln');
   const away = path.join(base, 'elsewhere-run');

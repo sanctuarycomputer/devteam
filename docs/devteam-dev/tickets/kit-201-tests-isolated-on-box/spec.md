@@ -110,7 +110,9 @@ under test believe it is on that box, whatever the test's environment says.
    The check runs first, in the block that re-execs the main checkout's kit (devteam.mjs ~34), so a
    copy that differs from home's kit can't hand the command to home's own kit either: when the
    script's folder is in a git checkout whose top level is `<top>` (from the same `git rev-parse`
-   call that block already makes, `--show-toplevel` added) and the real path of
+   call that block already makes, `--show-toplevel` added, run without the caller's `GIT_DIR`,
+   `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, which git sets for hooks and `rebase --exec`;
+   a worktree's kit run with `GIT_DIR` set is tested) and the real path of
    `<top>/docs/devteam/scripts` isn't the script's folder (a copy at `<home>/vendor/kit`, one at
    `<home>/fixtures/plain/docs/devteam`, one beside an empty `.git` folder), every command but `help` dies (a kit in no git checkout,
    as a box image's `/opt/devteam/kit`, skips the check):

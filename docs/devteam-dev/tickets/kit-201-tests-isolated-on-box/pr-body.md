@@ -5,7 +5,7 @@ Kit tests run on a devteam box or inside a worker can no longer reach the real f
 - **One env scrub for the tests** (`test/lib/kit.mjs`): at import, every `DEVTEAM_*` but the harness's own knobs (`HARNESS_ENV`: `DEVTEAM_TEST_*`, `FORK`, `FORK_AUDIT`, `G1_RECORD`, `CGROUP`, `MEMINFO`) and `TMUX`/`TMUX_PANE` are deleted, then `DEVTEAM_BOX=off` is set. The per-file denylists in machine, operator-threads, hub-overview and gateway tests go; gateway.test.mjs imports the helper; hub-overview's kit gets a temp `HOME`.
 - **`DEVTEAM_BOX=off`** (devteam.mjs, box detection): the kit ignores the box's files (`/opt/devteam/gateway.mjs`, `/etc/devteam/thread-key.pub`) only while `HOME`, by real path, isn't the account's passwd home; anything unresolvable leaves the files on. Box detection is a marked block, loaded in a vm by `boxFns()` and tested in CI.
 - **The kit refuses a foreign run folder**: a `DEVTEAM_RUN` whose real path isn't the default run folder's or inside the resolved home (`mainRoot`) dies naming both paths, for every command but `help` and the machine-wide ones.
-- **A kit copied into another checkout without a `.git` of its own** dies before the re-exec instead of taking that checkout's home; `bareProject` asserts each fixture is a repo of its own.
+- **A kit copy that isn't its checkout's own `docs/devteam`** (by the real path of `git rev-parse --show-toplevel`, asked without the caller's `GIT_DIR`) dies before the re-exec instead of taking that checkout's home; `bareProject` asserts each fixture is a repo of its own.
 
 ## How to verify
 

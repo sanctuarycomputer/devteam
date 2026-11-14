@@ -39,7 +39,10 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   const self = fileURLToPath(import.meta.url);
   let common = null;
   let top = null;
-  try { [common, top] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n'); } catch {}
+  // asked of the script's own folder, never of the caller's repo: git sets GIT_DIR for a hook and for
+  // rebase --exec, and with it would take the script's folder for a checkout's top level
+  const scriptGit = Object.fromEntries(Object.entries(process.env).filter(([k]) => !['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'].includes(k)));
+  try { [common, top] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd: path.dirname(self), env: scriptGit, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n'); } catch {}
   // A kit copied into a folder inside another checkout with no repo of its own (a fixture made
   // without git init) would take that checkout's git, and so its kit, home and live log: a kit in a
   // repo runs only as that checkout's own docs/devteam. (A kit in no repo, as a box image's, is free.)
