@@ -30,4 +30,6 @@ try 'a version literal in a comment' 'appears 2 times' \
   "s=s.replace('# ttyd, the web terminal','# ttyd 1.7.7, the web terminal')"
 try 'a typo in a pin reference' 'is not a declared ARG' \
   "s=s.replace('download/v\$GH_VERSION/','download/v\$GH_VERSOIN/')"
+try "gh's sum never checked" "GH's RUN never checks its download" \
+  "s=s.replace(' && echo \"\$sum  /tmp/gh.tgz\" | sha256sum -c - \\\\\\n','')"
 exit $bad

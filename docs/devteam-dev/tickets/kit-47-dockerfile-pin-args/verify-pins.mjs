@@ -107,6 +107,7 @@ for (const [tool, binary, , , , archX, archA] of TOOLS) {
     runOf.set(tool, run);
     prevRun = run.start;
     for (const n of names) if (!new RegExp(`\\$\\{?${n}\\b`).test(run.body)) fail(`${tool}'s RUN doesn't use $${n}`);
+    if (binary && !/echo "\$sum  \S+" \| sha256sum -c -/.test(run.body)) fail(`${tool}'s RUN never checks its download with sha256sum -c`);
     if (binary) {
       for (const [arm, sumVar, arch] of [['x86_64', `${tool}_SHA256_X86_64`, archX], ['aarch64', `${tool}_SHA256_AARCH64`, archA]]) {
         const m = run.body.match(new RegExp(`${arm}\\)\\s*(?:arch=(\\w+);\\s*)?sum=\\$\\{?(\\w+)\\}?`));
