@@ -1241,7 +1241,7 @@ const whichAsk = (q, list) => `
           <button type="button" class="choice" data-which="${esc(q.id)}" data-which-none value=""><span><b>None of them</b><div class="d">Post my words as they are.</div></span></button>
         </div>
       </div>`;
-const dropAsk = (id, card = null) => { delete ASKS[id]; for (const el of (card ? card.querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`) : document.querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`))) el.remove(); };
+const dropAsk = (id, card = null) => { delete ASKS[id]; for (const el of (card || document).querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`)) el.remove(); };
 // Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
 // refresh. Each goes straight from the browser to the owner's process and on to its sink.
 const SECRET_DRAFTS = new Map();
@@ -5557,8 +5557,9 @@ document.addEventListener('click', async (ev) => {
     const goalId = btn.dataset.goalAsk;
     const qv = DATA.questions.find((x) => x.id === id);
     if (chose === null && !picked && !goalId && needsWhich(qv)) {
+      // on this copy only: an ask the other copy raised goes
+      if (!card?.querySelector('[data-which-for]')) { dropAsk(id); card?.querySelector('.row-inline')?.insertAdjacentHTML('beforebegin', whichAsk(qv, choicesOf(qv))); }
       ASKS[id] = card?.id.startsWith('t-') ? 't' : 'q';
-      if (card && !card.querySelector('[data-which-for]')) card.querySelector('.row-inline')?.insertAdjacentHTML('beforebegin', whichAsk(qv, choicesOf(qv)));
       return;
     }
     dropAsk(id);
@@ -5568,7 +5569,7 @@ document.addEventListener('click', async (ev) => {
     const asRule = card?.querySelector('input[data-rulebox]')?.checked;
     if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
     // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
-    const qText = DATA.questions.find((x) => x.id === id)?.question || '';
+    const qText = qv?.question || '';
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId

@@ -616,11 +616,16 @@ test('a typed answer on a question with choices asks which choice it means, on t
     assert.equal(await p.ev(ask(D1)), 1, 'back');
   });
 
-  await t.test('a choice in the ask posts "<label> — <words>", matched', async () => {
+  await t.test('a choice in the ask posts "<label> — <words>", matched, with the card\'s standing rule and the hash it showed', async () => {
+    await still(() => p.click(`${card(D1)} input[data-rulebox]`));
+    await p.ev('window.__posts = []; void 0');
     await still(() => p.click(`${card(D1)} button[data-which][value="Yes"]`));
     await until(() => logged(D1).status === 'answered', 'D1 answered');
     assert.equal(logged(D1).answer, 'Yes — agreed, keep it');
     assert.equal(logged(D1).matched, true, 'the owner picked the recommendation');
+    assert.equal(logged(D1).standing_rule, 'agreed, keep it', 'the rule box went with it, worded by the note');
+    const sent = JSON.parse(JSON.parse(await p.ev(`JSON.stringify(window.__posts.find((x) => x.url === '/api/answer'))`)).body);
+    assert.equal(sent.seen, logged(D1).hash, 'bound to the question as the page showed it');
   });
 
   await t.test('a note with nothing picked asks too; None posts the words alone', async () => {
@@ -656,6 +661,13 @@ test('a typed answer on a question with choices asks which choice it means, on t
       await polls(2);
       assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 0, 'not on the Inbox copy after a redraw either');
       assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 1, 'still on the thread copy');
+      // then asked on the Inbox's copy: there now, and gone from the thread's
+      await write(`#q-${D3} textarea[data-q]`, 'ok');
+      await still(() => p.click(`#q-${D3} button[data-answer]`));
+      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 1, 'on the Inbox copy');
+      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 0, 'gone from the thread copy');
+      await polls(2);
+      assert.equal(await p.ev(ask(D3, '#questions')), 1, 'one ask after a redraw');
     } finally { await p.ev(`document.querySelector('[data-test-copy]')?.remove(); delete ASKS['${D3}']; void 0`); }
   });
 });
