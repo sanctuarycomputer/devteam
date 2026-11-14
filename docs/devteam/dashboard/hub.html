@@ -84,6 +84,25 @@
   .ov-bar > span { display: block; height: 100%; background: var(--green); }
   .ov-bar > span.held { background: var(--amber); }
   .ov-pills { display: flex; gap: 6px; flex: 0 0 auto; }
+  .ov-goal { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; min-width: 0; }
+  .ov-goal .k { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+  .ov-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .ov-goal .n { color: var(--fg-2); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+  .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; flex: 0 0 auto; }
+  .seg button { font: 500 12px/1 var(--sans); color: var(--fg-2); background: none; border: 0; padding: 6px 10px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line-2); }
+  .seg button:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
+  .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+  .seg button.confirm { background: var(--red); color: #fff; }
+  .seg button:disabled { cursor: default; opacity: .6; }
+  .seg button[aria-pressed="true"]:disabled { opacity: 1; }
+  .ov-ctl { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .ov-ctl .msg { font-size: 12px; color: var(--fg-2); }
+  .ov-ctl .msg.err { color: var(--red-fg); }
+  .ov-head .acts { margin-left: auto; display: flex; gap: 8px; }
+  .ov-head .acts button { font: 500 12.5px/1 var(--sans); padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); cursor: pointer; }
+  .ov-head .acts button:hover { background: var(--hover); }
+  .ov-head .acts button.confirm { background: var(--red); border-color: var(--red); color: #fff; }
   .ov-prog { display: flex; flex-direction: column; gap: 4px; }
   .ov-prog .k { color: var(--fg-2); font-size: 12px; }
   .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
@@ -193,18 +212,67 @@ function select(root) {
   if (!it) return;
   selected = root;
   history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
+  frameFor(it);
+  showOnly(root);
+}
+// A project's dashboard in its frame, made once and kept; hidden until its tab is chosen. The
+// Overview's fleet controls use it too: the dashboard does the owner action, on its own origin.
+function frameFor(it) {
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
+    it.frame.hidden = selected !== it.x.root;
     // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
     // never navigates this page, whatever answers in the block. A nested frame can't gain what this
     // one lacks, so modals, pointer lock and fullscreen are here for the dashboard's artifact viewer.
     it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
     it.frame.setAttribute('allow', 'clipboard-write; fullscreen');
+    it.loaded = new Promise((resolve) => it.frame.addEventListener('load', resolve, { once: true }));
     it.frame.src = urlOf(it.x);
     framesEl.append(it.frame);
   }
-  showOnly(root);
+  return it.frame;
+}
+// ----- Run, Drain and Park from the Overview ------------------------------------------------------
+// The hub can't post an owner action: it asks the project's own dashboard, in its frame, which
+// posts it as a click there would (index.html, "The hub's Overview"). The answer comes back by
+// message from that frame alone; nothing else is listened to.
+const fleetWait = new Map(); // nonce -> { resolve, origin, win }
+const fleetBusy = new Map(); // root -> what is being asked, or the last error
+window.addEventListener('message', (ev) => {
+  const m = ev.data;
+  if (!m || typeof m !== 'object' || m.devteam !== 'hub-fleet-done' || typeof m.nonce !== 'string') return;
+  const w = fleetWait.get(m.nonce);
+  if (!w || ev.source !== w.win || ev.origin !== w.origin) return;
+  fleetWait.delete(m.nonce);
+  w.resolve({ ok: m.ok === true, error: typeof m.error === 'string' ? m.error : null });
+});
+async function fleetAsk(it, mode, all = false) {
+  const frame = frameFor(it);
+  await Promise.race([it.loaded, new Promise((r) => setTimeout(r, 15000))]);
+  const origin = new URL(urlOf(it.x)).origin;
+  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24);
+  const answer = new Promise((resolve) => fleetWait.set(nonce, { resolve, origin, win: frame.contentWindow }));
+  // asked again until it answers (a dashboard still starting its script); it does it once per nonce
+  const send = () => { try { frame.contentWindow.postMessage({ devteam: 'hub-fleet', mode, nonce, all }, origin); } catch {} };
+  send();
+  const again = setInterval(send, 1500);
+  const r = await Promise.race([answer, new Promise((r_) => setTimeout(() => r_({ ok: false, error: 'its dashboard didn\'t answer (an older kit can\'t be parked from here)' }), 20000))]);
+  clearInterval(again);
+  fleetWait.delete(nonce);
+  return r;
+}
+async function setFleet(roots, mode) {
+  const words = { park: 'Parking…', drain: 'Draining…', run: 'Resuming…' };
+  for (const r of roots) fleetBusy.set(r, { asking: words[mode] });
+  paintOverview();
+  await Promise.all(roots.map(async (r) => {
+    const it = items.get(r);
+    const res = it ? await fleetAsk(it, mode, roots.length > 1) : { ok: false, error: 'gone' };
+    if (res.ok) fleetBusy.delete(r); else fleetBusy.set(r, { error: res.error ?? 'it didn\'t work' });
+  }));
+  await draw();
+  paintOverview();
 }
 // ----- the Overview: every project on one page, to see at a glance that each is moving ----------
 // Each card is that project's own hello (its pulse), as text. A dashboard on an older kit sends no
@@ -253,6 +321,36 @@ function mosaic(days) {
   box.setAttribute('aria-label', `Activity over the last ${Math.round(n / 7)} weeks: ${active} active days`);
   return box;
 }
+// A press that needs a second press to confirm (Park, Park all): remembered across redraws, 5 s.
+const confirming = new Map(); // key -> until
+const confirmed = (key) => { const until = confirming.get(key) ?? 0; if (until > Date.now()) { confirming.delete(key); return true; } confirming.set(key, Date.now() + 5000); setTimeout(paintOverview, 5100); paintOverview(); return false; };
+const isConfirming = (key) => (confirming.get(key) ?? 0) > Date.now();
+const modeOf = (it) => (['park', 'drain'].includes(it.x.fleet?.mode) ? it.x.fleet.mode : 'run');
+// what the Overview can steer: a dashboard answering, on a kit that sends a pulse
+const steerable = (it) => !it.goneAt && Boolean(it.x.pulse);
+function fleetControl(it) {
+  const root = it.x.root;
+  const ctl = el('div', 'ov-ctl');
+  const seg = el('div', 'seg');
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', `${it.x.name}: run, drain or park`);
+  const busy = fleetBusy.get(root);
+  const now = modeOf(it);
+  const opts = [['run', 'Run', 'Workers start and continue tickets'], ['drain', 'Drain', 'Workers finish what they have; nothing new starts'], ['park', 'Park', 'Every session stops where it is']];
+  for (const [mode, label, why] of opts) {
+    const key = `${root}:${mode}`;
+    const b = el('button', isConfirming(key) ? 'confirm' : '', isConfirming(key) ? 'Confirm park' : label);
+    b.title = why;
+    b.setAttribute('aria-pressed', String(now === mode));
+    b.disabled = Boolean(busy?.asking) || now === mode;
+    b.onclick = () => { if (mode === 'park' && !confirmed(key)) return; setFleet([root], mode); };
+    seg.append(b);
+  }
+  ctl.append(seg);
+  if (busy?.asking) ctl.append(el('span', 'msg', busy.asking));
+  else if (busy?.error) ctl.append(el('span', 'msg err', busy.error));
+  return ctl;
+}
 function overviewCard(it, newest) {
   const { x } = it;
   const p = x.pulse ?? null;
@@ -283,6 +381,14 @@ function overviewCard(it, newest) {
   stat('Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
   stat('Last moved', p ? agoText(p.last_activity) : '–');
   card.append(stats);
+
+  if (p?.goal) {
+    const g = el('div', 'ov-goal');
+    const more = (Number(p.goals_open) || 1) - 1;
+    g.append(el('span', 'k', 'Goal'), el('span', 't', p.goal.title), el('span', 'n', `${p.goal.total ? `${p.goal.done} of ${p.goal.total}` : 'not planned yet'}${more > 0 ? ` · +${more} more` : ''}`));
+    g.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
+    card.append(g);
+  } else if (p && p.goals_open === 0 && st !== 'idle') { const g = el('div', 'ov-goal'); g.append(el('span', 'k', 'Goal'), el('span', 'n', 'none approved yet')); card.append(g); }
 
   if (p) {
     const total = p.open_tickets + p.done_tickets;
@@ -315,6 +421,7 @@ function overviewCard(it, newest) {
     foot.append(mosaic(p.activity.map((n) => Math.max(0, Number(n) || 0))), el('span', 'k', `${Math.round(p.activity.length / 7)} weeks`));
     card.append(foot);
   }
+  if (steerable(it)) card.append(fleetControl(it));
   return card;
 }
 function paintOverview() {
@@ -329,9 +436,18 @@ function paintOverview() {
   const full = count('blocked') + count('waiting');
   const partly = all.filter((it) => it.x.pulse?.blocking === 'partial' && stateOf(it) !== 'blocked').length;
   const head = el('div', 'ov-head');
-  head.append(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : 'Everything is moving'));
-  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
+  head.append(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'));
+  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, count('parked') ? `${count('parked')} parked` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
   head.append(el('span', 'sum', parts.join(' · ')));
+  // every fleet at once: Park all (confirmed), and Resume all while any is held
+  const can = all.filter(steerable);
+  const acts = el('div', 'acts');
+  const held_ = can.filter((it) => modeOf(it) !== 'run');
+  const running = can.filter((it) => modeOf(it) !== 'park');
+  const anyBusy = can.some((it) => fleetBusy.get(it.x.root)?.asking);
+  if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
+  if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
+  if (acts.childElementCount) head.append(acts);
   const grid = el('div', 'ov-grid');
   for (const it of all) grid.append(overviewCard(it, newest));
   ovEl.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));

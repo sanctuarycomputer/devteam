@@ -24,6 +24,8 @@ test('hello carries a pulse: idle, moving, fully and partly blocked, building', 
     ok(old, ['feature', 'add', 'bill', '--json', JSON.stringify({ title: 'bill', goals: [G], stories: [{ id: 'BILL-S1', text: 'it works', release: 'v1.0.0' }] })], SUP);
     ok(old, ['ticket', 'add', 'app-01-bill', '--json', JSON.stringify({ title: 'Billing page', feature: 'bill', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['src/bill/**'], done_when: ['its test passes in CI'] })], SUP);
     p = pulse();
+    assert.equal(p.goal, null, 'a draft goal is not what it is working on');
+    assert.equal(p.goals_open, 0);
     assert.equal(p.open_tickets, 1);
     assert.equal(p.done_tickets, 0);
     assert.equal(p.state, 'moving', 'open work, and the fleet wrote just now');
@@ -60,5 +62,10 @@ test('hello carries a pulse: idle, moving, fully and partly blocked, building', 
     assert.equal(p.state, 'building');
     assert.equal(p.blocking, 'partial');
 
+
+    // the owner approves the goal: the card names it, with its own tickets merged of planned
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `owner-${ym}.jsonl`), line({ id: G, type: 'goal', op: 'set', status: 'ready', at: new Date().toISOString(), by: 'owner', channel: 'cli' }));
+    p = pulse();
+    assert.deepEqual([p.goal?.title, p.goal?.done, p.goal?.total, p.goals_open], ['Billing', 0, 3, 1]);
   } finally { F.done(); }
 });

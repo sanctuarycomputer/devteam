@@ -16454,7 +16454,12 @@ function helloPulse() {
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
   ].filter(Boolean);
-  return { state, blocking, blocked_tickets: held.size, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
+  // what it is working on: the approved goal first in priority, and its tickets merged of planned
+  const goals = logObjects('goal').filter((g) => g.status === 'ready').sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity));
+  const top = goals[0] ?? null;
+  const topTs = top ? ts.filter((t) => ticketGoals(t).some((g) => g.id === top.id)) : [];
+  const goal = top ? { title: String(top.title ?? top.id).slice(0, 120), done: topTs.filter((t) => mergeShaFor(t.id)).length, total: topTs.length, mode: goalMode(top) } : null;
+  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
 }
 function cmdHello() {
   const s = loadSettings();
