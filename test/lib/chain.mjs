@@ -1228,6 +1228,7 @@ out({ cursor: 'x' });
       assert.equal(dec.status, 3, dec.err);
       assert.match(dt(['decide', '--class', 'incident-fix', '--scope', 'sev:low', '--refs', pid, tid, '--', 'x'], sup).err, /its scope is sev:high, not sev:low/);
       assert.match(dt(['decide', '--class', 'incident-fix', '--refs', tid, '--', 'x'], sup).err, /names exactly one incident/);
+      assert.match(dt(['decide', '--class', 'incident-fix', '--refs', pid, '--', 'fix OutOfMemory'], sup).err, /names its fix ticket's id/, 'a fix without its ticket would mean asking again');
       const q = must(['ask', '--class', 'incident-fix', '--blocks', pid, '--question', 'Fix the checkout OutOfMemory?', '--recommendation', 'fix it', '--default', 'fix it', '--deadline', '2h', '--reasons', 'below-rung'], sup);
       const qv = json(must(['questions', '--all', '--json'])).find((x) => x.id === q);
       assert.equal(qv.scope, 'sev:high');
