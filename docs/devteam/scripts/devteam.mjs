@@ -12674,7 +12674,9 @@ const OPERATOR_WINDOW = 'operator';
 const OPERATOR_THREAD_ID = /^ot-\d{8}-\d{9}-[0-9a-f]{6}$/;
 const OPERATOR_SUBJECT_MAX = 1200; // bytes, as encoded in the line
 const OPERATOR_STARTING_MS = 60000;
-const onBox = () => !!previewBox();
+// The image's own file says box too: an agent can unset DEVTEAM_PUBLIC_URL for a dashboard it starts,
+// and that dashboard's hub would then keep threads elsewhere and start an operator of its own.
+const onBox = () => !!previewBox() || fs.existsSync(BOX_GATEWAY_FILE);
 // On a box the owner is never on the machine: they reach the hub only through the gateway, behind
 // their passkey. And every agent runs as the hub's own Unix user (dev), so nothing a request says
 // about where it came from, Origin and Sec-Fetch-Site included, tells the owner's press from an
@@ -12769,16 +12771,25 @@ function operatorThreads(lines = operatorLines()) {
     const b = proofBody(pr);
     const action = pr.path.slice('/operator/'.length);
     const first = t.turns.length === 0;
-    const ok = !!b && typeof b.text === 'string' && b.text.trim() === o.text && (first ? action === 'thread-new' : ['thread-say', 'thread-reopen'].includes(action) && b.id === t.id);
+    // a first turn's proof also names the title and subject it was signed with: never one moved under another thread
+    const sameThread = first ? action === 'thread-new' && threadTitle((typeof b.title === 'string' && b.title.trim()) || b.text.trim()) === t.title && JSON.stringify(b.subject ?? null) === JSON.stringify(t.subject ?? null) : ['thread-say', 'thread-reopen'].includes(action) && b.id === t.id;
+    const ok = !!b && typeof b.text === 'string' && b.text.trim() === o.text && sameThread;
     if (ok) used.add(pr.nonce);
     return ok;
+  };
+  // on a box a thread is closed or opened again only by a press the gateway signed for it
+  const signedSet = (o, t) => {
+    const pr = o.proof;
+    if (!isObj(pr) || gatewayProofProblem(pr, Date.parse(o.at))) return false;
+    const b = proofBody(pr);
+    return !!b && b.id === t.id && pr.path === (o.status === 'closed' ? '/operator/thread-close' : '/operator/thread-reopen');
   };
   for (const o of lines) {
     if (o.type === 'thread' && o.op === 'new' && !threads.has(o.id)) threads.set(o.id, { id: o.id, title: threadTitle(o.title), subject: operatorSubjectProblem(o.subject) ? null : o.subject, status: 'open', turns: [], created_at: o.at, closed_at: null, activity_at: o.at });
     const t = threads.get(o.type === 'turn' ? o.thread : o.id);
     if (!t) continue;
     if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}) });
-    else if (o.op === 'set' && ['open', 'closed'].includes(o.status)) { t.status = o.status; t.closed_at = o.status === 'closed' ? o.at : null; }
+    else if (o.op === 'set' && ['open', 'closed'].includes(o.status) && (!boxed || signedSet(o, t))) { t.status = o.status; t.closed_at = o.status === 'closed' ? o.at : null; }
     if (o.at > t.activity_at) t.activity_at = o.at;
   }
   return [...threads.values()].map((t) => ({ ...t, waiting: t.turns[t.turns.length - 1]?.by === 'owner' ? 'operator' : 'owner' }));
@@ -12918,6 +12929,9 @@ function cmdOperatorThread() {
     if (!want || JSON.stringify(want) !== JSON.stringify([command, ...argv])) no('the gateway signed another press than this one');
     proof = { path: given.path, ts: given.ts, nonce: given.nonce, sig: given.sig, body: given.body };
   };
+  // A press is taken once by its nonce in the store, so only a verb that writes a line keeps one: start
+  // writes nothing (and on a box starts nothing), nor does a close of a closed thread; for those the
+  // hub's own memory of nonces is the guard. A new verb that acts without writing must write its proof.
   const taken = () => (proof && operatorLines().some((o) => o.proof?.nonce === proof.nonce) ? { problem: `operator-thread ${sub}: that press was taken already` } : null);
   const signed = (o) => (proof ? { ...o, proof } : o);
   // The thread named, or why not. Under the store's lock nothing dies (an exit would leave the lock):

@@ -613,7 +613,7 @@ const typingIn = (e) => !!e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT
 function tThread(x) {
   if (!x || typeof x !== 'object' || typeof x.id !== 'string' || typeof x.created_at !== 'string' || !Array.isArray(x.turns)) return null;
   const s = x.subject && typeof x.subject === 'object' && x.subject.kind === 'overview' && x.subject.anchor && OP_PARTS.includes(x.subject.anchor.selector) ? { root: typeof x.subject.root === 'string' ? x.subject.root : null, name: typeof x.subject.name === 'string' ? x.subject.name : null, selector: x.subject.anchor.selector, label: typeof x.subject.anchor.label === 'string' ? x.subject.anchor.label : '' } : null;
-  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text }));
+  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(u.signed === false ? { unsigned: true } : {}) }));
   return { id: x.id, title: String(x.title ?? ''), subject: s, status: x.status === 'closed' ? 'closed' : 'open', turns, created_at: x.created_at, closed_at: typeof x.closed_at === 'string' ? x.closed_at : null, activity_at: typeof x.activity_at === 'string' ? x.activity_at : x.created_at };
 }
 // What a point is on: the part of the Overview under it that paintOverview named (data-pin), with
@@ -880,10 +880,10 @@ function tlCardBody(t) {
   const ctxSig = s ? `${tKey(s)}|${title}|${!!tlTarget(s)}` : '';
   if (ctxEl.dataset.is !== ctxSig) { const was = ctxEl.querySelector('details')?.open; ctxEl.dataset.is = ctxSig; ctxEl.replaceChildren(...(s ? [tlCtx(s, title)] : [])); if (was) ctxEl.querySelector('details').open = true; }
   const turns = $('tl-c-turns');
-  const sig = t ? JSON.stringify(t.turns.map((u) => [u.by, u.at, u.text, !!u.pending])) : '';
+  const sig = t ? JSON.stringify(t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned])) : '';
   if (sig !== TL.turnsSig) {
     TL.turnsSig = sig;
-    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? 'You' : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
+    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : 'You') : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
     turns.scrollTop = turns.scrollHeight;
   }
   if (t && !t.pending) tlSeen(t);

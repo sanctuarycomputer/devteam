@@ -245,10 +245,11 @@ EOF
 # the owner's threads with the operator, from the hub's Overview: box-thread list --waiting, box-thread
 # show <id>, box-thread reply <id> "<words>" (kept in ~/operator/threads.jsonl). show says which
 # owner turns the gateway signed; the image's node and kit, with nothing from dev's environment
-# that would load other code into it.
+# that would load other code into it, and only root's folders on its PATH (mise's shims, first on
+# dev's, are anyone's: a program planted there would run inside it).
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-thread
 #!/bin/sh
-exec /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
+exec /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
