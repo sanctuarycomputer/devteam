@@ -5597,9 +5597,11 @@ else { loadSchemaDocs(); load(); setInterval(load, 10000); }
 // The hub never posts an owner action itself (it only lists); it asks this page, and this page
 // posts it to its own origin as a click here would. Who asks: only this window's parent, and only
 // when the parent is not this origin. frame-ancestors lets only this origin and the hub frame this
-// page, so a parent on another origin is the hub. Three ops, each once per nonce; the answer goes
-// back to that parent alone.
-{
+// page, so a parent on another origin is the hub. Never in the viewer: on a box its parent may be
+// the owner's wrapper on the public name, which is not the hub (it runs no script, and this does
+// not rest on that). And only straight under the top page, as the hub holds it. Three ops, each
+// once per nonce; the answer goes back to that parent alone.
+if (!VIEWER && window.parent === window.top) {
   const HUB_OPS = { park: 'park', drain: 'drain', run: 'resume' };
   const seen = new Set();
   window.addEventListener('message', async (ev) => {
