@@ -553,6 +553,113 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 });
 
+// Words with no pick on a question with choices and a recommendation: the card asks which choice
+// they mean before anything is posted, so a door answered in the owner's own words can still be the
+// recommendation. The owner picks; nothing on the kit's side reads the words for a match.
+test('a typed answer on a question with choices asks which choice it means, on the card, before posting', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-which-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 63), DEVTEAM_PORT_BASE: String(PORTS + 64), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'which');
+  const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const door = (q) => dt(['ask', '--kind', 'one-way-door', '--question', q, '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes'], SUP);
+  const D1 = door('Keep the sales data?');
+  const D2 = door('Open the box?');
+  const D3 = door('Turn it on?');
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  t.after(() => dash.stop());
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+  const soon = soonIn(p, 15000, () => dash.out());
+  const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
+  const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
+  const card = (q) => `#questions [data-qcard="${q}"]`;
+  const ask = (q, where = card(q)) => `document.querySelectorAll('${where} [data-which-for="${q}"]').length`;
+  const logged = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
+  const write = async (sel, text) => { await p.click(sel); await soon(`document.activeElement === document.querySelector('${sel}')`, 'the note focused'); await p.type(text); };
+  await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}')`, 'the door cards');
+
+  await t.test('Something else and words: the ask, and nothing posted', async () => {
+    await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
+    await write(`${card(D1)} textarea[data-q]`, 'agreed, keep it');
+    await still(() => p.click(`${card(D1)} [data-answer]`));
+    assert.equal(await p.ev(ask(D1)), 1, 'the ask, on the card');
+    assert.deepEqual(JSON.parse(await p.ev(`JSON.stringify([...document.querySelectorAll('${card(D1)} button[data-which]')].map((b) => b.value))`)), ['Yes', 'No', ''], 'each choice, then None');
+    assert.match(await p.ev(`document.querySelector('${card(D1)} button[data-which][value="Yes"]').textContent`), /Recommended/);
+    assert.match(await p.ev(`document.querySelector('${card(D1)} [data-which-for]').textContent`), /Which choice do your words mean\?[\s\S]*None of them[\s\S]*Post my words as they are\./);
+    assert.equal(await p.ev('SAVING'), 0, 'no post in flight');
+    assert.doesNotMatch(await p.ev(`document.querySelector('${card(D1)}').textContent`), /Answered:/);
+    await polls(2);
+    assert.equal(logged(D1).status, 'open', 'nothing in the log');
+  });
+
+  await t.test('the ask survives a redraw', async () => {
+    await polls(2);
+    assert.equal(await p.ev(ask(D1, '#questions')), 1, 'one ask, still there');
+    assert.equal(await p.ev(`document.querySelector('${card(D1)} textarea[data-q]').value`), 'agreed, keep it', 'the words kept');
+  });
+
+  await t.test('a radio pick takes it away; Answer again brings it back', async () => {
+    await still(() => p.click(`${card(D1)} input[data-pick][value="No"]`));
+    assert.equal(await p.ev(ask(D1, '#questions')), 0, 'gone on a pick');
+    await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
+    await still(() => p.click(`${card(D1)} [data-answer]`));
+    assert.equal(await p.ev(ask(D1)), 1, 'back');
+  });
+
+  await t.test('a choice in the ask posts "<label> — <words>", matched', async () => {
+    await still(() => p.click(`${card(D1)} button[data-which][value="Yes"]`));
+    await until(() => logged(D1).status === 'answered', 'D1 answered');
+    assert.equal(logged(D1).answer, 'Yes — agreed, keep it');
+    assert.equal(logged(D1).matched, true, 'the owner picked the recommendation');
+  });
+
+  await t.test('a note with nothing picked asks too; None posts the words alone', async () => {
+    await write(`${card(D2)} textarea[data-q]`, 'not sure yet');
+    await still(() => p.click(`${card(D2)} [data-answer]`));
+    assert.equal(await p.ev(ask(D2)), 1, 'the ask');
+    await still(() => p.click(`${card(D2)} button[data-which][data-which-none]`));
+    await until(() => logged(D2).status === 'answered', 'D2 answered');
+    assert.equal(logged(D2).answer, 'not sure yet', 'the words, unchanged');
+    assert.equal(logged(D2).matched, false);
+  });
+
+  await t.test('the note emptied under the ask: nothing posted', async () => {
+    await write(`${card(D3)} textarea[data-q]`, 'ok');
+    await still(() => p.click(`${card(D3)} [data-answer]`));
+    assert.equal(await p.ev(ask(D3)), 1, 'the ask');
+    await p.ev(`(() => { const n = document.querySelector('${card(D3)} textarea[data-q]'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await still(() => p.click(`${card(D3)} button[data-which][value="Yes"]`));
+    assert.equal(await p.ev(ask(D3)), 0, 'the ask goes');
+    assert.equal(await p.ev(`document.getElementById('e-${D3}').textContent`), 'Pick a choice or write an answer.');
+    assert.equal(await p.ev('SAVING'), 0, 'no post in flight');
+    await polls(2);
+    assert.equal(logged(D3).status, 'open', 'still open');
+  });
+
+  await t.test('an ask raised on a thread\'s copy stays on that copy', async () => {
+    await p.ev(`(() => { const q = DATA.questions.find((x) => x.id === '${D3}'); const d = document.createElement('div'); d.dataset.testCopy = ''; d.innerHTML = questionCard(q, DATA.ooda, {}, true); $('tl').appendChild(d); })()`);
+    try {
+      await write(`#t-q-${D3} textarea[data-q]`, 'ok then');
+      await still(() => p.click(`#t-q-${D3} button[data-answer]`));
+      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 1, 'on the thread copy');
+      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 0, 'not on the Inbox copy');
+      await polls(2);
+      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 0, 'not on the Inbox copy after a redraw either');
+      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 1, 'still on the thread copy');
+    } finally { await p.ev(`document.querySelector('[data-test-copy]')?.remove(); delete ASKS['${D3}']; void 0`); }
+  });
+});
+
 test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
   // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
