@@ -1206,6 +1206,18 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   r = await view({ slug: 'no-such', at: 'main' });
   assert.deepEqual([r.status, await r.json()], [404, { error: 'no artifact no-such at main' }], 'nothing there, in words of its own: never what describe printed');
   assert.equal((await view({ slug: 'viewer-mock', at: 'demo-01-gone' })).status, 404, 'a worktree that is not there');
+  // describe failing for another reason (a folder it can't read) is a 500 in words of its own, never
+  // taken for nothing there; as root a mode holds nothing back, so it is not asked
+  if (process.getuid?.() !== 0) {
+    const draft = path.join(F.old, '.worktrees/demo-01-locked/docs/devteam/project/artifacts/viewer-mock');
+    for (const [rel, text] of Object.entries(VIEWER_MOCK)) write(path.join(draft, rel), text);
+    fs.mkdirSync(path.join(draft, 'locked'));
+    fs.chmodSync(path.join(draft, 'locked'), 0);
+    try {
+      r = await view({ slug: 'viewer-mock', at: 'demo-01-locked' });
+      assert.deepEqual([r.status, await r.json()], [500, { error: 'the artifact could not be read' }]);
+    } finally { fs.chmodSync(path.join(draft, 'locked'), 0o755); }
+  }
   const many = await Promise.all([1, 2, 3].map(() => view({ slug: 'viewer-mock', at: 'main' }).then((x) => x.json())));
   assert.deepEqual(many.map((x) => x.fp), [lib.fp, lib.fp, lib.fp], 'asks at once share one run, and each has its answer');
   assert.equal((await view({ slug: 'viewer-mock', at: '../x' })).status, 400);
