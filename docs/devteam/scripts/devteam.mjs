@@ -16387,8 +16387,9 @@ function boxAlert() {
   } catch { return null; }
 }
 const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
-// The hub's Overview: is this project moving, and if not, why. From the log in one pass (no git
-// beyond the merge facts the fold already keeps), so hello stays cheap at every 10 s.
+// The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
+// only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
+// read cache, never one per ticket), so hello stays cheap at every 10 s.
 // Blocked on the owner, per open ticket: named in the --blocks of an open question with no default,
 // or depending on one that is, however far down. blocking: 'full' when every
 // open ticket is, 'partial' when some are and the rest can move.
@@ -16462,6 +16463,8 @@ function helloPulse() {
   return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
 }
 function cmdHello() {
+  // read-only, and the pulse asks whether each open ticket has merged: every ref in one git call
+  gitReadCache = new Map();
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter(forOwner).length;
