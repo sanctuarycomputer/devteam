@@ -1,8 +1,5 @@
-Baseline on the cloud box at main 5c2a77b (HEAD 36f1b24 has no code change), 2026-11-14:
-node --test test/hub-overview.test.mjs test/machine.test.mjs test/operator-threads.test.mjs
-not ok 8 - status says at a glance what a check-in needs, and reads no pane it needn't
-not ok 11 - the kit lets a box operator look, and nothing else
-not ok 12 - a repo on a kit from before recover comes back from the box's list, the way the box always brought it back
+Baseline on the cloud box at main 5c2a77b (no code change yet), 2026-11-14, run with the session's devteam env removed (m-20261114-214804017-supervisor):
+env -u DEVTEAM_RUN -u DEVTEAM_HOME -u DEVTEAM_ROLE -u DEVTEAM_TICKET -u DEVTEAM_FEATURE -u DEVTEAM_SUPERVISOR -u TMUX -u TMUX_PANE TMUX_TMPDIR=$(mktemp -d) node --test test/hub-overview.test.mjs test/machine.test.mjs test/operator-threads.test.mjs
 not ok 20 - the store: a thread, its turns, closed and opened again, kept beside the operator in no repo
 not ok 21 - a box keeps them in ~/operator, on the disk that outlives a deploy
 not ok 22 - who may write what: the owner starts, says and closes; only the operator replies; no session in a fleet reads or writes
@@ -19,8 +16,8 @@ not ok 33 - the hub takes the owner's turns only from its own page, within its c
 not ok 34 - on a box the hub takes a press only with the gateway's signature: a local program with the page's own headers is refused
 not ok 36 - a start's note from a kit that did not name its tmux server is never taken for another session's pane
 # tests 36
-# pass 16
-# fail 18
+# pass 19
+# fail 15
 # skipped 2
 
 [exited with code 0]
