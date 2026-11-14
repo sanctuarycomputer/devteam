@@ -46,7 +46,7 @@
 - Test: `test/hub-overview.test.mjs`
 
 **Interfaces:**
-- Produces: `startHub(log, { kit = null, image = false, standalone = false } = {})`; `processLog(log, name)` installs uncaughtException/unhandledRejection (log `crashed: <stack>`, stderr `devteam <name> crashed: …`, exit 1) and SIGTERM/SIGINT/SIGHUP (`stopped by <SIG>`, exit 0); `hubLogger()` returns `(msg) => void` writing `<iso> [<pid>] <msg>` to stderr and `~/.devteam/hub-<HUB_PORT>.log`, rotating to `.1` before a write that would pass 1 MiB (1048576); `cmdHub()`; `runOwnerAction(args, { …, cwd = mainRoot })`; `projectKit()` = `kitVersion()` when `projectDir/settings.md` exists and `kitDir` is inside `mainRoot`, else `null`. Test helper `imageKit()` (in each test file that starts a standalone hub): copies `kit` (from `lib/kit.mjs`) minus `project/` and `run/` into a fresh non-git temp folder and returns its `scripts/devteam.mjs`, as `/opt/devteam/kit` is laid out.
+- Produces: `startHub(log, { kit = null, image = false, standalone = false } = {})`; `processLog(log, name)` installs uncaughtException/unhandledRejection (log `crashed: <stack>`, stderr `devteam <name> crashed: …`, exit 1) and SIGTERM/SIGINT/SIGHUP (`stopped by <SIG>`, exit 0); `hubLogger()` returns `(msg) => void` writing `<iso> [<pid>] <msg>` to stderr and `~/.devteam/hub-<HUB_PORT>.log`, rotating to `.1` before a write that would pass 1 MiB (1048576); `cmdHub()`; `runOwnerAction(args, { …, cwd = mainRoot })`; `projectKit()` = `kitVersion()` when `projectDir/settings.md` exists and `kitDir` is inside `mainRoot`, else `null`: used by the standalone hub only; a dashboard's hub passes `kitVersion()` as it is (spec-2 F2-1). Test helper `imageKit()` (in each test file that starts a standalone hub): copies `kit` (from `lib/kit.mjs`) minus `project/` and `run/` into a fresh non-git temp folder of its own (never under the hub's cwd, spec-2 F2-2) and returns its `scripts/devteam.mjs`, as `/opt/devteam/kit` is laid out.
 - List shape: `{ hub: 1, kit, ...(image ? { image: true } : {}), instances }`.
 
 - [ ] **Step 1: failing tests** in `test/hub-overview.test.mjs`, one helper `startHubCmd(cwd, env, args)` (spawn `node <imageKit()> hub …` with that cwd, detached, killed in `t.after`), env built from `process.env` minus the three box vars, `HOME` a temp home, `DEVTEAM_HUB_PORT=PORTS+40`, `DEVTEAM_PORT_BASE=PORTS+41`, `DEVTEAM_HUB_RETRY_MS=300`:
@@ -56,7 +56,7 @@
   - `test('the hub waits out another hub and a non-hub, logging the non-hub once, and takes the port')`: holder 1 = a tiny server answering `{"hub":1,"instances":[]}` on `/instances.json`; start `hub --release v9.9.9`; after 1.5 s (5 retries) it is alive and list kit is not `v9.9.9`; close holder → until list kit `v9.9.9`. Holder 2 = server answering `ok`: restart hub; after 1.5 s (≥ 4 × 300 ms) the hub is alive and exactly one line matching `isn't a devteam hub` in `HOME/.devteam/hub-<port>.log`; close → until kit `v9.9.9`.
   - `test('the hub\'s log stays under 1 MB and records a SIGTERM')`: pre-write the log with 1048000 bytes; start hub; until `hub on http://` is in log or `.1`; `statSync(log).size <= 1048576`; `kill(SIGTERM)`; until log includes `stopped by SIGTERM`.
 - [ ] **Step 2:** `node --test --test-name-pattern='hub' test/hub-overview.test.mjs` → the new tests FAIL (`unknown command "hub"`).
-- [ ] **Step 3: implement.** `cmdHub`: `const rel = flagStr('release')`; valid iff `/^v\d+\.\d+\.\d+$/`; invalid but given → log `hub: --release "<rel>" is not vX.Y.Z; serving with no release`; `startHub(log, valid ? { kit: rel, image: true, standalone: true } : { kit: projectKit(), standalone: true })`. In `startHub`: list body adds `kit`/`image`; standalone, on any listen error: for `EADDRINUSE` ask `holder()` and log the non-hub line only when the last state logged wasn't `other`; for another error log `hub: <message>` only when it differs from the last; then `setTimeout(tryListen, retry)` **not** unref'd. Dashboard path unchanged. Owner actions (`runOwnerAction` and `askOperator`'s `execFile`) use `cwd: standalone ? process.cwd() : mainRoot`. `cmdDashboard` uses `processLog(log, 'dashboard')` and `startHub(log, { kit: projectKit() })`. Add `'hub'` to `machineWide`, `COMMANDS`, HELP. Rewrite the comment above `startHub`: who serves it (a dashboard, or `devteam.mjs hub` alone, which keeps retrying), the list's fields, and "additive changes keep `hub: 1`; anything else bumps it".
+- [ ] **Step 3: implement.** `cmdHub`: `const rel = flagStr('release')`; valid iff `/^v\d+\.\d+\.\d+$/`; invalid but given → log `hub: --release "<rel>" is not vX.Y.Z; serving with no release`; `startHub(log, valid ? { kit: rel, image: true, standalone: true } : { kit: projectKit(), standalone: true })`. In `startHub`: list body adds `kit`/`image`; standalone, on any listen error: for `EADDRINUSE` ask `holder()` and log the non-hub line only when the last state logged wasn't `other`; for another error log `hub: <message>` only when it differs from the last; then `setTimeout(tryListen, retry)` **not** unref'd. Dashboard path unchanged. Owner actions (`runOwnerAction` and `askOperator`'s `execFile`) use `cwd: standalone ? process.cwd() : mainRoot`. `cmdDashboard` uses `processLog(log, 'dashboard')` and `startHub(log, { kit: kitVersion() })`. Add `'hub'` to `machineWide`, `COMMANDS`, HELP. Rewrite the comment above `startHub`: who serves it (a dashboard, or `devteam.mjs hub` alone, which keeps retrying), the list's fields, and "additive changes keep `hub: 1`; anything else bumps it".
 - [ ] **Step 4:** the same command → PASS; then the whole file and `test/dashboard.test.mjs` through `gate`.
 - [ ] **Step 5:** commit `kit-46 T1: devteam.mjs hub, the list's kit, the hub's log`.
 
@@ -64,11 +64,11 @@
 
 **Files:** Modify `docs/devteam/scripts/devteam.mjs` (`cmdDashboard`'s `listening` handler); Test `test/hub-overview.test.mjs`.
 
-**Interfaces:** Consumes `startHub(log, opts)`, `projectKit()` from T1. Produces `imageHub()` = `Number(process.env.DEVTEAM_IMAGE_HUB)` when the trimmed value is a non-empty integer string, else `null`.
+**Interfaces:** Consumes `startHub(log, opts)` from T1. Produces `imageHub()` = `Number(process.env.DEVTEAM_IMAGE_HUB)` when the value matches `^\d+$` (a plain port: not `0x10E0`, `4320.0` or ` 4320`), else `null`; the T2 test adds `0x10E0`-style value as a fourth run that serves its hub.
 
 - [ ] **Step 1: failing test** `test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names its own hub port')`: three runs of a bareProject dashboard on hub `PORTS+40`: (a) `DEVTEAM_IMAGE_HUB=String(PORTS+40)`: after the dashboard answers `/api/hello`, wait 1 s; `net.connect(PORTS+40)` fails (nothing listens); `run/dashboard.log` has exactly one line ending `hub: left to the image (DEVTEAM_IMAGE_HUB=<PORTS+40>)`. (b) unset and (c) `4320`: until `/instances.json` answers `hub: 1`, and the log has no `left to the image`.
 - [ ] **Step 2:** run → FAIL on (a).
-- [ ] **Step 3:** in the `listening` handler: `imageHub() === HUB_PORT ? log(\`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})\`) : startHub(log, { kit: projectKit() })`, with a one-line comment (the image's own hub serves it; an older kit can still take the port in a restart's gap).
+- [ ] **Step 3:** in the `listening` handler: `imageHub() === HUB_PORT ? log(\`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})\`) : startHub(log, { kit: kitVersion() })`, with a one-line comment (the image's own hub serves it; an older kit can still take the port in a restart's gap).
 - [ ] **Step 4:** PASS, and T1's tests still pass.
 - [ ] **Step 5:** commit `kit-46 T2: dashboards leave the hub to the image`.
 
@@ -102,6 +102,7 @@
 - [ ] **Step 2:** `git diff --diff-filter=A --name-only origin/main -- . ':!docs/devteam-dev'` is empty.
 - [ ] **Step 3:** commit `kit-46 T5: README, the image's hub`.
 
-## Rulings
+## Rulings and notes
 
-None yet.
+- Spec review 2 (APPROVE 2ce8e94), F2-1: the spec's own-kit guard for `kit` applies to the standalone hub only; a dashboard's hub reports `kitVersion()` unguarded, as done-when 1 says. F2-2: the test's kit copy lives outside the hub's cwd.
+- No rulings or answers yet.
