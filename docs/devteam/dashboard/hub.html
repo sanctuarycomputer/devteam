@@ -239,6 +239,9 @@ function frameFor(it) {
 // message from that frame alone; nothing else is listened to.
 const fleetWait = new Map(); // nonce -> { resolve, origin, win }
 const fleetBusy = new Map(); // root -> what is being asked, or the last error
+// root -> the mode its dashboard just said it set: a hello is up to 10 s old, and until it agrees
+// (or 30 s pass) the card shows what was done, not what the old hello says
+const fleetSet = new Map();
 window.addEventListener('message', (ev) => {
   const m = ev.data;
   if (!m || typeof m !== 'object' || m.devteam !== 'hub-fleet-done' || typeof m.nonce !== 'string') return;
@@ -248,6 +251,9 @@ window.addEventListener('message', (ev) => {
   w.resolve({ ok: m.ok === true, error: typeof m.error === 'string' ? m.error : null });
 });
 async function fleetAsk(it, mode, all = false) {
+  // a frame made only to ask is dropped once it has answered, unless its tab was chosen meanwhile:
+  // a dashboard reads its data every 10 s for as long as it is open, seen or not
+  const made = !it.frame;
   const frame = frameFor(it);
   await Promise.race([it.loaded, new Promise((r) => setTimeout(r, 15000))]);
   const origin = new URL(urlOf(it.x)).origin;
@@ -260,6 +266,7 @@ async function fleetAsk(it, mode, all = false) {
   const r = await Promise.race([answer, new Promise((r_) => setTimeout(() => r_({ ok: false, error: 'its dashboard didn\'t answer (an older kit can\'t be parked from here)' }), 20000))]);
   clearInterval(again);
   fleetWait.delete(nonce);
+  if (made && it.frame === frame && selected !== it.x.root) { frame.remove(); it.frame = null; it.loaded = null; }
   return r;
 }
 async function setFleet(roots, mode) {
@@ -269,7 +276,7 @@ async function setFleet(roots, mode) {
   await Promise.all(roots.map(async (r) => {
     const it = items.get(r);
     const res = it ? await fleetAsk(it, mode, roots.length > 1) : { ok: false, error: 'gone' };
-    if (res.ok) fleetBusy.delete(r); else fleetBusy.set(r, { error: res.error ?? 'it didn\'t work' });
+    if (res.ok) { fleetBusy.delete(r); fleetSet.set(r, { mode, until: Date.now() + 30000 }); } else fleetBusy.set(r, { error: res.error ?? 'it didn\'t work' });
   }));
   await draw();
   paintOverview();
@@ -289,7 +296,14 @@ const STATES = {
   starting: { label: 'Starting', tone: '', rank: 5 },
   unknown: { label: 'Running', tone: 'blue', rank: 3 },
 };
-const stateOf = (it) => (it.goneAt ? 'gone' : it.x.inbox === null || it.x.inbox === undefined ? 'starting' : STATES[it.x.pulse?.state] ? it.x.pulse.state : 'unknown');
+const stateOf = (it) => {
+  if (it.goneAt) return 'gone';
+  if (it.x.inbox === null || it.x.inbox === undefined) return 'starting';
+  const st = Object.hasOwn(STATES, it.x.pulse?.state) ? it.x.pulse.state : 'unknown';
+  // just parked or resumed from here, and its hello hasn't caught up
+  if (it.x.pulse && fleetSet.has(it.x.root)) { const m = modeOf(it); if (m === 'park') return 'parked'; if (st === 'parked') return 'unknown'; }
+  return st;
+};
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = String(text); return e; };
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 function agoText(iso) {
@@ -325,7 +339,14 @@ function mosaic(days) {
 const confirming = new Map(); // key -> until
 const confirmed = (key) => { const until = confirming.get(key) ?? 0; if (until > Date.now()) { confirming.delete(key); return true; } confirming.set(key, Date.now() + 5000); setTimeout(paintOverview, 5100); paintOverview(); return false; };
 const isConfirming = (key) => (confirming.get(key) ?? 0) > Date.now();
-const modeOf = (it) => (['park', 'drain'].includes(it.x.fleet?.mode) ? it.x.fleet.mode : 'run');
+const modeOf = (it) => {
+  const said = ['park', 'drain'].includes(it.x.fleet?.mode) ? it.x.fleet.mode : 'run';
+  const set = fleetSet.get(it.x.root);
+  if (!set) return said;
+  if (set.mode !== said && Date.now() < set.until) return set.mode;
+  fleetSet.delete(it.x.root);
+  return said;
+};
 // what the Overview can steer: a dashboard answering, on a kit that sends a pulse
 const steerable = (it) => !it.goneAt && Boolean(it.x.pulse);
 function fleetControl(it) {
@@ -340,6 +361,7 @@ function fleetControl(it) {
   for (const [mode, label, why] of opts) {
     const key = `${root}:${mode}`;
     const b = el('button', isConfirming(key) ? 'confirm' : '', isConfirming(key) ? 'Confirm park' : label);
+    b.dataset.k = key;
     b.title = why;
     b.setAttribute('aria-pressed', String(now === mode));
     b.disabled = Boolean(busy?.asking) || now === mode;
@@ -359,6 +381,7 @@ function overviewCard(it, newest) {
   const card = el('article', `ov-card${S.tone === 'red' ? ' bad' : S.tone === 'amber' ? ' warn' : ''}`);
   const top = el('div', 'ov-top');
   const name = el('button', 'ov-name', x.name);
+  name.dataset.k = `${x.root}:name`;
   name.title = `Open ${x.name}'s dashboard\n${x.root}`;
   name.onclick = () => select(x.root);
   const pills = el('span', 'ov-pills');
@@ -369,7 +392,7 @@ function overviewCard(it, newest) {
   card.append(top);
 
   const stats = el('div', 'ov-stats');
-  const stat = (k, v, cls = '', onclick = null) => { const s_ = el('div', 'ov-stat'); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.title = `Open ${x.name}'s Inbox`; } s_.append(vv); stats.append(s_); };
+  const stat = (k, v, cls = '', onclick = null) => { const s_ = el('div', 'ov-stat'); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.dataset.k = `${x.root}:inbox`; vv.title = `Open ${x.name}'s dashboard, where its Inbox is`; } s_.append(vv); stats.append(s_); };
   const kit = x.kit ?? '?';
   const nums = relNums(kit);
   const behind = newest && nums && relCmp(nums, newest) < 0;
@@ -408,7 +431,7 @@ function overviewCard(it, newest) {
     card.append(prog);
   }
 
-  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((p?.attention ?? []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
+  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
     for (const n of notes.slice(0, 5)) ul.append(el('li', n.red ? 'red' : '', n.t));
@@ -445,12 +468,17 @@ function paintOverview() {
   const held_ = can.filter((it) => modeOf(it) !== 'run');
   const running = can.filter((it) => modeOf(it) !== 'park');
   const anyBusy = can.some((it) => fleetBusy.get(it.x.root)?.asking);
-  if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
-  if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
+  if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.dataset.k = 'all:run'; b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
+  if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.dataset.k = 'all:park'; b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
   if (acts.childElementCount) head.append(acts);
   const grid = el('div', 'ov-grid');
-  for (const it of all) grid.append(overviewCard(it, newest));
+  // one answer in the block that isn't shaped like a hello costs its own card, not the page
+  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'ov-card bad'); c.append(el('div', 'ov-name', it.x.name), el('div', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
+  // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
+  // Park and then Confirm park are two presses of one key
+  const at = ovEl.contains(document.activeElement) ? document.activeElement.dataset.k : null;
   ovEl.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
+  if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
 }
 function paintTab(it) {
   const { x, tab } = it;

@@ -11394,7 +11394,9 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // instance in the block by asking each port /api/hello: a tab per instance, with that instance's
 // own dashboard in a sandboxed frame on its own address. It owns no state and does nothing for the
 // owner: GET only, no proxy, its own Host only, a page that fetches only from itself and frames only
-// the block. The others retry, so the hub moves when its dashboard stops. Something
+// the block. The page's Overview can run, drain and park a fleet, but not through this server: it
+// asks that project's dashboard, in its frame, and the dashboard posts to itself (index.html, "The
+// hub's Overview"). The others retry, so the hub moves when its dashboard stops. Something
 // that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
 function startHub(log) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
@@ -13548,6 +13550,8 @@ async function cmdDashboard() {
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
+      // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
+      if (r.ok) refreshHello();
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
