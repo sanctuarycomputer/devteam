@@ -8317,6 +8317,9 @@ function cmdDecide() {
     const incs = refs.map((r) => logGet(r)).filter(isIncident);
     if (incs.length !== 1) die(`an incident-fix decision names exactly one incident in --refs (sensor incident …), then the fix ticket's id; it names ${incs.length}`);
     const inc = incs[0];
+    // a fix names its ticket too, picked first: ticket add takes only a decision that names it, and
+    // an answer approves one decision, so a fix decided without it meant asking the owner again
+    if (!/^\s*(watch|ignore)\b/i.test(what) && !refs.some((r) => r !== inc.id && !/^[a-z]-\d{8}-/.test(r))) die(`a fix decision names its fix ticket's id in --refs too (pick it first): --refs ${inc.id} <ticket-id>. ticket add needs a decision that names the ticket, and an answer approves one decision, so leaving it out means asking again; "watch …" or "ignore …" needs no ticket`);
     const want = sevScope(incidentSeverity(inc));
     if (scope && scope !== want) die(`${inc.id} has computed severity ${incidentSeverity(inc)}: its scope is ${want}, not ${scope}`);
     scope = want;
