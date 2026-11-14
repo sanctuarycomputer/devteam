@@ -3793,8 +3793,12 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
 // The Loop's sidepeeks (the OODA spec, PR 3): every card opens one when clicked anywhere on it; an
 // observation's says where it came from and where it sits; a signal opens by its key, / and all.
 test('the Loop: a card opens its sidepeek; an observation says where it came from and where it sits; a signal opens by its key', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
+  // dashboard writing into them (a data run every 300 ms here) has stopped
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
   const F = fleetFixture('loop-peeks');
-  t.after(() => F.done());
+  undo.push(() => F.done());
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const O1 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow'], SUP);
   const O2 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', `slower than ${O1}`], SUP);
@@ -3810,11 +3814,11 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
     fs.appendFileSync(path.join(logDir, `supervisor-${d.toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, op: 'new', type: 'observation', id: `o-${stamp(d)}-supervisor`, at: d.toISOString(), by: 'supervisor', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed, then passed', source_key: 'metrics:flaky-gate:web/e2e' })}\n`);
   }
   const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
-  t.after(() => dash.stop());
+  undo.push(() => dash.stop());
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  undo.push(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  undo.push(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
