@@ -1900,7 +1900,7 @@
         ]
       },
       "act": {
-        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of one class only, artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs): the record of what the owner made public, with artifact and, for a publish, tree. It is a record, never a call: trust, decisions and corrections leave it out, and only the owner writes that class.",
+        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of two classes only. artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs) is the record of what the owner made public, with artifact and, for a publish, tree. pane-answer (written when the owner clicks an option on the dashboard's card) is the record of the owner answering a question a tool asked in the supervisor's terminal: what holds the dialog's first line (another account's artifact by its id, never its link), the option chosen, the keys sent and the dialog's digest, or that the key may not have landed; on a cloud box, proof holds the gateway's signature for the click. Each is a record, never a call: trust, decisions and corrections leave them out, and only the owner writes those classes.",
         "type": "object",
         "properties": {
           "class": {
@@ -2030,6 +2030,11 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
             "x-tip": "The artifact you published or took down."
+          },
+          "proof": {
+            "description": "On the owner's pane-answer act, on a cloud box only: the gateway's signature for the press that answered (the dashboard's port, when, a nonce taken once, the signature, and the signed body, which names the question's digest and the option). On a laptop nothing is signed and there is none.",
+            "type": "object",
+            "x-tip": "The gateway's signature for your click."
           },
           "tree": {
             "description": "On the owner's artifact-publish act with what publish: the git tree id of the artifact's folder on main that the gateway checked byte for byte and serves. Absent on an unpublish.",
