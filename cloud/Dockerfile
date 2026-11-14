@@ -115,7 +115,7 @@ COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
 # The kit, whole (it reads its schema beside it), as of the last release that changed this image:
 # box-deploy.yml deploys only then, so a repo's kit can be newer than this one, or older. The box's
-# own commands (box-status, box-tell, box-alert, box-recover) run it against every repo, and need it
+# own commands (box-status, box-tell, box-alert, box-thread, box-recover) run it against every repo, and need it
 # to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
 # questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
 # repo on a kit older than recover comes back the way the box always brought it back.
@@ -230,6 +230,12 @@ EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-alert
 #!/bin/sh
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine alert -- "$@"
+EOF
+# the owner's threads with the operator, from the hub's Overview: box-thread list --waiting, box-thread
+# show <id>, box-thread reply <id> "<words>" (kept in ~/operator/threads.jsonl)
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-thread
+#!/bin/sh
+exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
