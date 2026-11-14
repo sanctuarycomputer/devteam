@@ -477,10 +477,10 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN || path.join(mainRoot, 'docs
 // DEVTEAM_RUN is home's run folder, given to each session by the kit that starts it. One that isn't
 // inside the home this kit resolved is a session's, leaked into another repo's kit (a test's fixture,
 // a sibling): refused by name, never followed into that session's live log. The machine's commands
-// run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
+// (machine, operator-thread, recover --machine, the hub) run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
 // DEVTEAM_RUN that names some other folder inside home on purpose.
 const realPathMade = (p) => { let a = p; const rest = []; while (!fs.existsSync(a) && path.dirname(a) !== a) { rest.unshift(path.basename(a)); a = path.dirname(a); } return path.join(realPath(a), ...rest); };
-if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread'].includes(command) && !(command === 'recover' && flags.machine)) {
+if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread', 'hub'].includes(command) && !(command === 'recover' && flags.machine)) {
   const r = realPathMade(runDir), root = realPath(mainRoot);
   if (r !== realPathMade(path.join(mainRoot, 'docs', 'devteam', 'run')) && r !== root && !r.startsWith(`${root}${path.sep}`)) die(`DEVTEAM_RUN=${runDir} is not inside this kit's home (${mainRoot}): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`);
 }

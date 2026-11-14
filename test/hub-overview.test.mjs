@@ -386,3 +386,17 @@ test('a non-hub that answers slowly now and then is still logged once', { timeou
   assert.ok(h.alive());
   assert.equal(readOr(M.log).split('\n').filter((l) => l.includes("isn't a devteam hub")).length, 1, 'once, whatever answered slowly in between');
 });
+
+// The hub is the machine's, like machine and operator-thread: a session's DEVTEAM_RUN in its env (a
+// worker starting it by hand, say) is never refused there, and nothing is written into that run folder.
+test('the hub runs with another home\'s DEVTEAM_RUN in its env, and writes nothing there', { timeout: 120000 }, async (t) => {
+  const HUB = PORTS + 34;
+  const elsewhere = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-other-home-')), 'docs', 'devteam', 'run');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  t.after(() => fs.rmSync(path.dirname(path.dirname(path.dirname(elsewhere))), { recursive: true, force: true }));
+  const M = hubMachine(t, 'hub-run', HUB, { DEVTEAM_RUN: elsewhere });
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(async () => (await hubList(HUB))?.kit === 'v9.9.9' || !h.alive(), 'the hub, or its exit');
+  assert.ok(h.alive(), `the hub was refused: ${h.out()}`);
+  assert.deepEqual(fs.readdirSync(elsewhere), [], 'nothing in that run folder');
+});
