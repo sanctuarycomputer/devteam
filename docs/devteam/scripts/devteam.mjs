@@ -8598,6 +8598,9 @@ function observeFindings(m) {
 }
 async function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
+  // the tick's heartbeat: another machine live on this repo stops the tick here
+  const hc = hostCheck();
+  if (hc.refused) hostRefusedWhileRunning(hc);
   // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
@@ -12152,6 +12155,10 @@ function recoverOne() {
   if (missing.length) notes.push(`${dry ? 'missing here' : 'asked to get'}: ${missing.join(' ')}`);
   if (dropFlag && cmd.includes(SKIP_PERMISSIONS)) { cmd = withoutSkipPermissions(cmd); notes.push(`without ${SKIP_PERMISSIONS}: it ran without it`); }
   const tail = `${notes.length ? ` (${notes.join('; ')})` : ''}${!id && !exact ? ` ${NO_EXACT_RESUME}` : ''}`;
+  // another machine live on this repo: never a second supervisor, --force or not
+  // (only read here: it is written once the supervisor has really started, below)
+  const hc = hostCheck({ start: true, write: false });
+  if (hc.refused) return { say: `NOT started (${hc.refused})` };
   if (dry) return { say: `would ${how}${tail}` };
   // Claimed before a window opens: a shell pane says nothing, so anyone who gets past the lock must
   // find this. Taken back on any exit that started nothing, so the next try doesn't wait it out.
@@ -12170,6 +12177,7 @@ function recoverOne() {
   const line = `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} "$(cat '${promptFile}')"`;
   if (inPlace) {
     writeSupervisorUp({ up: true, kind: 'foreground', pid: null, start: null, machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
+    hostCheck({ start: true });
     return { say: `${didHow} in this terminal${tail}`, run: line };
   }
   if (sh('tmux', ['-V']) === null) return notStarted(`NOT started (no tmux here: run this in a terminal: DEVTEAM_ROLE=supervisor ${cmd})`);
@@ -12184,6 +12192,7 @@ function recoverOne() {
   recordSupervisorPane(runDir, pane);
   if (!typeInto(pane, line)) return notStarted(`NOT started (its window opened but could not be typed into: pane ${pane})`);
   writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
+  hostCheck({ start: true });
   return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
 }
 function cmdRecover() {
@@ -13602,7 +13611,13 @@ function cmdPrompt() {
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
   const t = role === 'worker' && positional[1] ? tickets().get(positional[1]) : null;
   const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : t ? promptFor('worker', t.id, repoAbout(repoOfTicketLink(t))) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
-  if (role === 'supervisor') return out(supervisorOpeningPrompt(p));
+  if (role === 'supervisor') {
+    // a start: another machine live on this repo is the whole prompt, so the agent stops there.
+    // The box's operator only reads it: no claim, no network.
+    const hc = process.env.DEVTEAM_ROLE === 'operator' ? {} : hostCheck({ start: true });
+    if (hc.refused) { out(`Do not supervise this repo from this machine. ${hc.refused}`); process.exitCode = 1; return; }
+    return out(supervisorOpeningPrompt(p));
+  }
   const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
   const links = linksBlock(positional[1]);
   const arts = artifactsBlock(positional[1]);
@@ -14262,6 +14277,7 @@ const fleetAt = (op) => (op ? `${op.slice(2, 6)}-${op.slice(6, 8)}-${op.slice(8,
 function cmdFleet() {
   const sub = positional[0];
   if (sub === 'status') return fleetStatus();
+  if (sub === 'host') return fleetHost();
   if (sub === 'drain' || sub === 'park') return fleetOp(sub);
   if (sub === 'undrain') return fleetUndo('drain');
   if (sub === 'unpark') return fleetUndo('park');
@@ -14273,7 +14289,7 @@ function cmdFleet() {
     if (inForce('drain')) fleetUndo('drain');
     return;
   }
-  die('usage: fleet drain | park [--reason "…"]   |   fleet undrain | unpark | resume   |   fleet status   (add --owner when the owner runs it)');
+  die('usage: fleet drain | park [--reason "…"]   |   fleet undrain | unpark | resume   |   fleet status   |   fleet host [--release | --take]   (add --owner when the owner runs it)');
 }
 // Set every goal's hold at once (Upkeep included), recording what each was. A fleet drain touches
 // only running goals and a fleet park only goals not already parked, so undoing it puts back
@@ -14293,6 +14309,9 @@ function fleetOp(mode) {
     changed.push(isUpkeep(g) ? 'upkeep' : g.id);
   }
   if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
+  // the claim says the fleet is held for a move, so the machine it moves to may take it over
+  logCache = null;
+  if (by === 'supervisor') hostCheck();
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
   out(`${mode === 'park' ? 'parked' : 'draining'} the fleet (${op}): ${changed.length} goal(s) set to ${mode}, Upkeep included; nothing new starts until fleet un${mode}`);
   if (mode === 'park') {
@@ -14481,10 +14500,14 @@ function fleetStatus() {
   const ready = !blockers.length;
   const parity = ready ? parityPrint() : null;
   const recovery = supervisorRecovery(supervisorSessionId());
-  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist, ...(recovery ? { recovery } : {}) };
+  // which machine supervises this repo (origin's claim): the one a move hands over
+  const host = hostHolder({ fetch: !flags['no-fetch'] });
+  if (fm && host.holder?.mine && !host.holder.fleet) warnings.push(`the claim on origin doesn't say this fleet is ${fm === 'park' ? 'parked' : 'drained'} yet (it couldn't be written), so the new machine waits until it lapses, 45 minutes after this one was last seen: run fleet ${fm} again once origin answers`);
+  const r = { parity, ...(host.holder ? { host: host.holder } : {}), supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist, ...(recovery ? { recovery } : {}) };
   if (flags.json) return json(r);
   if (r.recovery) out(`recovery (to bring the supervisor back, from the main checkout): ${r.recovery}`);
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
+  out(host.words);
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
   for (const x of sessions) out(x.readable === false ? `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.repo}: NO CHECKOUT HERE` : `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}${x.repo ? `  (${x.repo})` : ''}`);
   if (repoLinks.length) { out('\nrepos:'); for (const x of repos) out(`  ${x.id.padEnd(28)} ${x.remote} at ${x.path}  ${x.readable ? 'found' : x.found ? 'WRONG CHECKOUT' : 'MISSING'}`); }
@@ -14550,6 +14573,10 @@ function fleetUndo(mode) {
   if (repoRoot !== mainRoot) die(`run it from the main checkout (${mainRoot})`);
   git(['fetch', '--quiet', 'origin']);
   mainRefCache = undefined;
+  // the supervisor resuming is a start: never while another machine supervises this repo. The
+  // owner's unpark starts no supervisor here, so it leaves the claim to the supervisor's tick
+  const hc = by === 'supervisor' ? hostCheck({ start: true }) : {};
+  if (hc.refused) die(`fleet un${mode}: not here. ${hc.refused}`);
   const live = liveLogDir();
   if (!(fs.existsSync(live) && fs.readdirSync(live).some((f) => f.endsWith('.jsonl')))) {
     const main = mainRef() ?? die('no main branch to rebuild run/log from');
@@ -14578,6 +14605,8 @@ function fleetUndo(mode) {
   if (op && by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-un${mode}`, what: `un${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})`, refs: held.filter((x) => x.hold.fleet === op && !isUpkeep(x)).map((x) => x.id), reversible: true }, 'supervisor');
   logCache = null;
   out(`un${mode === 'park' ? 'parked' : 'drained'} the fleet${op ? ` (${op})` : ''}${legacy ? `, and lifted the old drain ${legacy.id}` : ''}: ${restored.length ? restored.join('; ') : 'no goal to put back'}`);
+  // the claim no longer says held for a move
+  if (by === 'supervisor') hostCheck();
   const rows = restartCommands().map((x) => `  devteam.mjs ${x.cmd.padEnd(36)} ${x.handoff ? 'its handoff note goes into its prompt' : 'no current handoff note'}`);
   const hint = rows.length ? pinsHint() : null;
   if (hint) out(`before restarting anything: ${hint}`);
@@ -14608,6 +14637,231 @@ function drainedPreface() {
   return `The fleet is ${what}${host ? `, on ${host}` : ''}. ${here
     ? 'This is the machine it was parked on. If a move is under way, carry on with it (supervisor.md §12): node docs/devteam/scripts/devteam.mjs fleet status until it says "ready to move", landing the log with log-sync and merge --chore log; start nothing. Run fleet unpark here only if the owner says to resume on this machine.'
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
+}
+
+// ===== the host claim: one machine supervises a repo at a time =====
+//
+// Two supervisors on two machines write the same log: their lines interleave once they land, their
+// ids collide, and one can make the other's tickets wait on work that isn't on main. A small ref on
+// origin, refs/devteam/host, says which machine supervises this repo now: a commit with no files
+// whose message is one JSON line (the machine's id, its hostname for people, the heartbeat, and
+// whether its fleet is parked or drained for a move). It never touches main's history, and a
+// compare-and-swap push (--force-with-lease on that one ref) means two machines taking it at once
+// can't both win. The supervisor's start (prompt supervisor, recover, fleet unpark|undrain) and its
+// tick (observe-metrics, and wait every 10 minutes) read it, and refresh it while they hold it;
+// fleet park|drain marks it released for a move; fleet status and fleet host show it. Nothing else
+// touches the network for it.
+//
+// The claim grants nothing. It is coordination between machines, not trust: no check anywhere reads
+// it as approval, and no command does more because this machine holds it. Anyone who can push to
+// origin can write it, so a hand-written claim can only make a supervisor refuse to start (or stop
+// at its tick) until it goes stale; it can never let one start that would otherwise be refused,
+// nor approve, merge or answer anything.
+const HOST_REF = 'refs/devteam/host';
+// origin's claim as last fetched: a local ref, so the claim's commit isn't collected meanwhile
+const HOST_SEEN_REF = 'refs/devteam/host-origin';
+// A heartbeat older than this is a machine that's gone (a dead laptop, a box being rebuilt).
+const HOST_FRESH_MS = 45 * 60000;
+// How often a holder writes its heartbeat, and how often wait reads the claim.
+const HOST_REFRESH_MS = 10 * 60000;
+// A heartbeat this far in the future is a wrong clock or a hand edit: it holds nothing.
+const HOST_SKEW_MS = 10 * 60000;
+const HOST_NET_MS = 15000;
+// This checkout's own record: the claim it last wrote, when it last read origin's, and whether it
+// has said it couldn't reach origin. Machine-local, like the rest of run/.
+const HOST_FILE = runPath('host-claim.json');
+// This machine's id: made once and kept in ~/.devteam (a box keeps its home across restarts and
+// redeploys, so its id stays whatever its pod or hostname is called), never derived from the boot,
+// the container or the hostname, which change. DEVTEAM_MACHINE_ID sets it instead (an image that
+// rebuilds its home each deploy, or a test's stand-in for a second machine).
+function hostMachineId() {
+  const set = hostToken(process.env.DEVTEAM_MACHINE_ID);
+  if (set) return set;
+  const f = path.join(os.homedir(), '.devteam', 'machine-id');
+  const had = readText(f)?.trim();
+  if (/^[A-Za-z0-9._-]{8,80}$/.test(had ?? '')) return had;
+  const id = `m-${crypto.randomBytes(8).toString('hex')}`;
+  try { writeText(f, `${id}\n`); } catch {}
+  return id;
+}
+// The machine's name for people (DEVTEAM_MACHINE_NAME, else its hostname). Never used to decide.
+// One token, as a claim's reader insists (parseHostClaim).
+const hostToken = (s) => String(s ?? '').trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 80);
+const hostName = () => hostToken(process.env.DEVTEAM_MACHINE_NAME) || hostToken(os.hostname()) || 'this-machine';
+const hostState = () => { try { const r = readJson(HOST_FILE); return r && typeof r === 'object' ? r : {}; } catch { return {}; } };
+const hostSave = (patch) => { try { writeJson(HOST_FILE, { ...hostState(), ...patch }); } catch {} };
+// git against origin with no prompt and a deadline: a laptop offline or a hung ssh never wedges a start.
+function hostNet(args) {
+  const ssh = process.env.GIT_SSH_COMMAND || git(['config', '--get', 'core.sshCommand'], mainRoot) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+  // LC_ALL=C: its messages are read (a missing ref, a lost race), so never translated
+  const r = spawnSync('git', args, { cwd: mainRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: HOST_NET_MS, env: { ...process.env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh } });
+  return { status: r.error ? null : r.status, err: (r.stderr || r.error?.message || '').trim() };
+}
+// A claim's commit read as data: only the fields the kit writes, each checked. Anything else reads
+// as unreadable, which the next start takes over: it would hold nothing anyway.
+function parseHostClaim(sha) {
+  const raw = sha ? git(['cat-file', 'commit', sha], mainRoot) : null;
+  if (raw === null) return null;
+  let c;
+  try { c = JSON.parse(raw.slice(raw.indexOf('\n\n') + 2).trim()); } catch { return { sha, unreadable: true }; }
+  // one name-like token each: the refusal is a supervisor's whole prompt and the owner reads the
+  // question, so a hand-written claim can't put words (or escape codes) in either
+  const word = (v) => (typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(v) ? v : null);
+  const at = Date.parse(c?.at);
+  if (c?.devteam_host !== 1 || !word(c.machine) || !Number.isFinite(at)) return { sha, unreadable: true };
+  const since = Date.parse(c.since);
+  return { sha, machine: c.machine, hostname: word(c.hostname) ?? 'a machine with an unreadable name', at: new Date(at).toISOString(), since: Number.isFinite(since) ? new Date(since).toISOString() : null, fleet: ['park', 'drain'].includes(c.fleet) ? c.fleet : null };
+}
+// origin's claim now: { claim, sha } with claim null when there is none, or { offline: why }.
+// fetch false reads the copy last fetched, touching no network.
+function readHostClaim({ fetch = true } = {}) {
+  if (!commonDir) return { offline: 'this is not a git checkout' };
+  if (!git(['config', '--get', 'remote.origin.url'], mainRoot)) return { offline: 'this checkout has no origin remote' };
+  if (fetch) {
+    const r = hostNet(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', 'origin', `+${HOST_REF}:${HOST_SEEN_REF}`]);
+    if (r.status !== 0) {
+      if (r.status !== null && /couldn't find remote ref|no such ref|not our ref/i.test(r.err)) { git(['update-ref', '-d', HOST_SEEN_REF], mainRoot); return { claim: null, sha: null }; }
+      return { offline: `could not reach origin (${firstLine(r.err) || 'timed out'})` };
+    }
+  }
+  const sha = git(['rev-parse', '--verify', '--quiet', HOST_SEEN_REF], mainRoot);
+  return { claim: sha ? parseHostClaim(sha) : null, sha: sha || null };
+}
+// What a claim means for this machine: mine; free (none, unreadable, stale, dated in the future, or
+// released by a park or drain for a move); or held by another machine that is live.
+function hostVerdict(claim, me = hostMachineId(), now = Date.now()) {
+  if (!claim || claim.unreadable) return { free: true, why: claim ? 'unreadable' : 'none' };
+  // mine: this machine's id, or the very claim this checkout last wrote (a machine whose home was
+  // rebuilt, and its id with it, keeps its checkout's run/ and isn't locked out by its own heartbeat)
+  if (claim.machine === me || (claim.sha && hostState().sha === claim.sha)) return { mine: true };
+  const age = now - Date.parse(claim.at);
+  if (age < -HOST_SKEW_MS) return { free: true, why: 'dated in the future' };
+  if (age > HOST_FRESH_MS) return { free: true, why: 'stale' };
+  if (claim.fleet) return { free: true, released: true, why: claim.fleet === 'park' ? 'parked for a move' : 'drained for a move' };
+  return { held: true, age: Math.max(0, age) };
+}
+const minutesAgo = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? 'less than a minute ago' : m === 1 ? 'a minute ago' : `${m} minutes ago`; };
+// The refusal, in plain words: who holds the repo, when it was last seen, and how to hand over.
+function hostRefusal(claim, age) {
+  const lapses = new Date(Date.parse(claim.at) + HOST_FRESH_MS).toISOString();
+  return `${claim.hostname} is supervising this repo (machine ${claim.machine}), last seen ${minutesAgo(age)} (${claim.at}). One machine supervises a repo at a time, so a second supervisor here would write over its work: this machine (${hostName()}) won't supervise it. To move it here: on ${claim.hostname}, park or drain the fleet (fleet park or fleet drain, supervisor.md §12), then start the supervisor here again. If ${claim.hostname} is gone (dead, or rebuilt without its disk), its claim lapses 45 minutes after it was last seen (at ${lapses}) and the next start anywhere takes over; the owner, sure it is gone, can free it now from any terminal of theirs (node docs/devteam/scripts/devteam.mjs fleet host --release), or take it for the machine they run that on (fleet host --take).`;
+}
+// The claim this machine would write now: its heartbeat, and the fleet's hold as this log has it.
+function hostClaimBody(prev) {
+  // A drain releases the claim only once it has drained: until then this supervisor still merges
+  // what is in flight, and a second one starting elsewhere would be the very collision this prevents.
+  let fleet = null;
+  try {
+    fleet = draining() ? 'park' : fleetMode();
+    if (fleet === 'drain' && liveSessions().some((s) => lastPhaseOf(s.name)?.to !== 'parked')) fleet = null;
+  } catch {}
+  const me = hostMachineId();
+  const since = prev && !prev.unreadable && prev.machine === me && prev.since ? prev.since : nowIso();
+  return { devteam_host: 1, machine: me, hostname: hostName(), at: nowIso(), since, fleet };
+}
+// Write this machine's claim over expect (origin's sha as read, or null for none) as one
+// compare-and-swap: a claim someone else wrote meanwhile makes it fail, and is never overwritten.
+function writeHostClaim(expect, prev) {
+  const tree = spawnSync('git', ['mktree'], { cwd: mainRoot, input: '', encoding: 'utf8' }).stdout?.trim();
+  if (!tree) return { failed: 'could not make the claim commit' };
+  const who = { GIT_AUTHOR_NAME: 'devteam', GIT_AUTHOR_EMAIL: 'devteam@localhost', GIT_COMMITTER_NAME: 'devteam', GIT_COMMITTER_EMAIL: 'devteam@localhost' };
+  const body = hostClaimBody(prev);
+  const c = spawnSync('git', ['commit-tree', tree, '-m', JSON.stringify(body)], { cwd: mainRoot, encoding: 'utf8', env: { ...process.env, ...who } });
+  const sha = c.status === 0 ? c.stdout.trim() : null;
+  if (!sha) return { failed: 'could not make the claim commit' };
+  const r = hostNet(['push', '--quiet', '--no-verify', `--force-with-lease=${HOST_REF}:${expect ?? ''}`, 'origin', `${sha}:${HOST_REF}`]);
+  // only a lost compare-and-swap is a race (the client's lease, or receive-pack's own check); a
+  // remote that declines the ref (a hook, a ruleset, a read-only key) is one we can't write: offline
+  if (r.status !== 0) return r.status !== null && /stale info|cannot lock ref|is at \S+ but expected|failed to update ref/i.test(r.err) && !/remote rejected.*(hook|denied|protected|permission|forbidden)/i.test(r.err) ? { raced: true } : { offline: `could not write the claim to origin (${firstLine(r.err) || 'timed out'})` };
+  git(['update-ref', HOST_SEEN_REF, sha], mainRoot);
+  hostSave({ sha, at: body.at, machine: body.machine });
+  return { wrote: true, claim: { ...body, sha } };
+}
+// Say once that the claim can't be checked, then carry on: a laptop with no network still works.
+function hostOffline(why) {
+  if (hostState().offline !== why) warn(`could not check which machine supervises this repo: ${why}. Carrying on; it is checked again on the next tick`);
+  hostSave({ offline: why, checked: Date.now() });
+  return { ok: true, offline: why };
+}
+// The one check, for a start or a tick: read origin's claim; held by another live machine, refuse;
+// else take or refresh it. A start always writes, taking over a claim that is free; a tick writes
+// only its own heartbeat once it is HOST_REFRESH_MS old (or when the fleet's hold changed), and
+// takes over only a claim no live machine holds, never one another machine released for a move
+// (that is the new machine's, taking over). write false reads only (recover --dry-run).
+// Returns { ok } or { refused: text, claim }.
+function hostCheck({ start = false, write = true } = {}) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = readHostClaim();
+    if (r.offline) return hostOffline(r.offline);
+    const v = hostVerdict(r.claim);
+    // a refusal is remembered, so wait checks again at once rather than in 10 minutes
+    hostSave({ offline: null, checked: Date.now(), refused: !!v.held });
+    if (v.held) return { refused: hostRefusal(r.claim, v.age), claim: r.claim };
+    const st = hostState();
+    const due = v.mine ? start || !(Date.now() - (Date.parse(st.at) || 0) < HOST_REFRESH_MS) || hostClaimBody(r.claim).fleet !== r.claim.fleet : start || !v.released;
+    if (!write || !due) return { ok: true, claim: r.claim };
+    const w = writeHostClaim(r.sha, r.claim);
+    if (w.raced) continue;
+    if (!w.wrote) return hostOffline(w.offline ?? w.failed);
+    if (v.free && r.claim && !r.claim.unreadable) process.stderr.write(`devteam: took over supervising this repo from ${r.claim.hostname} (its claim was ${v.why}; last seen ${r.claim.at})\n`);
+    return { ok: true, claim: w.claim };
+  }
+  // raced twice: someone keeps writing it, which is not yet a live machine holding it; carry on, and
+  // the next tick reads who won
+  return hostOffline('another machine wrote the claim at the same moment, twice');
+}
+// A refusal while the supervisor runs (its tick): one owner-action for the owner, in plain words,
+// once per holder's stint (never again on the next tick), and the supervisor told to stop.
+function hostRefusedWhileRunning(res) {
+  const c = res.claim;
+  if (c) {
+    const key = `host-claimed ${c.machine} ${c.since ?? c.at}`;
+    if (!logObjects('observation').some((o) => o.source_key === key)) {
+      const o = appendLog({ type: 'observation', source: 'kit', kind: 'host-claimed', subject: 'supervisor', detail: `${c.hostname} (machine ${c.machine}) holds this repo's supervisor claim, last seen ${c.at}; this machine (${hostName()}, machine ${hostMachineId()}) stopped supervising`, severity: 3, valence: -1, detector: 'kit', source_key: key }, 'supervisor');
+      appendLog({
+        type: 'question', kind: 'owner-action',
+        question: `${hostName()} stopped supervising this project, because ${c.hostname} is supervising it`,
+        context: `${c.hostname} was last seen working on it at ${c.at}. Only one machine runs a project at a time, so the two don't write over each other's work.\n\n- If ${c.hostname} should keep it: close the supervisor on ${hostName()}.\n- If you meant to move the project to ${hostName()}: ask the supervisor on ${c.hostname} to pause the fleet for a move first, then start the supervisor on ${hostName()} again.\n- If ${c.hostname} is gone for good: ${hostName()} can take over 45 minutes after it was last seen.`,
+        stake: 2, urgency: 2, evidence: [o.id], why_asked: { reasons: ['owner-only'] },
+      }, 'supervisor');
+    }
+  }
+  die(`stop supervising here. ${res.refused}`);
+}
+// Who holds the claim, for fleet status and fleet host: a view, so offline is a line, never a stop.
+function hostHolder({ fetch = true } = {}) {
+  const r = readHostClaim({ fetch });
+  if (r.offline) return { known: false, holder: null, words: `supervising machine: unknown (${r.offline})` };
+  const c = r.claim;
+  if (!c) return { known: true, holder: null, words: 'supervising machine: none (no machine has claimed this repo yet)' };
+  if (c.unreadable) return { known: true, holder: null, words: 'supervising machine: none (origin\'s claim is unreadable; the next start takes it over)' };
+  const v = hostVerdict(c);
+  const state = v.mine ? 'this machine' : v.held ? 'live' : v.why;
+  return {
+    known: true, holder: { machine: c.machine, hostname: c.hostname, at: c.at, since: c.since, fleet: c.fleet, mine: !!v.mine, state },
+    words: `supervising machine: ${c.hostname} (machine ${c.machine}${v.mine ? ', this machine' : ''}), last seen ${minutesAgo(Math.max(0, Date.now() - Date.parse(c.at)))} (${c.at})${c.fleet ? `, its fleet ${c.fleet === 'park' ? 'parked' : 'drained'} for a move` : ''}${!v.mine && !v.held ? `: ${v.why}, so the next start on another machine takes it over` : ''}`,
+  };
+}
+// fleet host: who holds the claim (origin's, fetched). The owner's alone, for a machine they know
+// is gone: --release deletes the claim (the next start anywhere takes it), --take writes this
+// machine's over it (run it on the machine that should supervise). Neither grants anything.
+function fleetHost() {
+  if (!flags.take && !flags.release) { const h = hostHolder({ fetch: !flags['no-fetch'] }); return flags.json ? json(h) : out(h.words); }
+  ownerWriter('the owner frees or takes the claim in their own terminal');
+  const r = readHostClaim();
+  if (r.offline) die(`could not ${flags.release ? 'free' : 'take'} the claim: ${r.offline}`);
+  if (flags.release) {
+    if (!r.sha) return out('no machine holds this repo; nothing to free');
+    const d = hostNet(['push', '--quiet', '--no-verify', `--force-with-lease=${HOST_REF}:${r.sha}`, 'origin', `:${HOST_REF}`]);
+    if (d.status !== 0) die(`could not free the claim: ${firstLine(d.err) || 'timed out'}`);
+    git(['update-ref', '-d', HOST_SEEN_REF], mainRoot);
+    const was = r.claim && !r.claim.unreadable ? r.claim : null;
+    return out(`freed: ${was ? `${was.hostname} no longer holds this repo` : 'the claim is gone'}; the next supervisor to start, on any machine, takes it${was ? ` (if ${was.hostname}'s supervisor is in fact still running, its next tick takes it back)` : ''}`);
+  }
+  const w = writeHostClaim(r.sha, null);
+  if (!w.wrote) die(`could not take the claim: ${w.offline ?? w.failed ?? 'another machine wrote it at the same moment; try again'}`);
+  const from = r.claim && !r.claim.unreadable && r.claim.machine !== hostMachineId() ? r.claim : null;
+  out(`${hostName()} now supervises this repo${from ? ` (taken from ${from.hostname}, last seen ${from.at}; if its supervisor is still running, it stops at its next tick)` : ''}`);
 }
 
 // ===== sensors: production signals into the loop =====
@@ -16349,6 +16603,10 @@ function cmdWait() {
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     return { owner, msgs, high };
   };
+  // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
+  // keeps its claim fresh, and another machine live on this repo ends the wait
+  const hostBeat = () => { if (hostState().refused || !(Date.now() - (Number(hostState().checked) || 0) < HOST_REFRESH_MS)) { const hc = hostCheck(); if (hc.refused) hostRefusedWhileRunning(hc); } };
+  hostBeat();
   const firstAlerts = poll();
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
@@ -16365,6 +16623,7 @@ function cmdWait() {
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
     sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    hostBeat();
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
@@ -17396,7 +17655,8 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   fleet drain | park [--reason r] [--owner]   every goal at once (Upkeep included): drain sets running goals to drain, park sets every goal not parked to park; each records what it replaced
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
   handoff [--file f] [--supervisor]   a parked worker or planner: the note (stdin) as an empty "devteam handoff: <name>" commit on its branch, pushed; the supervisor: an annotated devteam-handoff/<op> tag on origin
-  fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist
+  fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
+  fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
   drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
 
 The graph (planning.md)
@@ -17496,7 +17756,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
