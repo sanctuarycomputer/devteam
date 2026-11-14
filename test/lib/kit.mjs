@@ -435,6 +435,8 @@ export function bareProject(base, name) {
   const r = path.join(base, name);
   fs.mkdirSync(r);
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: r });
+  // a fixture is a repo of its own: a kit copied into a folder of another repo would take that repo's home
+  assert.equal(fs.realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: r, encoding: 'utf8' }).trim()), fs.realpathSync(r), 'a fixture is a repo of its own');
   fs.cpSync(kit, path.join(r, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
   const i = spawnSync(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), 'init', '--name', name], { cwd: r, encoding: 'utf8' });
   assert.equal(i.status, 0, i.stderr);

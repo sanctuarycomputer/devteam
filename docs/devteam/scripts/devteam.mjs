@@ -418,6 +418,11 @@ const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.
 const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
 // The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
 const repoLinksIn = (file) => { try { const m = readText(file)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); return Object.entries(JSON.parse(m[1]).links ?? {}).filter(([, l]) => l?.kind === 'repo' && typeof l.remote === 'string'); } catch { return []; } };
+// A kit copied into a folder inside another checkout with no repo of its own (a fixture made without
+// git init) would take that checkout's git, and so its home, project and live log: a kit in a repo
+// runs only from that checkout's own docs/devteam.
+const kitCheckout = path.resolve(here, '..', '..', '..');
+if (command && !['help', '--help'].includes(command) && !fs.existsSync(path.join(kitCheckout, '.git')) && commonOf(here)) die(`this kit (${fileURLToPath(import.meta.url)}) is not its checkout's own (${path.join(git(['rev-parse', '--show-toplevel'], here) ?? kitCheckout, 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)`);
 // { common, proj }: home's git common dir, and its project folder when DEVTEAM_HOME named it.
 const homeAt = (() => {
   const env = process.env.DEVTEAM_HOME;
@@ -461,6 +466,16 @@ const devteamDir = !cwdIsHome && commonDir ? path.join(mainRoot, 'docs', 'devtea
 const kitDir = path.resolve(here, '..');
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
 const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
+// DEVTEAM_RUN is home's run folder, given to each session by the kit that starts it. One that isn't
+// inside the home this kit resolved is a session's, leaked into another repo's kit (a test's fixture,
+// a sibling): refused by name, never followed into that session's live log. The machine's commands
+// run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
+// DEVTEAM_RUN that names some other folder inside home on purpose.
+const realPathMade = (p) => { let a = p; const rest = []; while (!fs.existsSync(a) && path.dirname(a) !== a) { rest.unshift(path.basename(a)); a = path.dirname(a); } return path.join(realPath(a), ...rest); };
+if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread'].includes(command) && !(command === 'recover' && flags.machine)) {
+  const r = realPathMade(runDir), root = realPath(mainRoot);
+  if (r !== realPathMade(path.join(mainRoot, 'docs', 'devteam', 'run')) && r !== root && !r.startsWith(`${root}${path.sep}`)) die(`DEVTEAM_RUN=${runDir} is not inside this kit's home (${mainRoot}): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`);
+}
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
