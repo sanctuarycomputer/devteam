@@ -1219,6 +1219,20 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
   assert.match(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: 'b'.repeat(64) })]), /^main has changed viewer-mock since this published version$/m);
   assert.match(F.sup(['thread', 'show', on({ at: 'demo-01-gone', fp: lib.fp })]), /^the artifact viewer-mock is no longer at "demo-01-gone"$/m, 'a draft whose worktree is gone');
+  // a published tree is served only under the slug whose folder it was on main: another artifact's
+  // tree under this name would show its files as this one's, in the bar and in a thread's subject
+  const T2 = landArtifact(F, 'other-mock', { ...VIEWER_MOCK, 'artifact.json': JSON.stringify({ v: 1, title: 'Other mock', summary: 'Another page', by: 'supervisor', for: [] }) });
+  assert.equal((await fetch(`${B}/artifact/tree/${T2}/viewer-mock/`)).status, 404, 'another artifact\'s tree under this slug');
+  assert.equal((await view({ slug: 'viewer-mock', at: `tree:${T2}` })).status, 404);
+  assert.equal(F.run(F.old, ['artifact', 'describe', 'viewer-mock', `--at=tree:${T2}`]).status, 3, 'nothing there');
+  assert.equal((await fetch(`${B}/artifact/tree/${T2}/other-mock/`)).status, 200, 'under its own');
+  // a version main has moved on from is still its slug's, by main's history of that folder
+  write(path.join(F.old, 'docs/devteam/project/artifacts/viewer-mock/style.css'), '#art { color: rgb(4, 5, 6) }');
+  const T3 = landArtifact(F, 'viewer-mock', {});
+  assert.notEqual(T3, T);
+  assert.equal((await fetch(`${B}/artifact/tree/${T}/viewer-mock/`)).status, 200, 'the older version, by history');
+  assert.equal(F.run(F.old, ['artifact', 'describe', 'viewer-mock', `--at=tree:${T}`]).status, 0, 'and in a process of its own, nothing remembered');
+  assert.equal((await fetch(`${B}/artifact/tree/${T}/other-mock/`)).status, 404, 'still never under another slug');
   // and once main no longer has it, a thread on a published version says so
   const pub = on({ at: `tree:${T}`, fp: lib.fp });
   F.g(['rm', '-rq', 'docs/devteam/project/artifacts/viewer-mock'], F.old);
