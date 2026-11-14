@@ -17,7 +17,7 @@ Today Claude Code and claude-swap are `ARG`s, ttyd, mise and uv are literals ins
 5. **A comment above the first pin `ARG`** states the naming rule, that `devteam.mjs box-pins` reads and rewrites these lines, and the hold convention: a line `# hold: <reason>` directly above a tool's `_VERSION` `ARG` makes `box-pins check` report it as held and `bump` leave it. (A Dockerfile comment is only a whole line starting with `#`; a trailing `# …` on the `ARG` line would be part of the instruction, so the hold goes on the line above.) It also replaces the old "These pins are bumped by editing them here and redeploying" line.
 6. **At the very end**, just before `VOLUME /data`, after every tool layer and every `COPY`, so a new stamp rebuilds nothing:
    ```
-   ARG DEVTEAM_RELEASE=v0.51.0
+   ARG DEVTEAM_RELEASE=v0.52.0
    ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
        DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
    ```
@@ -48,7 +48,7 @@ The box image's `ENV` `DEVTEAM_KIT_RELEASE` (`vX.Y.Z`) and `DEVTEAM_BOX_TOOLS` (
 
 1. Pins only through `ARG`s with the names above, each just above its layer, every tool layer after the apt layers; a grep of `cloud/Dockerfile` for each version and each sum finds it exactly once, on its `ARG` line; the comment states the naming rule and the hold convention.
 2. gh installs from its release tarball checked against its sum, at `/usr/local/bin/gh`, root-owned, with `/usr/bin/gh` a symlink to it; no `cli.github.com` or `githubcli` line remains; the probe's output also shows `/usr/bin/gh --version`.
-3. `ARG DEVTEAM_RELEASE=v0.51.0`, `ENV DEVTEAM_KIT_RELEASE` and `ENV DEVTEAM_BOX_TOOLS` after every tool layer; no `DEVTEAM_IMAGE_HUB`.
+3. `ARG DEVTEAM_RELEASE=v0.52.0`, `ENV DEVTEAM_KIT_RELEASE` and `ENV DEVTEAM_BOX_TOOLS` after every tool layer; no `DEVTEAM_IMAGE_HUB`.
 4. The `box-image` workflow is green on the PR, and verification.md quotes the done-when's `docker run … sh -c '…'` output showing the pinned versions. No docker on this machine, so the output comes from CI: a temporary probe commit on `box-image.yml`, reverted before the merge request (Rulings).
 5. The values are the table above; `git diff --stat origin/main` lists `cloud/Dockerfile` and this ticket's records only.
 
@@ -69,3 +69,4 @@ The box image's `ENV` `DEVTEAM_KIT_RELEASE` (`vX.Y.Z`) and `DEVTEAM_BOX_TOOLS` (
 ## Rulings
 
 - m-20261114-213717043-supervisor (decision d-20261114-213713246-supervisor), on m-20261114-213703705-kit-47-dockerfile-pin-args: one temporary probe commit adds the done-when's `docker run … --version` line to `box-image.yml`'s smoke step; verification.md quotes its CI log with the run URL; the probe is reverted before the merge request, and the final diff is `cloud/Dockerfile` only (plus this ticket's records).
+- m-20261114-214136480-supervisor (a-20261114-214130871-supervisor), on m-20261114-214122043-kit-47-dockerfile-pin-args: `ARG DEVTEAM_RELEASE=v0.52.0`, not the done-when's v0.51.0 (v0.52.0 shipped after the ticket was written). The hold marker as a line above the `_VERSION` `ARG` is recorded for kit-48.
