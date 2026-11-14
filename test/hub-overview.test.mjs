@@ -373,3 +373,17 @@ test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names 
     } finally { await r.d.stop(); }
   }
 });
+
+test('a non-hub that answers slowly now and then is still logged once', { timeout: 120000 }, async (t) => {
+  const HUB = PORTS + 33;
+  const M = hubMachine(t, 'hub-slow-other', HUB);
+  // every other answer comes after the hub's 2 s patience: other, unsure, other, …
+  let n = 0;
+  const s = http.createServer((q, res) => { const slow = n++ % 2 === 1; setTimeout(() => { if (!res.destroyed) res.end('ok'); }, slow ? 2500 : 0); });
+  await new Promise((r) => s.listen(HUB, '127.0.0.1', r));
+  t.after(() => new Promise((r) => { s.closeAllConnections?.(); s.close(r); }));
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(() => n >= 6, `six asks of the holder (${h.out()})`);
+  assert.ok(h.alive());
+  assert.equal(readOr(M.log).split('\n').filter((l) => l.includes("isn't a devteam hub")).length, 1, 'once, whatever answered slowly in between');
+});

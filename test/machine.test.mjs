@@ -692,6 +692,15 @@ test('status names the hub\'s kit, or says it is no hub, or down', async () => {
       body = typeof b === 'string' ? b : JSON.stringify(b);
       assert.equal(await hubLineOf(), `machine: hub ${port} ${want}`, body.slice(0, 80));
     }
+    // something on the port that answers and never finishes, a byte at a time: status still ends,
+    // within its 3 s, and says it isn't a hub
+    const drip = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); const i = setInterval(() => res.write(' '), 1000); res.on('close', () => clearInterval(i)); });
+    await new Promise((r) => srv.close(r));
+    await new Promise((r) => drip.listen(port, '127.0.0.1', r));
+    const started = Date.now();
+    try { assert.equal(await hubLineOf(), `machine: hub ${port} up, not a hub`); } finally { drip.closeAllConnections?.(); await new Promise((r) => drip.close(r)); }
+    assert.ok(Date.now() - started < 8000, `status waited ${Date.now() - started} ms on a server that drips`);
+    await new Promise((r) => srv.listen(port, '127.0.0.1', r));
     body = JSON.stringify({ hub: 1, kit: 'v1.2.3', instances: [] });
     machine(['machine', 'alert', '--', 'look']);
     assert.equal(await hubLineOf(), `machine: hub ${port} up, kit v1.2.3; alert: look`, 'the alert suffix as it was');

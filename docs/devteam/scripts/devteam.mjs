@@ -11928,11 +11928,12 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
     });
     hub.once('error', async (e) => {
       if (standalone) {
-        // said once for each state, never at each retry; the timer keeps this process alive
+        // said once for each state, never at each retry (a slow answer, unsure, changes nothing); the
+        // timer keeps this process alive
         const now = e.code === 'EADDRINUSE' ? await holder() : `error ${e.message}`;
         if (now !== held && now === 'other') log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; retrying every ${retry / 1000} s`);
         else if (now !== held && now.startsWith('error ')) log(`hub: ${e.message}; retrying every ${retry / 1000} s`);
-        held = now;
+        if (now !== 'unsure') held = now;
         return void setTimeout(tryListen, retry);
       }
       if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
@@ -13542,21 +13543,27 @@ function versionBefore(a, b) {
 }
 const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) }); return 'up'; } catch { return 'DOWN'; } };
 // What serves the hub, from its list as the hub's own page asks for it: the release serving it (the
-// image's, marked), `kit ?` from a hub too old to say, `not a hub`, or DOWN. The release comes off the
+// image's, marked), `kit ?` from a hub too old to say, `not a hub`, or DOWN. 3 s in all, however slowly
+// the holder sends: something that answered and never finished isn't a hub. The release comes off the
 // network and goes to a terminal, so it is printed only in a release's own characters.
 const hubLine = (port) => new Promise((resolve) => {
-  const r = http.get({ host: '127.0.0.1', port, path: '/instances.json', timeout: 3000, headers: { host: `127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
-    let b = '';
-    res.on('data', (c) => { b += c; if (b.length > 65536) { res.destroy(); resolve('up, not a hub'); } });
+  let answered = false;
+  const done = (v) => { clearTimeout(timer); r.destroy(); resolve(v); };
+  const timer = setTimeout(() => done(answered ? 'up, not a hub' : 'DOWN'), 3000);
+  const r = http.get({ host: '127.0.0.1', port, path: '/instances.json', headers: { host: `127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
+    answered = true;
+    const chunks = [];
+    let size = 0;
+    res.on('data', (c) => { size += c.length; if (size > 65536) done('up, not a hub'); else chunks.push(c); });
     res.on('end', () => {
       let j = null;
-      try { j = JSON.parse(b); } catch {}
-      if (j?.hub !== 1) return resolve('up, not a hub');
-      resolve(typeof j.kit === 'string' && /^[\w.+-]{1,64}$/.test(j.kit) ? `up, kit ${j.kit}${j.image === true ? ' (image)' : ''}` : 'up, kit ?');
+      try { j = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+      if (j?.hub !== 1) return done('up, not a hub');
+      done(typeof j.kit === 'string' && /^[\w.+-]{1,64}$/.test(j.kit) ? `up, kit ${j.kit}${j.image === true ? ' (image)' : ''}` : 'up, kit ?');
     });
+    res.on('error', () => done('up, not a hub'));
   });
-  r.on('timeout', () => { r.destroy(); resolve('DOWN'); });
-  r.on('error', () => resolve('DOWN'));
+  r.on('error', () => done(answered ? 'up, not a hub' : 'DOWN'));
 });
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
