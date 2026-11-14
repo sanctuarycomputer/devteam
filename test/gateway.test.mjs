@@ -12,10 +12,12 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
+// the suite's shared env scrub, tmux shim and stand-ins (it also claims a port block, unused here)
+import './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kit = path.resolve(here, '..', 'docs', 'devteam');
-// a block of its own, apart from kit.test.mjs's (20000 and up)
+// ports of its own, apart from the blocks lib/kit.mjs hands out (20000 and up); set after its import, so these win
 const PORTS = 10000 + (process.pid % 90) * 100;
 const HUB = PORTS;
 const P = PORTS + 1;
@@ -720,7 +722,6 @@ test('the owner\'s threads with the operator reach the hub through the box\'s na
     const x = seen.at(-1);
     const proof = { path: x.url, ts: x.headers['x-devteam-gateway-ts'], nonce: x.headers['x-devteam-gateway-nonce'], sig: x.headers['x-devteam-gateway-sig'], body: Buffer.from(x.body).toString('base64') };
     const kitEnv = { ...process.env, HOME: box, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: path.join(box, 'thread-key.pub'), DEVTEAM_OPERATOR_COMMAND: '', DEVTEAM_THREAD_PROOF: 'stdin' };
-    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX', 'TMUX_PANE']) delete kitEnv[k];
     const kitRun = (input) => spawnSync(process.execPath, [path.join(kit, 'scripts', 'devteam.mjs'), 'operator-thread', 'new', '--', 'hello from the gateway'], { cwd: box, encoding: 'utf8', env: kitEnv, input });
     const took = kitRun(JSON.stringify(proof));
     assert.equal(took.status, 0, took.stderr);
@@ -761,7 +762,6 @@ test('the gateway to a real hub on a box: a signed press is kept as the owner\'s
   // a box as its hub sees one: the public URL, the gateway's public key, and a tmux with no server
   // (so nothing on this machine is ever typed into)
   const env = { ...process.env, HOME: home, TMUX_TMPDIR: noTmux, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: keyFile };
-  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX', 'TMUX_PANE']) delete env[k];
   const d = spawn(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'dashboard'], { cwd: A, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   d.stdout.on('data', (b) => { out += b; });

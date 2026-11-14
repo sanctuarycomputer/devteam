@@ -380,6 +380,8 @@ test('supervisor-session: the supervisor\'s own conversation, read from disk, an
     assert.equal(id(), 'started\n', 'quoting the commands is not running them');
     save('adopted', `${user('be the supervisor')}\n${ran('DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs status')}`);
     assert.equal(id(), 'adopted\n', 'the newest that ran them');
+    save('big-head', `${JSON.stringify({ type: 'attachment', attachment: { content: 'x'.repeat(100 * 1024) } })}\n${user('You are the supervisor for this repository')}`);
+    assert.equal(id(), 'big-head\n', 'a large attachment line before the prompt still finds it');
     save('setup', `${user('Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo')}\n${ran('cd /x/website; export DEVTEAM_ROLE=supervisor; D="node docs/devteam/scripts/devteam.mjs"; $D status')}`);
     assert.equal(id(), 'setup\n', 'a session that set up its own fleet, exporting the role');
     save('exported', `${user('look around')}\n${ran('export DEVTEAM_ROLE=supervisor; echo hi')}`);

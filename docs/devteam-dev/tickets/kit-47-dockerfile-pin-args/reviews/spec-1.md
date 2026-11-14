@@ -1,0 +1,30 @@
+# Spec review, pass 1
+
+- Reviewer: spec-reviewer (fresh subagent, claude-opus-5-5)
+- Reviewed: 5c1272cf3b6889f63936068670a4bc91faba7876 (spec.md)
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| F1 | Critical | W3; design "Data" (nothing persisted changes) and "One-way doors" (a deploy breaks nothing); MOTD's `gh auth setup-git` | spec.md "What changes" 1 and 4, "Edge cases" | Moving gh from `/usr/bin/gh` (apt) to `/usr/local/bin/gh` breaks git over HTTPS on every box already set up. `gh auth setup-git` writes the gh binary's absolute path into `~/.gitconfig`, and that file is on the volume, so it outlasts the deploy. This box's `~/.gitconfig` has `helper = !/usr/bin/gh auth git-credential` for github.com and gist.github.com. After the deploy that path is gone, so every agent's fetch and push fails to authenticate, which stalls every fleet. The spec doesn't mention it. Fix inside `touches`: the gh layer also links `/usr/bin/gh` to `/usr/local/bin/gh` (or the spec rules out the breakage another way), and the edge-case list and the smoke probe cover it, e.g. `test "$(readlink -f /usr/bin/gh)" = /usr/local/bin/gh`. | fixed: /usr/bin/gh symlink to /usr/local/bin/gh, edge case, probe line |
+| F2 | Minor | done-when 3 vs the facts; P3 | spec.md "What changes" 6, "Acceptance" 3 | `DEVTEAM_RELEASE=v0.51.0` is out of date. v0.52.0 was released at 2026-11-14T21:22Z (`gh release list`), after the ticket was written at 21:08Z, so an image built from main after this merge would claim v0.51.0 while carrying a later kit. The release-prep bump fixes it, and kit-49's gate refuses a mismatch, so this is self-correcting. Still, the spec should say so or get a supervisor ruling on v0.52.0, not copy the done-when silently. | fixed: ruling m-20261114-214136480-supervisor, v0.52.0 |
+| F3 | Minor | design Security ("root-owned, read-only files"); the image's root-only-PATH comment (box-thread) | spec.md "What changes" 4 | The gh tarball's entries are owned by `1001/1001` (`runner`; checked with `tar -tvzf --numeric-owner` on gh_2.104.0_linux_amd64.tar.gz). GNU tar run as root keeps the archive's owner, so the prescribed `tar -xzf … -C /usr/local …` leaves `/usr/local/bin/gh` owned by uid 1001, not root. Add `--no-same-owner`, or `chown root:root`. No uid 1001 exists today, so this is not exploitable (P6). | fixed: tar --no-same-owner |
+| F4 | Minor | spec "What changes" 4 (one layer per tool, image size) | spec.md "What changes" 4 | The spec doesn't say where the tarball is downloaded or that it is removed afterwards. uv's layer does `rm /tmp/uv.tgz`. Without that, about 13 MB of tarball stays in the layer. | fixed: tarball in /tmp, removed in the same RUN |
+| F5 | Minor | kit-48 contract (`bump` rewrites lines; hold "directly above a tool's `_VERSION` ARG") | spec.md "What changes" 3 and 5, "Contract provided" | Within a tool's block, the order of `_VERSION` and the two `_SHA256` `ARG`s isn't fixed, and neither is where the tool's descriptive comment sits relative to the `ARG`s and the hold line. Fix the order as `_VERSION`, then `_SHA256_X86_64`, then `_SHA256_AARCH64`, with any `# hold:` line directly above `_VERSION` and the tool's prose comment above that. Also say that values are unquoted. Then kit-48's parser and `bump` have one shape to handle. | fixed: one shape per tool in "What changes" 3 |
+| F6 | Minor | design "The Dockerfile's pins" (the hold is "on a `_VERSION` line") | spec.md "What changes" 5 | The spec moves the hold to the line above, correctly: Dockerfile comments are whole lines only, and a trailing `# …` would become more `ARG` names. But the design text that kit-48's worker will read still says "on a `_VERSION` line". Ask the supervisor to note the amendment in the design or in kit-48's ticket, so kit-48 doesn't parse a trailing comment. | fixed: supervisor recorded it for kit-48 (m-20261114-214136480-supervisor) |
+| F7 | Suggestion | none | spec.md "What changes" 6 | Today the existing ttyd comment (`# ttyd 1.7.7, …`) is a second literal of `1.7.7`. The rule in item 3 already covers it, but naming it in the spec saves the grep in acceptance check 1 a surprise. | fixed: "What changes" 3 says comments included |
+
+Checked and found sound: the gh sums (`98cb101a…c24e` amd64 and `cb34cefc…69e3` arm64 match `gh_2.104.0_checksums.txt`, and the amd64 tarball re-hashes to the same value); 2.104.0 is the latest non-prerelease (2026-11-12); the tarball layout and the `--strip-components=1 gh_…/bin/gh` member extraction (GNU tar on bookworm) produce `/usr/local/bin/gh`; `ARG` scope runs to the end of the single stage, so the trailing `ENV` can expand every pin; a changed `ARG` invalidates the first `RUN` that follows it and every layer after, so putting the tool layers after the apt layers and the stamp last does what the spec says; nothing else in the worktree references `/usr/bin/gh`; the leading `v` stays on mise and stays off gh, which matches what kit-48's `installed` expects.
+
+## Values and refusals
+
+- **W3 (fewer stuck fleets):** crossed as written (F1). Every existing box loses git HTTPS auth on the deploy. With the `/usr/bin/gh` link, the change serves W3.
+- **W1, W2, W4:** no owner question is added. Not otherwise affected.
+- **P1 (harness-agnostic):** the change is to the image only, with nothing harness-specific.
+- **P2 (nothing project-specific):** the pins and `ENV` are the kit's own box image and make sense for every instance's box.
+- **P3 / P4:** the probe commit was settled by a supervisor ruling, and no owner question was asked. F2 is the supervisor's to decide, not the owner's.
+- **P5 (authority):** the change touches no ladder, fold, merge or answer path.
+- **P6:** every download is still checked against its sum. F3 is untidy, not a forgeable path.
+- **R1:** the change raises no rung and writes no owner line.
+- **R2:** the change sends no owner-facing message. The build error "no <tool> for <arch>" is plain.
+
+Verdict: CHANGES 5c1272cf3b6889f63936068670a4bc91faba7876
