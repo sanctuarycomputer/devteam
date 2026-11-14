@@ -12170,19 +12170,8 @@ function projectKit(root, args, { timeout = 60000 } = {}) {
 }
 const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, args) ?? 'null'); } catch { return null; } };
 // Whether a repo's kit has recover, from its own help: what it says it does, however a later kit
-// is written inside. help reads nothing of the repo's and writes nothing. Kept for this process by
-// root and the kit file's size and time, so a kit is started once to say so; a help that failed or
-// timed out is asked again next time, never kept.
-const kitRecoverSeen = new Map();
-function kitHasRecover(root) {
-  let key = null;
-  try { const st = fs.statSync(kitAt(root)); key = `${root}\0${st.size}\0${st.mtimeMs}`; } catch {}
-  if (key && kitRecoverSeen.has(key)) return kitRecoverSeen.get(key);
-  const said = projectKit(root, ['help']);
-  const has = /^\s+recover \[/m.test(said ?? '');
-  if (key && said !== null) kitRecoverSeen.set(key, has);
-  return has;
-}
+// is written inside. help reads nothing of the repo's and writes nothing.
+const kitHasRecover = (root) => /^\s+recover \[/m.test(projectKit(root, ['help']) ?? '');
 // The supervisor's pane a repo noted, for the machine's commands: marked, on a kit with recover;
 // bare, as it is written, on a kit older than recover, which never marks it (nor does legacyRecover,
 // which writes only what that kit writes). Its supervisor has no role-less pane to take but by its
