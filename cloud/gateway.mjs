@@ -177,6 +177,13 @@ export function hubSignature(privateKeyPem, route, body, ts = Date.now(), nonce 
   const msg = Buffer.from(`devteam-operator-post-v1\n${route}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
 }
+// The same for the owner's answer to what a supervisor's terminal asks, on that instance's
+// dashboard (/api/pane-answer): its port in place of the route, under a name of its own, so a
+// signature made for one is never good for the other.
+export function paneSignature(privateKeyPem, port, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -1121,6 +1128,26 @@ export function createGateway(opts = {}) {
     });
     pipeline(req, up, () => {});
   };
+  // The owner's answer to what an instance's supervisor's terminal asks: the one dashboard request
+  // the gateway signs (paneSignature), after the session check, since on a box every agent can send
+  // that dashboard any header. The body is read whole (it is small) so its hash is what is signed;
+  // whatever signature headers the browser sent are replaced.
+  const panePost = (req, res, port, publicOrigin) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
+    req.on('error', () => res.destroy());
+    req.on('end', () => {
+      if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      const data = Buffer.concat(chunks);
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/pane-answer', headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...paneSignature(threadKey(store).privateKey, port, data) } }, (ur) => {
+        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
+        pipeline(ur, res, () => {});
+      });
+      up.on('error', () => { if (res.headersSent) return res.destroy(); send(res, 502, 'text/plain; charset=utf-8', `Nothing answers on instance ${port}.`); });
+      up.end(data);
+    });
+  };
   // Where a preview's server is listening: a dev server bound to localhost may sit on either family.
   const previewHost = (port) => new Promise((resolve) => {
     const next = (hosts) => {
@@ -1951,6 +1978,7 @@ export function createGateway(opts = {}) {
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
+        if (req.method === 'POST' && rawPath === '/api/pane-answer') return panePost(req, res, port, own);
         return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
