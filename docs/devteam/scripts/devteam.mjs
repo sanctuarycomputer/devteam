@@ -12906,7 +12906,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -16387,6 +16387,59 @@ function boxAlert() {
   } catch { return null; }
 }
 const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// The hub's Overview: is this project moving, and if not, why. From the log in one pass (no git
+// beyond the merge facts the fold already keeps), so hello stays cheap at every 10 s.
+// state: parked (every goal held), building (a worker mid-ticket and the fleet wrote in the last
+// hour), waiting (nothing building and a question with no default holds work up), stalled (open
+// work and nothing written by the fleet for 2 h), idle (no open work), moving (anything else: the
+// supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
+// the last 84 days ending today (UTC).
+const PULSE_DAYS = 84;
+function helloPulse() {
+  const now = Date.now();
+  const lines = readLog().lines;
+  const day0 = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate());
+  const activity = new Array(PULSE_DAYS).fill(0);
+  const lastBy = new Map();
+  const phaseBy = new Map();
+  let last = 0;
+  for (const l of lines) {
+    if (l.by === 'owner') continue;
+    const t = Date.parse(l.at);
+    if (!(t > 0)) continue;
+    if (t > last) last = t;
+    if (t > (lastBy.get(l.by) ?? 0)) lastBy.set(l.by, t);
+    if (l.type === 'phase' && (!phaseBy.has(l.by) || l.at >= phaseBy.get(l.by).at)) phaseBy.set(l.by, l);
+    const back = Math.floor((day0 - t) / 86400000) + 1;
+    if (t >= day0) activity[PULSE_DAYS - 1]++;
+    else if (back < PULSE_DAYS) activity[PULSE_DAYS - 1 - back]++;
+  }
+  const ts = [...tickets().values()].filter(isActive);
+  const done = ts.filter((t) => mergeShaFor(t.id)).length;
+  const open = ts.length - done;
+  const working = ts.filter((t) => !mergeShaFor(t.id) && phaseBy.has(t.id) && !['done', 'parked'].includes(phaseBy.get(t.id).to));
+  const quietMin = last ? Math.round((now - last) / 60000) : null;
+  const silent = working.filter((t) => now - (lastBy.get(t.id) ?? 0) > 3600000);
+  const qs = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
+  const holding = qs.filter((q) => (q.blocks ?? []).length && q.default == null).length;
+  const mode = fleetMode() ?? 'run';
+  const state = mode === 'park' ? 'parked'
+    : working.length > silent.length && quietMin !== null && quietMin < 60 ? 'building'
+    : holding ? 'waiting'
+    : open && (quietMin === null || quietMin >= 120) ? 'stalled'
+    : !open ? 'idle'
+    : 'moving';
+  const ago = (m) => (m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`);
+  const incidents = (() => { try { return incidentList().filter((p) => p.status !== 'resolved').length; } catch { return 0; } })();
+  const attention = [
+    holding ? `${holding} question${holding === 1 ? '' : 's'} with no default ${holding === 1 ? 'is' : 'are'} holding up work` : null,
+    state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `Open work, and nothing has moved in ${ago(quietMin)}`) : null,
+    silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
+    incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
+  ].filter(Boolean);
+  return { state, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
+}
 function cmdHello() {
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
@@ -16394,7 +16447,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the

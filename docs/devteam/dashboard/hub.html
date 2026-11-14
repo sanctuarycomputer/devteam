@@ -53,6 +53,52 @@
   @media (max-width: 640px) { header { flex-wrap: wrap; } nav { order: 3; flex-basis: 100%; } }
   #drop-hint { position: fixed; left: 50%; top: 52px; transform: translateX(-50%); z-index: 10; padding: 8px 14px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
   #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
+  /* the Overview: a card per project, read at a glance */
+  #overview { position: absolute; inset: 0; overflow: auto; padding: 20px 16px 40px; }
+  #overview[hidden] { display: none; }
+  .ov-head { max-width: 1200px; margin: 0 auto 16px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+  .ov-head h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
+  .ov-head .sum { color: var(--fg-2); }
+  .ov-grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; align-items: start; }
+  .ov-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); }
+  .ov-card.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .ov-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
+  .ov-top { display: flex; align-items: center; gap: 8px; }
+  .ov-name { font: 600 15px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+  .ov-name:hover { text-decoration: underline; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
+  .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.green { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); }
+  .pill.blue { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 12%, transparent); }
+  .pill.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
+  .pill.red { color: var(--red-fg); background: color-mix(in srgb, var(--red) 12%, transparent); }
+  .ov-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .ov-stat { display: flex; flex-direction: column; min-width: 0; }
+  .ov-stat .k { color: var(--muted); font-size: 11px; }
+  .ov-stat .v { font: 500 14px/1.3 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-stat .v.red { color: var(--red-fg); }
+  .ov-stat .v.amber { color: var(--amber-fg); }
+  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font: inherit; font: 500 14px/1.3 var(--sans); }
+  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; }
+  .ov-bar > span { display: block; height: 100%; background: var(--green); border-radius: 3px; }
+  .ov-prog { display: flex; flex-direction: column; gap: 4px; }
+  .ov-prog .k { color: var(--fg-2); font-size: 12px; }
+  .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .ov-att li { position: relative; padding-left: 14px; font-size: 12.5px; color: var(--fg); }
+  .ov-att li::before { content: ''; position: absolute; left: 2px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
+  .ov-att li.red::before { background: var(--red); }
+  .ov-ok { font-size: 12.5px; color: var(--fg-2); }
+  .ov-mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 9px); grid-auto-columns: 9px; gap: 2px; }
+  .ov-mosaic i { border-radius: 2px; background: var(--well); }
+  .ov-mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); }
+  .ov-mosaic i.l2 { background: color-mix(in srgb, var(--green) 55%, var(--well)); }
+  .ov-mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); }
+  .ov-mosaic i.l4 { background: var(--green); }
+  .ov-mosaic i.pad { background: none; }
+  .ov-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+  .ov-foot .k { color: var(--muted); font-size: 11px; }
+  .ov-none { color: var(--fg-2); font-size: 12.5px; }
+  @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -61,7 +107,7 @@
   <span id="notify"></span>
   <span id="box-links" hidden></span>
 </header>
-<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
+<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"></section></main>
 <div id="drop-hint" hidden></div>
 <script>
 // An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
@@ -99,9 +145,29 @@ let box = null; // { terminal, instance } when the gateway answers box.json
 const urlOf = (x) => (box ? box.instance.replace('{port}', String(Number(x.port))) : `http://127.0.0.1:${Number(x.port)}/`);
 const TERM = '\u0000terminal';
 let term = null; // { tab, frame }
+const OVERVIEW = '\u0000overview';
+const ovEl = $('overview');
+let ovTab = null;
 const byRoot = (a, b) => String(a).localeCompare(String(b));
 const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
 
+// Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
+function showOnly(key) {
+  if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW ? 0 : -1; }
+  ovEl.hidden = key !== OVERVIEW;
+  if (term) { term.tab.setAttribute('aria-selected', String(key === TERM)); term.tab.tabIndex = key === TERM ? 0 : -1; if (term.frame) term.frame.hidden = key !== TERM; }
+  for (const [r, o] of items) {
+    o.tab.setAttribute('aria-selected', String(r === key));
+    o.tab.tabIndex = r === key ? 0 : -1;
+    if (o.frame) o.frame.hidden = r !== key;
+  }
+}
+function selectOverview() {
+  selected = OVERVIEW;
+  history.replaceState(null, '', '#overview');
+  showOnly(OVERVIEW);
+  paintOverview();
+}
 function selectTerminal() {
   if (!term) return;
   selected = TERM;
@@ -114,23 +180,16 @@ function selectTerminal() {
     term.frame.src = box.terminal;
     framesEl.append(term.frame);
   }
-  term.tab.setAttribute('aria-selected', 'true');
-  term.tab.tabIndex = 0;
-  term.frame.hidden = false;
-  for (const o of items.values()) {
-    o.tab.setAttribute('aria-selected', 'false');
-    o.tab.tabIndex = -1;
-    if (o.frame) o.frame.hidden = true;
-  }
+  showOnly(TERM);
   term.frame.focus();
 }
 function select(root) {
   if (root === TERM) return selectTerminal();
+  if (root === OVERVIEW) return selectOverview();
   const it = items.get(root);
   if (!it) return;
   selected = root;
   history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
-  if (term) { term.tab.setAttribute('aria-selected', 'false'); term.tab.tabIndex = -1; if (term.frame) term.frame.hidden = true; }
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
@@ -142,11 +201,128 @@ function select(root) {
     it.frame.src = urlOf(it.x);
     framesEl.append(it.frame);
   }
-  for (const [r, o] of items) {
-    o.tab.setAttribute('aria-selected', String(r === root));
-    o.tab.tabIndex = r === root ? 0 : -1;
-    if (o.frame) o.frame.hidden = r !== root;
+  showOnly(root);
+}
+// ----- the Overview: every project on one page, to see at a glance that each is moving ----------
+// Each card is that project's own hello (its pulse), as text. A dashboard on an older kit sends no
+// pulse; its card says so and shows what it does send.
+const STATES = {
+  building: { label: 'Building', tone: 'green', rank: 3 },
+  moving: { label: 'Moving', tone: 'blue', rank: 3 },
+  waiting: { label: 'Waiting on you', tone: 'amber', rank: 1 },
+  stalled: { label: 'Stalled', tone: 'red', rank: 0 },
+  idle: { label: 'Idle', tone: '', rank: 4 },
+  parked: { label: 'Parked', tone: '', rank: 4 },
+  gone: { label: 'Not answering', tone: 'red', rank: 0 },
+  starting: { label: 'Starting', tone: '', rank: 5 },
+  unknown: { label: 'Running', tone: 'blue', rank: 3 },
+};
+const stateOf = (it) => (it.goneAt ? 'gone' : it.x.inbox === null || it.x.inbox === undefined ? 'starting' : STATES[it.x.pulse?.state] ? it.x.pulse.state : 'unknown');
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = String(text); return e; };
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+function agoText(iso) {
+  const t = Date.parse(iso ?? '');
+  if (!(t > 0)) return 'never';
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+}
+// kit releases compared by their numbers; "+local" is the same release with local changes
+const relNums = (k) => { const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(k ?? '')); return m ? m.slice(1).map(Number) : null; };
+const relCmp = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
+function mosaic(days) {
+  const box = el('div', 'ov-mosaic');
+  const n = days.length;
+  const max = Math.max(0, ...days);
+  const today = new Date();
+  const day0 = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  const first = new Date(day0 - (n - 1) * 86400000);
+  for (let i = 0; i < first.getUTCDay(); i++) box.append(el('i', 'pad'));
+  days.forEach((c, i) => {
+    const q = !c || !max ? 0 : Math.min(4, Math.ceil((c / max) * 4));
+    const cell = el('i', q ? `l${q}` : '');
+    const d = new Date(first.getTime() + i * 86400000);
+    cell.title = `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}: ${plural(c, 'thing', 'things')} the fleet logged`;
+    box.append(cell);
+  });
+  box.setAttribute('role', 'img');
+  const active = days.filter(Boolean).length;
+  box.setAttribute('aria-label', `Activity over the last ${Math.round(n / 7)} weeks: ${active} active days`);
+  return box;
+}
+function overviewCard(it, newest) {
+  const { x } = it;
+  const p = x.pulse ?? null;
+  const st = stateOf(it);
+  const S = STATES[st];
+  const card = el('article', `ov-card${S.tone === 'red' ? ' bad' : S.tone === 'amber' ? ' warn' : ''}`);
+  const top = el('div', 'ov-top');
+  const name = el('button', 'ov-name', x.name);
+  name.title = `Open ${x.name}'s dashboard\n${x.root}`;
+  name.onclick = () => select(x.root);
+  top.append(name, el('span', `pill ${S.tone}`, S.label));
+  card.append(top);
+
+  const stats = el('div', 'ov-stats');
+  const stat = (k, v, cls = '', onclick = null) => { const s_ = el('div', 'ov-stat'); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.title = `Open ${x.name}'s Inbox`; } s_.append(vv); stats.append(s_); };
+  const kit = x.kit ?? '?';
+  const nums = relNums(kit);
+  const behind = newest && nums && relCmp(nums, newest) < 0;
+  stat('Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
+  if (behind) stats.lastChild.title = `Behind the newest kit here (v${newest.join('.')})`;
+  else if (/\+local$/.test(String(kit))) stats.lastChild.title = 'This release, with local changes to the kit';
+  const inbox = typeof x.inbox === 'number' ? x.inbox : null;
+  stat('Inbox', inbox ?? '–', inbox ? 'red' : '', inbox ? () => select(x.root) : null);
+  stat('Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
+  stat('Last moved', p ? agoText(p.last_activity) : '–');
+  card.append(stats);
+
+  if (p) {
+    const total = p.open_tickets + p.done_tickets;
+    const prog = el('div', 'ov-prog');
+    prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged` : 'No tickets planned yet'));
+    const bar = el('div', 'ov-bar');
+    const fill = el('span');
+    fill.style.width = `${total ? Math.round((p.done_tickets / total) * 100) : 0}%`;
+    bar.append(fill);
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuemin', '0');
+    bar.setAttribute('aria-valuemax', String(total));
+    bar.setAttribute('aria-valuenow', String(p.done_tickets));
+    prog.append(bar);
+    card.append(prog);
   }
+
+  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((p?.attention ?? []).map((t) => ({ t: String(t), red: st === 'stalled' && /moved/.test(t) })))];
+  if (notes.length) {
+    const ul = el('ul', 'ov-att');
+    for (const n of notes.slice(0, 5)) ul.append(el('li', n.red ? 'red' : '', n.t));
+    card.append(ul);
+  } else if (p) card.append(el('div', 'ov-ok', st === 'idle' ? 'Nothing open. Waiting for a new goal.' : inbox ? 'Moving without you. The questions can wait.' : 'Nothing needs you.'));
+  else if (!it.goneAt && inbox !== null) card.append(el('div', 'ov-none', 'Update its kit to see what it is doing and how far along it is.'));
+
+  if (Array.isArray(p?.activity) && p.activity.length) {
+    const foot = el('div', 'ov-foot');
+    foot.append(mosaic(p.activity.map((n) => Math.max(0, Number(n) || 0))), el('span', 'k', `${Math.round(p.activity.length / 7)} weeks`));
+    card.append(foot);
+  }
+  return card;
+}
+function paintOverview() {
+  if (!ovTab || selected !== OVERVIEW) return;
+  const all = [...items.values()];
+  const newest = all.map((it) => relNums(it.x.kit)).filter(Boolean).sort(relCmp).pop() ?? null;
+  // what needs the owner first: stalled and gone, then waiting, then the rest by name
+  all.sort((a, b) => STATES[stateOf(a)].rank - STATES[stateOf(b)].rank || String(a.x.name).localeCompare(String(b.x.name)));
+  const count = (s_) => all.filter((it) => stateOf(it) === s_).length;
+  const owed = all.reduce((n, it) => n + (typeof it.x.inbox === 'number' ? it.x.inbox : 0), 0);
+  const stuck = count('stalled') + count('gone');
+  const head = el('div', 'ov-head');
+  head.append(el('h1', '', !all.length ? 'No projects running' : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : count('waiting') ? `${plural(count('waiting'), 'project')} waiting on you` : 'Everything is moving'));
+  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
+  head.append(el('span', 'sum', parts.join(' · ')));
+  const grid = el('div', 'ov-grid');
+  for (const it of all) grid.append(overviewCard(it, newest));
+  ovEl.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
 }
 function paintTab(it) {
   const { x, tab } = it;
@@ -297,33 +473,36 @@ async function draw() {
   }
   // tabs in the hub's order (by root)
   for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
+  if (ovTab) tabsEl.prepend(ovTab);
   if (term) tabsEl.prepend(term.tab);
   for (const it of items.values()) paintTab(it);
-  empty.hidden = items.size > 0 || Boolean(term);
+  empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW;
   if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
-  if (!selected || (selected !== TERM && !items.has(selected))) {
+  if (!selected || (selected !== TERM && selected !== OVERVIEW && !items.has(selected))) {
     const want = wanted();
     const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
-    // on a box the terminal is the first tab, and chosen unless the address names an instance or
-    // one has something in its Inbox
-    const pick = ordered.find((it) => keyOf(it) === want) ?? (term && want === 'terminal' ? null : ordered.find((it) => it.x.inbox > 0)) ?? (term ? null : ordered[0]);
+    // the address picks a tab; with none, the Overview (the terminal when the address says so)
+    const pick = ordered.find((it) => keyOf(it) === want);
     if (pick) select(pick.x.root);
-    else if (term) selectTerminal();
+    else if (term && want === 'terminal') selectTerminal();
+    else selectOverview();
   }
+  paintOverview();
   firstDraw = false;
 }
 window.addEventListener('hashchange', () => {
   const want = wanted();
   if (want === 'terminal' && term) return void (selected !== TERM && selectTerminal());
+  if (want === 'overview') return void (selected !== OVERVIEW && selectOverview());
   const it = [...items.values()].find((o) => keyOf(o) === want);
   if (it && it.x.root !== selected) select(it.x.root);
 });
 tabsEl.addEventListener('keydown', (e) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
-  const roots = [...(term ? [TERM] : []), ...[...items.keys()].sort(byRoot)];
+  const roots = [...(term ? [TERM] : []), OVERVIEW, ...[...items.keys()].sort(byRoot)];
   const i = roots.indexOf(selected);
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
-  if (next) { select(next); (next === TERM ? term : items.get(next)).tab.focus(); }
+  if (next) { select(next); (next === TERM ? term.tab : next === OVERVIEW ? ovTab : items.get(next).tab).focus(); }
 });
 // Left alone, a browser opens whatever is dropped on a page in a new tab. A drop on the terminal
 // goes to the terminal's own page, in its frame; this is for everywhere the hub itself is under
@@ -375,6 +554,14 @@ async function findBox() {
     term = { tab, frame: null };
   } catch {}
 }
+// The Overview's tab: after the box's Terminal, before the projects.
+ovTab = document.createElement('button');
+ovTab.className = 'tab';
+ovTab.setAttribute('role', 'tab');
+ovTab.textContent = 'Overview';
+ovTab.title = 'Every project at a glance: is it moving, what it needs from you';
+ovTab.onclick = selectOverview;
+tabsEl.append(ovTab);
 findBox().then(() => { notifyControl(); return draw(); });
 setInterval(draw, 10000);
 </script>
