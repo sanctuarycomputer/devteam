@@ -99,3 +99,4 @@
 
 - m-20261114-213717043-supervisor: temporary probe commit on `box-image.yml`, reverted before the merge request; final diff `cloud/Dockerfile` only.
 - m-20261114-214136480-supervisor: `ARG DEVTEAM_RELEASE=v0.52.0`.
+- m-20261114-214839590-supervisor, on m-20261114-214823090-kit-47-dockerfile-pin-args: yes to a native `ubuntu-24.04-arm` runner in the probe's build matrix (never QEMU), in the temporary probe only. So T2 builds and probes on both `ubuntu-latest` and `ubuntu-24.04-arm`, and aarch64 is not deferred.
