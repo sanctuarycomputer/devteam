@@ -25,7 +25,8 @@ fs.mkdirSync(nowhere);
 // a claude that notes how it was run and stays up as node (what a real one shows as, to tmux): first
 // on PATH, and the only claude a pane's shell finds
 const bin = path.join(tmp, 'bin');
-write(path.join(bin, 'claude'), `#!/bin/sh\nprintf '%s|%s|%s\\n' "$DEVTEAM_ROLE" "$DEVTEAM_KIT" "$(printf '%s' "$*" | tr '\\n' ' ')" >> .claude-calls\nexec ${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1e6)'\n`);
+// (in a folder that holds a stand-in agent, agent.cjs, it becomes that agent: the real start line, and a prompt to type into)
+write(path.join(bin, 'claude'), `#!/bin/sh\nprintf '%s|%s|%s\\n' "$DEVTEAM_ROLE" "$DEVTEAM_KIT" "$(printf '%s' "$*" | tr '\\n' ' ')" >> .claude-calls\n[ -f ./agent.cjs ] && exec ${JSON.stringify(process.execPath)} ./agent.cjs\nexec ${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1e6)'\n`);
 const stubShell = path.join(bin, 'stubshell');
 write(stubShell, `#!/bin/sh\nPATH=${bin}:/usr/bin:/bin\nexport PATH\nENV=/dev/null\nexport ENV\ncase "$1" in -c) exec /bin/sh "$@" ;; *) exec /bin/sh -i ;; esac\n`);
 for (const f of ['claude', 'stubshell']) fs.chmodSync(path.join(bin, f), 0o755);
@@ -65,7 +66,8 @@ function machine({ box = false, starts = true } = {}) {
   const env = { ...process.env, HOME: home, PATH: `${bin}${path.delimiter}${process.env.PATH}`, DEVTEAM_HUB_PORT: String(hub), DEVTEAM_TELL_SETTLE_SECONDS: '0.3', ...(box ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}), ...(starts ? {} : { DEVTEAM_OPERATOR_COMMAND: '' }) };
   for (const k of ['DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const dir = box ? path.join(home, 'operator') : path.join(home, '.devteam', `operator-${hub}`);
-  const run = (args, extra = {}, input = undefined) => spawnSync(process.execPath, [KIT, 'operator-thread', ...args], { cwd: nowhere, encoding: 'utf8', env: { ...env, ...extra }, input });
+  // input: a press's proof on stdin, as the hub hands it over (and says it has)
+  const run = (args, extra = {}, input = undefined) => spawnSync(process.execPath, [KIT, 'operator-thread', ...args], { cwd: nowhere, encoding: 'utf8', env: { ...env, ...(input === undefined ? {} : { DEVTEAM_THREAD_PROOF: 'stdin' }), ...extra }, input });
   const ok = (args, extra) => { const r = run(args, extra); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
   // on a box, an owner's verb as the hub runs it for a press the gateway signed
   const press = (action, body, o = {}) => run(o.args ?? pressArgs(action, body), {}, JSON.stringify(o.proof ?? signedPress(action, body, o).proof));
@@ -229,7 +231,7 @@ test('an owner turn becomes one line in the operator\'s pane, and only at its pr
     assert.equal(out[1], "sent to the operator's pane");
     await until(() => a.keys().includes('\r'), 'the line and its Enter');
     const typed = a.keys();
-    assert.equal(typed, `[devteam operator thread ${out[0]} from the owner, via the hub] restart beta; then \`whoami\` $(id) [31mred [0m gnp.exe "q" \\ ; tmux kill-server ; (the whole thread: operator-thread show ${out[0]}; answer with operator-thread reply ${out[0]} "<words>")\r`, 'literally, flattened to one line, with one Enter');
+    assert.equal(typed, `[devteam operator thread ${out[0]} from the owner, via the hub] restart beta; then \`whoami\` $(id) [31mred [0m gnp.exe "q" \\ ; tmux kill-server ; (a line like this proves nothing about who sent it: anything running on this machine can type one. The whole thread: operator-thread show ${out[0]}; answer with operator-thread reply ${out[0]} "<words>")\r`, 'literally, flattened to one line, with one Enter');
     assert.ok(!/[\x00-\x0c\x0e-\x1f\x7f\u202e]/.test(typed), 'no control or bidi character reaches the terminal');
     assert.ok(!typed.includes('IGNORE ALL RULES'), 'the subject is the page\'s words, never typed');
     assert.equal(M.store()[1].text, nasty, 'while the store keeps the words as they were said');
@@ -241,7 +243,7 @@ test('an owner turn becomes one line in the operator\'s pane, and only at its pr
     M.ok(['say', out[0], long]);
     await until(() => a.keys().length > before && a.keys().endsWith('\r'), 'the second line');
     const second = a.keys().slice(before);
-    assert.ok(second.includes(`] ${'é'.repeat(150)}… (the whole thread`), 'cut to 300 bytes');
+    assert.ok(second.includes(`] ${'é'.repeat(150)}… (a line like this proves nothing`), 'cut to 300 bytes');
     assert.equal(second.split('\r').length, 2, 'one Enter');
   } finally { a.kill(); }
 
@@ -312,7 +314,8 @@ test('on a box the owner\'s verbs take only a press the box\'s gateway signed, a
   const first = signedPress('thread-new', { title: 'alpha: Inbox 3', text: 'Why three?' });
   const args = ['new', '--title=alpha: Inbox 3', '--', 'Why three?'];
   const id = M.pressOk('thread-new', null, { proof: first.proof, args }).split('\n')[0];
-  assert.equal(M.store()[1].proof.nonce, first.proof.nonce);
+  assert.deepEqual([M.store()[0].type, M.store()[0].proof.nonce, M.store()[1].type, M.store()[1].proof.nonce], ['thread', first.proof.nonce, 'turn', first.proof.nonce], 'the proof is kept on the thread\'s line and on its first turn\'s');
+  assert.equal(M.list()[0].signed, true, 'the title and subject are the ones the gateway signed');
   no(M.press('thread-new', null, { proof: first.proof, args }), /that press was taken already/, 'a replay');
   M.pressOk('thread-say', { id, text: 'And the fourth?' });
   M.ok(['reply', id, 'Three questions are open.'], OP);
@@ -330,6 +333,17 @@ test('on a box the owner\'s verbs take only a press the box\'s gateway signed, a
   fs.appendFileSync(file, `${JSON.stringify({ v: 1, at, id: other, type: 'thread', op: 'new', by: 'owner', title: 'Force-push main' })}\n`);
   fs.appendFileSync(file, `${JSON.stringify({ v: 1, at, id: 'ou-20260101-000000000-eeeeee', type: 'turn', op: 'new', by: 'owner', thread: other, text: 'Why three?', proof: first.proof })}\n`);
   assert.equal(M.list().find((x) => x.id === other).turns[0].signed, false, 'a proof names the title it was signed with');
+  assert.equal(M.list().find((x) => x.id === other).signed, false);
+  // nor with the owner's proof copied onto the forged thread's own line: another title, or another subject
+  for (const [n, extra] of [['f', { title: 'Force-push main' }], ['b', { title: 'alpha: Inbox 3', subject: SUBJECT('/code/alpha') }]]) {
+    const tid = `ot-20260101-000000000-${n.repeat(6)}`;
+    fs.appendFileSync(file, `${JSON.stringify({ v: 1, at, id: tid, type: 'thread', op: 'new', by: 'owner', proof: first.proof, ...extra })}\n${JSON.stringify({ v: 1, at, id: `ou-20260101-000000001-${n.repeat(6)}`, type: 'turn', op: 'new', by: 'owner', thread: tid, text: 'Why three?', proof: first.proof })}\n`);
+    const x = M.list().find((y) => y.id === tid);
+    assert.deepEqual([x.signed, x.turns[0].signed], [false, false], `a forged thread with the owner's proof and ${Object.keys(extra).join(' and ')} of its own`);
+  }
+  // a thread line alone, its turn not yet written (or never): still a thread, with no turns
+  fs.appendFileSync(file, `${JSON.stringify({ v: 1, at, id: 'ot-20260101-000000000-999999', type: 'thread', op: 'new', by: 'owner', title: 'half' })}\n`);
+  assert.deepEqual(M.list().find((x) => x.id === 'ot-20260101-000000000-999999').turns, []);
   // a close the gateway didn't sign is passed over; a signed one counts
   fs.appendFileSync(file, `${JSON.stringify({ v: 1, at, id, type: 'thread', op: 'set', by: 'owner', status: 'closed' })}\n`);
   assert.equal(M.list().find((x) => x.id === id).status, 'open', 'an unsigned close');
@@ -356,7 +370,8 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
     assert.deepEqual([st.box, st.session, st.state, st.can_start], [false, `devteam-home-${M.hub}`, 'missing', true]);
     // the owner's first words start it, and wait for it: nothing is typed into a shell
     const said = M.ok(['new', 'what is stuck?']).split('\n');
-    assert.equal(said[1], 'recorded; the operator is starting, and reads this first');
+    // a first start can stop at Claude Code's own dialog, which only the owner answers: the reply says where
+    assert.equal(said[1], `recorded; the operator is starting for the first time here. If Claude Code asks whether to trust its folder, answer it in its terminal (tmux attach -t devteam-home-${M.hub}); it reads this once it is up`);
     await until(() => calls().length === 1, 'the operator\'s agent');
     // role|kit|arguments: operator.md has bars of its own (its tables)
     const [, role, kitPath, args] = /^([^|]*)\|([^|]*)\|(.*)$/.exec(calls()[0]);
@@ -406,6 +421,183 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
   } finally { tmuxSh(['kill-session', '-t', `=${N.session}`]); }
 });
 
+// The start must never fail open. tmux prints a tab as "_" under a C locale (LANG unset is one), and a
+// reader that split its lines on tabs then saw no operator and started another on every press.
+test('start-once holds under a C locale, with the window renamed, and when tmux gives no answer', { skip: !hasTmux }, async () => {
+  const C = { LANG: 'C', LC_ALL: 'C' };
+  const calls = (M) => (fs.existsSync(path.join(M.dir, '.claude-calls')) ? fs.readFileSync(path.join(M.dir, '.claude-calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
+  const windows = (M) => (tmuxSh(['list-windows', '-t', `=${M.session}`, '-F', '#W']).stdout ?? '').split('\n').filter(Boolean);
+  const panes = (M) => (tmuxSh(['list-panes', '-s', '-t', `=${M.session}`, '-F', '#{pane_id}']).stdout ?? '').split('\n').filter(Boolean);
+  // under LANG=C, every way of asking
+  const M = machine();
+  try {
+    assert.equal(spawnSync('tmux', ['list-panes', '-a', '-F', 'a\tb'], { encoding: 'utf8', env: { ...M.env, ...C } }).stdout.trim().split('\n')[0], 'a_b', 'this tmux, under this locale, does rewrite a tab (else the case below proves nothing)');
+    assert.match(M.ok(['start'], C), /^started fresh/);
+    await until(() => calls(M).length === 1, 'the operator\'s agent');
+    const st = JSON.parse(M.ok(['status', '--json'], C));
+    assert.notEqual(st.state, 'missing', 'the operator is seen');
+    assert.equal(st.can_start, false);
+    assert.match(st.pane, /^%\d+$/);
+    for (let i = 0; i < 3; i++) assert.match(M.ok(['start'], C), /^already running/);
+    assert.match(M.ok(['new', 'are you there?'], C).split('\n')[1], /^recorded; /);
+    await Promise.all(Array.from({ length: 4 }, () => new Promise((r) => spawn(process.execPath, [KIT, 'operator-thread', 'start'], { cwd: nowhere, env: { ...M.env, ...C }, stdio: 'ignore' }).on('close', r))));
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.equal(calls(M).length, 1, 'one agent, however often it was asked');
+    assert.deepEqual([windows(M), panes(M).length], [['operator'], 1], 'in one window, one pane');
+  } finally { tmuxSh(['kill-session', '-t', `=${M.session}`]); }
+
+  // the window renamed: the session is the operator's, whatever its window is called
+  const R = machine();
+  try {
+    assert.match(R.ok(['start']), /^started fresh/);
+    await until(() => calls(R).length === 1, 'the operator\'s agent');
+    const [pane] = panes(R);
+    tmuxSh(['rename-window', '-t', pane, 'my notes']);
+    assert.equal(JSON.parse(R.ok(['status', '--json'])).pane, pane, 'still found');
+    assert.match(R.ok(['start']), /^already running/);
+    R.ok(['new', 'still you?']);
+    // with the start's note gone too, the mark on the pane says it; with neither, an agent in the
+    // operator's own session is the operator
+    fs.rmSync(path.join(R.dir, 'operator-start.json'));
+    assert.match(R.ok(['start']), /^already running/, 'by the mark on its pane');
+    tmuxSh(['set-option', '-p', '-u', '-t', pane, '@devteam_operator']);
+    assert.match(R.ok(['start']), /^already running/, 'by being the agent in the operator\'s session');
+    assert.equal(JSON.parse(R.ok(['status', '--json'])).can_start, false);
+    assert.equal(calls(R).length, 1);
+    assert.deepEqual([windows(R), panes(R).length], [['my notes'], 1], 'no second window, no second agent');
+    // a shell someone opened beside it changes nothing: the agent is still the operator
+    tmuxSh(['new-window', '-d', '-t', `=${R.session}:`, '-n', 'operator']);
+    assert.match(R.ok(['start']), /^already running/);
+    assert.equal(JSON.parse(R.ok(['status', '--json'])).pane, pane, 'the agent, not the shell that took its name');
+    assert.equal(calls(R).length, 1);
+  } finally { tmuxSh(['kill-session', '-t', `=${R.session}`]); }
+
+  // the noted pane, alive in another session (its window was moved): running, and nothing new is opened
+  const V = machine();
+  try {
+    assert.match(V.ok(['start']), /^started fresh/);
+    await until(() => calls(V).length === 1, 'the operator\'s agent');
+    const [pane] = panes(V);
+    tmuxSh(['new-window', '-d', '-t', `=${V.session}:`, '-n', 'spare']);
+    tmuxSh(['move-window', '-s', pane, '-t', '=keep:']);
+    assert.deepEqual(windows(V), ['spare']);
+    assert.match(V.ok(['start']), /^already running/, 'the pane it noted is alive');
+    assert.equal(JSON.parse(V.ok(['status', '--json'])).pane, pane);
+    assert.equal(calls(V).length, 1);
+    tmuxSh(['kill-pane', '-t', pane]);
+  } finally { tmuxSh(['kill-session', '-t', `=${V.session}`]); }
+
+  // a tmux that answers nothing it can read (an error of its own, a line in another shape): never
+  // "no operator", so nothing is started, and nothing typed
+  const U = machine();
+  for (const [what, script] of [
+    ['an error', `#!/bin/sh\ncase "$1" in -V) echo tmux 3.4 ;; *) echo 'lost server' >&2; exit 1 ;; esac\n`],
+    ['a timeout\'s empty answer', `#!/bin/sh\ncase "$1" in -V) echo tmux 3.4 ;; *) exit 143 ;; esac\n`],
+    ['lines it cannot read', `#!/bin/sh\ncase "$1" in -V) echo tmux 3.4 ;; list-panes) echo 'operator_%3_node' ;; *) exit 0 ;; esac\n`],
+  ]) {
+    const fake = fs.mkdtempSync(path.join(tmp, 'faketmux-'));
+    write(path.join(fake, 'tmux'), script);
+    fs.chmodSync(path.join(fake, 'tmux'), 0o755);
+    const env = { PATH: `${fake}${path.delimiter}${U.env.PATH}` };
+    const st = JSON.parse(U.ok(['status', '--json'], env));
+    assert.deepEqual([st.state, st.can_start], ['no-answer', false], what);
+    const r = U.run(['start'], env);
+    assert.equal(r.status, 1, what);
+    assert.match(r.stdout, /^NOT started \(tmux did not say whether an operator is running/, what);
+    assert.match(U.ok(['new', 'hello?'], env).split('\n')[1], /^recorded; tmux did not say what the operator is at, so nothing was typed or started/, what);
+  }
+  assert.notEqual(tmuxSh(['has-session', '-t', `=${U.session}`]).status, 0, 'no session was made');
+  // and tmux saying plainly that there is no such session is still "missing": a start may go ahead
+  assert.deepEqual(JSON.parse(U.ok(['status', '--json'])).state, 'missing');
+});
+
+// A die under the start's lock would leave the lock held: what can die is settled before it.
+test('settings that can\'t be read fail the start before its lock is taken', { skip: !hasTmux }, () => {
+  const base = fs.mkdtempSync(path.join(tmp, 'badsettings-'));
+  const A = bareProject(base, 'alpha');
+  const f = path.join(A, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/```json devteam\s*\n/, '```json devteam\n{ not json\n'));
+  const M = machine();
+  const r = spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'operator-thread', 'start'], { cwd: A, encoding: 'utf8', env: M.env });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /settings\.md: the json devteam block is not valid JSON/);
+  assert.ok(!fs.existsSync(path.join(M.dir, 'start.lock')), 'no lock left behind');
+  assert.notEqual(tmuxSh(['has-session', '-t', `=${M.session}`]).status, 0);
+});
+
+// A role in the environment is the caller's own claim. Inside tmux, tmux says which pane a command
+// runs in, and a read or a reply there is the operator's only from the operator's pane.
+test('inside tmux, list, show and reply are the operator\'s only from its own pane', { skip: !hasTmux }, async () => {
+  const M = machine();
+  const a = seat(M);
+  const elsewhere = tmuxSh(['new-window', '-dP', '-F', '#{pane_id}', '-t', '=keep:', '-n', 'a-worker']).stdout.trim();
+  try {
+    await shown(a.pane, 'the operator');
+    const id = M.ok(['new', 'hello']).split('\n')[0];
+    const sock = tmuxSh(['display-message', '-p', '-t', a.pane, '#{socket_path}']).stdout.trim();
+    const at = (pane) => ({ TMUX: `${sock},1,0`, TMUX_PANE: pane });
+    // a session in another pane, claiming the operator's role (or none): refused, reads included
+    for (const role of [OP, {}]) {
+      for (const args of [['list'], ['list', '--json'], ['show', id], ['reply', id, 'x']]) {
+        const r = M.run(args, { ...role, ...at(elsewhere) });
+        assert.notEqual(r.status, 0, `${JSON.stringify(role)} ${args.join(' ')}`);
+        if (args[0] !== 'reply' || role === OP) assert.match(r.stderr, new RegExp(`inside tmux this is the operator's, from its own pane \\(pane ${a.pane}\\); this is pane ${elsewhere}`));
+        assert.equal(r.stdout, '', 'nothing of the threads is printed');
+      }
+    }
+    assert.deepEqual(M.list()[0].turns.map((u) => u.by), ['owner'], 'and nothing was written');
+    // the operator, in its own pane
+    assert.match(M.ok(['list'], { ...OP, ...at(a.pane) }), new RegExp(`^${id} `));
+    assert.match(M.ok(['show', id], { ...OP, ...at(a.pane) }), /hello/);
+    assert.match(M.ok(['reply', id, 'here'], { ...OP, ...at(a.pane) }), /^ou-/);
+    // the owner, in a terminal that is no tmux pane, reads as before
+    assert.equal(M.list().length, 1);
+    // no operator at all: a pane can't be its
+    a.kill();
+    const r = M.run(['list'], { ...OP, ...at(elsewhere), DEVTEAM_OPERATOR_COMMAND: '' });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /there is no operator here/);
+  } finally { a.kill(); tmuxSh(['kill-pane', '-t', elsewhere]); }
+});
+
+// Two turns sent at once: each is its text and its Enter in one tmux call, so the operator's input
+// never holds two texts run together before one Enter.
+test('turns sent at the same moment each arrive whole: text then Enter, never text, text, Enter, Enter', { skip: !hasTmux }, async () => {
+  const M = machine();
+  const a = seat(M);
+  try {
+    await shown(a.pane, 'the operator');
+    const id = M.ok(['new', 'first']).split('\n')[0];
+    await until(() => a.keys().includes('\r'), 'the first line');
+    const before = a.keys().length;
+    const n = 6;
+    await Promise.all(Array.from({ length: n }, (_, i) => new Promise((r) => spawn(process.execPath, [KIT, 'operator-thread', 'say', id, `turn number ${i}`], { cwd: nowhere, env: M.env, stdio: 'ignore' }).on('close', r))));
+    await until(() => a.keys().slice(before).split('\r').length - 1 >= n, 'every Enter');
+    const lines = a.keys().slice(before).split('\r').filter(Boolean);
+    assert.equal(lines.length, n);
+    for (const l of lines) assert.match(l, new RegExp(`^\\[devteam operator thread ${id} from the owner, via the hub\\] turn number \\d \\(a line like this proves nothing about who sent it: .*"<words>"\\)$`), 'one whole line before each Enter');
+    assert.deepEqual(lines.map((l) => /turn number (\d)/.exec(l)[1]).sort(), ['0', '1', '2', '3', '4', '5']);
+  } finally { a.kill(); }
+});
+
+// On a box the owner's command is handed its proof on stdin by the hub, which says so. Run any
+// other way it reads nothing: a pipe nobody writes to would otherwise hold it for ever.
+test('on a box an owner verb run with an idle stdin pipe is refused at once, never left waiting', async () => {
+  const M = machine({ box: true, starts: false });
+  const child = spawn(process.execPath, [KIT, 'operator-thread', 'new', 'x'], { cwd: nowhere, env: M.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let err = '';
+  child.stderr.on('data', (c) => { err += c; });
+  const code = await Promise.race([new Promise((r) => child.on('close', r)), new Promise((r) => setTimeout(() => r('still waiting'), 20000))]);
+  child.kill('SIGKILL');
+  assert.equal(code, 1, 'it exited by itself, with the pipe still open');
+  assert.match(err, /carries no signature from the gateway/);
+  // and a proof on stdin that the hub didn't announce is not read either
+  const r = M.run(['new', '--', 'x'], { DEVTEAM_THREAD_PROOF: '' }, JSON.stringify(signedPress('thread-new', { text: 'x' }).proof));
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /carries no signature from the gateway/);
+  assert.deepEqual(M.store(), []);
+});
+
 // ----- the hub's routes, and the Overview's dock and pin ------------------------------------------
 const ask = (port, method, route, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
   const data = body === undefined ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
@@ -426,7 +618,7 @@ async function hubFixture(t, name, { box: boxed = false } = {}) {
   const HUB = PORTS + 30;
   const P = PORTS + 31;
   const a = agentProgram([box(prompt)]);
-  const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(P), DEVTEAM_HUB_RETRY_MS: '500', DEVTEAM_TELL_SETTLE_SECONDS: '0.3', DEVTEAM_OPERATOR_COMMAND: `${process.execPath} ${a.prog} #`, CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex'), ...(boxed ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}) };
+  const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(P), DEVTEAM_HUB_RETRY_MS: '500', DEVTEAM_TELL_SETTLE_SECONDS: '0.3', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex'), ...(boxed ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}) };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const A = bareProject(base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
@@ -435,8 +627,14 @@ async function hubFixture(t, name, { box: boxed = false } = {}) {
   await until(async () => { try { return (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.pulse); } catch { return false; } }, 'the hub, listing alpha with its pulse');
   const own = { origin: `http://127.0.0.1:${HUB}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
   const dir = boxed ? path.join(home, 'operator') : path.join(home, '.devteam', `operator-${HUB}`);
+  // No DEVTEAM_OPERATOR_COMMAND: the start line is the real one, with the project's agent_command
+  // (claude), --append-system-prompt and the prompt file; the pane's claude is the stub above, which
+  // becomes the stand-in agent it finds in the operator's folder.
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(a.prog, path.join(dir, 'agent.cjs'));
   const kitOf = (args, extra = {}) => spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'operator-thread', ...args], { cwd: nowhere, encoding: 'utf8', env: { ...env, ...extra } });
-  return { HUB, P, A, env, own, dir, keys: a.keys, kitOf, store: () => (fs.existsSync(path.join(dir, 'threads.jsonl')) ? fs.readFileSync(path.join(dir, 'threads.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []) };
+  const calls = () => (fs.existsSync(path.join(dir, '.claude-calls')) ? fs.readFileSync(path.join(dir, '.claude-calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
+  return { HUB, P, A, env, own, dir, keys: a.keys, kitOf, calls, store: () => (fs.existsSync(path.join(dir, 'threads.jsonl')) ? fs.readFileSync(path.join(dir, 'threads.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []) };
 }
 
 test('the hub takes the owner\'s turns only from its own page, within its caps, and starts the laptop\'s operator on the first', { skip: !hasTmux, timeout: 240000 }, async (t) => {
@@ -503,16 +701,22 @@ test('the hub takes the owner\'s turns only from its own page, within its caps, 
   assert.equal(r.status, 200, r.body);
   const [id, said] = r.json.out.split('\n');
   assert.match(id, /^ot-/);
-  assert.equal(said, 'recorded; the operator is starting, and reads this first');
+  assert.equal(said, `recorded; the operator is starting for the first time here. If Claude Code asks whether to trust its folder, answer it in its terminal (tmux attach -t devteam-home-${HUB}); it reads this once it is up`);
   assert.deepEqual(F.store().map((l) => [l.type, l.by]), [['thread', 'owner'], ['turn', 'owner']]);
   assert.deepEqual(F.store()[0].subject, body.subject);
+  // the very next read asks tmux afresh: never the answer from before the press, which would offer Start again
+  r = await ask(HUB, 'GET', '/operator/threads', { headers: { 'sec-fetch-site': 'same-origin' } });
+  assert.deepEqual([r.json.operator.state === 'missing', r.json.operator.can_start], [false, false]);
   await until(async () => (await ask(HUB, 'GET', '/operator/threads', { headers: { 'sec-fetch-site': 'same-origin' } })).json.operator.state === 'ready', 'the operator at its prompt, as the dock reads it');
   assert.equal(F.keys(), '', 'the first words were not typed: the operator reads what is waiting');
+  // started by the real line: the project's own agent command, the role, operator.md as its system prompt, and what to read first
+  assert.equal(F.calls().length, 1);
+  assert.match(F.calls()[0], /^operator\|[^|]*devteam\.mjs\|--dangerously-skip-permissions --append-system-prompt # You are this machine's operator .*## On a laptop.* You are the sanctuarycomputer\/devteam operator for this machine, a laptop.*operator-thread list --waiting/);
   // the next are typed into its session, words that look like flags included
   r = await post('thread-say', { id, text: '--title=x -- and; `this`' });
   assert.equal(r.json.out, `${id}\nsent to the operator's pane`);
   await until(() => F.keys().includes('\r'), 'typed');
-  assert.ok(F.keys().startsWith(`[devteam operator thread ${id} from the owner, via the hub] --title=x -- and; \`this\` (the whole thread`));
+  assert.ok(F.keys().startsWith(`[devteam operator thread ${id} from the owner, via the hub] --title=x -- and; \`this\` (a line like this proves nothing about who sent it`));
   // start again: never a second
   r = await post('start', {});
   assert.equal(r.status, 200);
@@ -639,6 +843,22 @@ test('the Overview in Chrome: the Threads dock, a pin on what it is about across
   await until(() => F.keys().includes('\r'), 'typed into the operator\'s pane');
   assert.ok(F.keys().startsWith(`[devteam operator thread ${id} from the owner, via the hub] thanks (`));
   await page('Sent', `document.getElementById('tl-c-state').textContent === 'Sent.'`);
+  // On a box, as the page draws it: what the gateway didn't sign is not "You", and a reply is not
+  // verified. Drawn from a read shaped as a box's, and looked at before the next poll.
+  const boxed = await p.ev(`(() => {
+    const was = { op: TL.op, raw: TL.raw };
+    const wire = (t) => ({ ...t, subject: null, signed: false, turns: t.turns.map((u, i) => ({ ...u, ...(u.by === 'owner' ? { signed: i > 0 } : {}) })) });
+    TL.op = { ...TL.op, box: true };
+    TL.raw = TL.raw.map((t) => (t.id === '${id}' ? tThread(wire(t)) : t));
+    tlRelay(); tlDraw();
+    const got = { metas: [...document.querySelectorAll('#tl-c-turns .meta')].map((m) => m.textContent.split(' · ')[0]), note: document.getElementById('tl-c-note').textContent, kept: TL.raw.find((t) => t.id === '${id}').turns.map((u) => u.signed ?? 'none') };
+    TL.op = was.op; TL.raw = was.raw; tlRelay(); tlDraw();
+    return { ...got, after: document.getElementById('tl-c-note').textContent };
+  })()`);
+  assert.deepEqual(boxed.metas, ['Not sent from this page: written on the box as yours', 'The operator (not verified)', 'You']);
+  assert.deepEqual(boxed.kept, [false, 'none', true], 'the read\'s signed is carried, not dropped');
+  assert.match(boxed.note, /This thread was not started from this page.*Replies are not verified: on a box, anything running as its user can write one/);
+  assert.equal(boxed.after, '', 'and a laptop says nothing of it');
 
   // Shift and a click, without Pin: a thread about the headline, which belongs to no project
   await p.ev(`document.querySelector('[data-tl-close]').click()`);
