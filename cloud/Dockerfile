@@ -180,6 +180,17 @@ step='drop to gw'
 check 'as gw' as_gw id
 step='drop to dev'
 check 'as dev' as_dev id
+# The owner's threads with the operator: the gateway signs each press it passes to the hub, and the
+# hub (dev's, as every agent is) checks it against the public half, put where only root can write.
+# Without it the hub takes no thread press on this box; nothing else stops.
+step='the gateway key for threads'
+rm -f /etc/devteam/thread-key.pub
+install -d -o root -g root -m 755 /etc/devteam
+if as_gw /usr/local/bin/node /opt/devteam/gateway.mjs thread-key > /etc/devteam/thread-key.pub.new && grep -q 'BEGIN PUBLIC KEY' /etc/devteam/thread-key.pub.new; then
+  chown root:root /etc/devteam/thread-key.pub.new && chmod 644 /etc/devteam/thread-key.pub.new && mv -f /etc/devteam/thread-key.pub.new /etc/devteam/thread-key.pub
+else
+  rm -f /etc/devteam/thread-key.pub.new; say "no gateway key for threads: the hub takes no thread press on this boot"
+fi
 step='start the gateway'
 say "starting the gateway on ${PORT:-8080}"
 # not through as_gw: a function sent to the background is a subshell, and $! would be root's
@@ -232,10 +243,12 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/box-alert
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine alert -- "$@"
 EOF
 # the owner's threads with the operator, from the hub's Overview: box-thread list --waiting, box-thread
-# show <id>, box-thread reply <id> "<words>" (kept in ~/operator/threads.jsonl)
+# show <id>, box-thread reply <id> "<words>" (kept in ~/operator/threads.jsonl). show says which
+# owner turns the gateway signed; the image's node and kit, with nothing from dev's environment
+# that would load other code into it.
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-thread
 #!/bin/sh
-exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
+exec /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
