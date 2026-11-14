@@ -275,6 +275,13 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
 cd "$HOME"
 mkdir -p code
 note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
+# Temporary files go on the volume, not the instance's own disk: builds, gate copies and test
+# runs write hundreds of MB there at a time, and a platform that caps a container's ephemeral
+# storage evicts it (a new pod, the work in flight lost) when they pile up. tmux, every agent and
+# every build below inherit it. What a restart left there more than a day ago goes.
+mkdir -p "$HOME/tmp" && chmod 700 "$HOME/tmp"
+export TMPDIR="$HOME/tmp"
+find "$HOME/tmp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now; its mark
 # (supervisor-pane-role) goes with it.
