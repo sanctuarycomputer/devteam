@@ -1166,6 +1166,8 @@ function actView(a) {
       return { head: `Changed ${t || 'a ticket'}: ${fields.map((f) => FIELD_WORDS[f] || f).join(', ') || 'its details'}` };
     }
     case 'worker-slots': {
+      const rm = String(a.what).match(/^removed worktree \.worktrees\/(\S+?)(?: \(a worktree of \S+\))?: (.*)$/);
+      if (rm) return { head: `Tidied away the finished checkout ${esc(rm[1])}`, detail: linkify(rm[2]) };
       const m = String(a.what).match(/^(made|resumed) (worker|planner) (\S+)/);
       if (m?.[2] === 'planner') return { head: `${m[1] === 'made' ? 'Started' : 'Restarted'} planning feature ${esc(m[3])}` };
       return { head: `${m?.[1] === 'resumed' ? 'Restarted the agent on' : 'Put an agent to work on'} ${t || linkify(a.what)}` };
