@@ -477,6 +477,24 @@ export function startDashboard(root, env, args = []) {
   }));
   return { p, out: () => o, stop };
 }
+// A dashboard pinned to a port freePort found, resolved once it listens. The port is free when
+// freePort lets go of it, and anything on the machine can take it before the dashboard binds it: a
+// Chrome's DevTools port, which the kernel picks the same way, or a connection's own end. A pinned
+// dashboard that lost it says EADDRINUSE and exits, and is started again on another; one that exits
+// for any other reason fails here with what it said, not after a 2 min wait for a line it never prints.
+export async function dashboardOnFreePort(root, env, args = []) {
+  for (let i = 0; ; i++) {
+    const port = await freePort();
+    const dash = startDashboard(root, env, [...args, '--port', String(port)]);
+    // never left running by a wait that failed: no test has it to stop yet
+    try { await until(() => /dashboard on http/.test(dash.out()) || dash.p.exitCode !== null || dash.p.signalCode !== null, 'the dashboard'); } catch (e) { await dash.stop(); throw e; }
+    if (/dashboard on http/.test(dash.out())) return { dash, port };
+    // its last words may still be in the pipe when it exits
+    await new Promise((r) => { if (dash.p.stdout.closed && dash.p.stderr.closed) return r(); dash.p.once('close', r); setTimeout(r, 5000).unref(); });
+    await dash.stop();
+    if (!/EADDRINUSE/.test(dash.out()) || i >= 4) assert.fail(`the dashboard on ${port} exited: ${dash.out().slice(-800)}`);
+  }
+}
 // Up to 2 min: a dashboard's first background run (hello hashes every kit file) takes that long on
 // a loaded machine; a healthy one returns at once.
 export async function until(f, what = 'the condition') {
