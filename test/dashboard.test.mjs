@@ -338,7 +338,8 @@ const POLL_FAST = `(() => {
     // 30 s from its fetch, gate included: a gate held that long reads as a read given up at 0 ms.
     if (String(u).startsWith('/api/data')) {
       window.__polls++;
-      if (window.__gate) await window.__gate;
+      // how many reads wait at the gate: a refresh in flight, as the page sees it, held
+      if (window.__gate) { window.__gated = (window.__gated ?? 0) + 1; try { await window.__gate; } finally { window.__gated--; } }
       const x = { at: Date.now(), ms: null, status: null };
       (window.__reads ??= []).push(x);
       if (window.__reads.length > 20) window.__reads.shift();
@@ -595,12 +596,18 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
 
     await t.test('a refresh already in flight when you click in and type', async () => {
       await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))'); // void: evaluating a promise would wait for it
-      await polls(1);
-      await p.click(box);
-      const y = await p.ev('window.scrollY');
-      assert.ok(y > 0, 'the fixture page scrolls');
-      await p.type('hello');
-      await p.ev('window.__open(); window.__gate = null; window.__t = document.querySelector(\'' + box + '\')');
+      let y;
+      try {
+        // a read waiting at the gate, and none past it: counting polls can't say so, since a poll that
+        // reached the gate before the count was read is the last one until the gate opens
+        await soon('window.__gated > 0 && window.__quiet()', 'a refresh held at the gate');
+        await p.click(box);
+        await soon(`document.activeElement === document.querySelector('${box}')`, 'the field focused');
+        y = await p.ev('window.scrollY');
+        assert.ok(y > 0, 'the fixture page scrolls');
+        await p.type('hello');
+        await p.ev('window.__t = document.querySelector(\'' + box + '\'); void 0');
+      } finally { await p.ev('window.__open(); window.__gate = null; void 0'); } // never left shut: it would hold every later read
       await polls();
       assert.deepEqual(await state(y), wrote('hello'), 'still in the field after the refresh lands');
       assert.equal(await p.ev('window.__t.isConnected'), true, 'the same field, not a redrawn one');
