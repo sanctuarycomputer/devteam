@@ -1354,7 +1354,7 @@ function fold(all) {
     // keep it or change its words or scope (the owner's Keep is of what they read). And one about a
     // kind of call only the owner makes is theirs, however it was filed (supervisor.md §4).
     if (obj.type === 'knowledge' && cls === 'supervisor') {
-      const why = obj.for_owner === true ? (l.status === 'accepted' || ['statement', 'scope', 'plain'].some((k) => k in l) ? 'a lesson sent to the owner is theirs to keep: the supervisor may only retire it' : null)
+      const why = obj.for_owner === true ? (l.status === 'accepted' || ['statement', 'scope', 'plain'].some((k) => k in l) || ('for_owner' in l && l.for_owner !== true) ? 'a lesson sent to the owner is theirs to keep: the supervisor may only retire it' : null)
         : l.for_owner === true ? null
         : ownerScoped(l.scope) || (l.status === 'accepted' && ownerScoped(obj.scope)) ? 'a lesson about a kind of call only the owner makes is theirs to keep: the supervisor sends it to them' : null;
       if (why) { ignored.push({ line: l, why }); continue; }

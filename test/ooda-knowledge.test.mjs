@@ -253,11 +253,13 @@ test('lessons: the agents\' own are the supervisor\'s to keep; only one sent to 
     const hand = handFor(F);
     hand('supervisor', { type: 'knowledge', op: 'set', id: later, status: 'accepted' }, 500);
     hand('supervisor', { type: 'knowledge', op: 'set', id: theirs, statement: 'rewritten after the owner kept it' }, 400);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: later, for_owner: false }, 450);
     const raw = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'raw', scope: 'project', status: 'candidate', evidence: [o1] }, 300);
     hand('supervisor', { type: 'knowledge', op: 'set', id: raw, scope: `class:${only}` }, 200);
     const ks = json(ok(old, ['knowledge', '--json']));
     assert.equal(ks.find((k) => k.id === later).status, 'candidate', 'the supervisor\'s accept of a lesson sent to the owner is ignored');
     assert.match(ks.find((k) => k.id === theirs).statement, /^ship the pricing page/, 'and so is a rewording');
+    assert.equal(ks.find((k) => k.id === later).for_owner, true, 'and so is taking one back out of the owner\'s Inbox');
     assert.equal(ks.find((k) => k.id === raw).scope, 'project', 'and a re-scope to an owner-only class');
     // withdrawn, it can't come back as the agents' own
     ok(old, ['knowledge', 'set', later, '--status', 'retired'], SUP);
