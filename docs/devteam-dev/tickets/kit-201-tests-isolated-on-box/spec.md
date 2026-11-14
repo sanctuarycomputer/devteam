@@ -34,16 +34,25 @@ under test believe it is on that box, whatever the test's environment says.
 
 1. **One shared scrub.** `test/lib/kit.mjs`, at import, deletes every `DEVTEAM_*` variable except the
    harness knobs above (an explicit list, `HARNESS_ENV`), and `TMUX`, `TMUX_PANE`, before setting its
-   own. Every test that spawns the kit gets its env from that scrubbed `process.env`:
-   `machine.test.mjs`, `operator-threads.test.mjs` and `hub-overview.test.mjs` drop their own
-   `DEVTEAM_*`/`TMUX` denylists (they keep stripping `CLAUDECODE|CLAUDE_*`, which isn't devteam's
-   and is outside this ticket), and `gateway.test.mjs` imports `lib/kit.mjs` so its spawns inherit the
-   scrub. Check: `grep -n "DEVTEAM_RUN\|'DEVTEAM_HOME'" test/{machine,operator-threads,hub-overview,gateway}.test.mjs`
+   own. `HARNESS_ENV` names `DEVTEAM_FORK`, `DEVTEAM_FORK_AUDIT`, `DEVTEAM_G1_RECORD`,
+   `DEVTEAM_CGROUP`, `DEVTEAM_MEMINFO` and the prefix `DEVTEAM_TEST_` (the suite's own switches:
+   KEEP, COLD, GITLEAKS, READ_DELAY_MS today, and any it adds). Every test that spawns the kit gets its env from that scrubbed `process.env`:
+   `machine.test.mjs` (l.14's regex keeps only `CLAUDECODE|CLAUDE_*`, which isn't devteam's and is
+   outside this ticket; l.34's loop goes), `operator-threads.test.mjs` (l.19 likewise; l.67 and
+   l.626 go), `hub-overview.test.mjs` (l.133 goes) and `gateway.test.mjs` (its loops at l.723 and
+   l.764 go) drop their own `DEVTEAM_*`/`TMUX` denylists, and `gateway.test.mjs` imports
+   `lib/kit.mjs` so its spawns inherit the scrub. Check:
+   `grep -nE "DEVTEAM_(ROLE|TICKET|FEATURE|RUN|HOME|SUPERVISOR|PUBLIC_URL)'?[],|)]|delete [a-zA-Z.]*\[k\]" test/{machine,operator-threads,hub-overview,gateway}.test.mjs`
    finds no denylist; the scrub is the only one.
 2. **Proven against a decoy.** A test in `machine.test.mjs` runs the incident's own test ("status says
    at a glance…") in a child `node --test` whose environment carries `DEVTEAM_RUN=<decoy>/run`,
    `DEVTEAM_HOME=<decoy>`, `DEVTEAM_ROLE=worker`, `DEVTEAM_TICKET=<id>`, `DEVTEAM_PUBLIC_URL`, `TMUX`
-   and `TMUX_PANE`; the child passes, and the decoy folder holds no file afterwards. A second, quick
+   and `TMUX_PANE`; the child's own TAP says exactly one test ran and passed (`# pass 1`,
+   `# skip 0`, `# fail 0`: a skipped test, or a name pattern matching nothing, fails the proof), and
+   the decoy folder holds nothing but its empty `run/` afterwards. The test skips, as the incident's
+   does, where there is no tmux. Before the scrub lands, it is run once and fails with files in the
+   decoy (the pre-fix kit does write into `DEVTEAM_RUN`, as the incident shows); that run is recorded
+   in `reviews/task-2.md` or `verification.md`. A second, quick
    check: a child that imports `lib/kit.mjs` and prints its `DEVTEAM_*` names shows only the harness
    knobs and the kit's own settings.
 3. **Box detection can be turned off.** `DEVTEAM_BOX=off` makes the kit ignore the box's files
@@ -55,16 +64,35 @@ under test believe it is on that box, whatever the test's environment says.
 4. **CI and files.** test.yml passes on every job at the PR head; no file is added (the records
    under `docs/devteam-dev/tickets/kit-201-tests-isolated-on-box/` aside).
 
-## The off switch's limit (needs the supervisor's word)
+## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 
-The box files exist so an agent can't make a command it runs believe it is off the box (and so take
-an owner's thread press unsigned). A bare `DEVTEAM_BOX=off` would undo that. So the switch is honored
-only while `$HOME` is not the account's own home (`os.userInfo().homedir`, from the password file,
-not from `$HOME`): every owner record box detection guards (the operator's threads, `operatorDir()`)
-lives under `os.homedir()`, so a command that turns the box off can only act on a throwaway home,
-never the real operator's store. The tests that need it (`operator-threads`) already set `HOME` to a
-temp dir; `hub-overview` will too (its hub registry then lives under its own temp dir, which is more
-isolated, not less).
+The box files exist so that normal use of a command on a box can't take an owner's press unsigned
+(an owner thread turn, `operator-thread …`; a pane answer, `/api/pane-answer` and `pane answered`,
+devteam.mjs ~14548, ~14807). A bare `DEVTEAM_BOX=off` that leaked from a test's env into a command
+run at the account's own home would undo that by accident. So the switch is honored only while
+`$HOME` is not the account's own home: both `$HOME` and `os.userInfo().homedir` (from the password
+file, not from `$HOME`) are compared by real path (`fs.realpathSync`), so a `HOME` that is the home
+with a trailing slash or a symlink to it counts as the home. When either can't be resolved
+(`os.userInfo()` throws for a uid with no passwd entry, or `HOME` names nothing), the switch is
+ignored: box detection works as today (fails closed). The tests that need it (`operator-threads`,
+gateway's box tests) already set `HOME` to a temp dir; `hub-overview` will too (its hub registry
+then lives under its own temp dir, more isolated, not less).
+
+Per P6 (agents are trusted not to forge), this stops the accidental path and no more. What it
+doesn't defend against, in one line in the PR body (the ruling asks for it): an agent that sets
+`HOME` to a temp folder on purpose (and copies the store there) gets the laptop's unsigned behaviour,
+for the operator threads in that copy and for pane answers into the real project's log and pane.
+
+5. **The limit is tested** (the ruling's added done-when). The box-detection code is marked as a block
+   in devteam.mjs (`/* box start */ … /* box end */`, beside `previewBox()`'s use), and
+   `test/lib/kit.mjs` loads it in a vm with a stand-in `fs` (the box files exist or not), `os`
+   (`homedir()` from the test's `HOME`, `userInfo().homedir` the passwd home) and `process.env`, as
+   `coverageFns()`/`gitReadFns()` already load theirs. A test in `operator-threads.test.mjs` checks,
+   on a box-shaped fixture (both box files exist): with `HOME` equal to the passwd home,
+   `DEVTEAM_BOX=off` is ignored and `onBox()`, `threadsNeedGateway()` stay true and
+   `gatewayThreadKey()` reads the box's key; with `HOME` a symlink to it, the same; with `HOME` a
+   temp folder, all three follow the environment; with `DEVTEAM_BOX` unset or `on`, the files win.
+   It runs in CI, where no box file exists, because the files are the stand-in's.
 
 ## Approaches considered
 
@@ -88,6 +116,15 @@ isolated, not less).
 - The nested `node --test` child must not inherit `NODE_TEST_CONTEXT`, or it reports to the parent's
   runner instead of running.
 
+- `gateway.test.mjs` importing `lib/kit.mjs` takes its side effects too: it claims one port block
+  (the gateway's own servers still pick ports outside 20000..32699; the comments in ports.mjs and
+  gateway.test.mjs that say it claims none are updated, ports.mjs's only if it is put in touches,
+  else left and noted), it puts the tmux shim first on PATH (the real-hub test's `TMUX_TMPDIR`
+  names a folder with no server, so its tmux was already refused or serverless; with the shim it is
+  refused outright, which is what that test wants: nothing typed into), and it sets
+  `DEVTEAM_CSWAP=off`, `DEVTEAM_SUPERVISOR_UP=off`, `DEVTEAM_BOX=off` (all safer for a test).
+  Its own `DEVTEAM_HUB_PORT`/`PORT_BASE` settings run after the import and win.
+
 ## Contracts
 
 None provided or consumed: `DEVTEAM_BOX` is a new, test-facing env knob of the kit, documented in the
@@ -100,6 +137,12 @@ comment beside `onBox()`.
 - Any change to what a real box does when `DEVTEAM_BOX` is unset.
 
 ## Rulings
+
+- d-20261114-215844973-supervisor (m-20261114-215845202-supervisor, re m-20261114-215838230): rule B,
+  the switch honored only off the account's own home. Add a test that on a box-shaped fixture with
+  HOME equal to the passwd home, DEVTEAM_BOX=off is ignored and onBox() stays true. The PR body says
+  in one line what it doesn't defend against (an agent that sets HOME to a temp folder and copies the
+  store there).
 
 - m-20261114-215142046-supervisor (to kit-200, carried over by m-20261114-215602684-supervisor):
   touches add `test/lib/kit.mjs` and `test/gateway.test.mjs`; the shared helper is a scrub at import
