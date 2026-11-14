@@ -176,8 +176,12 @@ test('a kit refuses a run folder outside its home: a worker\'s DEVTEAM_RUN leake
     assert.ok(r.stderr.includes(`DEVTEAM_RUN=${runOf(api)} is not inside this kit's home (${app}): `), `${args[0]} names both, exactly: ${r.stderr}`);
   }
   assert.deepEqual(snapshot(runOf(api)), before, 'not a byte written in the other home\'s run folder');
-  // the machine's own commands run from anywhere and keep no run folder: never refused
-  assert.doesNotMatch(dtIn(app, ['machine', 'status'], { DEVTEAM_RUN: runOf(api) }).stderr, LEAKED);
+  // help, and the machine's own commands (they run from anywhere and keep no run folder): never refused
+  for (const args of [['help'], ['machine', 'status'], ['operator-thread', 'list']]) assert.doesNotMatch(dtIn(app, args, { DEVTEAM_RUN: runOf(api) }).stderr, LEAKED, args.join(' '));
+  // an empty DEVTEAM_RUN is none: from inside the other home's run folder it is not taken for the cwd
+  const empty = dtAt(app, runOf(api), [...OBSERVE.slice(0, -1), 'empty run'], { DEVTEAM_RUN: '' });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.ok(logged(runOf(app), 'empty run'), 'the line is in the kit\'s own run folder');
 });
 
 test('a kit takes a run folder inside its home, however it is reached: its own, a symlink, one not made yet, a worktree\'s, a run folder that is itself a symlink', () => {
@@ -197,9 +201,11 @@ test('a kit takes a run folder inside its home, however it is reached: its own, 
   // a worker in home's own worktree, on home's run folder
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init && git worktree add -q ../app-wt -b ticket/x-1'], { cwd: app });
   const wt = path.join(base, 'app-wt');
-  const ph = dtAt(wt, wt, ['phase', 'spec'], { DEVTEAM_RUN: runOf(app), ...WORKER });
-  assert.equal(ph.status, 0, ph.stderr);
-  assert.ok(logged(runOf(app), '"x-1"'), 'the worktree\'s phase is in home\'s run folder');
+  for (const args of [['phase', 'spec'], ['status'], [...OBSERVE.slice(0, -1), 'from the worktree']]) {
+    const r = dtAt(wt, wt, args, { DEVTEAM_RUN: runOf(app), ...WORKER });
+    assert.equal(r.status, 0, `${args[0]}: ${r.stderr}`);
+  }
+  assert.ok(logged(runOf(app), '"x-1"') && logged(runOf(app), 'from the worktree'), 'the worktree\'s lines are in home\'s run folder');
   // a home whose run folder is a symlink out of the checkout
   const ln = seeded(base, 'app-ln');
   const away = path.join(base, 'elsewhere-run');
@@ -207,6 +213,7 @@ test('a kit takes a run folder inside its home, however it is reached: its own, 
   fs.symlinkSync(away, runOf(ln));
   const ob = dtIn(ln, [...OBSERVE.slice(0, -1), 'taken symlinked'], { DEVTEAM_RUN: runOf(ln) });
   assert.equal(ob.status, 0, ob.stderr);
+  assert.equal(dtIn(ln, ['status'], { DEVTEAM_RUN: runOf(ln) }).status, 0);
   assert.ok(logged(away, 'taken symlinked'));
 });
 
@@ -241,7 +248,14 @@ test('a kit copied into a home\'s tree without a repo of its own refuses to run 
   const base = runFixture('run-nested');
   const home = seeded(base, 'home');
   const plain = path.join(home, 'fixtures', 'plain');
-  fs.cpSync(kit, path.join(plain, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+  const copy = (to) => fs.cpSync(kit, to, { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+  copy(path.join(plain, 'docs', 'devteam'));
+  // a copy kept anywhere but a checkout's own docs/devteam, here three folders below home's .git
+  const vendor = path.join(home, 'vendor', 'kit');
+  copy(vendor);
+  const v = spawnSync(process.execPath, [path.join(vendor, 'scripts', 'devteam.mjs'), 'status'], { cwd: home, encoding: 'utf8', env: baseEnv });
+  assert.notEqual(v.status, 0, 'a vendored copy');
+  assert.match(v.stderr, /is not its checkout's own/);
   const before = snapshot(runOf(home));
   const refused = () => { for (const args of [['status'], OBSERVE]) {
     const r = dtAt(plain, plain, args);
@@ -251,6 +265,9 @@ test('a kit copied into a home\'s tree without a repo of its own refuses to run 
   refused();
   // a copy that differs from home's kit would otherwise hand the command to home's own kit
   fs.appendFileSync(kitOf(plain), '\n// a copy, changed\n');
+  refused();
+  // nor does a .git that is no repo of its own make it one
+  fs.mkdirSync(path.join(plain, '.git'));
   refused();
   assert.deepEqual(snapshot(runOf(home)), before, 'home\'s run folder is untouched');
 });

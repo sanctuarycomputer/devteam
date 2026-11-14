@@ -72,10 +72,11 @@ under test believe it is on that box, whatever the test's environment says.
    ancestor's real path, re-joined with the rest, when the folder isn't made yet) is either the real
    path of the default run folder (`<mainRoot>/docs/devteam/run`, which may itself be a symlink out
    of the checkout) or `realPath(mainRoot)` or under it, separator-bounded (`<root>-api` is not under
-   `<root>`). Otherwise the command dies, after home is resolved and before the run folder is
+   `<root>`). Otherwise the command dies (the message names `DEVTEAM_RUN` resolved as given, and
+   `mainRoot` as git reports it), after home is resolved and before the run folder is
    read or written, with: `DEVTEAM_RUN=<run> is not inside this kit's home (<mainRoot>): a session's
    run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`.
-   Exempt: `help`, and the machine-wide commands homeAt already exempts (`machine`,
+   An empty `DEVTEAM_RUN` is the same as unset (task-3 T3-1). Exempt: `help`, and the machine-wide commands homeAt already exempts (`machine`,
    `operator-thread`, `recover --machine`), which run from anywhere and keep their records outside
    any run folder. Every other command is checked, not only the writing ones: one rule a reader
    can't get wrong, and a read of another fleet's log misleads as much as a write does (my call,
@@ -108,15 +109,17 @@ under test believe it is on that box, whatever the test's environment says.
    without `git init`) resolves home's git, so it would run against home's project and live log.
    The check runs first, in the block that re-execs the main checkout's kit (devteam.mjs ~34), so a
    copy that differs from home's kit can't hand the command to home's own kit either: when the
-   script's folder is in a git checkout and `<script folder>/../../../.git` doesn't exist (the copy
-   isn't its checkout's own `docs/devteam`), every command but `help` dies (a kit in no git checkout,
+   script's folder is in a git checkout whose top level is `<top>` (from the same `git rev-parse`
+   call that block already makes, `--show-toplevel` added) and the real path of
+   `<top>/docs/devteam/scripts` isn't the script's folder (a copy at `<home>/vendor/kit`, one at
+   `<home>/fixtures/plain/docs/devteam`, one beside an empty `.git` folder), every command but `help` dies (a kit in no git checkout,
    as a box image's `/opt/devteam/kit`, skips the check):
    `this kit (<script>) is not its checkout's own (<top level>/docs/devteam): a copy inside another
    repo can't run against that repo's home; give the copy a repo of its own (git init)`. And
    `bareProject` asserts each fixture is a repo of its own (its top level is itself). Tests: a copy
    of the kit under `<home>/fixtures/plain/docs/devteam`, no `git init`: `status` and `observe` die
-   with that message, again after the copy is changed so it differs from home's kit, and home's run
-   folder is unchanged; `bareProject`'s fixtures pass the new assertion (every test that uses it).
+   with that message, again after the copy is changed so it differs from home's kit, and again for a
+   copy at `<home>/vendor/kit` and beside an empty `.git` folder; home's run folder is unchanged; `bareProject`'s fixtures pass the new assertion (every test that uses it).
 
 ## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 

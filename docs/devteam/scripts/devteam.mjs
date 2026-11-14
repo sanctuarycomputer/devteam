@@ -38,15 +38,15 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
 {
   const self = fileURLToPath(import.meta.url);
   let common = null;
-  try { common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  let top = null;
+  try { [common, top] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n'); } catch {}
   // A kit copied into a folder inside another checkout with no repo of its own (a fixture made
   // without git init) would take that checkout's git, and so its kit, home and live log: a kit in a
   // repo runs only as that checkout's own docs/devteam. (A kit in no repo, as a box image's, is free.)
   const cmd = process.argv[2];
-  if (common && cmd && !['help', '--help'].includes(cmd) && !fs.existsSync(path.join(path.dirname(self), '..', '..', '..', '.git'))) {
-    let top = null;
-    try { top = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
-    process.stderr.write(`devteam: this kit (${self}) is not its checkout's own (${path.join(top ?? path.dirname(common), 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)\n`);
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  if (top && cmd && !['help', '--help'].includes(cmd) && real(path.join(top, 'docs', 'devteam', 'scripts')) !== real(path.dirname(self))) {
+    process.stderr.write(`devteam: this kit (${self}) is not its checkout's own (${path.join(top, 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)\n`);
     process.exit(1);
   }
   const kitMain = common && path.join(path.dirname(common), 'docs', 'devteam');
@@ -470,7 +470,7 @@ const devteamDir = !cwdIsHome && commonDir ? path.join(mainRoot, 'docs', 'devtea
 // project that is the main checkout's (the re-exec above), so every session folds by the same rules.
 const kitDir = path.resolve(here, '..');
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
-const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
+const runDir = path.resolve(process.env.DEVTEAM_RUN || path.join(mainRoot, 'docs', 'devteam', 'run'));
 // DEVTEAM_RUN is home's run folder, given to each session by the kit that starts it. One that isn't
 // inside the home this kit resolved is a session's, leaked into another repo's kit (a test's fixture,
 // a sibling): refused by name, never followed into that session's live log. The machine's commands
