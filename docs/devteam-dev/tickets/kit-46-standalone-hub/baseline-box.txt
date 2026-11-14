@@ -1,0 +1,26 @@
+Baseline on the cloud box at main 5c2a77b (HEAD 36f1b24 has no code change), 2026-11-14:
+node --test test/hub-overview.test.mjs test/machine.test.mjs test/operator-threads.test.mjs
+not ok 8 - status says at a glance what a check-in needs, and reads no pane it needn't
+not ok 11 - the kit lets a box operator look, and nothing else
+not ok 12 - a repo on a kit from before recover comes back from the box's list, the way the box always brought it back
+not ok 20 - the store: a thread, its turns, closed and opened again, kept beside the operator in no repo
+not ok 21 - a box keeps them in ~/operator, on the disk that outlives a deploy
+not ok 22 - who may write what: the owner starts, says and closes; only the operator replies; no session in a fleet reads or writes
+not ok 23 - what is kept is checked: a turn's size, a title of one line, a subject of the Overview's own shape
+not ok 24 - an owner turn becomes one line in the operator's pane, and only at its prompt
+not ok 25 - on a box the operator is window 0 of home: typed into when it is there, never started when it is not
+not ok 26 - on a box the owner's verbs take only a press the box's gateway signed, and show says which turns it signed
+not ok 27 - a laptop's operator is started once: by the first words or by start, in its own session, with operator.md as its prompt
+not ok 28 - start-once holds under a C locale, with the window renamed, and when tmux gives no answer
+not ok 29 - settings that can't be read fail the start before its lock is taken
+not ok 30 - inside tmux, list, show and reply are the operator's only from its own pane
+not ok 31 - turns sent at the same moment each arrive whole: text then Enter, never text, text, Enter, Enter
+not ok 33 - the hub takes the owner's turns only from its own page, within its caps, and starts the laptop's operator on the first
+not ok 34 - on a box the hub takes a press only with the gateway's signature: a local program with the page's own headers is refused
+not ok 36 - a start's note from a kit that did not name its tmux server is never taken for another session's pane
+# tests 36
+# pass 16
+# fail 18
+# skipped 2
+
+[exited with code 0]
