@@ -12294,7 +12294,7 @@ function supervisorTranscript() {
   for (const { f } of files) {
     try {
       const end = read(f, true);
-      const first = lines(read(f, false)).find((o) => o?.type === 'user');
+      const first = read(f, false).split('\n').reduce((u, l) => { if (u || !l.includes('"user"')) return u; try { const o = JSON.parse(l); return o?.type === 'user' ? o : null; } catch { return null; } }, null);
       const ran = lines(end).some((o) => o?.type === 'assistant' && Array.isArray(o.message?.content) && o.message.content.some((c) => c?.type === 'tool_use' && SUPERVISOR_COMMAND.test(String(c.input?.command ?? ''))));
       if (ran || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) return { file: f, entries: lines(end) };
     } catch {}
