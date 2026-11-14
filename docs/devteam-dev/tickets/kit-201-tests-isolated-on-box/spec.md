@@ -67,20 +67,33 @@ under test believe it is on that box, whatever the test's environment says.
 6. **The kit refuses a foreign run folder** (scope change, m-20261114-222834445-supervisor; the
    ticket's new done-when 3). `runDir` (devteam.mjs ~463) takes `DEVTEAM_RUN` from any cwd; that is
    how a fixture repo's kit, with a worker's `DEVTEAM_RUN`, wrote owner-credited lines into home's
-   log. Now, when `DEVTEAM_RUN` is set and its real path (the nearest existing ancestor's, when the
-   folder isn't made yet) is not `mainRoot`'s real path or inside it, every command but `help` dies
-   before anything is read or written, naming both: `DEVTEAM_RUN=<run> is not inside this kit's home
-   (<mainRoot>): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run
-   home's kit from home`. Every command, not only the writing ones: one rule that a reader can't
-   get wrong, and a read of another fleet's log is as misleading as a write (my call; the ticket says
-   log-writing commands, which this covers). Within home (a worker or planner in home's worktree, a
-   worker in a linked repo's worktree with `DEVTEAM_HOME`, the dashboard, home's own spawns, which
-   carry `DEVTEAM_RUN=<home>/docs/devteam/run`) nothing changes; unset `DEVTEAM_RUN` is unchanged.
-   Tests (machine.test.mjs): from a `bareProject` fixture with `DEVTEAM_RUN` pointing at a second
-   fixture's run folder (standing in for home's), `log`-writing `phase`/`observe` and a read
-   (`status`) die with both paths in stderr and the second fixture's run folder is byte-for-byte
-   unchanged; with `DEVTEAM_RUN` pointing at the fixture's own run folder, a symlink to it, or
-   unset, the same commands work.
+   log. Now, when `DEVTEAM_RUN` is set, it is taken only if its real path (the nearest existing
+   ancestor's real path, re-joined with the rest, when the folder isn't made yet) is either the real
+   path of the default run folder (`<mainRoot>/docs/devteam/run`, which may itself be a symlink out
+   of the checkout) or `realPath(mainRoot)` or under it, separator-bounded (`<root>-api` is not under
+   `<root>`). Otherwise the command dies, after home is resolved and before the run folder is
+   read or written, with: `DEVTEAM_RUN=<run> is not inside this kit's home (<mainRoot>): a session's
+   run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`.
+   Exempt: `help`, and the machine-wide commands homeAt already exempts (`machine`,
+   `operator-thread`, `recover --machine`), which run from anywhere and keep their records outside
+   any run folder. Every other command is checked, not only the writing ones: one rule a reader
+   can't get wrong, and a read of another fleet's log misleads as much as a write does (my call,
+   reported to the supervisor; it covers the ticket's "log-writing"). Within home nothing changes:
+   a worker or planner in home's worktree, a worker in a linked repo's checkout with `DEVTEAM_HOME`,
+   the dashboard, home's own spawns (they carry `DEVTEAM_RUN=<mainRoot>/docs/devteam/run`), and an
+   unset `DEVTEAM_RUN`.
+   Tests (machine.test.mjs), on `bareProject` fixtures `app` (the kit run) and `app-api` (standing
+   in for home; a prefix check would wrongly pass it), each run folder seeded by one command run
+   with no `DEVTEAM_RUN`: refused, from `app` with `DEVTEAM_RUN=<app-api>/docs/devteam/run`:
+   `phase spec` (as a worker), `observe …` and `status` each exit non-zero with the message above
+   (both paths in it), and `app-api`'s run folder is byte-for-byte unchanged. Taken: `DEVTEAM_RUN`
+   as `app`'s own run folder, a symlink to it, a not-yet-made folder inside `app`, and unset, from
+   `app`; from a `git worktree` of `app` with `app`'s run folder (a worker in home's worktree); from
+   a third repo's checkout with `DEVTEAM_HOME=<app>` and `app`'s kit by absolute path (a worker in a
+   linked repo); and with `app`'s `docs/devteam/run` a symlink to a folder outside it: `observe …`
+   exits 0 and its line is in that run folder's log, `status` exits 0.
+   Not defended (P6): a `DEVTEAM_RUN` that names, on purpose, a folder inside the kit's home other
+   than its run folder, or a kit copied into home's own tree.
 
 ## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 
