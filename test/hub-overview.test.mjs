@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -342,3 +343,33 @@ test('the hub\'s log stays under 1 MB and records a SIGTERM', { timeout: 120000 
   assert.ok(fs.statSync(M.log).size <= 1048576);
 });
 
+test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names its own hub port', { timeout: 480000 }, async (t) => {
+  const left = (port) => `hub: left to the image (DEVTEAM_IMAGE_HUB=${port})`;
+  const listens = (port) => new Promise((r) => { const c = net.connect({ port, host: '127.0.0.1' }); c.once('connect', () => { c.destroy(); r(true); }); c.once('error', () => r(false)); });
+  // the box's own case, the image naming this dashboard's hub port: the port left alone, and said once
+  const run = async (hubPort, value) => {
+    const M = hubMachine(t, 'hub-image', hubPort, value === undefined ? {} : { DEVTEAM_IMAGE_HUB: value });
+    const A = bareProject(M.base, 'alpha');
+    execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+    const d = startDashboard(A, M.env);
+    try {
+      await until(() => /dashboard on http/.test(d.out()), 'the dashboard');
+      return { d, logOf: () => readOr(path.join(A, 'docs/devteam/run/dashboard.log')) };
+    } catch (e) { await d.stop(); throw e; }
+  };
+  const a = await run(PORTS + 26, String(PORTS + 26));
+  try {
+    await until(() => a.logOf().includes(left(PORTS + 26)), 'the line saying so');
+    await pause(1000);
+    assert.equal(await listens(PORTS + 26), false, 'nothing listens on the hub port');
+    assert.equal(a.logOf().split('\n').filter((l) => l.endsWith(left(PORTS + 26))).length, 1, 'said exactly once');
+  } finally { await a.d.stop(); }
+  // unset, the real box's 4320 while this hub is a fixture's, or a number that isn't a plain port
+  for (const [port, value] of [[PORTS + 27, undefined], [PORTS + 28, '4320'], [PORTS + 29, `0x${(PORTS + 29).toString(16)}`]]) {
+    const r = await run(port, value);
+    try {
+      await until(async () => (await hubList(port))?.hub === 1, `its hub on ${port} (DEVTEAM_IMAGE_HUB=${value})`);
+      assert.doesNotMatch(r.logOf(), /left to the image/, `served as before with DEVTEAM_IMAGE_HUB=${value}`);
+    } finally { await r.d.stop(); }
+  }
+});

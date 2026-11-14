@@ -13810,6 +13810,10 @@ function cmdHub() {
   startHub(log, ok ? { kit: rel, image: true, standalone: true } : { kit: ownKitVersion(), standalone: true });
 }
 
+// The port the box's image serves its own hub on (ENV DEVTEAM_IMAGE_HUB), a plain port or nothing. A
+// dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
+// take the port in the second the image's hub restarts, until it adopts this release.
+const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);
 async function cmdDashboard() {
   const picked = await pickDashboardPort();
   let port = picked.port;
@@ -14670,7 +14674,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log, { kit: kitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: kitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
