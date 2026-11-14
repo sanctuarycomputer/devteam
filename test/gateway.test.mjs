@@ -705,7 +705,7 @@ test('the owner\'s threads with the operator reach the hub through the box\'s na
     assert.equal(newer.status, 200);
     const x = seen.at(-1);
     const proof = { path: x.url, ts: x.headers['x-devteam-gateway-ts'], nonce: x.headers['x-devteam-gateway-nonce'], sig: x.headers['x-devteam-gateway-sig'], body: Buffer.from(x.body).toString('base64') };
-    const kitEnv = { ...process.env, HOME: box, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: path.join(box, 'thread-key.pub'), DEVTEAM_OPERATOR_COMMAND: '' };
+    const kitEnv = { ...process.env, HOME: box, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: path.join(box, 'thread-key.pub'), DEVTEAM_OPERATOR_COMMAND: '', DEVTEAM_THREAD_PROOF: 'stdin' };
     for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX', 'TMUX_PANE']) delete kitEnv[k];
     const kitRun = (input) => spawnSync(process.execPath, [path.join(kit, 'scripts', 'devteam.mjs'), 'operator-thread', 'new', '--', 'hello from the gateway'], { cwd: box, encoding: 'utf8', env: kitEnv, input });
     const took = kitRun(JSON.stringify(proof));
@@ -730,6 +730,64 @@ test('the owner\'s threads with the operator reach the hub through the box\'s na
     await new Promise((r) => hub.close(r));
     assert.match((await gw.req('GET', '/operator/threads')).json.error, /not answering/);
   } finally { hub.close(); await gw.close(); }
+});
+
+// The same, with nothing standing in for the hub: a box's real hub behind the gateway. What the hub
+// refuses comes back as its own refusal, with its reason, never as "an older kit".
+test('the gateway to a real hub on a box: a signed press is kept as the owner\'s, and the hub\'s own refusals come back as they are', { timeout: 240000 }, async () => {
+  const gw = await gateway('operator-real');
+  const base = fs.mkdtempSync(path.join(tmp, 'real-hub-'));
+  const A = bareProject(base, 'alpha');
+  const home = path.join(base, 'home');
+  const noTmux = path.join(base, 'tmux');
+  fs.mkdirSync(home);
+  fs.mkdirSync(noTmux);
+  const keyFile = path.join(base, 'thread-key.pub');
+  fs.writeFileSync(keyFile, gw.g.threadPublicKey());
+  // a box as its hub sees one: the public URL, the gateway's public key, and a tmux with no server
+  // (so nothing on this machine is ever typed into)
+  const env = { ...process.env, HOME: home, TMUX_TMPDIR: noTmux, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: keyFile };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const d = spawn(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'dashboard'], { cwd: A, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  d.stdout.on('data', (b) => { out += b; });
+  d.stderr.on('data', (b) => { out += b; });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    await until(() => out.includes(`127.0.0.1:${P}`), `the dashboard (${out})`);
+    await until(async () => (await gw.req('GET', '/operator/threads')).status === 200, 'the hub\'s threads, through the gateway');
+    const empty = await gw.req('GET', '/operator/threads');
+    assert.deepEqual([empty.json.threads, empty.json.operator.box, empty.json.operator.can_start], [[], true, false]);
+
+    // the owner's press, signed by the gateway and checked by the hub and by the owner's command
+    const made = await gw.req('POST', '/operator/thread-new', { body: { title: 'the box', text: 'is anyone there?' } });
+    assert.equal(made.status, 200, made.body);
+    const id = made.json.out.split('\n')[0];
+    assert.match(id, /^ot-/);
+    const [t] = (await gw.req('GET', '/operator/threads')).json.threads;
+    assert.deepEqual([t.id, t.title, t.signed, t.turns.map((u) => [u.by, u.text, u.signed])], [id, 'the box', true, [['owner', 'is anyone there?', true]]]);
+
+    // what the press asked for and can't have: the hub's 400, with its reason
+    const closed = await gw.req('POST', '/operator/thread-say', { body: { id: 'ot-20260101-000000000-abcdef', text: 'x' } });
+    assert.equal(closed.status, 400);
+    assert.match(closed.json.error, /no operator thread ot-20260101-000000000-abcdef/);
+    // a press the hub won't take (the key the box holds is not this gateway's): its 403 and why,
+    // not a 502 that blames the kit
+    fs.writeFileSync(keyFile, crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }));
+    const refused = await gw.req('POST', '/operator/thread-say', { body: { id, text: 'still there?' } });
+    assert.equal(refused.status, 403, refused.body);
+    assert.match(refused.json.error, /only through the box's gateway \(its signature is not the gateway's\)/);
+    assert.deepEqual(Object.keys(refused.json), ['error'], 'the reason and nothing else of the hub\'s answer');
+    fs.rmSync(keyFile);
+    const off = await gw.req('POST', '/operator/thread-say', { body: { id, text: 'still there?' } });
+    assert.equal(off.status, 403);
+    assert.match(off.json.error, /no gateway key/);
+    // and with the key back, the same thread takes the next turn
+    fs.writeFileSync(keyFile, gw.g.threadPublicKey());
+    assert.equal((await gw.req('POST', '/operator/thread-say', { body: { id, text: 'still there?' } })).status, 200);
+    const [again] = (await gw.req('GET', '/operator/threads')).json.threads;
+    assert.deepEqual(again.turns.map((u) => [u.text, u.signed]), [['is anyone there?', true], ['still there?', true]]);
+  } finally { d.kill(); await new Promise((r) => { if (d.exitCode !== null || d.signalCode !== null) return r(); d.once('exit', r); }); await gw.close(); }
 });
 
 test('the gateway tells every subscribed browser when an Inbox goes up, with no page open', async () => {

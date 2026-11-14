@@ -170,6 +170,8 @@
   .tl-ctx dt { color: var(--muted); }
   .tl-ctx dd { margin: 0; overflow-wrap: anywhere; }
   .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-note:empty { display: none; }
+  .tl-note { margin-top: 4px; }
   .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
   .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
@@ -613,8 +615,9 @@ const typingIn = (e) => !!e && (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT
 function tThread(x) {
   if (!x || typeof x !== 'object' || typeof x.id !== 'string' || typeof x.created_at !== 'string' || !Array.isArray(x.turns)) return null;
   const s = x.subject && typeof x.subject === 'object' && x.subject.kind === 'overview' && x.subject.anchor && OP_PARTS.includes(x.subject.anchor.selector) ? { root: typeof x.subject.root === 'string' ? x.subject.root : null, name: typeof x.subject.name === 'string' ? x.subject.name : null, selector: x.subject.anchor.selector, label: typeof x.subject.anchor.label === 'string' ? x.subject.anchor.label : '' } : null;
-  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(u.signed === false ? { unsigned: true } : {}) }));
-  return { id: x.id, title: String(x.title ?? ''), subject: s, status: x.status === 'closed' ? 'closed' : 'open', turns, created_at: x.created_at, closed_at: typeof x.closed_at === 'string' ? x.closed_at : null, activity_at: typeof x.activity_at === 'string' ? x.activity_at : x.created_at };
+  const turns = x.turns.filter((u) => u && typeof u.at === 'string' && typeof u.text === 'string').map((u) => ({ id: String(u.id ?? ''), by: u.by === 'owner' ? 'owner' : 'operator', at: u.at, text: u.text, ...(typeof u.signed === 'boolean' ? { signed: u.signed, unsigned: !u.signed } : {}) }));
+  // signed: on a box, whether the box's gateway signed it (the thread's title and subject, each owner turn)
+  return { id: x.id, title: String(x.title ?? ''), subject: s, status: x.status === 'closed' ? 'closed' : 'open', turns, ...(typeof x.signed === 'boolean' ? { signed: x.signed, unsigned: !x.signed } : {}), created_at: x.created_at, closed_at: typeof x.closed_at === 'string' ? x.closed_at : null, activity_at: typeof x.activity_at === 'string' ? x.activity_at : x.created_at };
 }
 // What a point is on: the part of the Overview under it that paintOverview named (data-pin), with
 // its project when it is in a card. Blank space names nothing, and gets no pin.
@@ -698,6 +701,7 @@ function tOpWords(op) {
   if (st === 'dialog') return { text: `The operator is waiting at a dialog. Answer it in ${where}.`, ok: false };
   if (st === 'limit') return { text: 'The operator is at a usage limit. It reads what you send once that lifts.', ok: false };
   if (st === 'typing') return { text: 'Something is typed in the operator\'s input, so nothing is typed over it. It reads what you send when it next checks.', ok: false };
+  if (st === 'no-answer') return { text: 'tmux did not say what the operator is at, so nothing is typed or started. It reads what you send when it next checks.', ok: false };
   if (st === 'no-tmux') return { text: 'An operator needs tmux, and there is none on this machine.', ok: false };
   return { text: `The operator's session isn't at its prompt (look in ${where}). It reads what you send when it next checks.`, ok: false };
 }
@@ -832,6 +836,8 @@ function tlCardFrame(card) {
   turns.id = 'tl-c-turns';
   const state = el('div', 'small muted');
   state.id = 'tl-c-state';
+  const note = el('div', 'small muted tl-note');
+  note.id = 'tl-c-note';
   const compose = el('div', 'tl-compose');
   const ta = el('textarea');
   ta.id = 'tl-c-text';
@@ -847,7 +853,7 @@ function tlCardFrame(card) {
   send.dataset.tlSend = '';
   row.append(bytes, err, el('span', 'grow'), send);
   compose.append(ta, row);
-  card.replaceChildren(head, ctx, turns, state, compose);
+  card.replaceChildren(head, ctx, turns, state, note, compose);
 }
 // What the thread is about, as the page named it then: the project, the part, what it showed.
 function tlCtx(s, title) {
@@ -880,12 +886,16 @@ function tlCardBody(t) {
   const ctxSig = s ? `${tKey(s)}|${title}|${!!tlTarget(s)}` : '';
   if (ctxEl.dataset.is !== ctxSig) { const was = ctxEl.querySelector('details')?.open; ctxEl.dataset.is = ctxSig; ctxEl.replaceChildren(...(s ? [tlCtx(s, title)] : [])); if (was) ctxEl.querySelector('details').open = true; }
   const turns = $('tl-c-turns');
-  const sig = t ? JSON.stringify(t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned])) : '';
+  const sig = t ? JSON.stringify([!!TL.op?.box, t.turns.map((u) => [u.by, u.at, u.text, !!u.pending, !!u.unsigned])]) : '';
   if (sig !== TL.turnsSig) {
     TL.turnsSig = sig;
-    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : 'You') : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
+    turns.replaceChildren(...(t ? t.turns : []).map((u) => { const d = el('div', `tl-turn ${u.by}`); d.append(el('div', 'meta', `${u.by === 'owner' ? (u.unsigned ? 'Not sent from this page: written on the box as yours' : 'You') : TL.op?.box ? 'The operator (not verified)' : 'The operator'} · ${when(u.at)}`), el('div', 'tl-text', u.text)); return d; }));
     turns.scrollTop = turns.scrollHeight;
   }
+  // On a box only your own turns are proved (the gateway signs them): a reply, and a thread or turn
+  // the gateway didn't sign, is whatever something running as the box's user wrote.
+  const notes = !t || !TL.op?.box ? [] : [t.unsigned ? 'This thread was not started from this page: its title and what it is pinned on were written on the box.' : null, t.turns.some((u) => u.by === 'operator') ? 'Replies are not verified: on a box, anything running as its user can write one. Read them as a report.' : null].filter(Boolean);
+  $('tl-c-note').textContent = notes.join(' ');
   if (t && !t.pending) tlSeen(t);
   $('tl-c-state').textContent = !t ? (tOpWords(TL.op).text) : t.status === 'closed' ? 'Closed. Writing reopens it.' : tCardState(t, Date.now(), TL.said[t.id], TL.op) ?? '';
 }
