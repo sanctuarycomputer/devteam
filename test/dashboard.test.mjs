@@ -643,9 +643,13 @@ test('a typed answer on a question with choices asks which choice it means, on t
     await still(() => p.click(`${card(D3)} [data-answer]`));
     assert.equal(await p.ev(ask(D3)), 1, 'the ask');
     await p.ev(`(() => { const n = document.querySelector('${card(D3)} textarea[data-q]'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-    await still(() => p.click(`${card(D3)} button[data-which][value="Yes"]`));
-    assert.equal(await p.ev(ask(D3)), 0, 'the ask goes');
-    assert.equal(await p.ev(`document.getElementById('e-${D3}').textContent`), 'Pick a choice or write an answer.');
+    // read while the page is held still: a redraw draws the card's error line empty, as for every card
+    await still(async () => {
+      await p.click(`${card(D3)} button[data-which][value="Yes"]`);
+      await soon('PRESSED === 0', 'the release handled');
+      assert.equal(await p.ev(ask(D3)), 0, 'the ask goes');
+      assert.equal(await p.ev(`document.getElementById('e-${D3}').textContent`), 'Pick a choice or write an answer.');
+    });
     assert.equal(await p.ev('SAVING'), 0, 'no post in flight');
     await polls(2);
     assert.equal(logged(D3).status, 'open', 'still open');
