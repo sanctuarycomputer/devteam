@@ -441,7 +441,7 @@ function overviewCard(it, newest) {
 
   if (Array.isArray(p?.activity) && p.activity.length) {
     const foot = el('div', 'ov-foot');
-    foot.append(mosaic(p.activity.map((n) => Math.max(0, Number(n) || 0))), el('span', 'k', `${Math.round(p.activity.length / 7)} weeks`));
+    foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0))), el('span', 'k', `${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
     card.append(foot);
   }
   if (steerable(it)) card.append(fleetControl(it));
