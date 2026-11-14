@@ -1,7 +1,7 @@
 // The owner's threads with the machine's operator, from the hub's Overview: the store beside the
 // operator (operator-thread), who may write what in it, the line an owner turn becomes in the
-// operator's pane, a laptop's operator started once, and the hub's routes. Real tmux on this file's
-// own server, with stand-in agents.
+// operator's pane, a laptop's operator started once, the hub's routes, and the Overview's dock and
+// pin in a real Chrome. Real tmux on this file's own server, with stand-in agents.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
@@ -10,6 +10,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { PORTS, bareProject, hasTmux, kit, startDashboard, until, write } from './lib/kit.mjs';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 
 // tmux reads UTF-8 from the locale's name: the prompt's ❯ and its non-breaking space must survive
 process.env.LANG = process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8';
@@ -323,7 +324,7 @@ test('a laptop\'s operator is started once: by the first words or by start, in i
   } finally { tmuxSh(['kill-session', '-t', `=${N.session}`]); }
 });
 
-// ----- the hub's routes ----------------------------------------------------------------------------
+// ----- the hub's routes, and the Overview's dock and pin ------------------------------------------
 const ask = (port, method, route, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
   const data = body === undefined ? null : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
   const r = http.request({ host: '127.0.0.1', port, path: route, method, headers: { host: `127.0.0.1:${port}`, ...(data ? { 'content-length': data.length } : {}), ...headers } }, (res) => {
@@ -448,4 +449,127 @@ test('the hub takes the owner\'s turns only from its own page, within its caps, 
   assert.match(r.json.error, /is closed; reopen it first/);
   assert.equal((await post('thread-reopen', { id, text: 'again' })).status, 200);
   assert.equal((await post('thread-say', { id: 'ot-20260101-000000000-abcdef', text: 'x' })).status, 400, 'no such thread');
+});
+
+test('the Overview in Chrome: the Threads dock, a pin on what it is about across redraws, the operator\'s reply as text, a phone', { skip: !hasTmux ? 'needs tmux' : canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const F = await hubFixture(t, 'chrome');
+  const { HUB } = F;
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${HUB}/` });
+  const page = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
+  await page('alpha\'s card and the dock', `document.querySelectorAll('.ov-card').length === 1 && !document.getElementById('tl').hidden && TL.avail === true`);
+  assert.equal(await p.ev(`document.getElementById('tl-pill').textContent`), 'Threads');
+  // the dock: no operator yet on a laptop, and it says how one starts
+  await p.click('#tl-pill');
+  await page('the dock open', `!document.getElementById('tl-panel').hidden && document.getElementById('tl-op').textContent.includes('No operator is running on this machine')`);
+  assert.equal(await p.ev(`document.querySelector('#tl-op [data-tl-start]').textContent`), 'Start the operator');
+  assert.match(await p.ev(`document.getElementById('tl-list').textContent`), /No open threads\. Hold Shift and click anything on the Overview/);
+
+  // Pin, then a click on the project's name: a thread about it, and the name's own click (open the
+  // project's dashboard) never happens
+  await p.click('#tl-pinbtn');
+  assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
+  let at = await p.at('.ov-card [data-pin="name"]');
+  await p.move(at.x, at.y);
+  await page('the pin cursor, with what it is on named', `!document.getElementById('tl-cursor').hidden && document.getElementById('tl-chip').textContent === 'alpha'`);
+  await p.clickAt(at.x, at.y);
+  await page('a card for a thread about to start', `!document.getElementById('tl-card').hidden && document.getElementById('tl-c-title').textContent === 'alpha' && document.activeElement?.id === 'tl-c-text'`);
+  assert.equal(await p.ev(`document.querySelector('[role=tab][aria-selected=true]').textContent`), 'Overview', 'the click was the layer\'s alone');
+  assert.equal(await p.ev(`document.querySelectorAll('iframe').length`), 0);
+  assert.deepEqual(F.store(), [], 'nothing is written until the first words are sent');
+  await p.key('Escape');
+  assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'false', 'Esc ends pin mode');
+  await p.ev(`document.getElementById('tl-c-text').focus()`);
+  await p.type('what is alpha doing?');
+  await p.key('Enter');
+  await page('the thread, its turn and its pin', `document.querySelectorAll('#tl-pins .tl-pin').length === 1 && String(TL.open).startsWith('ot-') && document.querySelector('.tl-turn.owner .tl-text')?.textContent === 'what is alpha doing?'`);
+  const [th] = F.store();
+  assert.deepEqual([th.title, th.subject], ['alpha', { kind: 'overview', root: fs.realpathSync(F.A), name: 'alpha', anchor: { selector: 'name', label: 'alpha' } }], 'anchored by the project\'s root and the part\'s name, never by where it was drawn');
+  await page('what the send said, under the turn', `/the operator is starting/.test(document.getElementById('tl-c-state').textContent)`);
+  assert.equal(await p.ev(`document.getElementById('tl-pill').textContent`), 'Threads · 1');
+
+  // the pin sits on the name, and stays through a redraw of every card: the same disc, in place
+  const onName = `(() => { const pin = document.querySelector('#tl-pins .tl-pin').getBoundingClientRect(); const n = document.querySelector('.ov-card [data-pin="name"]').getBoundingClientRect(); return Math.abs(pin.left - (n.right - 10)) < 3 && Math.abs(pin.top - (n.top - 10)) < 3; })()`;
+  assert.equal(await p.ev(onName), true);
+  await p.ev(`(() => { document.querySelector('#tl-pins .tl-pin').dataset.mark = '1'; window.__card = document.querySelector('.ov-card'); paintOverview(); })()`);
+  assert.equal(await p.ev(`document.querySelector('.ov-card') !== window.__card`), true, 'the card was made anew');
+  assert.equal(await p.ev(`document.querySelectorAll('#tl-pins .tl-pin').length === 1 && document.querySelector('#tl-pins .tl-pin').dataset.mark === '1'`), true, 'the pin was not');
+  assert.equal(await p.ev(onName), true);
+  assert.equal(await p.ev(`document.querySelector('#tl-pins .tl-pin').getAttribute('aria-label')`), 'Thread 1: alpha');
+  await p.ev(`document.querySelector('[data-tl-close]').click()`);
+  await page('the card put away', `document.getElementById('tl-card').hidden`);
+  await p.click('#tl-pins .tl-pin');
+  await page('and opened again from its pin', `!document.getElementById('tl-card').hidden && document.querySelector('#tl-pins .tl-pin').classList.contains('on')`);
+
+  // the operator's reply, typed by its own command: shown as text, whatever it holds
+  await until(() => JSON.parse(F.kitOf(['status', '--json']).stdout).state === 'ready', 'the operator at its prompt');
+  const id = th.id;
+  assert.equal(F.kitOf(['reply', id, '<img src=x onerror="window.__x=1"><b>bold</b> & done'], OP).status, 0);
+  await page('the reply in the open card', `document.querySelector('.tl-turn.operator .tl-text')?.textContent === '<img src=x onerror="window.__x=1"><b>bold</b> & done'`);
+  assert.deepEqual(await p.ev(`[document.querySelectorAll('#tl-card img, #tl-card .tl-turns b').length, window.__x === undefined]`), [0, true], 'never as markup');
+  assert.equal(await p.ev(`document.querySelector('.tl-turn.operator .meta').textContent.startsWith('The operator · ')`), true);
+  // and the owner's next turn is typed into the operator's session
+  await p.ev(`document.getElementById('tl-c-text').focus()`);
+  await p.type('thanks');
+  await p.key('Enter');
+  await until(() => F.keys().includes('\r'), 'typed into the operator\'s pane');
+  assert.ok(F.keys().startsWith(`[devteam operator thread ${id} from the owner, via the hub] thanks (`));
+  await page('Sent', `document.getElementById('tl-c-state').textContent === 'Sent.'`);
+
+  // Shift and a click, without Pin: a thread about the headline, which belongs to no project
+  await p.ev(`document.querySelector('[data-tl-close]').click()`);
+  at = await p.at('#ov-body [data-pin="headline"]');
+  await p.hold('Shift', true);
+  await p.move(at.x, at.y, 8);
+  await page('the pin under Shift', `!document.getElementById('tl-cursor').hidden`);
+  await p.clickAt(at.x, at.y, 8);
+  await p.hold('Shift', false);
+  await page('a draft about the headline', `!document.getElementById('tl-card').hidden && document.getElementById('tl-c-title').textContent === document.querySelector('[data-pin="headline"]').textContent && TL.draft?.subject?.root === null`);
+  await p.ev(`document.getElementById('tl-c-text').focus()`);
+  await p.type('all of it');
+  await p.key('Enter');
+  await page('two pins', `document.querySelectorAll('#tl-pins .tl-pin').length === 2`);
+  await until(() => F.store().filter((l) => l.type === 'thread').length === 2, 'the second thread kept');
+  await page('and read back', `TL.pend.length === 0 && TL.raw.length === 2`);
+  assert.deepEqual(F.store().filter((l) => l.type === 'thread').at(-1).subject.anchor.selector, 'headline');
+  assert.equal(F.store().filter((l) => l.type === 'thread').at(-1).subject.root, undefined);
+
+  // a phone: nothing to scroll sideways with pins up and the dock open, and the card is a sheet
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 1, mobile: true });
+  await p.ev(`window.dispatchEvent(new Event('resize'))`);
+  await page('the card as a sheet', `document.getElementById('tl-card').classList.contains('sheet')`);
+  await p.ev(`document.querySelector('[data-tl-close]').click()`);
+  await p.ev(`document.getElementById('tl-pill').click()`);
+  await page('the dock listing both', `document.querySelectorAll('#tl-list .tl-row').length === 2`);
+  const fit = await p.ev(`(() => { const o = document.getElementById('overview'), pn = document.getElementById('tl-panel').getBoundingClientRect(); return { ov: o.scrollWidth <= o.clientWidth, doc: document.documentElement.scrollWidth <= innerWidth, panel: pn.left >= 0 && pn.right <= innerWidth, pins: [...document.querySelectorAll('#tl-pins .tl-pin')].every((b) => b.getBoundingClientRect().right <= innerWidth) }; })()`);
+  assert.deepEqual(fit, { ov: true, doc: true, panel: true, pins: true });
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.ev(`window.dispatchEvent(new Event('resize'))`);
+
+  // the threads are read only while the Overview is what shows
+  await p.ev(`(() => { window.__reads = 0; const f = window.fetch; window.fetch = (u, ...a) => { if (String(u).includes('operator/threads')) window.__reads++; return f(u, ...a); }; })()`);
+  await p.ev(`document.querySelector('#tl-list .tl-row').click()`);
+  await page('an open card polling', `!document.getElementById('tl-card').hidden && window.__reads >= 2`);
+  await p.ev(`[...document.querySelectorAll('[role=tab]')].find((x) => x.textContent.startsWith('alpha')).click()`);
+  await page('alpha\'s dashboard instead', `document.getElementById('overview').hidden && document.getElementById('tl').hidden`);
+  await new Promise((r) => setTimeout(r, 800));
+  const reads = await p.ev(`window.__reads`);
+  await new Promise((r) => setTimeout(r, 5000));
+  assert.equal(await p.ev(`window.__reads`), reads, 'no read while a project\'s dashboard shows');
+  await p.ev(`[...document.querySelectorAll('[role=tab]')].find((x) => x.textContent === 'Overview').click()`);
+  await page('read again on coming back', `window.__reads > ${reads} && !document.getElementById('tl').hidden`);
+
+  // Close thread: its pin goes, and the dock keeps it under Closed
+  await page('the card still open', `!document.getElementById('tl-card').hidden && !!document.querySelector('[data-tl-end]')`);
+  await p.ev(`document.querySelector('[data-tl-end]').click()`);
+  await page('one pin left', `document.querySelectorAll('#tl-pins .tl-pin').length === 1 && document.getElementById('tl-card').hidden`);
+  await until(() => F.store().some((l) => l.type === 'thread' && l.op === 'set' && l.status === 'closed'), 'closed in the store');
+  await p.ev(`document.getElementById('tl-pill').click()`);
+  await page('the dock: one open, one closed', `document.querySelectorAll('#tl-list > .tl-row').length === 1 && document.querySelector('#tl-list .tl-closed summary')?.textContent === 'Closed (1)'`);
 });
