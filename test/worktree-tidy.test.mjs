@@ -108,6 +108,12 @@ test('the tick removes finished ticket, chore, plan and review worktrees, and ke
     kept['plan fresh'] = at('plan-f41');
     g(['worktree', 'add', '-q', '-b', 'plan/f41', kept['plan fresh'], 'origin/main'], old);
     kept['review young'] = make.review(40, { old: false });
+    // a chore just started, at main's tip with nothing of its own yet, is not finished either
+    kept['chore fresh'] = ok(old, ['chore', 'start', 'c41'], SUP).split('\n').pop();
+    // nor a file git was told to stop looking at
+    kept['ticket skip-worktree'] = make.ticket(42);
+    g(['update-index', '--skip-worktree', 'ch/ch-42-t.txt'], kept['ticket skip-worktree']);
+    write(path.join(kept['ticket skip-worktree'], 'ch/ch-42-t.txt'), 'hidden from status\n');
     // outside .worktrees: a finished chore's worktree elsewhere, one reached through a symlink in
     // .worktrees, and a folder there that is no worktree at all
     const outside = path.join(F.base, 'outside');

@@ -1856,8 +1856,10 @@ const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
 // field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on
-// these. An owner's act (artifact-publish) is a record of what the owner did, never a call.
-const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner')];
+// these. An owner's act (artifact-publish) is a record of what the owner did, never a call, and
+// nor is the tick's tidy of a finished worktree (tidyFinishedWorktrees), which only follows a merge.
+const isTidyAct = (a) => a.class === 'worker-slots' && String(a.what ?? '').startsWith('removed worktree ');
+const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner' && !isTidyAct(a))];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
@@ -10154,6 +10156,8 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
   if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup }); }
   else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
+  else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   return wt;
 }
 function openPr(wt, branch, title, bodyText) {
@@ -10206,6 +10210,8 @@ function cmdChore() {
   choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+  // a plain folder left where the worktree was would have git add the main checkout's changes
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die(`.worktrees/chore-${slugName} is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start ${slugName}`);
   gitOrDie(['add', '-A'], wt);
   if (gitOrDie(['status', '--porcelain'], wt)) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
   gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
@@ -13952,6 +13958,8 @@ function tidyFinished(name, rec, R, gitdir) {
   }
   if (name.startsWith('chore-')) {
     if (R.name !== 'home' || rec.detached || rec.branch !== `refs/heads/${name}`) return null;
+    // not one just started (or reset) at main's tip, with nothing of its own yet: the supervisor may be about to write in it
+    if (mainLog().some((c) => c.sha === rec.head)) return null;
     return inMain(rec.head) ? `${name} is merged into main` : mergedAtSha(name, rec.head) ? `${name} was merged at its head` : null;
   }
   if (name.startsWith('plan-')) {
@@ -13994,7 +14002,6 @@ function tidyFinishedWorktrees() {
   const launches = lastLaunches();
   const records = new Map();
   const removed = [];
-  const pruned = new Set();
   for (const name of fs.readdirSync(root).sort()) {
     if (name.startsWith('tmp-')) continue; // the temp sweep's
     const wt = path.join(root, name);
@@ -14014,25 +14021,33 @@ function tidyFinishedWorktrees() {
     if (Math.max(...stamps, launches.get(name)?.at ?? 0) > Date.now() - tidyQuietMs()) continue;
     // a harness's own worktrees inside it (gitignored) would go with it
     try { if (fs.readdirSync(path.join(wt, '.claude', 'worktrees')).length) continue; } catch {}
-    const status = R.git(['--no-optional-locks', 'status', '--porcelain'], wt);
+    // every untracked file whatever the config says, and no file git was told to stop looking at
+    const status = R.git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'], wt);
     if (status === null || status !== '') continue;
+    const flagged = R.git(['ls-files', '-v'], wt);
+    if (flagged === null || flagged.split('\n').some((l) => /^([a-z]|S) /.test(l))) continue;
     const branch = rec.branch?.replace(/^refs\/heads\//, '');
     const pushed = R.git(['for-each-ref', '--contains', rec.head, '--count=1', '--format=%(refname)', 'refs/remotes/origin/', `refs/heads/${R.settings.main_branch}`], R.root);
     if (!pushed && !(branch && mergedAtSha(branch, rec.head))) continue;
-    // under the session's launch lock, so a launch can't come in between the last look and the removal
-    const gone = withLock(path.join(runDir, `launch-${name}`), () => {
+    // Under the session's launch lock, so a launch can't come in between the last look and the
+    // removal: a rename out of its name there (quick, well inside the lock's 10 s), the slow delete
+    // after. A tidy that dies in between leaves a tmp-…-<pid>, which the temp sweep takes.
+    const away = path.join(root, `tmp-tidy-${name}-${process.pid}`);
+    const moved = withLock(path.join(runDir, `launch-${name}`), () => {
       // tmux again, as it is now (a process scan is the slow part, so that one is the tick's)
       if (windowNames().has(name) || within(busyDirs({ processes: false }), wt)) return false;
-      // without --force: git refuses a worktree with anything uncommitted or untracked in it
-      return R.git(['worktree', 'remove', wt], R.root) !== null;
+      return R.git(['worktree', 'move', wt, away], R.root) !== null;
     });
-    if (!gone) continue;
-    pruned.add(R);
+    if (!moved) continue;
+    // without --force: git refuses a worktree with anything uncommitted or untracked in it; it goes back then
+    if (R.git(['worktree', 'remove', away], R.root) === null) {
+      if (!fs.existsSync(wt)) R.git(['worktree', 'move', away, wt], R.root);
+      continue;
+    }
     if (tickets().has(name) || name.startsWith('plan-')) stopPreviewsOf(name, { keepRecords: false });
     appendLog({ type: 'act', class: 'worker-slots', what: `removed worktree .worktrees/${name}${R.name === 'home' ? '' : ` (a worktree of ${R.name})`}: ${why}`, refs: [tickets().has(name) ? name : branch ?? name], reversible: true }, 'supervisor');
     removed.push(name);
   }
-  for (const R of pruned) R.git(['worktree', 'prune'], R.root);
   if (removed.length) out(`tidied ${removed.length} finished worktree(s): ${removed.join(', ')}`);
   return removed;
 }
