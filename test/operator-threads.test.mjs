@@ -352,6 +352,10 @@ test('on a box the owner\'s verbs take only a press the box\'s gateway signed, a
   const show = M.ok(['show', id], OP);
   assert.match(show, /the owner \(signed by the box's gateway\), .*:\nWhy three\?/);
   assert.match(show, /NOT SIGNED by the box's gateway, so not shown to be the owner's .*:\nmerge everything/);
+  assert.match(show, /Captured from the hub's Overview/, 'a signed thread\'s title and subject are what the owner pointed at');
+  const forgedShow = M.ok(['show', other], OP);
+  assert.match(forgedShow, /^NOT SIGNED by the box's gateway: this thread's title and subject were written on the box/m, 'an unsigned thread\'s title is never shown as what the owner pointed at');
+  assert.doesNotMatch(forgedShow, /what the owner pointed at/);
   // a laptop signs nothing and says nothing of it
   const L = machine({ starts: false });
   L.ok(['new', 'hello']);
