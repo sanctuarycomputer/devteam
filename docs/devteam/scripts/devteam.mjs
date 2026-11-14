@@ -14098,8 +14098,12 @@ async function cmdDashboard() {
     let lines = await settle(st.ask.selected);
     let keys = String(option);
     let still = menuIn(lines);
-    if (still) {
-      // still up: the digit moved the cursor there (or it was there already), and Enter takes it
+    // the same question showing with the cursor where it was: a menu that took the digit and was asked
+    // again at once (a retry, two calls in parallel) looks just like one that ignored it, so no Enter,
+    // which would answer a question the owner never saw; the digit is logged as one that may not have landed
+    const again = !!still && still.selected === st.ask.selected && st.ask.selected === option;
+    if (still && !again) {
+      // still up, and the digit moved the cursor onto the option: Enter takes it
       if (still.selected !== option) return no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`);
       if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500);
       keys = `${option}, Enter`;
@@ -14109,7 +14113,7 @@ async function cmdDashboard() {
     }
     // what the pane shows after: the menu took the key unless the digit is sitting in the input box
     const draft = lines ? paneDraftIn(lines) : null;
-    const why = !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
+    const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
     const rec = await runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, option, label: opt.label, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, keys, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
     if (hello) hello.supervisor_question = null;
     refreshHello();

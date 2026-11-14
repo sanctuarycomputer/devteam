@@ -443,7 +443,7 @@ test("the dashboard: an answer only from its own page, with that page's token fo
   assert.match((await r.json()).error, /not asking anything now/);
 });
 
-test('a menu whose digit only moves the cursor gets the Enter; one that takes no digit is left as it is, and said so; a dialog with no numbers is never answered from here', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
+test('a menu whose digit only moves the cursor gets the Enter; one that takes no digit, or whose cursor is on it already, is left as it is, and said so; a dialog with no numbers is never answered from here', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-keys');
   t.after(() => F.done());
   const pane = menuPane(F, 'menu:move,menu2:deaf,trust,input');
@@ -460,16 +460,34 @@ test('a menu whose digit only moves the cursor gets the Enter; one that takes no
   assert.match((await r.json()).error, /did not take the key 2 .*answer it in the terminal/);
   assert.equal(pane.typed(), '2\r2', 'no Enter: it would have taken option 1');
   assert.equal(acts(F).length, 1, 'nothing answered, nothing logged');
-  // the option the cursor is on already: the digit changes nothing, and Enter takes it
+  // the option the cursor is on already: the digit changes nothing, which looks just like the same
+  // question asked again, so no Enter; the owner answers it in the terminal
   r = await D.post({ digest: q2.digest, option: 1, token: q2.token });
-  assert.equal(r.status, 200, await r.clone().text());
-  assert.equal(pane.typed(), '2\r21\r');
+  assert.equal(r.status, 409);
+  assert.match((await r.json()).error, /no Enter was sent/);
+  assert.equal(pane.typed(), '2\r21');
+  assert.match(acts(F)[1].what, /may not have landed/);
+  pane.press('Enter');
   // no numbers: shown, with no token, and a token made up for it answers nothing
   const d = await until(async () => { const x = await D.asked(); return x?.kind === 'dialog' ? x : null; }, 'the dialog');
   assert.deepEqual([d.token, d.options], [undefined, undefined]);
   assert.match(d.text, /❯ Yes/);
   assert.equal((await D.post({ digest: d.digest, option: 1, token: 'f'.repeat(64) })).status, 403);
   assert.equal(pane.typed(), '2\r21\r');
+});
+
+test("one click is one answer: the same question asked again at once (a retry, two calls in parallel) gets no Enter", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
+  const F = threadsFixture('pane-again');
+  t.after(() => F.done());
+  const pane = menuPane(F, 'menu,menu,input');
+  const D = await dash(t, F, pane);
+  const q = await D.question();
+  const r = await D.post({ digest: q.digest, option: 1, token: q.token });
+  assert.equal(r.status, 409, await r.clone().text());
+  assert.match((await r.json()).error, /no Enter was sent/);
+  assert.match(acts(F)[0].what, /^sent 1 to the supervisor's terminal .* may not have landed/);
+  assert.equal(pane.typed(), '1', 'the digit, and no Enter into the question asked again');
+  assert.match(pane.shows(), /❯ 1\. Yes/);
 });
 
 test('a question that goes as the key is sent: the digit in the input box is not an answer; it is logged as one that may not have landed, and nothing held is typed', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
