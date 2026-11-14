@@ -12497,13 +12497,15 @@ function machineTell(words) {
   if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
   if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
   // An Enter that arrives as the agent redraws can be lost, and the line would then merge with
-  // whatever is typed there next: once more, as the kit's lost Enter does, and if it's still there, say so.
-  const settle = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000);
-  settle();
-  if (paneState(p) === 'typing') {
+  // whatever is typed there next: pressed again, as the kit's lost Enter does, up to TELL_ENTER_TRIES
+  // in all, each after a longer wait (a loaded machine redraws slowly), and if it's still there, say so.
+  const settle = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000 * n);
+  const TELL_ENTER_TRIES = 3;
+  settle(1);
+  for (let tries = 1; paneState(p) === 'typing'; tries++) {
+    if (tries >= TELL_ENTER_TRIES) return say(`not delivered: the message is still in its input (pane ${p}) after ${TELL_ENTER_TRIES} presses; clear it before anyone types there`, 3);
     tmux(['send-keys', '-t', p, 'Enter']);
-    settle();
-    if (paneState(p) === 'typing') return say(`not delivered: the message is still in its input (pane ${p}); clear it before anyone types there`, 3);
+    settle(tries + 1);
   }
   say(`told (pane ${p})`, 0);
 }
