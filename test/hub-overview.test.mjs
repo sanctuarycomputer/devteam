@@ -33,7 +33,16 @@ test('hello carries a pulse: idle, moving, fully and partly blocked, building', 
     assert.equal(p.open_tickets, 1);
     assert.equal(p.done_tickets, 0);
     assert.equal(p.state, 'moving', 'open work, and the fleet wrote just now');
-    assert.ok(p.activity.at(-1) >= 3, 'what the supervisor just wrote counts as today\'s activity');
+    // the grid is commits on main, by author date, from git: days before the fleet existed count too,
+    // once they are on origin's main
+    assert.equal(p.activity_of, 'commits');
+    const before = p.activity;
+    const commitAt = (daysAgo) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', `${daysAgo} days ago`], { cwd: old, env: { ...process.env, GIT_AUTHOR_DATE: new Date(Date.now() - daysAgo * 86400000).toISOString() } });
+    assert.equal(execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: old, encoding: 'utf8' }).trim(), 'main', 'the fixture works on main');
+    commitAt(3); commitAt(3); commitAt(40); commitAt(200);
+    execFileSync('git', ['push', '-q', 'origin', 'main'], { cwd: old });
+    const after = pulse().activity;
+    assert.deepEqual(after.map((n, i) => n - before[i]).map((d, i) => (d ? [83 - i, d] : null)).filter(Boolean), [[40, 1], [3, 2]], 'two commits 3 days back, one 40 back, none for 200 days back (outside the 12 weeks)');
     assert.ok(p.last_activity && Date.now() - Date.parse(p.last_activity) < 60000);
 
     // a question with no default holding up the only ticket: fully blocked
