@@ -3722,7 +3722,7 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     const own = R.projectInRepo ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
-    if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
+    if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}; if the supervisor widened touches with ticket set since the log last landed, land the log first (log-sync, then merge --chore log) and check again`);
     // Component lines: a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
     // Judged by main's committed settings, so neither a line widened in a working tree nor the
