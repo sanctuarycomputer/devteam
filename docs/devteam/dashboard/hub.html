@@ -80,7 +80,10 @@
   .ov-stat .v.amber { color: var(--amber-fg); }
   .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font: inherit; font: 500 14px/1.3 var(--sans); }
   .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; }
-  .ov-bar > span { display: block; height: 100%; background: var(--green); border-radius: 3px; }
+  .ov-bar { display: flex; }
+  .ov-bar > span { display: block; height: 100%; background: var(--green); }
+  .ov-bar > span.held { background: var(--amber); }
+  .ov-pills { display: flex; gap: 6px; flex: 0 0 auto; }
   .ov-prog { display: flex; flex-direction: column; gap: 4px; }
   .ov-prog .k { color: var(--fg-2); font-size: 12px; }
   .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
@@ -209,6 +212,7 @@ function select(root) {
 const STATES = {
   building: { label: 'Building', tone: 'green', rank: 3 },
   moving: { label: 'Moving', tone: 'blue', rank: 3 },
+  blocked: { label: 'Fully blocked', tone: 'red', rank: 0 },
   waiting: { label: 'Waiting on you', tone: 'amber', rank: 1 },
   stalled: { label: 'Stalled', tone: 'red', rank: 0 },
   idle: { label: 'Idle', tone: '', rank: 4 },
@@ -259,7 +263,11 @@ function overviewCard(it, newest) {
   const name = el('button', 'ov-name', x.name);
   name.title = `Open ${x.name}'s dashboard\n${x.root}`;
   name.onclick = () => select(x.root);
-  top.append(name, el('span', `pill ${S.tone}`, S.label));
+  const pills = el('span', 'ov-pills');
+  // partly blocked is beside what the project is doing: it is still doing it
+  if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber', 'Partly blocked'); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; pills.append(pb); }
+  pills.append(el('span', `pill ${S.tone}`, S.label));
+  top.append(name, pills);
   card.append(top);
 
   const stats = el('div', 'ov-stats');
@@ -279,11 +287,13 @@ function overviewCard(it, newest) {
   if (p) {
     const total = p.open_tickets + p.done_tickets;
     const prog = el('div', 'ov-prog');
-    prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged` : 'No tickets planned yet'));
+    const heldN = Math.max(0, Number(p.blocked_tickets) || 0);
+    prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged${heldN ? `, ${heldN} waiting on you` : ''}` : 'No tickets planned yet'));
     const bar = el('div', 'ov-bar');
     const fill = el('span');
-    fill.style.width = `${total ? Math.round((p.done_tickets / total) * 100) : 0}%`;
+    fill.style.width = `${total ? (p.done_tickets / total) * 100 : 0}%`;
     bar.append(fill);
+    if (heldN && total) { const h = el('span', 'held'); h.style.width = `${(heldN / total) * 100}%`; h.title = `${plural(heldN, 'ticket')} waiting on your answers`; bar.append(h); }
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
     bar.setAttribute('aria-valuemax', String(total));
@@ -292,7 +302,7 @@ function overviewCard(it, newest) {
     card.append(prog);
   }
 
-  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((p?.attention ?? []).map((t) => ({ t: String(t), red: st === 'stalled' && /moved/.test(t) })))];
+  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((p?.attention ?? []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
     for (const n of notes.slice(0, 5)) ul.append(el('li', n.red ? 'red' : '', n.t));
@@ -316,9 +326,11 @@ function paintOverview() {
   const count = (s_) => all.filter((it) => stateOf(it) === s_).length;
   const owed = all.reduce((n, it) => n + (typeof it.x.inbox === 'number' ? it.x.inbox : 0), 0);
   const stuck = count('stalled') + count('gone');
+  const full = count('blocked') + count('waiting');
+  const partly = all.filter((it) => it.x.pulse?.blocking === 'partial' && stateOf(it) !== 'blocked').length;
   const head = el('div', 'ov-head');
-  head.append(el('h1', '', !all.length ? 'No projects running' : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : count('waiting') ? `${plural(count('waiting'), 'project')} waiting on you` : 'Everything is moving'));
-  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
+  head.append(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : 'Everything is moving'));
+  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
   head.append(el('span', 'sum', parts.join(' · ')));
   const grid = el('div', 'ov-grid');
   for (const it of all) grid.append(overviewCard(it, newest));

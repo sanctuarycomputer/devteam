@@ -8,7 +8,7 @@ import { fleetFixture, json, line } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 
-test('hello carries a pulse: idle, moving, waiting on the owner, building', () => {
+test('hello carries a pulse: idle, moving, fully and partly blocked, building', () => {
   const F = fleetFixture('hub-pulse');
   const { old, ok } = F;
   const pulse = () => json(ok(old, ['hello', '--json', '--no-kit'])).pulse;
@@ -30,18 +30,35 @@ test('hello carries a pulse: idle, moving, waiting on the owner, building', () =
     assert.ok(p.activity.at(-1) >= 3, 'what the supervisor just wrote counts as today\'s activity');
     assert.ok(p.last_activity && Date.now() - Date.parse(p.last_activity) < 60000);
 
-    // a question with no default holding the ticket up: waiting on the owner
+    // a question with no default holding up the only ticket: fully blocked
     ok(old, ['ask', '--question', 'Charge per seat or per team?', '--blocks', 'app-01-bill', '--recommendation', 'Per team'], SUP);
     p = pulse();
-    assert.equal(p.state, 'waiting');
-    assert.equal(p.holding, 1);
-    assert.match(p.attention[0], /1 question with no default is holding up work/);
+    assert.equal(p.state, 'blocked');
+    assert.equal(p.blocking, 'full');
+    assert.equal(p.blocked_tickets, 1);
+    assert.match(p.attention[0], /^Fully blocked: all 1 open ticket wait on your answer to 1 question/);
 
-    // a worker mid-ticket, writing now: building, even with the question open
+    // a ticket that depends on it waits too; one that doesn't can move: partly blocked
+    const add = (id, deps) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'bill', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: deps, touches: [`src/${id}/**`], done_when: ['its test passes in CI'] })], SUP);
+    add('app-02-invoices', ['app-01-bill']);
+    p = pulse();
+    assert.equal(p.blocking, 'full', 'what depends on a held ticket is held too');
+    assert.equal(p.blocked_tickets, 2);
+    add('app-03-receipts', []);
+    p = pulse();
+    assert.equal(p.blocking, 'partial');
+    assert.equal(p.blocked_tickets, 2);
+    assert.equal(p.open_tickets, 3);
+    assert.notEqual(p.state, 'blocked');
+    assert.match(p.attention[0], /^Partly blocked: 2 of 3 open tickets wait on your answer to 1 question; the rest can move/);
+
+    // a worker mid-ticket, writing now: building, and still partly blocked
     const ym = new Date().toISOString().slice(0, 7);
-    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', 'app-01-bill.jsonl'), line({ v: 1, id: `h-${ym.replace('-', '')}01-000000000-app-01-bill`, type: 'phase', op: 'new', at: new Date().toISOString(), by: 'app-01-bill', from: null, to: 'build' }));
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', 'app-03-receipts.jsonl'), line({ v: 1, id: `h-${ym.replace('-', '')}01-000000000-app-03-receipts`, type: 'phase', op: 'new', at: new Date().toISOString(), by: 'app-03-receipts', from: null, to: 'build' }));
     p = pulse();
     assert.equal(p.working, 1);
     assert.equal(p.state, 'building');
+    assert.equal(p.blocking, 'partial');
+
   } finally { F.done(); }
 });

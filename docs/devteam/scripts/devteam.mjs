@@ -16389,9 +16389,12 @@ function boxAlert() {
 const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass (no git
 // beyond the merge facts the fold already keeps), so hello stays cheap at every 10 s.
-// state: parked (every goal held), building (a worker mid-ticket and the fleet wrote in the last
-// hour), waiting (nothing building and a question with no default holds work up), stalled (open
-// work and nothing written by the fleet for 2 h), idle (no open work), moving (anything else: the
+// Blocked on the owner, per open ticket: named in the --blocks of an open question with no default,
+// or depending on one that is, however far down. blocking: 'full' when every
+// open ticket is, 'partial' when some are and the rest can move.
+// state: parked (every goal held), blocked (fully: nothing can move until the owner answers),
+// building (a worker mid-ticket and the fleet wrote in the last hour), stalled (open work and
+// nothing written by the fleet for 2 h), idle (no open work), moving (anything else: the
 // supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
 // the last 84 days ending today (UTC).
 const PULSE_DAYS = 84;
@@ -16421,24 +16424,37 @@ function helloPulse() {
   const quietMin = last ? Math.round((now - last) / 60000) : null;
   const silent = working.filter((t) => now - (lastBy.get(t.id) ?? 0) > 3600000);
   const qs = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
-  const holding = qs.filter((q) => (q.blocks ?? []).length && q.default == null).length;
+  const holdingQs = qs.filter((q) => (q.blocks ?? []).length && q.default == null);
+  const holding = holdingQs.length;
+  const named = new Set(holdingQs.flatMap((q) => q.blocks));
+  const openTs = ts.filter((t) => !mergeShaFor(t.id));
+  const openIds = new Set(openTs.map((t) => t.id));
+  const held = new Set(openTs.filter((t) => named.has(t.id)).map((t) => t.id));
+  // and whatever depends on a held ticket, however far down
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of openTs) if (!held.has(t.id) && (t.depends_on ?? []).some((d) => held.has(d) && openIds.has(d))) { held.add(t.id); grew = true; }
+  }
+  const blocking = !held.size ? null : held.size === openTs.length ? 'full' : 'partial';
   const mode = fleetMode() ?? 'run';
   const state = mode === 'park' ? 'parked'
+    : blocking === 'full' ? 'blocked'
     : working.length > silent.length && quietMin !== null && quietMin < 60 ? 'building'
-    : holding ? 'waiting'
     : open && (quietMin === null || quietMin >= 120) ? 'stalled'
     : !open ? 'idle'
     : 'moving';
   const ago = (m) => (m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`);
   const incidents = (() => { try { return incidentList().filter((p) => p.status !== 'resolved').length; } catch { return 0; } })();
   const attention = [
-    holding ? `${holding} question${holding === 1 ? '' : 's'} with no default ${holding === 1 ? 'is' : 'are'} holding up work` : null,
+    blocking === 'full' ? `Fully blocked: all ${open} open ticket${open === 1 ? '' : 's'} wait on ${holding === 1 ? 'your answer to 1 question' : `your answers to ${holding} questions`}`
+    : blocking === 'partial' ? `Partly blocked: ${held.size} of ${open} open tickets wait on ${holding === 1 ? 'your answer to 1 question' : `your answers to ${holding} questions`}; the rest can move`
+    : holding ? `${holding} question${holding === 1 ? '' : 's'} with no default ${holding === 1 ? 'is' : 'are'} holding up work not planned into tickets yet` : null,
     state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `Open work, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
   ].filter(Boolean);
-  return { state, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
+  return { state, blocking, blocked_tickets: held.size, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
 }
 function cmdHello() {
   const s = loadSettings();
