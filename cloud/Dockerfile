@@ -115,7 +115,7 @@ COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
 # The kit, whole (it reads its schema beside it), as of the last release that changed this image:
 # box-deploy.yml deploys only then, so a repo's kit can be newer than this one, or older. The box's
-# own commands (box-status, box-tell, box-alert, box-recover) run it against every repo, and need it
+# own commands (box-status, box-tell, box-alert, box-thread, box-recover) run it against every repo, and need it
 # to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
 # questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
 # repo on a kit older than recover comes back the way the box always brought it back.
@@ -180,6 +180,17 @@ step='drop to gw'
 check 'as gw' as_gw id
 step='drop to dev'
 check 'as dev' as_dev id
+# The owner's threads with the operator: the gateway signs each press it passes to the hub, and the
+# hub (dev's, as every agent is) checks it against the public half, put where only root can write.
+# Without it the hub takes no thread press on this box; nothing else stops.
+step='the gateway key for threads'
+rm -f /etc/devteam/thread-key.pub
+install -d -o root -g root -m 755 /etc/devteam
+if as_gw /usr/local/bin/node /opt/devteam/gateway.mjs thread-key > /etc/devteam/thread-key.pub.new && grep -q 'BEGIN PUBLIC KEY' /etc/devteam/thread-key.pub.new; then
+  chown root:root /etc/devteam/thread-key.pub.new && chmod 644 /etc/devteam/thread-key.pub.new && mv -f /etc/devteam/thread-key.pub.new /etc/devteam/thread-key.pub
+else
+  rm -f /etc/devteam/thread-key.pub.new; say "no gateway key for threads: the hub takes no thread press on this boot"
+fi
 step='start the gateway'
 say "starting the gateway on ${PORT:-8080}"
 # not through as_gw: a function sent to the background is a subshell, and $! would be root's
@@ -231,6 +242,15 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/box-alert
 #!/bin/sh
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine alert -- "$@"
 EOF
+# the owner's threads with the operator, from the hub's Overview: box-thread list --waiting, box-thread
+# show <id>, box-thread reply <id> "<words>" (kept in ~/operator/threads.jsonl). show says which
+# owner turns the gateway signed; the image's node and kit, with nothing from dev's environment
+# that would load other code into it, and only root's folders on its PATH (mise's shims, first on
+# dev's, are anyone's: a program planted there would run inside it).
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-thread
+#!/bin/sh
+exec /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs operator-thread "$@"
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
 set -eu
@@ -275,6 +295,13 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
 cd "$HOME"
 mkdir -p code
 note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
+# Temporary files go on the volume, not the instance's own disk: builds, gate copies and test
+# runs write hundreds of MB there at a time, and a platform that caps a container's ephemeral
+# storage evicts it (a new pod, the work in flight lost) when they pile up. tmux, every agent and
+# every build below inherit it. What a restart left there more than a day ago goes.
+mkdir -p "$HOME/tmp" && chmod 700 "$HOME/tmp"
+export TMPDIR="$HOME/tmp"
+find "$HOME/tmp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now; its mark
 # (supervisor-pane-role) goes with it.
