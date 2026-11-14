@@ -69,3 +69,41 @@ test('hello carries a pulse: idle, moving, fully and partly blocked, building', 
     assert.deepEqual([p.goal?.title, p.goal?.done, p.goal?.total, p.goals_open], ['Billing', 0, 3, 1]);
   } finally { F.done(); }
 });
+
+test('the pulse: an approved goal with nothing planned is not idle; a goal the owner parked is neither moving nor stalled', () => {
+  const F = fleetFixture('hub-pulse-goals');
+  const { old, ok } = F;
+  const pulse = () => json(ok(old, ['hello', '--json', '--no-kit'])).pulse;
+  const dir = path.join(old, 'docs/devteam/run/log');
+  // every line written so far, as if written that long ago
+  const age = (ms) => { for (const f of fs.readdirSync(dir)) fs.writeFileSync(path.join(dir, f), fs.readFileSync(path.join(dir, f), 'utf8').replace(/"at":"([^"]+)"/g, (all, t) => `"at":"${new Date(Date.parse(t) - ms).toISOString()}"`)); };
+  try {
+    const G = ok(old, ['goal', 'add', '--title', 'Billing', '--outcome', 'it works', '--priority', '1'], SUP);
+    fs.appendFileSync(path.join(dir, `owner-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ id: G, type: 'goal', op: 'set', status: 'ready', at: new Date().toISOString(), by: 'owner', channel: 'cli' }));
+    let p = pulse();
+    assert.equal(p.state, 'moving', 'approved and not planned yet: planning is owed');
+    assert.equal(p.open_tickets, 0);
+    age(3 * 3600000);
+    p = pulse();
+    assert.equal(p.state, 'stalled', 'and nobody planning it for hours is a stall, not "waiting for a new goal"');
+    assert.match(p.attention.join('\n'), /An approved goal with no tickets, and nothing has moved in 3 h/);
+
+    ok(old, ['feature', 'add', 'bill', '--json', JSON.stringify({ title: 'bill', goals: [G], stories: [{ id: 'BILL-S1', text: 'it works', release: 'v1.0.0' }] })], SUP);
+    ok(old, ['ticket', 'add', 'app-01-bill', '--json', JSON.stringify({ title: 'Billing page', feature: 'bill', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['src/bill/**'], done_when: ['its test passes in CI'] })], SUP);
+    assert.equal(pulse().state, 'moving');
+    // the owner parks that one goal: Upkeep still runs, so the fleet is not parked
+    ok(old, ['goal', 'hold', G, 'park', '--reason', 'later', '--owner'], { DEVTEAM_CHANNEL: 'dashboard' });
+    age(3 * 86400000);
+    p = pulse();
+    assert.equal(json(ok(old, ['hello', '--json', '--no-kit'])).fleet.mode, 'run');
+    assert.equal(p.state, 'idle', 'its ticket waits by the owner\'s choice: nothing is stalled');
+    assert.equal(p.open_tickets, 1, 'still counted as not merged');
+    assert.deepEqual(p.attention, ['1 open ticket is on hold with its goal']);
+    assert.equal(p.goal.mode, 'park');
+    // a question on it blocks nothing that could move
+    ok(old, ['ask', '--question', 'Charge per seat or per team?', '--blocks', 'app-01-bill', '--recommendation', 'Per team'], SUP);
+    p = pulse();
+    assert.equal(p.blocking, null);
+    assert.notEqual(p.state, 'blocked');
+  } finally { F.done(); }
+});

@@ -16390,13 +16390,14 @@ const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor st
 // The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
 // only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
 // read cache, never one per ticket), so hello stays cheap at every 10 s.
-// Blocked on the owner, per open ticket: named in the --blocks of an open question with no default,
-// or depending on one that is, however far down. blocking: 'full' when every
-// open ticket is, 'partial' when some are and the rest can move.
+// Blocked on the owner, per open ticket that could move (its goal not parked or let go): named in
+// the --blocks of an open question with no default, or depending on one that is, however far down.
+// blocking: 'full' when every such ticket is, 'partial' when some are and the rest can move.
 // state: parked (every goal held), blocked (fully: nothing can move until the owner answers),
+// waiting (an approved goal with nothing planned yet, and a question with no default open on it),
 // building (a worker mid-ticket and the fleet wrote in the last hour), stalled (open work and
-// nothing written by the fleet for 2 h), idle (no open work), moving (anything else: the
-// supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
+// nothing written by the fleet for 2 h), idle (no open work: no ticket that could move, no
+// approved goal still to plan), moving (anything else: the supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
 // the last 84 days ending today (UTC).
 const PULSE_DAYS = 84;
 function helloPulse() {
@@ -16426,41 +16427,57 @@ function helloPulse() {
   const silent = working.filter((t) => now - (lastBy.get(t.id) ?? 0) > 3600000);
   const qs = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
   const holdingQs = qs.filter((q) => (q.blocks ?? []).length && q.default == null);
-  const holding = holdingQs.length;
   const named = new Set(holdingQs.flatMap((q) => q.blocks));
   const openTs = ts.filter((t) => !mergeShaFor(t.id));
-  const openIds = new Set(openTs.map((t) => t.id));
-  const held = new Set(openTs.filter((t) => named.has(t.id)).map((t) => t.id));
+  // what could move: a ticket whose goal the owner parked or let go waits by choice, so it is
+  // neither stalled nor blocked, and it isn't what a question holds up
+  const live = openTs.filter((t) => !['park', 'let-go'].includes(ticketMode(t)));
+  const liveIds = new Set(live.map((t) => t.id));
+  const held = new Set(live.filter((t) => named.has(t.id)).map((t) => t.id));
   // and whatever depends on a held ticket, however far down
   for (let grew = true; grew;) {
     grew = false;
-    for (const t of openTs) if (!held.has(t.id) && (t.depends_on ?? []).some((d) => held.has(d) && openIds.has(d))) { held.add(t.id); grew = true; }
+    for (const t of live) if (!held.has(t.id) && (t.depends_on ?? []).some((d) => held.has(d))) { held.add(t.id); grew = true; }
   }
-  const blocking = !held.size ? null : held.size === openTs.length ? 'full' : 'partial';
+  // the questions that hold tickets, and the ones that hold something else (an incident, work not
+  // planned yet)
+  const holding = holdingQs.filter((q) => q.blocks.some((b) => liveIds.has(b))).length;
+  const holdingElse = holdingQs.length - holding;
+  const blocking = !held.size ? null : held.size === live.length ? 'full' : 'partial';
   const mode = fleetMode() ?? 'run';
+  // what it is working on: the approved goal first in priority (one that is running before one on
+  // hold), and its tickets merged of planned
+  const goals = logObjects('goal').filter((g) => g.status === 'ready').sort((a, b) => (goalMode(a) === 'park') - (goalMode(b) === 'park') || (a.priority ?? Infinity) - (b.priority ?? Infinity));
+  const goalTs = (g) => ts.filter((t) => ticketGoals(t).some((x) => x.id === g.id));
+  // an approved goal, running, with no ticket yet: planning is owed, so the project is not idle
+  const unplanned = goals.filter((g) => goalMode(g) !== 'park' && !goalTs(g).length).length;
+  const work = live.length + unplanned;
   const state = mode === 'park' ? 'parked'
     : blocking === 'full' ? 'blocked'
+    : !live.length && unplanned && holdingElse ? 'waiting'
     : working.length > silent.length && quietMin !== null && quietMin < 60 ? 'building'
-    : open && (quietMin === null || quietMin >= 120) ? 'stalled'
-    : !open ? 'idle'
+    : work && (quietMin === null || quietMin >= 120) ? 'stalled'
+    : !work ? 'idle'
     : 'moving';
   const ago = (m) => (m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`);
   const incidents = (() => { try { return incidentList().filter((p) => p.status !== 'resolved').length; } catch { return 0; } })();
+  const answers = (n) => (n === 1 ? 'your answer to 1 question' : `your answers to ${n} questions`);
+  const onHold = openTs.length - live.length;
   const attention = [
-    blocking === 'full' ? `Fully blocked: all ${open} open ticket${open === 1 ? '' : 's'} wait on ${holding === 1 ? 'your answer to 1 question' : `your answers to ${holding} questions`}`
-    : blocking === 'partial' ? `Partly blocked: ${held.size} of ${open} open tickets wait on ${holding === 1 ? 'your answer to 1 question' : `your answers to ${holding} questions`}; the rest can move`
-    : holding ? `${holding} question${holding === 1 ? '' : 's'} with no default ${holding === 1 ? 'is' : 'are'} holding up work not planned into tickets yet` : null,
-    state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `Open work, and nothing has moved in ${ago(quietMin)}`) : null,
+    blocking === 'full' ? `Fully blocked: all ${live.length} open ticket${live.length === 1 ? '' : 's'} wait on ${answers(holding)}`
+    : blocking === 'partial' ? `Partly blocked: ${held.size} of ${live.length} open tickets wait on ${answers(holding)}; the rest can move`
+    : null,
+    holdingElse ? `${holdingElse} question${holdingElse === 1 ? '' : 's'} with no default ${holdingElse === 1 ? 'is' : 'are'} holding up work that is not an open ticket` : null,
+    state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
     silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
     incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
     mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
+    onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
   ].filter(Boolean);
-  // what it is working on: the approved goal first in priority, and its tickets merged of planned
-  const goals = logObjects('goal').filter((g) => g.status === 'ready').sort((a, b) => (a.priority ?? Infinity) - (b.priority ?? Infinity));
   const top = goals[0] ?? null;
-  const topTs = top ? ts.filter((t) => ticketGoals(t).some((g) => g.id === top.id)) : [];
+  const topTs = top ? goalTs(top) : [];
   const goal = top ? { title: String(top.title ?? top.id).slice(0, 120), done: topTs.filter((t) => mergeShaFor(t.id)).length, total: topTs.length, mode: goalMode(top) } : null;
-  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding, attention, activity };
+  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding: holdingQs.length, attention, activity };
 }
 function cmdHello() {
   // read-only, and the pulse asks whether each open ticket has merged: every ref in one git call
