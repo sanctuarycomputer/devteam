@@ -31,11 +31,16 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   html { touch-action: manipulation; }
+  /* an app, not a page: the hub itself never scrolls or rubber-bands; its views scroll inside */
+  html, body { overscroll-behavior: none; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
   header { display: flex; align-items: flex-end; gap: 12px; padding: 6px 12px 0; background: var(--surface); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
-  nav { display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; scrollbar-width: none; }
+  /* The tabs scroll sideways only: no vertical scroll, no pull, and a swipe that reaches either end
+     stays in the strip. The strip, not each tab, hangs 1px over the header's rule, so the chosen
+     tab covers it without the strip having anything to scroll up or down. */
+  nav { display: flex; gap: 2px; overflow-x: auto; overflow-y: hidden; overscroll-behavior: contain; touch-action: pan-x; flex: 1 1 auto; margin-bottom: -1px; scrollbar-width: none; }
   nav::-webkit-scrollbar { display: none; }
-  .tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 7px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; background: none; color: var(--fg-2); font: 500 13px/18px var(--sans); cursor: pointer; white-space: nowrap; margin-bottom: -1px; }
+  .tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 7px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; background: none; color: var(--fg-2); font: 500 13px/18px var(--sans); cursor: pointer; white-space: nowrap; flex: 0 0 auto; }
   .tab:hover { color: var(--fg); background: var(--hover); }
   .tab[aria-selected="true"] { color: var(--fg); background: var(--bg); border-color: var(--line); }
   .tab.gone { opacity: .45; }
