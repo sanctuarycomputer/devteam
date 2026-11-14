@@ -16821,14 +16821,35 @@ const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor st
 // waiting (an approved goal with nothing planned yet, and a question with no default open on it),
 // building (a worker mid-ticket and the fleet wrote in the last hour), stalled (open work and
 // nothing written by the fleet for 2 h), idle (no open work: no ticket that could move, no
-// approved goal still to plan), moving (anything else: the supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
-// the last 84 days ending today (UTC).
+// approved goal still to plan), moving (anything else: the supervisor planning, reviewing, merging).
+// activity: commits per day on main, in home and each repo link this machine can read, oldest
+// first, the last 84 days ending today (UTC), by author date, as GitHub counts contributions. From
+// git, so it goes back before the fleet did, and counts the owner's commits too.
 const PULSE_DAYS = 84;
+function commitActivity(day0) {
+  const activity = new Array(PULSE_DAYS).fill(0);
+  const since = new Date(day0 - (PULSE_DAYS - 1) * 86400000).toISOString();
+  const links = Object.entries(loadSettings().links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id);
+  for (const name of ['home', ...links]) {
+    if (name !== 'home' && !repoReadable(name)) continue;
+    const R = repo(name);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    for (const at of (R.git(['log', ref, `--since=${since}`, '--format=%at']) ?? '').split('\n')) {
+      const t = Number(at) * 1000;
+      if (!(t > 0)) continue;
+      const back = Math.floor((day0 - t) / 86400000) + 1;
+      if (t >= day0) activity[PULSE_DAYS - 1]++;
+      else if (back < PULSE_DAYS) activity[PULSE_DAYS - 1 - back]++;
+    }
+  }
+  return activity;
+}
 function helloPulse() {
   const now = Date.now();
   const lines = readLog().lines;
   const day0 = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate());
-  const activity = new Array(PULSE_DAYS).fill(0);
+  const activity = commitActivity(day0);
   const lastBy = new Map();
   const phaseBy = new Map();
   let last = 0;
@@ -16839,9 +16860,6 @@ function helloPulse() {
     if (t > last) last = t;
     if (t > (lastBy.get(l.by) ?? 0)) lastBy.set(l.by, t);
     if (l.type === 'phase' && (!phaseBy.has(l.by) || l.at >= phaseBy.get(l.by).at)) phaseBy.set(l.by, l);
-    const back = Math.floor((day0 - t) / 86400000) + 1;
-    if (t >= day0) activity[PULSE_DAYS - 1]++;
-    else if (back < PULSE_DAYS) activity[PULSE_DAYS - 1 - back]++;
   }
   const ts = [...tickets().values()].filter(isActive);
   const done = ts.filter((t) => mergeShaFor(t.id)).length;
@@ -16901,7 +16919,7 @@ function helloPulse() {
   const top = goals[0] ?? null;
   const topTs = top ? goalTs(top) : [];
   const goal = top ? { title: String(top.title ?? top.id).slice(0, 120), done: topTs.filter((t) => mergeShaFor(t.id)).length, total: topTs.length, mode: goalMode(top) } : null;
-  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding: holdingQs.length, attention, activity };
+  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, activity_of: 'commits', last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding: holdingQs.length, attention, activity };
 }
 function cmdHello() {
   // read-only, and the pulse asks whether each open ticket has merged: every ref in one git call

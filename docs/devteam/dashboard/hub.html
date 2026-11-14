@@ -56,15 +56,15 @@
   /* the Overview: a card per project, read at a glance */
   #overview { position: absolute; inset: 0; overflow: auto; padding: 20px 16px 40px; }
   #overview[hidden] { display: none; }
-  .ov-head { max-width: 1200px; margin: 0 auto 16px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+  .ov-head { max-width: 1200px; margin: 0 auto 16px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
   .ov-head h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
   .ov-head .sum { color: var(--fg-2); }
-  .ov-grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; align-items: start; }
-  .ov-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); }
+  .ov-grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; align-items: start; }
+  .ov-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); min-width: 0; overflow-wrap: anywhere; }
   .ov-card.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .ov-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
   .ov-top { display: flex; align-items: center; gap: 8px; }
-  .ov-name { font: 600 15px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+  .ov-name { font: 600 15px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
   .ov-name:hover { text-decoration: underline; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
   .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -120,7 +120,7 @@
   .ov-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
   .ov-foot .k { color: var(--muted); font-size: 11px; }
   .ov-none { color: var(--fg-2); font-size: 12.5px; }
-  @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: minmax(0, 1fr); } }
 </style>
 </head>
 <body>
@@ -315,7 +315,7 @@ function agoText(iso) {
 // kit releases compared by their numbers; "+local" is the same release with local changes
 const relNums = (k) => { const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(k ?? '')); return m ? m.slice(1).map(Number) : null; };
 const relCmp = (a, b) => { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
-function mosaic(days) {
+function mosaic(days, commits = false) {
   const box = el('div', 'ov-mosaic');
   const n = days.length;
   const max = Math.max(0, ...days);
@@ -327,7 +327,7 @@ function mosaic(days) {
     const q = !c || !max ? 0 : Math.min(4, Math.ceil((c / max) * 4));
     const cell = el('i', q ? `l${q}` : '');
     const d = new Date(first.getTime() + i * 86400000);
-    cell.title = `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}: ${plural(c, 'thing', 'things')} the fleet logged`;
+    cell.title = `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}: ${commits ? `${plural(c, 'commit')} on main` : `${plural(c, 'thing', 'things')} the fleet logged`}`;
     box.append(cell);
   });
   box.setAttribute('role', 'img');
@@ -441,7 +441,7 @@ function overviewCard(it, newest) {
 
   if (Array.isArray(p?.activity) && p.activity.length) {
     const foot = el('div', 'ov-foot');
-    foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0))), el('span', 'k', `${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
+    foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
     card.append(foot);
   }
   if (steerable(it)) card.append(fleetControl(it));
