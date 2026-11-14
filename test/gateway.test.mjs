@@ -385,6 +385,20 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.equal(r.headers.location, `${gw.inst(P + 5)}/x`);
     assert.deepEqual(r.headers['set-cookie'], ['theme=light'], 'nothing behind the gateway sets a cookie for the box\'s names');
     assert.equal(r.headers['clear-site-data'], undefined, 'or clears the owner\'s');
+    // the owner's answer to what a supervisor's terminal asks is the one dashboard request the
+    // gateway signs: for that instance's port and that body, whatever signature the browser sent
+    const press = { digest: 'a'.repeat(40), option: 1, token: 't' };
+    const pa = await gw.req('POST', '/api/pane-answer', { on: P + 5, body: press, headers: { 'x-devteam-gateway-sig': 'forged', 'x-devteam-gateway-nonce': 'forged' } });
+    assert.equal(pa.status, 200);
+    const ph = seen.at(-1);
+    assert.match(ph['x-devteam-gateway-ts'], /^\d{13}$/);
+    assert.notEqual(ph['x-devteam-gateway-sig'], 'forged');
+    const signedBytes = (port) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ph['x-devteam-gateway-ts']}\n${ph['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(JSON.stringify(press)).digest('hex')}`);
+    const pub = crypto.createPublicKey(gw.g.threadPublicKey());
+    assert.equal(crypto.verify(null, signedBytes(P + 5), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), true, 'signed for this port and this body');
+    assert.equal(crypto.verify(null, signedBytes(P), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), false, 'and for no other instance');
+    assert.equal(seen.filter((x) => x !== ph).every((x) => x['x-devteam-gateway-sig'] === undefined), true, 'nothing else an instance gets is signed');
+    assert.equal((await gw.req('POST', '/api/pane-answer', { on: P + 5, body: press, cookie: '' })).status, 401, 'never without the session');
 
     // another site's page can't use the cookie for a read; a sandboxed review page's loads can
     const xs = (route, dest) => gw.req('GET', route, { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest } });

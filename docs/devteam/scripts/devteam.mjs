@@ -1179,6 +1179,7 @@ function integrity(o, file) {
     // classes: an agent can't make the log say the owner published, or gave a tool their yes.
     if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? 'the owner\'s acts are artifact-publish and pane-answer only' : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
+    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
@@ -2751,112 +2752,235 @@ function resendSupervisorLostEnter() {
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
-// A question in a pane: a menu the agent's CLI put up and is waiting on (a tool that wants a person's
-// yes, a permission prompt), read from what the pane shows, never from colors. A run of options
-// numbered from 1 in one column, exactly one of them under the cursor mark, with nothing after it
-// but a hint line or two: no input box, and nothing that says the agent is working. A numbered list
-// in a reply, in code or in a diff has no cursor on it, or sits above the input box, so it is none.
-// The question is the dialog's own lines above the options, up to its top rule. The digest names
-// the question and its options (not where the cursor is), so an answer can be checked against the
-// very question still showing. Null when nothing recognisable is up.
+// A question in a pane: a dialog the agent's CLI put up and is waiting on (a tool that wants a
+// person's yes, a permission prompt), read from what the pane shows, never from colors.
+//
+// Two readings, for two uses. Whether to type into the pane is the wide one (paneAskingIn): a
+// numbered menu, a dialog whose last lines say Enter confirms it, or any line under the cursor mark
+// near the bottom with a choice beside it and no input box under it. Holding a line too long costs a
+// wait; typing one into a menu answers it. Whether the owner may answer from the dashboard is the
+// narrow one (paneQuestionIn): the agent's own frame from its top rule (a rule from the pane's first
+// column) to its hint lines, with options numbered from 1 in one column, exactly one under the
+// cursor, and nothing under it but hints. The whole dialog is kept as the pane has it: no line
+// dropped, no space collapsed, nothing cut. One too tall for the pane, or too long to send, is not
+// offered at all, so the card never shows less than the owner is agreeing to. The digest is of that
+// whole dialog, rule to last hint, with only the cursor mark taken out: any other change to it is
+// another question.
 /* pane question start */
 const MENU_OPTION = /^(\s*)(?:([❯›▶→>])\s*)?(\d{1,2})\.\s+(\S.*)$/;
+const CURSOR_LINE = /^(\s*)([❯›▶→])(\s+)(\S.*)$/;
 const PANE_WORKING = /esc to interrupt|ctrl\+c to interrupt|press esc to stop/i;
 const PANE_INPUT = /^[❯›>](\s|$)/;
+const SHELL_PROMPT = /^[$%#]$/;
 const BOX_ONLY = /^[\s─-╿]+$/;
-const SOLID_RULE = /^[\s╭╮┌┐─━═]*[─━═]{8,}[\s╭╮┌┐─━═]*$/;
-const QUESTION_MAX = 600;
-const OPTION_MAX = 200;
+const TOP_RULE = /^[╭┌─━═][─━═]{19,}[╮┐]?\s*$/;
+const ANY_RULE = /^[\s╭╮╰╯┌┐└┘├┤]*[─━═]{8,}[\s╭╮╰╯┌┐└┘├┤─━═]*$/;
+const ENTER_CONFIRMS = /\bEnter to (confirm|select|continue)\b|\bPress Enter to continue\b/i;
+const LIMIT_OPTION = /^\s*(?:[❯›▶→>]\s*)?\d+\.\s*Stop and wait for limit to reset\s*$/;
+const DIALOG_MAX = 6000;
+const HINT_LINES_MAX = 8;
+// a dialog drawn in a box: its sides drop out, the columns stay
+const unboxed = (rawLines) => rawLines.map((l) => String(l).replace(/^(\s*)[│┃]/, '$1 ').replace(/[│┃]\s*$/, '').trimEnd());
 function paneQuestionIn(rawLines) {
-  // a dialog drawn in a box: its sides drop out, the columns stay
-  const lines = rawLines.map((l) => String(l).replace(/^(\s*)[│┃]/, '$1 ').replace(/[│┃]\s*$/, '').trimEnd());
+  const raw = rawLines.map((l) => String(l).trimEnd());
+  const lines = unboxed(raw);
   let at = -1;
   for (let i = lines.length - 1; i >= 0 && at === -1; i--) if (MENU_OPTION.exec(lines[i])?.[2]) at = i;
   if (at === -1) return null;
   const col = (l) => (MENU_OPTION.test(l) ? l.search(/\d/) : -1);
+  const num = (l) => Number(MENU_OPTION.exec(l)[3]);
   const c = col(lines[at]);
-  // an option in the cursor's column, or a wrapped label's next line (indented past the numbers)
-  const inMenu = (l) => !!l.trim() && (col(l) === c || l.search(/\S/) > c);
+  const option = (l) => col(l) === c;
+  // a wrapped label's next line, or a line describing the option: indented to the numbers or past them
+  const more = (l) => !!l.trim() && !option(l) && l.search(/\S/) >= c;
+  // up to option 1, through options, their extra lines and blank lines only
   let start = at;
+  while (num(lines[start]) !== 1) {
+    let i = start - 1;
+    while (i >= 0 && (more(lines[i]) || !lines[i].trim())) i--;
+    if (i < 0 || !option(lines[i]) || num(lines[i]) !== num(lines[start]) - 1) return null;
+    start = i;
+  }
+  // down through the rest: a blank line stays inside only when the next option follows it
   let end = at;
-  while (start > 0 && inMenu(lines[start - 1])) start--;
-  while (end < lines.length - 1 && inMenu(lines[end + 1])) end++;
-  while (start < at && col(lines[start]) !== c) start++;
+  for (let last = num(lines[at]); end < lines.length - 1;) {
+    let i = end + 1;
+    while (i < lines.length && !lines[i].trim()) i++;
+    if (i >= lines.length) break;
+    if (option(lines[i]) && num(lines[i]) === last + 1) { last++; end = i; continue; }
+    if (i === end + 1 && more(lines[i])) { end = i; continue; }
+    break;
+  }
   const options = [];
   let selected = null;
   for (let i = start; i <= end; i++) {
-    const m = col(lines[i]) === c ? MENU_OPTION.exec(lines[i]) : null;
-    if (!m) { options[options.length - 1].label += ` ${lines[i].trim()}`; continue; }
-    options.push({ n: Number(m[3]), label: m[4].trim() });
+    if (!lines[i].trim()) continue;
+    const m = option(lines[i]) ? MENU_OPTION.exec(lines[i]) : null;
+    if (!m) { options[options.length - 1].label += `\n${lines[i].trim()}`; continue; }
+    options.push({ n: Number(m[3]), label: m[4].trimEnd() });
     if (m[2]) { if (selected !== null) return null; selected = Number(m[3]); }
   }
   if (options.length < 2 || selected === null || options.some((o, i) => o.n !== i + 1)) return null;
-  const after = lines.slice(end + 1).map((l) => l.trim()).filter((l) => l && !BOX_ONLY.test(l));
-  if (after.length > 4 || after.some((l) => PANE_WORKING.test(l) || PANE_INPUT.test(l))) return null;
-  const text = [];
-  for (let i = start - 1; i >= 0 && text.length < 12; i--) {
-    const l = lines[i].trim();
-    if (SOLID_RULE.test(l) || /^[⏺●⎿✻]/.test(l)) break;
-    if (l && !BOX_ONLY.test(l)) text.unshift(l);
-  }
-  const clean = (t) => t.replace(UNSAFE_TEXT_ALL, ' ').replace(/[ \t]+/g, ' ').trim();
-  let question = text.map(clean).filter(Boolean).join('\n');
-  // the words nearest the options are the question itself: a long dialog loses its top
-  if (question.length > QUESTION_MAX) question = `…${question.slice(-(QUESTION_MAX - 1))}`;
-  const opts = options.map((o) => ({ n: o.n, label: clean(o.label).slice(0, OPTION_MAX) }));
-  const digest = crypto.createHash('sha1').update(JSON.stringify([question, opts.map((o) => [o.n, o.label])])).digest('hex');
-  return { question, options: opts, selected, digest };
+  const hints = lines.slice(end + 1).map((l) => l.trim()).filter((l) => l && !BOX_ONLY.test(l));
+  if (hints.length > HINT_LINES_MAX || hints.some((l) => PANE_WORKING.test(l) || PANE_INPUT.test(l) || SHELL_PROMPT.test(l))) return null;
+  // the agent's own frame: its top rule, from the pane's first column. A rule inside the dialog (a
+  // command's own text) is indented with the rest of it, and is not the top.
+  let top = -1;
+  for (let i = start - 1; i >= 0 && top === -1; i--) if (TOP_RULE.test(raw[i])) top = i;
+  if (top === -1) return null;
+  let bottom = raw.length - 1;
+  while (bottom > end && !raw[bottom].trim()) bottom--;
+  // the whole dialog, as the pane has it, with only the cursor mark taken out
+  const whole = raw.slice(top, bottom + 1).map((l, k) => { const i = top + k; return i >= start && i <= end && option(lines[i]) ? l.replace(/[❯›▶→>](\s*\d)/, ' $1') : l; }).join('\n');
+  if (whole.length > DIALOG_MAX) return null;
+  const body = lines.slice(top + 1, start);
+  while (body.length && !body[0].trim()) body.shift();
+  while (body.length && !body[body.length - 1].trim()) body.pop();
+  // the dialog's own margin goes (a rule across the pane has none); every other space stays
+  const worded = (l) => !!l.trim() && !BOX_ONLY.test(l);
+  const indent = Math.min(...body.filter(worded).map((l) => l.search(/\S/)), 99);
+  const question = body.map((l) => (worded(l) ? l.slice(indent) : l)).join('\n');
+  const first = (body.find((l) => l.trim() && !BOX_ONLY.test(l)) ?? '').trim();
+  const artifact = /claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})/.exec(whole)?.[1] ?? null;
+  return { question, options, selected, hint: hints.join('\n'), first, artifact, digest: crypto.createHash('sha1').update(whole).digest('hex') };
 }
+// The agent's input box, from the line with its prompt mark: a rule right above it, and a rule under
+// it and whatever of a long draft wrapped onto more lines. What is typed in it, or null when that
+// line is not an input box.
+function inputBoxAt(lines, i) {
+  let a = i - 1;
+  while (a >= 0 && !lines[a].trim()) a--;
+  if (a < 0 || !ANY_RULE.test(lines[a])) return null;
+  const words = [lines[i].trim().slice(1).trim()];
+  for (let b = i + 1; b < lines.length && b <= i + 12; b++) {
+    if (ANY_RULE.test(lines[b])) return words.join('');
+    if (lines[b].trim()) words.push(lines[b].trim());
+  }
+  return null;
+}
+// The agent's input box, if the pane's last lines show one: what is typed in it ('' when empty), else null.
+function paneDraftIn(rawLines) {
+  const lines = unboxed(rawLines);
+  const idx = lines.map((l, i) => (l.trim() ? i : -1)).filter((i) => i >= 0).slice(-16);
+  for (const i of idx.reverse()) {
+    if (!PANE_INPUT.test(lines[i].trim())) continue;
+    const box = inputBoxAt(lines, i);
+    // an agent that draws no rules round its prompt: the bare mark, or a line that is no menu's
+    return box ?? (MENU_OPTION.exec(lines[i])?.[2] ? null : lines[i].trim().slice(1).trim());
+  }
+  return null;
+}
+// Whether a line typed into the pane now, with its Enter, would answer something instead of being
+// read. { kind: 'menu', … } is one the owner can answer from the dashboard; 'limit' the usage-limit
+// menu (accounts-tick's to clear); 'dialog' anything else that is up, answered in the terminal: text
+// is the pane's last lines as they are. Only what the pane's own shape says: a question the agent
+// wrote in a reply, above its input box, holds nothing.
+function paneAskingIn(rawLines) {
+  const raw = rawLines.map((l) => String(l).trimEnd());
+  const lines = unboxed(raw);
+  const limit = lines.some((l) => LIMIT_OPTION.test(l));
+  const q = paneQuestionIn(raw);
+  if (q && !limit) return { kind: 'menu', ...q };
+  const shown = () => { const t = raw.slice(-25); while (t.length && !t[0].trim()) t.shift(); while (t.length && !t[t.length - 1].trim()) t.pop(); return t.join('\n'); };
+  const dialog = () => ({ kind: limit ? 'limit' : 'dialog', text: shown(), digest: crypto.createHash('sha1').update(shown()).digest('hex') });
+  if (q) return dialog();
+  const idx = lines.map((l, i) => (l.trim() ? i : -1)).filter((i) => i >= 0);
+  // its last lines say Enter confirms it, and none of them is the input box with those words typed in it
+  const tail = idx.filter((i) => !BOX_ONLY.test(lines[i])).slice(-4).map((i) => lines[i].trim());
+  const e = tail.findIndex((l) => ENTER_CONFIRMS.test(l));
+  if (e !== -1 && !tail.some((l) => PANE_WORKING.test(l)) && !tail.slice(e).some((l) => PANE_INPUT.test(l))) return dialog();
+  // a line under the cursor mark near the bottom, a choice beside it, and no input box under it
+  const near = idx.slice(-15);
+  for (let k = near.length - 1; k >= 0; k--) {
+    const i = near[k];
+    const m = CURSOR_LINE.exec(lines[i]) ?? (MENU_OPTION.exec(lines[i])?.[2] ? /^(\s*)(>)(\s*)(\S.*)$/.exec(lines[i]) : null);
+    if (!m) continue;
+    const after = idx.filter((j) => j > i).map((j) => lines[j].trim());
+    if (after.some((l) => PANE_WORKING.test(l) || PANE_INPUT.test(l) || SHELL_PROMPT.test(l))) return null;
+    if (inputBoxAt(lines, i) !== null) continue;
+    const at = m[1].length + m[2].length + m[3].length;
+    // the nearest line above or below it (a blank line between them or not) starts where its words do
+    const near2 = [idx[idx.indexOf(i) - 1], idx[idx.indexOf(i) + 1]].filter((j) => j !== undefined && Math.abs(j - i) <= 2);
+    if (near2.some((j) => !BOX_ONLY.test(lines[j]) && lines[j].search(/\S/) === at)) return dialog();
+  }
+  return null;
+}
+// Ready for a line: nothing asked, and the agent's input box is showing.
+const paneReadyIn = (rawLines) => !paneAskingIn(rawLines) && paneDraftIn(rawLines) !== null;
+/* pane question end */
 // What a pane shows now, bottom 60 lines, columns kept (not sh(): it trims). -u: under a locale that
 // isn't UTF-8 tmux prints the cursor mark as an underscore, and the menu would go unseen.
+const screenLines = (text) => String(text ?? '').replace(/\s+$/, '').split('\n').slice(-60);
 function paneScreen(target) {
   let text = '';
   try { text = execFileSync('tmux', ['-u', 'capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
-  return text.replace(/\s+$/, '').split('\n').slice(-60);
-}
-const paneQuestion = (target) => paneQuestionIn(paneScreen(target));
-// Whether a line typed into the pane now, with its Enter, would answer something instead of being
-// read: a numbered menu (paneQuestionIn), or any dialog whose last lines say Enter confirms it (a
-// menu with no numbers, a notice to continue past). Only what can't be mistaken: a question the
-// agent wrote in its own reply holds nothing.
-const ENTER_CONFIRMS = /\bEnter to (confirm|select|continue)\b|\bPress Enter to continue\b/i;
-function paneAskingIn(lines) {
-  const q = paneQuestionIn(lines);
-  if (q) return { kind: 'menu', ...q };
-  const tail = lines.map((l) => String(l).trim()).filter((l) => l && !BOX_ONLY.test(l)).slice(-4);
-  const i = tail.findIndex((l) => ENTER_CONFIRMS.test(l));
-  if (i === -1 || tail.some((l) => PANE_WORKING.test(l)) || tail.slice(i + 1).some((l) => PANE_INPUT.test(l))) return null;
-  return { kind: 'confirm', line: tail[i].slice(0, 200) };
+  return screenLines(text);
 }
 const paneAsking = (target) => paneAskingIn(paneScreen(target));
-/* pane question end */
-// The question the owner can answer from the dashboard: the supervisor's, when its pane shows a
-// numbered menu. A usage-limit menu is not one: accounts-tick answers that by restarting the session.
-function supervisorQuestion() {
-  const { target } = resolvePane(supervisorTarget());
-  const q = target ? paneQuestion(target) : null;
-  return q && !q.options.some((o) => LIMIT_MENU.test(`${o.n}. ${o.label}`)) ? q : null;
+// Why a pane is not taken for the supervisor's, for an answer from the dashboard (null when it is):
+// the record of its pane (run/supervisor-pane) is a file any session here can write, and an owner's
+// click must not land in a worker's menu. The supervisor runs in the main checkout, never in a
+// worktree, and its window is not one of the fleet's. Anything that runs as this user can still
+// type into any pane itself; this only keeps the kit's own click where the card said it would go.
+function notSupervisorPane(target) {
+  const [cwd, win] = (sh('tmux', ['-u', 'display-message', '-p', '-t', target, '#{pane_current_path}\n#{window_name}']) ?? '').split('\n');
+  if (!cwd) return `cannot inspect ${target}`;
+  let real = cwd;
+  try { real = fs.realpathSync(cwd); } catch {}
+  const root = fs.realpathSync(mainRoot);
+  if (real !== root && !real.startsWith(root + path.sep)) return `the pane recorded as the supervisor's (${target}) runs in ${cwd}, not in this checkout`;
+  if (real.startsWith(path.join(root, '.worktrees') + path.sep)) return `the pane recorded as the supervisor's (${target}) runs in a worktree (${cwd}): that is a worker's or a planner's`;
+  if (win && (tickets().has(win) || win.startsWith('plan-'))) return `the pane recorded as the supervisor's (${target}) is the window of ${win}`;
+  return null;
+}
+// What the supervisor's terminal is asking, for the dashboard: { target, ask, problem }.
+function supervisorAsk() {
+  const { target, problem } = resolvePane(supervisorTarget());
+  if (!target) return { target: null, ask: null, problem };
+  const ask = paneAsking(target);
+  const not = ask ? notSupervisorPane(target) : null;
+  // not answered from the dashboard, but still shown: the owner goes to the terminal
+  return { target, ask: ask && not && ask.kind === 'menu' ? { kind: 'dialog', text: paneScreen(target).slice(-25).join('\n').trim(), digest: ask.digest } : ask, problem: not };
 }
 
 // Deliveries held while a pane asks: a message typed into a menu, with its Enter, answers the menu
 // (an owner's "Approved here" in a thread once answered No to a tool's consent prompt). So typeInto
 // types nothing while the pane asks; the line (already in the log, which is the record) waits in
-// run/held/<window>/, one file a line, named so that sorting them is the order they came in. Once
-// the question is gone they are typed in that order: by the next delivery to that pane, by the
-// supervisor's tick for its workers' panes, by accounts-tick for every pane, and at once after the
-// owner answers on the dashboard. One process types a window's lines at a time: it claims the whole
-// folder by renaming it (a rename only one can win), types, and puts back what it could not type;
-// lines held meanwhile land in a fresh folder, which it takes next. A claim whose process died goes
-// back as it was, so a line is typed twice only if that process died between its keys and its
-// unlink, and is never lost. A line a day old, or one whose pane has been gone ten minutes, is let
-// go: its recipient reads it in the log.
+// run/held/<window>/, one file a line, named so that sorting them is the order they came in. They
+// are typed in that order once the pane shows the agent's input box again (not merely no question:
+// between two prompts a pane shows neither), or, for an agent whose input box the kit can't
+// recognise, once it has asked nothing and the oldest line has waited two minutes. Who looks: the
+// next delivery to that pane, the supervisor's tick for its workers' panes, accounts-tick for every
+// pane, and the owner's answer on the dashboard. One process types a window's lines at a time: it
+// claims the whole folder by renaming it (a rename only one can win) to a name with its pid and the
+// time, touches it as it goes, and puts back what it could not type; lines held meanwhile land in a
+// fresh folder, which it takes next. A claim whose process is gone, or that has not been touched for
+// a minute (a pid can be someone else's by then), goes back as it was: a line is typed twice only if
+// its process stopped between its keys and its unlink, and is never lost. A line a day old, or one
+// whose pane has been gone ten minutes, is let go and the supervisor's log says so: its recipient
+// reads it in the log.
 const HELD_MAX_MS = 24 * 3600 * 1000;
 const HELD_GONE_MS = 10 * 60 * 1000;
+const HELD_NO_INPUT_MS = 2 * 60 * 1000;
+const HELD_CLAIM_STALE_MS = 60 * 1000;
 const heldRoot = () => path.join(runDir, 'held');
 const heldDir = (key) => path.join(heldRoot(), encodeURIComponent(key));
 const paneKey = (target) => sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']) || null;
 const heldFiles = (dir) => { try { return fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort(); } catch { return []; } };
-const heldClaims = (key) => { const pre = `${encodeURIComponent(key)}.claim-`; try { return fs.readdirSync(heldRoot()).filter((n) => n.startsWith(pre) && /^\d+$/.test(n.slice(pre.length))).map((n) => ({ dir: path.join(heldRoot(), n), pid: Number(n.slice(pre.length)) })); } catch { return []; } };
+// when a held line's file says it was held: its name begins with the time
+const heldAge = (name) => Date.now() - Number(name.slice(0, 15));
+const heldClaims = (key) => {
+  const pre = `${encodeURIComponent(key)}.claim-`;
+  let names = [];
+  try { names = fs.readdirSync(heldRoot()); } catch {}
+  return names.filter((n) => n.startsWith(pre) && /^\d+(-\d+)?$/.test(n.slice(pre.length))).map((n) => {
+    // a claim with no time in its name counts from when it was last touched
+    const [pid, at = 0] = n.slice(pre.length).split('-').map(Number);
+    let touched = at;
+    try { touched = Math.max(at, fs.statSync(path.join(heldRoot(), n)).mtimeMs); } catch {}
+    return { dir: path.join(heldRoot(), n), pid, stale: !pidAlive(pid) || Date.now() - touched > HELD_CLAIM_STALE_MS };
+  });
+};
 let heldSeq = 0;
 function holdLine(key, target, line) {
   const dir = heldDir(key);
@@ -2876,42 +3000,70 @@ function unclaimHeld(claimed, dir) {
   for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
   try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
 }
-const heldPending = (key) => heldFiles(heldDir(key)).length > 0 || heldClaims(key).length > 0;
-// Types a window's held lines, oldest first, while its pane asks nothing. The number typed.
+// A line let go, said in the log by whoever writes as the supervisor (its tick, accounts-tick): any
+// other process leaves it for them.
+const heldLogs = () => process.env.DEVTEAM_ROLE === 'supervisor' && logWriter() === 'supervisor';
+function dropHeld(key, file, why) {
+  if (!heldLogs()) return false;
+  let rec = null;
+  try { rec = readJson(file); } catch {}
+  try { fs.unlinkSync(file); } catch { return false; }
+  const text = typeof rec?.line === 'string' ? rec.line : '';
+  const hash = crypto.createHash('sha1').update(text).digest('hex').slice(0, 12);
+  try { appendLog({ type: 'observation', source: 'pane', kind: 'held-dropped', subject: key.slice(key.indexOf(':') + 1), detail: `a line held for this pane since ${rec?.at ?? 'an unknown time'} was never typed and is let go (${why}): "${text.slice(0, 120)}${text.length > 120 ? '…' : ''}" (sha1 ${hash}); its recipient reads it in the log`, detector: 'pane', source_key: `held-dropped ${key} ${path.basename(file)}` }); } catch {}
+  return true;
+}
+// Stale claims back, and what is a day old let go: whoever looks, whatever else holds the window.
+function tidyHeld(key) {
+  const dir = heldDir(key);
+  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(c.dir, dir);
+  for (const n of heldFiles(dir)) if (!(heldAge(n) < HELD_MAX_MS)) dropHeld(key, path.join(dir, n), 'held for over a day');
+}
+// a line still worth typing waits, or someone is typing them now
+const heldPending = (key) => heldFiles(heldDir(key)).some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+// Types a window's held lines, oldest first, each only into a pane that is ready for it. The number typed.
 function flushHeld(key) {
   const dir = heldDir(key);
   let typed = 0;
-  for (const c of heldClaims(key)) if (c.pid !== process.pid && !pidAlive(c.pid)) unclaimHeld(c.dir, dir);
+  tidyHeld(key);
   // someone is typing them now, in order: what is held meanwhile is theirs to take next
   if (heldClaims(key).length) return 0;
   for (let stopped = false; !stopped && heldFiles(dir).length;) {
-    const claimed = `${dir}.claim-${process.pid}`;
+    const claimed = `${dir}.claim-${process.pid}-${Date.now()}`;
     try { fs.renameSync(dir, claimed); } catch { break; }
-    for (const n of heldFiles(claimed)) {
+    const names = heldFiles(claimed);
+    const live = names.filter((n) => heldAge(n) < HELD_MAX_MS);
+    // only lines nobody here may let go: left where they are for the supervisor's next look
+    if (!live.length && !heldLogs()) { unclaimHeld(claimed, dir); break; }
+    for (const n of names) {
       const f = path.join(claimed, n);
+      if (!(heldAge(n) < HELD_MAX_MS)) { dropHeld(key, f, 'held for over a day'); continue; }
       let rec = null;
       try { rec = readJson(f); } catch {}
-      const age = Date.now() - Date.parse(rec?.at ?? '');
-      if (typeof rec?.line !== 'string' || !(age < HELD_MAX_MS)) { try { fs.unlinkSync(f); } catch {} continue; }
+      if (typeof rec?.line !== 'string') { try { fs.unlinkSync(f); } catch {} continue; }
       // the pane it was for, if that is still this window's; else the window's pane as it is now
       let pane = typeof rec.target === 'string' ? resolvePane(rec.target) : { problem: 'no pane recorded' };
       if (pane.problem || paneKey(pane.target) !== key) pane = resolvePane(key);
-      if (pane.problem) { if (age > HELD_GONE_MS) { try { fs.unlinkSync(f); } catch {} continue; } stopped = true; break; }
-      if (paneAsking(pane.target) || !typeNow(pane.target, rec.line)) { stopped = true; break; }
+      if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
+      const screen = paneScreen(pane.target);
+      const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
+      if (!ready || !typeNow(pane.target, rec.line)) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
+      try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
     }
     unclaimHeld(claimed, dir);
   }
   return typed;
 }
-// Every window with lines held, by whoever looks next.
-function flushAllHeld() {
+// Every window with lines held, by whoever looks next; not the ones in skip (a session this same
+// look just restarted: its input box comes first).
+function flushAllHeld(skip = []) {
   let names = [];
   try { names = fs.readdirSync(heldRoot()); } catch { return 0; }
-  const keys = new Set(names.map((n) => n.replace(/\.claim-\d+$/, '')));
+  const keys = new Set(names.map((n) => n.replace(/\.claim-\d+(-\d+)?$/, '')));
   let typed = 0;
-  for (const k of keys) { try { typed += flushHeld(decodeURIComponent(k)); } catch {} }
+  for (const k of keys) { try { const key = decodeURIComponent(k); if (skip.includes(key)) tidyHeld(key); else typed += flushHeld(key); } catch {} }
   return typed;
 }
 
@@ -5841,7 +5993,7 @@ function deliverOwnerTurn(t, text) {
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
   return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}`);
 }
-const deliveredWords = (typed) => (typed === 'held' ? "recorded and held: the supervisor's terminal is asking a question (answer it on the dashboard, at the top of the Inbox); these words reach it once that is answered, and are never the answer to it" : typed ? "sent to the supervisor's pane" : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
+const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
 // value quoted (quoteData), in the pattern the prompt's knowledge and link blocks use.
 function threadDataFrame(v) {
@@ -13477,8 +13629,11 @@ function cmdAccountsTick() {
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
   if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
   resendSupervisorLostEnter();
-  // lines held while a pane asked a question (typeInto), typed once it asks no more
-  flushAllHeld();
+  // lines held while a pane asked (typeInto), typed once it is ready; never into a session this
+  // tick just restarted, whose agent is still coming up
+  const session = tmuxSession();
+  const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -13556,13 +13711,10 @@ async function cmdDashboard() {
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
-    // The owner's answer to what the supervisor's terminal asks: the question as the card showed it
-    // (its digest) and an option's number. The child reads the pane again and sends that digit only.
-    'pane-answer': (b) => (typeof b.digest === 'string' && /^[0-9a-f]{40}$/.test(b.digest) && Number.isInteger(b.option) && b.option >= 1 && b.option <= 9 ? ['pane', 'answer', '--digest', b.digest, '--option', String(b.option), '--owner'] : null),
     'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
-  const ACTION_MS = { 'artifact-publish': 12000, 'pane-answer': 20000 };
+  const ACTION_MS = { 'artifact-publish': 12000 };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
@@ -13896,7 +14048,76 @@ async function cmdDashboard() {
   // the 10 s hello child found (hello --pane), so a read never waits on tmux.
   const supervisorPane = () => hello?.supervisor_pane === true;
   // What the supervisor's terminal is asking the owner, as that same run found it (pane text: the page escapes it).
-  const supervisorAsks = () => { const q = hello?.supervisor_question; return q && typeof q === 'object' && typeof q.digest === 'string' && Array.isArray(q.options) ? { question: String(q.question ?? ''), options: q.options.slice(0, 20).map((o) => ({ n: Number(o.n), label: String(o.label ?? '') })), selected: Number(q.selected) || null, digest: q.digest } : null; };
+  const supervisorAsks = () => {
+    const q = hello?.supervisor_question;
+    if (!isObj(q) || typeof q.digest !== 'string' || !/^[0-9a-f]{40}$/.test(q.digest)) return null;
+    if (q.kind === 'menu' && Array.isArray(q.options)) return { kind: 'menu', question: String(q.question ?? ''), options: q.options.slice(0, 40).map((o) => ({ n: Number(o?.n), label: String(o?.label ?? '') })), selected: Number(q.selected) || null, hint: String(q.hint ?? ''), digest: q.digest };
+    return { kind: q.kind === 'limit' ? 'limit' : 'dialog', text: String(q.text ?? ''), digest: q.digest };
+  };
+  // The owner's answer to it. Who may send one: this page, by the browser's own headers (Origin and
+  // Sec-Fetch-Site, both), carrying the token this process made for that question and gave only to a
+  // same-origin read of /api/threads (kept in memory: not in run/, not in the log, not in any
+  // command's arguments). On a laptop that is as far as it goes: whatever runs as this user can ask
+  // this server for the token as the page does, and can type into the terminal itself; the point is
+  // that nothing answers by accident, or by a plain request, or from the command line. On a box the
+  // owner is never local, so a press also carries the gateway's signature, each nonce taken once
+  // (paneProofProblem), and pane answered checks it again.
+  // The key is sent from here, not by a command: the terminal is read again (pane question), the
+  // digest must be the one the card showed, the pane is read once more right before the key, and
+  // after it the pane must show that the menu took it: gone, and the digit not sitting in the
+  // agent's input box. Then the act is recorded and the held lines typed (pane answered). A key
+  // that may not have landed is recorded as that, and nothing held is typed.
+  const paneSecret = crypto.randomBytes(32);
+  const paneToken = (digest) => crypto.createHmac('sha256', paneSecret).update(String(digest)).digest('hex');
+  const paneTokenOk = (digest, token) => { const want = Buffer.from(paneToken(digest)); const got = Buffer.from(String(token ?? '')); return got.length === want.length && crypto.timingSafeEqual(got, want); };
+  const paneNonces = new Map();
+  let paneAnswering = false;
+  const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
+  const PANE_SETTLE_MS = 1500;
+  async function paneAnswer({ digest, option, proof }) {
+    const no = (error, status = 400) => ({ status, body: { error } });
+    const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
+    let st = null;
+    try { st = r.ok ? JSON.parse(r.stdout) : null; } catch {}
+    if (!isObj(st)) return no("nothing was answered: the supervisor's terminal could not be read", 500);
+    if (!st.ask) return no(`nothing was answered: the supervisor's terminal is not asking anything now (the question is gone)${st.problem ? `; ${st.problem}` : ''}`);
+    if (st.ask.kind !== 'menu' || typeof st.target !== 'string') return no(`nothing was answered: what the supervisor's terminal shows now is answered in the terminal, not here${st.problem ? ` (${st.problem})` : ''}`);
+    if (st.ask.digest !== digest) return no("nothing was answered: the question in the supervisor's terminal has changed since the page showed it; read the one showing now and answer that");
+    const opt = st.ask.options.find((o) => o.n === option);
+    if (!opt) return no(`nothing was answered: that question has no option ${option}`);
+    const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
+    const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
+    // once more, right before the key
+    if (!menuIn(await look())) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    // tests only: the moment between that look and the key, in which a question can go
+    const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
+    if (pause > 0) await new Promise((w) => setTimeout(w, pause));
+    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
+    // until the question is gone or changed, or its cursor has moved
+    const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
+    let lines = await settle(st.ask.selected);
+    let keys = String(option);
+    let still = menuIn(lines);
+    if (still) {
+      // still up: the digit moved the cursor there (or it was there already), and Enter takes it
+      if (still.selected !== option) return no(`not answered: the terminal did not take the key ${option} (the question is still up, on option ${still.selected}); answer it in the terminal`);
+      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Enter'])) === null) return no(`not answered: option ${option} is selected but Enter could not be sent; answer it in the terminal`, 500);
+      keys = `${option}, Enter`;
+      lines = await settle(option);
+      still = menuIn(lines);
+      if (still) return no(`not answered: the question is still up with option ${option} selected, after ${keys}; answer it in the terminal`);
+    }
+    // what the pane shows after: the menu took the key unless the digit is sitting in the input box
+    const draft = lines ? paneDraftIn(lines) : null;
+    const why = !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
+    const rec = await runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, option, label: opt.label, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, keys, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    if (hello) hello.supervisor_question = null;
+    refreshHello();
+    const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
+    if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
+    if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal, and clear its input box if the digit is there.`, 409);
+    return { status: 200, body: { ok: true, out: said } };
+  }
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -13989,7 +14210,9 @@ async function cmdDashboard() {
       // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
       // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
       // this process's work is saved.
-      const tag = `"${sha256(`${r.key}|${pane}|${asks?.digest ?? ''}`).slice(0, 20)}"`;
+      // the token for an answer goes only to this page's own read, said so by the browser
+      if (asks?.kind === 'menu' && site === 'same-origin') asks.token = paneToken(asks.digest);
+      const tag = `"${sha256(`${r.key}|${pane}|${asks?.kind ?? ''}|${asks?.digest ?? ''}|${asks?.token ? 1 : 0}`).slice(0, 20)}"`;
       const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
       if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
       res.writeHead(200, { 'content-type': 'application/json', ...head });
@@ -14161,13 +14384,14 @@ async function cmdDashboard() {
     const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
     const isSecret = name === 'secret';
     const isReview = name === 'review-draft' || name === 'review-answer';
+    const isPane = name === 'pane-answer';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-    if (!action && !isSecret && !isReview) return send(res, 404, 'text/plain', 'not found');
+    if (!action && !isSecret && !isReview && !isPane) return send(res, 404, 'text/plain', 'not found');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
     // present. A sandboxed frame's request says Origin: null and is refused here too.
-    const strict = isSecret || isReview;
+    const strict = isSecret || isReview || isPane;
     const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
     // A review's result or draft is up to 4 MB, plus its envelope.
@@ -14192,6 +14416,30 @@ async function cmdDashboard() {
     const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
     const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
+    if (isPane) {
+      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+      return req.on('end', () => guarded(() => {
+        if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        if (!isObj(parsed) || typeof parsed.digest !== 'string' || !/^[0-9a-f]{40}$/.test(parsed.digest) || !Number.isInteger(parsed.option) || parsed.option < 1 || parsed.option > 9 || typeof parsed.token !== 'string') return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token }' }));
+        if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
+        let proof = null;
+        if (threadsNeedGateway()) {
+          const boxOnly = "nothing was answered: on a box the owner answers only through the box's gateway";
+          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+          const why = paneProofProblem(proof) ?? (paneNonces.has(proof.nonce) ? 'its signature was used already' : null);
+          if (why) { log(`refused /api/pane-answer: ${why}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${why})` })); }
+          const now = Date.now();
+          for (const [n, at] of paneNonces) if (now - at > 2 * OPERATOR_PROOF_MS) paneNonces.delete(n);
+          paneNonces.set(proof.nonce, now);
+        }
+        if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
+        paneAnswering = true;
+        paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      }));
+    }
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
@@ -14234,9 +14482,8 @@ async function cmdDashboard() {
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
-      // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once; and
-      // the question in the supervisor's terminal is read again whether or not the answer was taken
-      if (r.ok || name === 'pane-answer') { if (name === 'pane-answer' && hello) hello.supervisor_question = null; refreshHello(); }
+      // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
+      if (r.ok) refreshHello();
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
@@ -14363,10 +14610,12 @@ function resolvePane(target) {
 }
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
 const typeNow = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
-// A message for an agent: typed now, or held while its pane asks a question (flushHeld types it once
-// the question is gone) and behind any line already held for it, so they arrive in order. True once
-// typed, 'held' while it waits, false when it could be neither. A launch command typed into a fresh
-// window is typeNow's: nothing is asked there, and it must not wait.
+// A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
+// is ready again) and behind any line already held for it, so they arrive in order. True once
+// typed; while it waits, why: 'held-card' (a menu the owner answers on the dashboard), 'held-terminal'
+// (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
+// asked now, but lines held earlier go first and the pane is not ready for them); false when it
+// could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
 function typeInto(target, line) {
   const key = paneKey(target);
   if (!key) return typeNow(target, line);
@@ -14375,8 +14624,16 @@ function typeInto(target, line) {
   const file = holdLine(key, target, line);
   if (!file) return asking ? false : typeNow(target, line);
   if (!asking) flushHeld(key);
-  return fs.existsSync(file) ? 'held' : true;
+  if (!fs.existsSync(file)) return true;
+  return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
 }
+// Why a line is held, in words: every one begins "recorded and held" (the dashboard reads that).
+const heldWords = (why, whose) => `recorded and held: ${{
+  'held-card': `${whose} terminal is asking a question, and typing now would answer it. ${whose === "the supervisor's" ? 'The owner answers it on the dashboard (the card at the top of the Inbox)' : 'Someone answers it in that terminal'}; this is typed after, and is never the answer to it`,
+  'held-terminal': `${whose} terminal has a dialog up that only the terminal can answer (no card can), and typing now would answer it. It is typed once someone answers it there`,
+  'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
+  'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
+}[why]}`;
 function nudgeSupervisor(line) {
   if (REPLY_FD !== null) return void queuedNudges.push(line);
   typeNudge(line);
@@ -14389,55 +14646,67 @@ function typeNudge(line) {
 }
 const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'supervisor' : w; };
 
-// pane question [--json]: what the supervisor's terminal is asking, if anything.
-// pane answer --digest <sha1> --option <n> --owner: the owner's answer to it, from the dashboard's
-// card (or their own terminal). The pane is read again first: an answer goes only to the question
-// the owner was shown (its digest), and only as that option's digit key, never as words. Claude
-// Code's menus take a digit as the choice, with no Enter (seen on 2.1.325); a menu that only moves
-// its cursor to the option gets the Enter, and one that does neither is left as it is and said so.
-// The answer is logged as the owner's act; lines held for the pane while it asked are typed after.
-const PANE_ANSWER_WAIT_MS = 1500;
+// pane question [--json]: what the supervisor's terminal is asking, if anything. Reading is all a
+// command does: none sends a key to that terminal. The owner answers on the dashboard's card, and
+// the dashboard's own process sends the key (cmdDashboard, paneAnswer), after its checks of the
+// page that asked. pane answered is what it runs after: the owner's act for the log, and the lines
+// held for the pane while it asked. On a box it takes that only with the gateway's signature for
+// the press, each taken once, as a thread with the operator does.
+const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
+function paneProofProblem(proof, now = Date.now()) {
+  if (!isObj(proof)) return 'it carries no signature from the gateway';
+  const { port, ts, nonce, sig, body } = proof;
+  if (!Number.isInteger(port) || typeof ts !== 'string' || !/^\d{13}$/.test(ts) || typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(nonce) || typeof sig !== 'string' || !/^[A-Za-z0-9_-]{80,100}$/.test(sig) || typeof body !== 'string') return 'its signature is malformed';
+  if (Math.abs(now - Number(ts)) > OPERATOR_PROOF_MS) return 'its signature is too old';
+  const key = gatewayThreadKey();
+  if (!key) return `this box has no gateway key (${BOX_THREAD_KEY})`;
+  let ok = false;
+  try { ok = crypto.verify(null, paneSigned(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
+  return ok ? null : 'its signature is not the gateway\'s';
+}
+// Another account's artifact is named by its id, never its link: the log is mirrored to git.
+const noArtifactLinks = (t) => String(t ?? '').replace(/(?:https?:\/\/)?claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})\S*/g, 'artifact $1');
 function cmdPane() {
   const sub = positional[0];
   if (sub === 'question') {
-    const q = supervisorQuestion();
-    if (flags.json) return json(q);
-    return out(q ? `${q.question || '(no words above the options)'}\n${q.options.map((o) => `${o.n === q.selected ? '>' : ' '} ${o.n}. ${o.label}`).join('\n')}\ndigest ${q.digest}` : "the supervisor's terminal is asking nothing");
+    const a = supervisorAsk();
+    if (flags.json) return json({ ask: a.ask, problem: a.problem ?? null, ...(flags.pane ? { target: a.target } : {}) });
+    const q = a.ask;
+    if (!q) return out(`the supervisor's terminal is asking nothing${a.problem ? ` (${a.problem})` : ''}`);
+    if (q.kind !== 'menu') return out(`${q.text}\n\n${q.kind === 'limit' ? "the supervisor is stopped at a usage-limit menu: the dashboard restarts it once an account has room" : "the supervisor's terminal needs someone at it: this is answered in the terminal, not on the dashboard"}${a.problem ? ` (${a.problem})` : ''}`);
+    return out(`${q.question || '(no words above the options)'}\n${q.options.map((o) => `${o.n === q.selected ? '>' : ' '} ${o.n}. ${o.label}`).join('\n')}${q.hint ? `\n${q.hint}` : ''}\ndigest ${q.digest}`);
   }
-  const usage = 'usage: pane question [--json] | pane answer --digest <sha1> --option <n> --owner   (the owner answers what the supervisor\'s terminal asks; the dashboard\'s card runs it)';
-  if (sub !== 'answer' || !flags.owner) die(usage);
+  if (sub === 'answer') die("pane answer: no command answers what the supervisor's terminal asks. The owner answers on the dashboard's card (the top of the Inbox), or in the terminal; `pane question` prints what it is asking");
+  if (sub !== 'answered' || !flags.owner) die('usage: pane question [--json]   (what the supervisor\'s terminal is asking; the owner answers it on the dashboard\'s card, which no command stands in for)');
   const { by } = ownerWriter('a question a tool asks in your terminal is the owner\'s to answer, on the dashboard; wait for it');
-  const digest = flagStr('digest') ?? '';
-  const n = Number(flagStr('option'));
-  if (!/^[0-9a-f]{40}$/.test(digest) || !Number.isInteger(n) || n < 1 || n > 9) die(`${usage}\nan option is its number, 1 to 9: one past 9 is answered in the terminal`);
-  const { target, problem } = resolvePane(supervisorTarget());
-  if (problem) die(`nothing was answered: ${problem}`);
-  const q = paneQuestion(target);
-  if (!q) die("nothing was answered: the supervisor's terminal is not asking anything now (the question is gone)");
-  if (q.digest !== digest) die("nothing was answered: the question in the supervisor's terminal has changed since the page showed it; read the one showing now and answer that");
-  const opt = q.options.find((o) => o.n === n);
-  if (!opt) die(`nothing was answered: that question has no option ${n}`);
-  const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  // until the question is gone or changed, or its cursor has moved onto the option
-  const settle = (from) => { let now = from; for (let t = 0; t < PANE_ANSWER_WAIT_MS; t += 100) { nap(100); now = paneQuestion(target); if (!now || now.digest !== digest || now.selected !== from.selected) break; } return now; };
-  if (!tmux(['send-keys', '-t', target, '-l', String(n)])) die(`nothing was answered: could not send the key to ${target}`);
-  let now = settle(q);
-  let keys = String(n);
-  if (now && now.digest === digest) {
-    // still up: the digit moved the cursor there (or it was there already), and Enter takes it
-    if (now.selected !== n) die(`not answered: the terminal did not take the key ${n} (the question is still up, on option ${now.selected}); answer it in the terminal`);
-    if (!tmux(['send-keys', '-t', target, 'Enter'])) die(`not answered: option ${n} is selected but Enter could not be sent to ${target}`);
-    keys = `${n}, Enter`;
-    now = settle(now);
-    if (now && now.digest === digest) die(`not answered: the question is still up with option ${n} selected, after ${keys}; answer it in the terminal`);
+  let b = null;
+  try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+  const line1 = (x, max) => typeof x === 'string' && x.length <= max;
+  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !Number.isInteger(b.option) || b.option < 1 || b.option > 9 || !line1(b.label, 4000) || !line1(b.first, 4000) || !/^\d(, Enter)?$/.test(b.keys ?? '') || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
+  let proof = null;
+  if (threadsNeedGateway()) {
+    const no = (why) => die(`pane answered: on a box the owner answers only on the dashboard through the box's gateway, which signs the press, and ${why}`);
+    const why = paneProofProblem(b.proof);
+    if (why) no(why);
+    let signed = null;
+    try { signed = JSON.parse(Buffer.from(b.proof.body, 'base64').toString('utf8')); } catch {}
+    if (!isObj(signed) || signed.digest !== b.digest || signed.option !== b.option) no('the gateway signed another press than this one');
+    if (logObjects('act').some((a) => a.class === 'pane-answer' && a.proof?.nonce === b.proof.nonce)) no('that press was taken already');
+    proof = { port: b.proof.port, ts: b.proof.ts, nonce: b.proof.nonce, sig: b.proof.sig, body: b.proof.body };
   }
-  const summary = (q.question.split('\n').pop() || '(no words above the options)').slice(0, 160);
-  appendLog({ type: 'act', class: 'pane-answer', what: `answered the supervisor's terminal: "${summary}" with ${n}. ${opt.label.slice(0, 120)} (keys: ${keys}; question ${digest})` }, by);
-  out(`answered: ${n}. ${opt.label}`);
-  // the dashboard has its answer; then what was held for the pane while it asked
+  const flat = (t, max) => { const x = noArtifactLinks(t).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return x.length > max ? `${x.slice(0, max - 1)}…` : x; };
+  const about = `"${flat(b.first, 120) || '(no words above the options)'}"${typeof b.artifact === 'string' && /^[A-Za-z0-9-]{6,64}$/.test(b.artifact) ? ` (artifact ${b.artifact})` : ''}`;
+  const chose = `${b.option}. ${flat(b.label, 120)}`;
+  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}, option ${chose}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
+  out(b.taken ? `answered: ${chose}` : `sent, and it may not have landed: ${chose}`);
+  // the dashboard has its answer; then what was held for the pane while it asked, if it took the key
   replyNow();
-  const key = paneKey(target);
-  if (key && heldPending(key)) { nap(300); flushHeld(key); }
+  if (!b.taken) return;
+  const { target } = resolvePane(supervisorTarget());
+  const key = target ? paneKey(target) : null;
+  if (!key || !heldPending(key)) return;
+  // its input box comes back a moment after the menu goes
+  for (let i = 0; i < 20 && heldPending(key); i++) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250); flushHeld(key); }
 }
 
 function cmdSend() {
@@ -14467,7 +14736,7 @@ function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }
   const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
   const typed = problem ? false : typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`);
   if (!typed) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
-  else if (typed === 'held') warn(`${line.id} recorded and held: the terminal of "${to}" is asking a question, and typing now would answer it; it is typed once the question is answered${to === 'supervisor' ? ' (the owner answers it on the dashboard)' : ''}`);
+  else if (typed !== true) warn(`${line.id} ${heldWords(typed, to === 'supervisor' ? "the supervisor's" : `${to}'s`)}`);
   return line;
 }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
@@ -17673,8 +17942,10 @@ function cmdHello() {
   const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
-    r.supervisor_question = supervisorQuestion();
-    if (r.supervisor_question && Array.isArray(r.pulse?.attention)) r.pulse.attention.unshift("The supervisor's terminal is asking you a question: answer it on the dashboard, at the top of the Inbox");
+    const a = supervisorAsk();
+    r.supervisor_question = a.ask;
+    r.supervisor_target = a.ask ? a.target : null;
+    if (a.ask && Array.isArray(r.pulse?.attention)) r.pulse.attention.unshift(a.ask.kind === 'menu' ? "The supervisor's terminal is asking you a question: answer it on the dashboard, at the top of the Inbox" : a.ask.kind === 'limit' ? 'The supervisor is stopped at a usage-limit menu' : "The supervisor's terminal needs you: a dialog is up that is answered in the terminal");
   }
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
@@ -18632,7 +18903,7 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
-  pane question [--json] | pane answer --digest <sha1> --option <n> --owner   (what the supervisor's terminal is asking; the owner answers it, from the dashboard's card: that option's digit key, nothing else)
+  pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
