@@ -7,11 +7,11 @@ import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hasTmux, kit, testDir, until, write } from './lib/kit.mjs';
+import { HARNESS_ENV, hasTmux, kit, testDir, until, write } from './lib/kit.mjs';
 
 // tmux reads UTF-8 from the locale's name: the prompt's ❯ and its non-breaking space must survive
 process.env.LANG = process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8';
-for (const k of Object.keys(process.env)) if (/^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_PID|CLAUDE_CONFIG_DIR|DEVTEAM_ROLE|DEVTEAM_TICKET|DEVTEAM_FEATURE)$/.test(k)) delete process.env[k];
+for (const k of Object.keys(process.env)) if (/^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_PID|CLAUDE_CONFIG_DIR)$/.test(k)) delete process.env[k];
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-machine-')));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 const home = path.join(tmp, 'home');
@@ -31,7 +31,6 @@ const stubShell = path.join(bin, 'stubshell');
 write(stubShell, `#!/bin/sh\nPATH=${bin}:/usr/bin:/bin\nexport PATH\nENV=/dev/null\nexport ENV\ncase "$1" in -c) exec /bin/sh "$@" ;; *) exec /bin/sh -i ;; esac\n`);
 for (const f of ['gh', 'mise', 'claude', 'stubshell']) fs.chmodSync(path.join(bin, f), 0o755);
 const baseEnv = { ...process.env, HOME: home, PATH: `${bin}${path.delimiter}${process.env.PATH}`, DEVTEAM_TELL_SETTLE_SECONDS: '0.3', DEVTEAM_MACHINE_EPOCH: 'boot2' };
-for (const k of ['DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete baseEnv[k];
 const tmuxSh = (args) => spawnSync('tmux', args, { encoding: 'utf8', env: baseEnv });
 if (hasTmux) {
   execFileSync('tmux', ['new-session', '-d', '-s', 'keep', '-x', '200', '-y', '50', 'sleep 86400'], { env: baseEnv });
@@ -113,6 +112,39 @@ setInterval(() => {}, 1e6);\n`);
 }
 const shown = (pane, text) => until(() => tmuxSh(['capture-pane', '-p', '-t', pane]).stdout.includes(text), `pane ${pane} drawn`);
 const paneState = (pane) => machine(['machine', 'pane-state', pane]).stdout.trim();
+
+// A worker's session env, as a box gives it: its run folder, its home, its role and ticket, the box's
+// address, its tmux pane. Pointed at a decoy, it shows whether a test can still write to the fleet.
+const workerEnv = (decoy) => ({ DEVTEAM_RUN: path.join(decoy, 'run'), DEVTEAM_HOME: decoy, DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-1', DEVTEAM_FEATURE: 'x', DEVTEAM_SUPERVISOR: '%1', DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1', TMUX: 'x', TMUX_PANE: '%9' });
+const decoyOf = (name) => { const d = fs.mkdtempSync(path.join(tmp, `${name}-`)); fs.mkdirSync(path.join(d, 'run')); return d; };
+const filesIn = (d) => fs.readdirSync(d, { recursive: true }).map(String).sort();
+
+test('importing the test helper leaves no session\'s DEVTEAM_* or tmux in the environment, only the harness\'s own knobs', () => {
+  const decoy = decoyOf('env-decoy');
+  const env = { ...process.env, ...workerEnv(decoy), DEVTEAM_FORK: path.join(decoy, 'fork'), DEVTEAM_TEST_KEEP: '1' };
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `await import(${JSON.stringify(new URL('./lib/kit.mjs', import.meta.url).href)}); console.log(JSON.stringify(Object.keys(process.env).filter((k) => /^(DEVTEAM_|TMUX)/.test(k)).sort()))`], { cwd: tmp, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const names = JSON.parse(r.stdout.trim().split('\n').at(-1));
+  assert.deepEqual(names.filter((k) => !HARNESS_ENV.test(k)), ['DEVTEAM_BOX', 'DEVTEAM_CSWAP', 'DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_SUPERVISOR_UP', 'TMUX_TMPDIR']);
+  for (const k of ['DEVTEAM_FORK', 'DEVTEAM_TEST_KEEP', 'DEVTEAM_CGROUP', 'DEVTEAM_MEMINFO']) assert.ok(names.includes(k), `${k} survives: the harness reads it`);
+  assert.deepEqual(filesIn(decoy), ['run']);
+});
+
+test('a worker\'s session env sends nothing into its run folder: the incident\'s own test, run under it, writes nothing in the decoy', { skip: !hasTmux, timeout: 300000 }, () => {
+  const decoy = decoyOf('run-decoy');
+  const env = { ...process.env, ...workerEnv(decoy) };
+  delete env.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^status says at a glance', path.join(testDir, 'machine.test.mjs')], { cwd: REPO, env, encoding: 'utf8', timeout: 280000 });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^# pass 1$/m);
+  assert.match(r.stdout, /^# fail 0$/m);
+  const oks = r.stdout.split('\n').filter((l) => /^ok \d+ - /.test(l));
+  const ran = oks.filter((l) => / - status says at a glance/.test(l));
+  assert.equal(ran.length, 1, 'the incident\'s test ran');
+  assert.doesNotMatch(ran[0], /# SKIP/, 'and was not skipped');
+  for (const l of oks.filter((x) => !ran.includes(x))) assert.match(l, /# SKIP test name does not match pattern$/, l);
+  assert.deepEqual(filesIn(decoy), ['run'], 'nothing written in the worker\'s run folder or home');
+});
 
 test('what a pane is at, from what is on it', { skip: !hasTmux }, async () => {
   const at = async (screen, want, why) => { const a = agent({ screens: [screen] }); await shown(a.pane, screen.replace(/\x1b\[[0-9;]*m/g, '').split('\n').find((l) => l.trim()).replace(/ /g, ' ').trim().slice(0, 12)); assert.equal(paneState(a.pane), want, why); a.kill(); };

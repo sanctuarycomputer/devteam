@@ -16,7 +16,7 @@ import { hubSignature } from '../cloud/gateway.mjs';
 
 // tmux reads UTF-8 from the locale's name: the prompt's ❯ and its non-breaking space must survive
 process.env.LANG = process.platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8';
-for (const k of Object.keys(process.env)) if (/^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_PID|CLAUDE_CONFIG_DIR|DEVTEAM_ROLE|DEVTEAM_TICKET|DEVTEAM_FEATURE|DEVTEAM_PUBLIC_URL|DEVTEAM_OPERATOR_COMMAND)$/.test(k)) delete process.env[k];
+for (const k of Object.keys(process.env)) if (/^(CLAUDECODE|CLAUDE_CODE_.*|CLAUDE_PID|CLAUDE_CONFIG_DIR)$/.test(k)) delete process.env[k];
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-operator-')));
 process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 const KIT = path.join(kit, 'scripts', 'devteam.mjs');
@@ -64,7 +64,6 @@ function machine({ box = false, starts = true } = {}) {
   fs.mkdirSync(home);
   const hub = PORTS + 80 + n;
   const env = { ...process.env, HOME: home, PATH: `${bin}${path.delimiter}${process.env.PATH}`, DEVTEAM_HUB_PORT: String(hub), DEVTEAM_TELL_SETTLE_SECONDS: '0.3', ...(box ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}), ...(starts ? {} : { DEVTEAM_OPERATOR_COMMAND: '' }) };
-  for (const k of ['DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const dir = box ? path.join(home, 'operator') : path.join(home, '.devteam', `operator-${hub}`);
   // input: a press's proof on stdin, as the hub hands it over (and says it has)
   const run = (args, extra = {}, input = undefined) => spawnSync(process.execPath, [KIT, 'operator-thread', ...args], { cwd: nowhere, encoding: 'utf8', env: { ...env, ...(input === undefined ? {} : { DEVTEAM_THREAD_PROOF: 'stdin' }), ...extra }, input });
@@ -664,7 +663,6 @@ async function hubFixture(t, name, { box: boxed = false } = {}) {
   const P = PORTS + 31;
   const a = agentProgram([box(prompt)]);
   const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(P), DEVTEAM_HUB_RETRY_MS: '500', DEVTEAM_TELL_SETTLE_SECONDS: '0.3', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex'), ...(boxed ? { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: GW_PUBLIC } : {}) };
-  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const A = bareProject(base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
   const dash = startDashboard(A, env);

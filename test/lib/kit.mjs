@@ -19,6 +19,14 @@ export const kit = path.resolve(testDir, '..', 'docs', 'devteam');
 // The tmux session a project's workers live in: devteam-<project>-<hash of the checkout's path>.
 export function sessionOf(root, name) { return `devteam-${name}-${crypto.createHash('sha1').update(fs.realpathSync(root)).digest('hex').slice(0, 6)}`; }
 export const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
+// The suite's own switches, the only DEVTEAM_* a test process keeps from the shell that ran it.
+export const HARNESS_ENV = /^DEVTEAM_(TEST_.*|FORK|FORK_AUDIT|G1_RECORD|CGROUP|MEMINFO)$/;
+// Nothing of the session that runs the tests reaches the kits under test: a worker's DEVTEAM_RUN once
+// sent a test's writes into its fleet's live log, and a box's DEVTEAM_PUBLIC_URL makes every kit a box.
+for (const k of Object.keys(process.env)) if ((/^DEVTEAM_/.test(k) && !HARNESS_ENV.test(k)) || /^TMUX(_PANE)?$/.test(k)) delete process.env[k];
+// On a box, its files say box whatever a test's environment says; the kit drops them for a test's
+// throwaway HOME (devteam.mjs, boxFilesOff), so a test sees the box its environment describes.
+process.env.DEVTEAM_BOX = 'off';
 // A test never rotates the machine's real Claude accounts: a test that wants cswap sets a stand-in.
 process.env.DEVTEAM_CSWAP = 'off';
 // A fixture's stand-in supervisor runs under whatever agent runs the tests; it isn't that agent.
@@ -34,10 +42,6 @@ process.env.DEVTEAM_MEMINFO ??= path.join(os.tmpdir(), 'dt-no-such-machine');
 // is removed only as the process exits, after its server.
 export const tmuxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
 process.env.TMUX_TMPDIR = tmuxRoot;
-delete process.env.TMUX;
-// a devteam session's own home never reaches the kits under test
-delete process.env.DEVTEAM_HOME;
-delete process.env.TMUX_PANE;
 // The real tmux is the first one on PATH that isn't a shim: a fork or a warm CLI process inherits
 // its parent's PATH, shim first.
 const isShim = (f) => { try { return fs.readFileSync(f, 'utf8').includes('tmux refused: TMUX_TMPDIR'); } catch { return false; } };
@@ -91,9 +95,7 @@ export function fleetFixture(name) {
   const home = path.join(base, 'home');
   const tmuxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
   const env = (role) => {
-    const e = { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, 'claude'), CODEX_HOME: path.join(home, 'codex'), TMUX_TMPDIR: tmuxDir };
-    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete e[k];
-    return { ...e, ...role };
+    return { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, 'claude'), CODEX_HOME: path.join(home, 'codex'), TMUX_TMPDIR: tmuxDir, ...role };
   };
   const run = (cwd, args, role = {}, input) => { const r = runNode(path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), args, { cwd, env: env(role), input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
   const ok = (cwd, args, role, input) => { const r = run(cwd, args, role, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
@@ -308,6 +310,9 @@ export function gitFactFns(cwd, runDir) {
   const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
   return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
 }
+// One folder for every boxFns machine in this process, removed as it exits.
+let boxFnsRoot = null;
+const boxFnsDir = () => { if (!boxFnsRoot) { boxFnsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-boxfns-')); process.on('exit', () => fs.rmSync(boxFnsRoot, { recursive: true, force: true })); } return boxFnsRoot; };
 // The script's box detection, loaded by itself on a machine of the test's making: the box's files
 // exist only as files names them ({ path: text }), HOME is home, the password file's home is passwd
 // (null: the uid has none, and userInfo throws), and the environment is { HOME, ...env }.
@@ -315,8 +320,7 @@ export function boxFns({ files = {}, home, passwd, env = {} }) {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
   const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
   const BOX = ['/opt/devteam/gateway.mjs', '/etc/devteam/thread-key.pub'];
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-boxfns-'));
-  process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = fs.mkdtempSync(path.join(boxFnsDir(), 'm-'));
   const stand = Object.fromEntries(BOX.filter((f) => f in files).map((f, i) => { const p = path.join(dir, `box-${i}`); fs.writeFileSync(p, files[f]); return [f, p]; }));
   const at = (f) => (BOX.includes(f) ? stand[f] ?? path.join(dir, 'none') : f);
   const sandboxFs = { existsSync: (f) => fs.existsSync(at(f)), statSync: (f) => fs.statSync(at(f)), readFileSync: (f, e) => fs.readFileSync(at(f), e), realpathSync: (f) => fs.realpathSync(f) };
