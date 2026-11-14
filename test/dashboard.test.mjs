@@ -424,7 +424,9 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const Q1 = dt(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]'], SUP);
   const Q2 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
-  const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make'], SUP);
+  const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make', '--for-owner', '--plain', 'The project is built with one standard tool, so any machine can build it.'], SUP);
+  // the agents' own lesson: the supervisor's to keep, so never an Inbox card
+  const KA = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'check-pr reads main\'s log'], SUP);
   const Q3 = dt(['ask', '--question', 'Which port?', '--default', '8080'], SUP);
   pastDeadline(root, Q3);
   dt(['answer', Q3, '--defaulted'], SUP);
@@ -486,6 +488,13 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   await t.test('a lesson kept: it leaves at once and stays gone across refreshes', async () => {
     const lesson = `document.querySelector('[data-know="${K}"]')`;
     await soon(`!!${lesson}`, 'the lesson card');
+    // its plain line first, the technical wording folded under it; the agents' own lesson isn't here
+    const kcard = `${lesson}.closest('.card')`;
+    assert.equal(await p.ev(`${kcard}.querySelector('h4[data-plain]').textContent`), 'The project is built with one standard tool, so any machine can build it.');
+    assert.equal(await p.ev(`${kcard}.querySelector('details[data-technical]').open`), false, 'the technical wording folded');
+    assert.match(await p.ev(`${kcard}.querySelector('details[data-technical]').textContent`), /The build uses make/);
+    assert.equal(await p.ev(`!!document.querySelector('#questions [data-know="${KA}"]')`), false, 'the agents\' own lesson is not in the Inbox');
+    assert.match(await p.ev(`document.getElementById('knowledge').textContent`), /The agents' own lessons, waiting for the supervisor \(1\)/, 'it is in the Loop, folded');
     await hold();
     await p.click(`[data-know="${K}"][data-status="accepted"]`);
     assert.equal(await p.ev(`!!${lesson}`), false, 'gone at once');

@@ -2150,11 +2150,13 @@ function renderOoda(o) {
     <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><a class="linkish" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
     <div class="card small"${subj('problem', p.id, p.title)} data-open="problem/${esc(encodeURIComponent(p.id))}"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
-  const cand = o.knowledge.filter((k) => k.status === 'candidate');
+  const cand = o.knowledge.filter(ownerLesson);
+  const agents = o.knowledge.filter((k) => k.status === 'candidate' && !ownerLesson(k));
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
+    (agents.length ? `<details class="agents-lessons"><summary>The agents' own lessons, waiting for the supervisor (${agents.length})</summary><p class="small muted">About how the agents work: the supervisor keeps or retires these itself once the evidence is plain. You can read each one, and retire any lesson from its card.</p>${agents.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge">${esc(k.kind)}</span></a>${linkify(k.statement)} <span class="muted">· applies to ${esc(scopeWords(k.scope))}</span></div>`).join('')}</details>` : '') +
     (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
-    empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
+    empty('None yet. Things noticed more than once become lessons: the supervisor keeps the ones about how the agents work, and sends you any that would change something you set.');
 
   // Trust Ladder
   $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
@@ -2330,7 +2332,7 @@ const ATTR = {
   },
   decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
   act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'knowledge', 'reversible'], label: { knowledge: 'Given' }, fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}`, knowledge: linkList } },
-  knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
+  knowledge: { order: ['plain', 'statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], hide: ['for_owner'], label: { plain: 'In plain words' }, fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
   observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => /^https:\/\//.test(v) ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
@@ -3124,7 +3126,9 @@ function openLesson(id) {
     ${attrs({ id, peek: p, type: 'knowledge', computed: [
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
-    ${k.status === 'candidate' ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : ''}
+    ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
+    ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
+    ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>` : ''}
     ${lineageBlock(p)}
     ${obs.length ? `<h3>The signals it came from</h3>${obsList(obs)}` : ''}
     ${citedBlock(p, k)}
@@ -3987,7 +3991,7 @@ function render(d) {
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
-  count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
+  count('n-questions', d.questions.length + o.knowledge.filter(ownerLesson).length, true);
   count('n-active', active);
   {
     const rt = DATA.ooda.retro || {};
@@ -3999,7 +4003,7 @@ function render(d) {
   }
   renderLibrary(d.library);
   count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
-  count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
+  count('n-knowledge', o.knowledge.filter(ownerLesson).length);
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
@@ -4029,12 +4033,14 @@ function render(d) {
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
-  const cands = o.knowledge.filter((k) => k.status === 'candidate');
+  // only the lessons the supervisor sent you: the rest are about how the agents work, and its own to keep
+  const cands = o.knowledge.filter(ownerLesson);
   const goalCards = cands.map((k) => `
-    <div class="card qcard trust"${subj('lesson', k.id, k.statement)}>
+    <div class="card qcard trust"${subj('lesson', k.id, k.plain || k.statement)}>
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
-      <h4>${linkify(k.statement)}</h4>
-      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <h4 data-plain>${k.plain ? esc(k.plain) : linkify(k.statement)}</h4>
+      ${k.plain ? `<details data-technical><summary>The technical wording</summary><p>${linkify(k.statement)}</p></details>` : ''}
+      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Kept, it goes into the instructions of every agent it applies to.</p>
       <textarea data-know-note="${esc(k.id)}" rows="1" maxlength="600" placeholder="Add a note to refine it (optional): it goes with the lesson into every prompt">${esc(drafts[`know:${k.id}`] || '')}</textarea>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
@@ -5228,9 +5234,13 @@ function staleNote() {
   n.style.top = matchMedia('(max-width: 900px)').matches ? `${Math.max(0, document.querySelector('.side').getBoundingClientRect().bottom) + 8}px` : '';
 }
 
+// A lesson waits on you only when the supervisor sent it to you: it would change something you set.
+// The rest are about how the agents work, and the supervisor's to keep (supervisor.md §4).
+function ownerLesson(k) { return k.status === 'candidate' && k.for_owner === true; }
+
 // The tab title carries the Inbox count. Notifications are the hub's, for every instance.
 function inboxTitle(d) {
-  const n = d.questions.length + (d.ooda?.knowledge ?? []).filter((k) => k.status === 'candidate').length;
+  const n = d.questions.length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
   document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
   const c = $('n-questions');
   c.textContent = n || '';
@@ -5462,7 +5472,7 @@ document.addEventListener('click', async (ev) => {
     press(`k:${kid}`, {
       build: () => ({ action: 'knowledge', body: { id: kid, status, ...(note ? { note } : {}) } }),
       overlay: { data: (d) => ({ ...d, ooda: { ...d.ooda, knowledge: d.ooda.knowledge.filter((k) => !pending(k)) } }), agrees: (raw) => !raw.ooda.knowledge.some(pending) },
-      apply: () => { drafts[`know:${kid}`] = typed; know.closest('.card')?.remove(); },
+      apply: () => { drafts[`know:${kid}`] = typed; if (know.closest('.card')) know.closest('.card').remove(); else { know.disabled = true; know.textContent = status === 'retired' ? 'Retiring…' : 'Saving…'; } },
       onOk: () => { delete drafts[`know:${kid}`]; },
       errId: kid,
     });

@@ -645,7 +645,7 @@ test('the Inbox shows the order: the next best step on top with its reason, what
   const detail = ask('Round to cents?', '--goal', G, '--stake', '1', '--urgency', '2');
   const unrated = ask('Unrated one?');
   const gate = ask('Should we build it at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', detail, '--settles-if', "Don't build it");
-  ok(old, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'a lesson to keep', '--scope', 'project', '--evidence', detail], SUP);
+  ok(old, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'a lesson to keep', '--scope', 'project', '--evidence', detail, '--for-owner', '--plain', 'A lesson that would change how you set the goals.'], SUP);
   const port = await freePort();
   const dash = startDashboard(old, F.env({ DEVTEAM_HUB_PORT: String(PORTS + 10), DEVTEAM_PORT_BASE: String(PORTS + 11) }), ['--port', String(port)]);
   const chrome = await openChrome();

@@ -1161,6 +1161,9 @@ function integrity(o, file) {
   if (o.type === 'knowledge' && 'kit_lesson' in o && cls !== 'supervisor') return "kit_lesson is the supervisor's tag on its own knowledge";
   // And the owner's note is the owner's, on a new line as on a set: no other line passes one off as theirs.
   if (o.type === 'knowledge' && 'owner_note' in o && cls !== 'owner') return "owner_note is the owner's";
+  // Sending a lesson to the owner, and its plain line, are the supervisor's: the owner's own knowledge is kept as written.
+  if (o.type === 'knowledge' && ('for_owner' in o || 'plain' in o) && cls !== 'supervisor') return "for_owner and plain are the supervisor's, on a lesson it sends the owner";
+  if (o.type === 'knowledge' && o.op === 'new' && cls !== 'owner' && o.for_owner !== true && ownerScoped(o.scope)) return 'a lesson about a kind of call only the owner makes is sent to the owner (for_owner)';
   if (o.op === 'new') {
     if (ids.keyed[o.type]) {
       if (!new RegExp(ids.keyed[o.type]).test(o.id)) return `a ${o.type} id must match ${ids.keyed[o.type]}`;
@@ -1346,6 +1349,15 @@ function fold(all) {
     if (notOwnTag) {
       ignored.push({ line: l, why: "kit_lesson is the supervisor's tag on knowledge it wrote" });
       if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'kit_lesson')) continue;
+    }
+    // A lesson sent to the owner is theirs as it was sent: the supervisor may only retire it, never
+    // keep it or change its words or scope (the owner's Keep is of what they read). And one about a
+    // kind of call only the owner makes is theirs, however it was filed (supervisor.md §4).
+    if (obj.type === 'knowledge' && cls === 'supervisor') {
+      const why = obj.for_owner === true ? (l.status === 'accepted' || ['statement', 'scope', 'plain'].some((k) => k in l) || ('for_owner' in l && l.for_owner !== true) ? 'a lesson sent to the owner is theirs to keep: the supervisor may only retire it' : null)
+        : l.for_owner === true ? null
+        : ownerScoped(l.scope) || (l.status === 'accepted' && ownerScoped(obj.scope)) ? 'a lesson about a kind of call only the owner makes is theirs to keep: the supervisor sends it to them' : null;
+      if (why) { ignored.push({ line: l, why }); continue; }
     }
     if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
       ignored.push({ line: l, why: 'the question has no default' });
@@ -8684,6 +8696,32 @@ function knowledgeFor(target) {
 // make another project's (operator.md, The daily review). Read from a folded object's creator and
 // updates, so it works on what any kit's knowledge --json returns.
 const knowledgeIsOwners = (k) => k?.created_by === 'owner' || (Array.isArray(k?.updates) && k.updates.some((u) => u?.by === 'owner' && ['statement', 'scope', 'owner_note'].some((f) => u[f] !== undefined)));
+// A candidate waits on the owner only when the supervisor sent it to them (--for-owner): it would
+// change something the owner set. Every other candidate is about how the agents work, and is the
+// supervisor's to accept or retire (supervisor.md §4); the owner can still retire any lesson.
+const forOwner = (k) => k?.status === 'candidate' && k.for_owner === true;
+// A lesson about a kind of call only the owner makes is theirs, whatever the supervisor files it as.
+const ownerScoped = (scope) => typeof scope === 'string' && scope.startsWith('class:') && (ladder().owner_only ?? []).includes(scope.slice('class:'.length));
+// Why the line the owner reads first on a lesson sent to them isn't plain words (null when it is):
+// no commands, flags, code, paths or ids, the same vocabulary ask refuses in a question.
+function plainLessonProblem(s) {
+  if (!s.trim() || UNSAFE_TEXT.test(s)) return 'is one line of plain words';
+  if (s.length > 300) return `is ${s.length} characters: say what would change and why in one or two sentences (300 at most)`;
+  if (s.includes('`')) return 'has code in backticks: say what would change in words the owner uses';
+  const flag = s.match(/(?<![\w-])--[a-z][\w-]*/i);
+  if (flag) return `names a flag (${flag[0]}): say what would change, not how to run it`;
+  const kw = s.match(KIT_WORDS);
+  if (kw) return `uses the kit's own word "${kw[0]}": say it as you would to a person who has never seen the fleet`;
+  const id = s.match(KIT_ID);
+  if (id) return `names a kit id (${id[0]}): say what it is in words; the card links the evidence`;
+  const file = s.match(/(?<![\w/])[\w.-]+\/[\w./-]*\.[a-z]{1,5}\b|\b[\w-]+\.(?:mjs|json|jsonl|md|rb|py|sh|ya?ml)\b|\b[a-z][\w-]*\.(?:js|ts)\b/);
+  if (file) return `names a file (${file[0]}): say what it is for`;
+  const L = ladder();
+  const words = [...Object.keys(COMMANDS), ...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? []), ...tickets().keys()].filter((w) => w.includes('-'));
+  const cw = words.find((w) => new RegExp(`(?<![\\w-])${escRe(w)}(?![\\w-])`, 'i').test(s));
+  if (cw) return `says "${cw}", a name from inside the kit: say in plain words what it is`;
+  return null;
+}
 const ownerNote = (id) => readLog().lines.filter((l) => l.id === id && l.by === 'owner' && typeof l.owner_note === 'string').pop()?.owner_note ?? null;
 const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
@@ -8980,6 +9018,23 @@ function kitFlag(w) {
   if (['off', 'no', 'false'].includes(v)) return false;
   return die('--kit is on or off (bare --kit is on)');
 }
+// --for-owner and --plain: the supervisor sends a candidate to the owner, with the line they read
+// first. Only on its own candidates, set once (a lesson sent to the owner stays theirs), and never
+// without that line in plain words. k is the entry a set changes (null on add).
+function ownerSend(w, k) {
+  const on = flags['for-owner'];
+  const plain = flags.plain === true ? die('--plain needs the line the owner reads: what would change, and why they should care') : flagStr('plain');
+  if (on === undefined && plain === undefined) return {};
+  if (on !== undefined && on !== true) die('--for-owner takes no value: it sends the lesson to the owner, and stays');
+  if (w === 'owner') die("--for-owner and --plain are for a lesson the supervisor sends the owner: the owner's own knowledge is kept as they write it");
+  if (k && k.created_by !== 'supervisor') die(`${k.id} is the ${k.created_by}'s: the supervisor sends only its own lessons to the owner`);
+  if (k && k.status !== 'candidate') die(`${k.id} is ${k.status}: only a candidate waits for the owner`);
+  const sent = on === true || k?.for_owner === true;
+  if (!sent) die('--plain goes with --for-owner: it is the line the owner reads on a lesson sent to them');
+  if (plain === undefined && !k?.plain) die('a lesson sent to the owner (--for-owner) says in plain words what would change and why they should care: --plain "<one line, no commands or code>"');
+  if (plain !== undefined) { const why = plainLessonProblem(plain.trim()); if (why) die(`--plain ${why}`); }
+  return { ...(on === true && k?.for_owner !== true ? { for_owner: true } : {}), ...(plain !== undefined ? { plain: plain.trim() } : {}) };
+}
 function cmdKnowledge() {
   const [sub, id] = positional;
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
@@ -8994,18 +9049,33 @@ function cmdKnowledge() {
       if (!evidence.length) die('a lesson names what it rests on: --evidence <log ids> (the observations, acts, questions or messages that show it)');
       for (const e of evidence) if (!logGet(e)) die(`--evidence ${e}: no such log entry`);
     }
-    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence, kit_lesson: kit || undefined }, w);
+    const send = ownerSend(w, null);
+    const scope = flagStr('scope') ?? 'project';
+    // the owner's preference is theirs to state: one the supervisor infers goes to them (operator.md reads a preference as the owner's ruling)
+    if (w !== 'owner' && !send.for_owner && flagStr('kind') === 'preference') die('a preference is the owner\'s: one you inferred is theirs to keep. Send it with --for-owner --plain "<what you think they prefer, and why it matters>"');
+    // a lesson once sent to the owner and withdrawn isn't filed again as the agents' own
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const withdrawn = w !== 'owner' && !send.for_owner && logObjects('knowledge').find((x) => x.for_owner === true && norm(x.statement) === norm(flagStr('statement')));
+    if (withdrawn) die(`${withdrawn.id} said this and was sent to the owner: it is theirs to keep. Send it again with --for-owner --plain "…"`);
+    if (w !== 'owner' && !send.for_owner && ownerScoped(scope)) die(`${scope} is a kind of call only the owner makes, so a lesson about it is theirs to keep: send it to them with --for-owner --plain "<what would change, and why they should care>"`);
+    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope, status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence, kit_lesson: kit || undefined, ...send }, w);
     return out(line.id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--kit [on|off]] [--note "the owner\'s refinement"] [--owner]');
+    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--kit [on|off]] [--for-owner --plain "<words>"] [--note "the owner\'s refinement"] [--owner]');
     const w = by();
     const kit = kitFlag(w);
     if (kit !== undefined && logGet(id).created_by !== 'supervisor') die(`${id} is the ${logGet(id).created_by}'s: --kit is the supervisor's tag on its own knowledge. The operator reads the owner's entries anyway, and judges each one itself`);
+    const k = logGet(id);
+    const send = ownerSend(w, k);
+    const sent = send.for_owner || k.for_owner === true;
+    if (w !== 'owner' && flagStr('status') === 'accepted' && sent) die(`${id} was sent to the owner: it would change something they set, so only they keep it. Retire it if it no longer holds`);
+    if (w !== 'owner' && k.for_owner === true && ['statement', 'scope', 'plain'].some((f) => flagStr(f) !== undefined)) die(`${id} was sent to the owner as it stands: its words and scope are what they keep. Retire it and send a new one`);
+    if (w !== 'owner' && !sent && (ownerScoped(flagStr('scope')) || (flagStr('status') === 'accepted' && ownerScoped(k.scope)))) die(`${flagStr('scope') ?? k.scope} is a kind of call only the owner makes, so a lesson about it is theirs to keep: send it to them with --for-owner --plain "<what would change, and why they should care>"`);
     const note = flagStr('note');
     if (note !== undefined && w !== 'owner') die('--note is the owner\'s refinement of a lesson: only the owner adds one (--owner)');
     if (note !== undefined && (!note.trim() || note.length > 600 || /[\r\n]/.test(note))) die('--note is one line of at most 600 characters');
-    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope'), owner_note: note?.trim(), kit_lesson: kit }, w);
+    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope'), owner_note: note?.trim(), kit_lesson: kit, ...send }, w);
     return out(`updated ${id}`);
   }
   if (flagStr('for')) {
@@ -9019,7 +9089,7 @@ function cmdKnowledge() {
   if (flags.kit === true) ks = ks.filter((k) => k.kit_lesson === true);
   else if (flags.kit !== undefined) die('knowledge --kit lists the tagged entries; it takes no value');
   if (flags.json) return json(ks);
-  for (const k of ks) out(`${k.id} [${k.kind}, ${k.status}, ${k.scope}${k.confidence !== undefined ? `, conf ${k.confidence}` : ''}${knowledgeIsOwners(k) ? ", owner's" : ''}${k.kit_lesson === true ? ', kit lesson' : ''}] ${k.statement}`);
+  for (const k of ks) out(`${k.id} [${k.kind}, ${k.status}, ${k.scope}${k.confidence !== undefined ? `, conf ${k.confidence}` : ''}${knowledgeIsOwners(k) ? ", owner's" : ''}${k.kit_lesson === true ? ', kit lesson' : ''}${k.for_owner === true ? ', for the owner' : ''}] ${k.statement}`);
 }
 function cmdProblem() {
   const [sub, id] = positional;
@@ -9337,10 +9407,18 @@ function cmdOrient() {
   const lk = orientLinks();
   // --json stays the signals and the link proposals its readers count; incident debt is dashboard-data's ooda.debt.incidents
   if (flags.json) return json([...cl, ...lk]);
-  if (!cl.length && !inc.length && !lk.length) return out('nothing recurring that is unexplained');
+  // lessons waiting to be kept: the agents' own are the supervisor's to accept or retire, oldest first
+  const mine = logObjects('knowledge').filter((k) => k.status === 'candidate' && !forOwner(k));
+  const theirs = logObjects('knowledge').filter(forOwner).length;
+  if (!cl.length && !inc.length && !lk.length && !mine.length) return out(`nothing recurring that is unexplained${theirs ? `; ${theirs} lesson${theirs > 1 ? 's wait' : ' waits'} for the owner` : ''}`);
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
   for (const x of inc) out(`${x.id} was fixed and verified (${x.title}): what did it teach? ${x.explain[0]} or ${x.explain[1]}`);
   if (inc.length) out('  (once a lesson is accepted, a decision it informs cites it: decide … --on <k-…>)');
+  if (mine.length) {
+    out('lessons for you to keep (the evidence is plain: accept it; it no longer holds: retire it; it would change something the owner set: send it to them):');
+    for (const k of mine) out(`  ${k.id} [${k.kind}, ${k.scope}] ${k.statement}${(k.evidence ?? []).length ? ` (evidence: ${k.evidence.join(' ')})` : ''}`);
+    out(`  (knowledge set <k-…> --status accepted, or --status retired, or --for-owner --plain "<what would change, and why the owner should care>")${theirs ? `; ${theirs} more wait${theirs > 1 ? '' : 's'} for the owner` : ''}`);
+  }
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
@@ -11150,7 +11228,8 @@ function collectOoda() {
     // orientation debt: recurring signals nothing has explained for more than a day, and resolved
     // incidents nobody learned from, each oldest first
     debt: { signals: orientationDebt(), incidents: incidentDebt() },
-    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    // every candidate, however many: the ones sent to the owner are their Inbox, the rest the
+    // supervisor's to accept (the owner sees those too, read-only); only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
@@ -16310,8 +16389,8 @@ function boxAlert() {
 const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
 function cmdHello() {
   const s = loadSettings();
-  // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
-  const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
+  // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
+  const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter(forOwner).length;
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
@@ -17291,7 +17370,7 @@ Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
-  knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing)
+  knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 

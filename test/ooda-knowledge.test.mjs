@@ -152,7 +152,7 @@ test('orientation debt: an incident fixed and verified owes a lesson or a ruling
     // a noise ruling naming the problem clears it; corrected, it owes again
     const n = ok(old, ['decide', '--class', 'orient-noise', '--refs', ruled.p, '--', 'nothing to keep'], SUP).trim();
     assert.deepEqual(debt(), []);
-    assert.equal(ok(old, ['orient'], SUP), 'nothing recurring that is unexplained');
+    assert.match(ok(old, ['orient'], SUP), /^lessons for you to keep/, 'only the lesson citing it, waiting for the supervisor to keep');
     ok(old, ['correct', n, '--reason', 'there was a lesson in it']);
     assert.deepEqual(debt().map((y) => y.id), [ruled.p]);
     // a lesson the owner retired taught nothing: the incident owes one again
@@ -178,5 +178,95 @@ test('a hand-written decision citing knowledge that isn\'t accepted only cites i
     assert.equal(why(retired), 'cites');
     assert.equal(why(good), 'rests on');
     assert.equal(p.cited[retired].status, 'retired');
+  } finally { F.done(); }
+});
+
+test('lessons: the agents\' own are the supervisor\'s to keep; only one sent to the owner reaches their Inbox, in plain words', () => {
+  const F = fleetFixture('ooda-for-owner');
+  const { old, ok, run } = F;
+  try {
+    const o1 = ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the ticket was checked before its log synced'], SUP).trim();
+    const data = () => json(ok(old, ['dashboard-data']));
+    const inbox = () => json(ok(old, ['hello', '--json'])).inbox;
+    const ownerList = () => data().ooda.knowledge.filter((k) => k.status === 'candidate' && k.for_owner === true).map((k) => k.id);
+
+    // the default: about how the agents work, so it waits for the supervisor in orient, not the owner
+    const mine = ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'check-pr reads tickets from main\'s log: run log-sync before the ticket\'s PR is checked', '--evidence', o1], SUP).trim();
+    assert.deepEqual(ownerList(), [], 'not in the owner\'s list');
+    assert.equal(inbox(), 0, 'nor in the Inbox count');
+    const k0 = data().ooda.knowledge.find((k) => k.id === mine);
+    assert.equal(k0.status, 'candidate', 'the owner can still read it');
+    assert.equal(k0.for_owner, undefined);
+    const said = ok(old, ['orient'], SUP);
+    assert.match(said, /lessons for you to keep/);
+    assert.ok(said.includes(`${mine} [lesson, project] check-pr reads`), said);
+
+    // the supervisor keeps it itself
+    ok(old, ['knowledge', 'set', mine, '--status', 'accepted'], SUP);
+    assert.doesNotMatch(ok(old, ['orient'], SUP), /lessons for you to keep/);
+
+    // sent to the owner: it needs a plain line, and that line has no code in it
+    const base = ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'ship the pricing page before the blog, against goal one\'s order', '--evidence', o1, '--for-owner'];
+    assert.match(run(old, base, SUP).err, /--plain "<one line, no commands or code>"/, 'no plain line, refused');
+    for (const [bad, re] of [['Run `log-sync` first', /backticks/], ['Pass --chore log when merging', /names a flag \(--chore\)/], ['The devteam.mjs merge step drifts', /devteam\.mjs/], ['Use check-pr before you merge', /"check-pr", a name from inside the kit/], [`Since ${o1} the order is off`, /kit id/], ['Edit docs/devteam/project/log.md first', /names a file/]]) {
+      const r = run(old, [...base, '--plain', bad], SUP);
+      assert.notEqual(r.status, 0, bad);
+      assert.match(r.err, re, bad);
+    }
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'x', '--evidence', o1, '--plain', 'Words'], SUP).err, /--plain goes with --for-owner/);
+    const plain = 'The pricing page would ship before the blog, which changes the order you gave the goals. It brings sign-ups forward by a week.';
+    const theirs = ok(old, [...base, '--plain', plain], SUP).trim();
+    assert.deepEqual(ownerList(), [theirs], 'in the owner\'s list');
+    assert.equal(inbox(), 1);
+    assert.equal(data().ooda.knowledge.find((k) => k.id === theirs).plain, plain, 'with its plain line');
+    assert.match(ok(old, ['orient'], SUP), /1 lesson waits for the owner/);
+    assert.match(ok(old, ['knowledge'], SUP), new RegExp(`${theirs} \\[lesson, candidate, project, for the owner\\]`));
+
+    // theirs to keep: the supervisor can't accept it, or take it back, only retire it
+    assert.match(run(old, ['knowledge', 'set', theirs, '--status', 'accepted'], SUP).err, /was sent to the owner/);
+    assert.match(run(old, ['knowledge', 'set', theirs, '--for-owner', 'off'], SUP).err, /--for-owner takes no value/);
+    // the owner keeps it; then it is no longer waiting
+    ok(old, ['knowledge', 'set', theirs, '--status', 'accepted', '--owner']);
+    assert.equal(inbox(), 0);
+
+    // an agent's candidate sent on later, with its line
+    const later = ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'the owner\'s launch date slips with the checkout rewrite', '--evidence', o1], SUP).trim();
+    assert.match(run(old, ['knowledge', 'set', later, '--for-owner'], SUP).err, /--plain/);
+    ok(old, ['knowledge', 'set', later, '--for-owner', '--plain', 'Keeping the launch date means leaving the checkout rewrite for after it.'], SUP);
+    assert.deepEqual(ownerList(), [later]);
+    // only the supervisor sends one, and only its own
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'fact', '--statement', 'x', '--for-owner', '--plain', 'Words', '--owner']).err, /the supervisor sends the owner/);
+
+    // a lesson about a call only the owner makes is theirs, however it is filed
+    const L = fs.readFileSync(path.join(old, 'docs/devteam/governance/constitution.md'), 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/);
+    const only = JSON.parse(L[1]).owner_only[0];
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', `class:${only}`, '--statement', 'x', '--evidence', o1], SUP).err, /only the owner makes/);
+    assert.match(run(old, ['knowledge', 'set', mine, '--scope', `class:${only}`], SUP).err, /only the owner makes/);
+
+    // and keeping one grants nothing: a lesson the supervisor accepted is no standing rule
+    assert.match(run(old, ['decide', '--class', only, '--approved', mine, '--refs', o1, '--', 'x'], SUP).err, /not a standing rule of the owner's/);
+
+    // sent is sent: its words and scope stay as the owner read them, before or after they keep it
+    for (const f of [['--statement', 'something else'], ['--scope', 'component:app'], ['--plain', 'Other words.']]) assert.match(run(old, ['knowledge', 'set', later, ...f], SUP).err, /was sent to the owner as it stands/, f[0]);
+    assert.match(run(old, ['knowledge', 'set', theirs, '--statement', 'something else'], SUP).err, /was sent to the owner as it stands/, 'after the owner kept it too');
+    // and a line written past the kit counts for nothing: the fold holds the same rules
+    const hand = handFor(F);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: later, status: 'accepted' }, 500);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: theirs, statement: 'rewritten after the owner kept it' }, 400);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: later, for_owner: false }, 450);
+    const raw = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'raw', scope: 'project', status: 'candidate', evidence: [o1] }, 300);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: raw, scope: `class:${only}` }, 200);
+    const ks = json(ok(old, ['knowledge', '--json']));
+    assert.equal(ks.find((k) => k.id === later).status, 'candidate', 'the supervisor\'s accept of a lesson sent to the owner is ignored');
+    assert.match(ks.find((k) => k.id === theirs).statement, /^ship the pricing page/, 'and so is a rewording');
+    assert.equal(ks.find((k) => k.id === later).for_owner, true, 'and so is taking one back out of the owner\'s Inbox');
+    assert.equal(ks.find((k) => k.id === raw).scope, 'project', 'and a re-scope to an owner-only class');
+    // withdrawn, it can't come back as the agents' own
+    ok(old, ['knowledge', 'set', later, '--status', 'retired'], SUP);
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'The owner\'s launch date slips  with the checkout rewrite', '--evidence', o1], SUP).err, /was sent to the owner: it is theirs to keep/);
+    // a preference is the owner's: one the supervisor inferred goes to them
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'preference', '--scope', 'project', '--statement', 'short PRs'], SUP).err, /a preference is the owner's/);
+    // ordinary words pass: a product's name with a dot, a hyphenated English word
+    ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'node upgrade', '--evidence', o1, '--for-owner', '--plain', 'Moving to the newer Node.js would change the hosting plan and the sign-up page.'], SUP);
   } finally { F.done(); }
 });
