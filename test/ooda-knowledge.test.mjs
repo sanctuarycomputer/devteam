@@ -245,5 +245,26 @@ test('lessons: the agents\' own are the supervisor\'s to keep; only one sent to 
 
     // and keeping one grants nothing: a lesson the supervisor accepted is no standing rule
     assert.match(run(old, ['decide', '--class', only, '--approved', mine, '--refs', o1, '--', 'x'], SUP).err, /not a standing rule of the owner's/);
+
+    // sent is sent: its words and scope stay as the owner read them, before or after they keep it
+    for (const f of [['--statement', 'something else'], ['--scope', 'component:app'], ['--plain', 'Other words.']]) assert.match(run(old, ['knowledge', 'set', later, ...f], SUP).err, /was sent to the owner as it stands/, f[0]);
+    assert.match(run(old, ['knowledge', 'set', theirs, '--statement', 'something else'], SUP).err, /was sent to the owner as it stands/, 'after the owner kept it too');
+    // and a line written past the kit counts for nothing: the fold holds the same rules
+    const hand = handFor(F);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: later, status: 'accepted' }, 500);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: theirs, statement: 'rewritten after the owner kept it' }, 400);
+    const raw = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'raw', scope: 'project', status: 'candidate', evidence: [o1] }, 300);
+    hand('supervisor', { type: 'knowledge', op: 'set', id: raw, scope: `class:${only}` }, 200);
+    const ks = json(ok(old, ['knowledge', '--json']));
+    assert.equal(ks.find((k) => k.id === later).status, 'candidate', 'the supervisor\'s accept of a lesson sent to the owner is ignored');
+    assert.match(ks.find((k) => k.id === theirs).statement, /^ship the pricing page/, 'and so is a rewording');
+    assert.equal(ks.find((k) => k.id === raw).scope, 'project', 'and a re-scope to an owner-only class');
+    // withdrawn, it can't come back as the agents' own
+    ok(old, ['knowledge', 'set', later, '--status', 'retired'], SUP);
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'The owner\'s launch date slips  with the checkout rewrite', '--evidence', o1], SUP).err, /was sent to the owner: it is theirs to keep/);
+    // a preference is the owner's: one the supervisor inferred goes to them
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'preference', '--scope', 'project', '--statement', 'short PRs'], SUP).err, /a preference is the owner's/);
+    // ordinary words pass: a product's name with a dot, a hyphenated English word
+    ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'node upgrade', '--evidence', o1, '--for-owner', '--plain', 'Moving to the newer Node.js would change the hosting plan and the sign-up page.'], SUP);
   } finally { F.done(); }
 });

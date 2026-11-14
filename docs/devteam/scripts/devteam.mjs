@@ -1163,6 +1163,7 @@ function integrity(o, file) {
   if (o.type === 'knowledge' && 'owner_note' in o && cls !== 'owner') return "owner_note is the owner's";
   // Sending a lesson to the owner, and its plain line, are the supervisor's: the owner's own knowledge is kept as written.
   if (o.type === 'knowledge' && ('for_owner' in o || 'plain' in o) && cls !== 'supervisor') return "for_owner and plain are the supervisor's, on a lesson it sends the owner";
+  if (o.type === 'knowledge' && o.op === 'new' && cls !== 'owner' && o.for_owner !== true && ownerScoped(o.scope)) return 'a lesson about a kind of call only the owner makes is sent to the owner (for_owner)';
   if (o.op === 'new') {
     if (ids.keyed[o.type]) {
       if (!new RegExp(ids.keyed[o.type]).test(o.id)) return `a ${o.type} id must match ${ids.keyed[o.type]}`;
@@ -1348,6 +1349,15 @@ function fold(all) {
     if (notOwnTag) {
       ignored.push({ line: l, why: "kit_lesson is the supervisor's tag on knowledge it wrote" });
       if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'kit_lesson')) continue;
+    }
+    // A lesson sent to the owner is theirs as it was sent: the supervisor may only retire it, never
+    // keep it or change its words or scope (the owner's Keep is of what they read). And one about a
+    // kind of call only the owner makes is theirs, however it was filed (supervisor.md §4).
+    if (obj.type === 'knowledge' && cls === 'supervisor') {
+      const why = obj.for_owner === true ? (l.status === 'accepted' || ['statement', 'scope', 'plain'].some((k) => k in l) ? 'a lesson sent to the owner is theirs to keep: the supervisor may only retire it' : null)
+        : l.for_owner === true ? null
+        : ownerScoped(l.scope) || (l.status === 'accepted' && ownerScoped(obj.scope)) ? 'a lesson about a kind of call only the owner makes is theirs to keep: the supervisor sends it to them' : null;
+      if (why) { ignored.push({ line: l, why }); continue; }
     }
     if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
       ignored.push({ line: l, why: 'the question has no default' });
@@ -8701,7 +8711,7 @@ function plainLessonProblem(s) {
   if (kw) return `uses the kit's own word "${kw[0]}": say it as you would to a person who has never seen the fleet`;
   const id = s.match(KIT_ID);
   if (id) return `names a kit id (${id[0]}): say what it is in words; the card links the evidence`;
-  const file = s.match(/(?<![\w/])[\w.-]+\/[\w./-]*\.[a-z]{1,5}\b|\b[\w-]+\.(?:mjs|js|ts|json|jsonl|md|rb|py|sh|ya?ml)\b/i);
+  const file = s.match(/(?<![\w/])[\w.-]+\/[\w./-]*\.[a-z]{1,5}\b|\b[\w-]+\.(?:mjs|json|jsonl|md|rb|py|sh|ya?ml)\b|\b[a-z][\w-]*\.(?:js|ts)\b/);
   if (file) return `names a file (${file[0]}): say what it is for`;
   const L = ladder();
   const words = [...Object.keys(COMMANDS), ...Object.keys(L.classes ?? {}), ...(L.owner_only ?? []), ...(L.constitutional ?? []), ...tickets().keys()].filter((w) => w.includes('-'));
@@ -9038,6 +9048,12 @@ function cmdKnowledge() {
     }
     const send = ownerSend(w, null);
     const scope = flagStr('scope') ?? 'project';
+    // the owner's preference is theirs to state: one the supervisor infers goes to them (operator.md reads a preference as the owner's ruling)
+    if (w !== 'owner' && !send.for_owner && flagStr('kind') === 'preference') die('a preference is the owner\'s: one you inferred is theirs to keep. Send it with --for-owner --plain "<what you think they prefer, and why it matters>"');
+    // a lesson once sent to the owner and withdrawn isn't filed again as the agents' own
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const withdrawn = w !== 'owner' && !send.for_owner && logObjects('knowledge').find((x) => x.for_owner === true && norm(x.statement) === norm(flagStr('statement')));
+    if (withdrawn) die(`${withdrawn.id} said this and was sent to the owner: it is theirs to keep. Send it again with --for-owner --plain "…"`);
     if (w !== 'owner' && !send.for_owner && ownerScoped(scope)) die(`${scope} is a kind of call only the owner makes, so a lesson about it is theirs to keep: send it to them with --for-owner --plain "<what would change, and why they should care>"`);
     const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope, status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence, kit_lesson: kit || undefined, ...send }, w);
     return out(line.id);
@@ -9051,6 +9067,7 @@ function cmdKnowledge() {
     const send = ownerSend(w, k);
     const sent = send.for_owner || k.for_owner === true;
     if (w !== 'owner' && flagStr('status') === 'accepted' && sent) die(`${id} was sent to the owner: it would change something they set, so only they keep it. Retire it if it no longer holds`);
+    if (w !== 'owner' && k.for_owner === true && ['statement', 'scope', 'plain'].some((f) => flagStr(f) !== undefined)) die(`${id} was sent to the owner as it stands: its words and scope are what they keep. Retire it and send a new one`);
     if (w !== 'owner' && !sent && (ownerScoped(flagStr('scope')) || (flagStr('status') === 'accepted' && ownerScoped(k.scope)))) die(`${flagStr('scope') ?? k.scope} is a kind of call only the owner makes, so a lesson about it is theirs to keep: send it to them with --for-owner --plain "<what would change, and why they should care>"`);
     const note = flagStr('note');
     if (note !== undefined && w !== 'owner') die('--note is the owner\'s refinement of a lesson: only the owner adds one (--owner)');

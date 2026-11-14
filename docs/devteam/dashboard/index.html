@@ -2332,7 +2332,7 @@ const ATTR = {
   },
   decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
   act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'knowledge', 'reversible'], label: { knowledge: 'Given' }, fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}`, knowledge: linkList } },
-  knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
+  knowledge: { order: ['plain', 'statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], hide: ['for_owner'], label: { plain: 'In plain words' }, fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
   observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => /^https:\/\//.test(v) ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
@@ -3126,7 +3126,8 @@ function openLesson(id) {
     ${attrs({ id, peek: p, type: 'knowledge', computed: [
       ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
     ] })}
-    ${ownerLesson(k) ? `${k.plain ? `<p>${esc(k.plain)}</p>` : ''}<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>` : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
+    ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
+    ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
     ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>` : ''}
     ${lineageBlock(p)}
     ${obs.length ? `<h3>The signals it came from</h3>${obsList(obs)}` : ''}
@@ -5471,7 +5472,7 @@ document.addEventListener('click', async (ev) => {
     press(`k:${kid}`, {
       build: () => ({ action: 'knowledge', body: { id: kid, status, ...(note ? { note } : {}) } }),
       overlay: { data: (d) => ({ ...d, ooda: { ...d.ooda, knowledge: d.ooda.knowledge.filter((k) => !pending(k)) } }), agrees: (raw) => !raw.ooda.knowledge.some(pending) },
-      apply: () => { drafts[`know:${kid}`] = typed; know.closest('.card')?.remove(); },
+      apply: () => { drafts[`know:${kid}`] = typed; if (know.closest('.card')) know.closest('.card').remove(); else { know.disabled = true; know.textContent = status === 'retired' ? 'Retiring…' : 'Saving…'; } },
       onOk: () => { delete drafts[`know:${kid}`]; },
       errId: kid,
     });

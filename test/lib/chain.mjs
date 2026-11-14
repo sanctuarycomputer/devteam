@@ -2270,7 +2270,7 @@ http.createServer((req, res) => {
     must(['answer', QkitSync, 'yes', '--from-chat', '--said', 'yes, adopt it'], { role: 'sup' });
     must([...args, '--approved', QkitSync], { role: 'sup' });
     // a rule the supervisor wrote and accepted itself doesn't count, only the owner's
-    const Ks = must(['knowledge', 'add', '--kind', 'preference', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
+    const Ks = must(['knowledge', 'add', '--kind', 'fact', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
     must(['knowledge', 'set', Ks, '--status', 'accepted'], { role: 'sup' });
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, "the supervisor can't grant itself standing approval");
     // a rule given on an unscoped question applies to the project, not to syncs; the supervisor can't
@@ -3499,20 +3499,23 @@ http.createServer((req, res) => {
     assert.equal(h.name, 'demo');
     assert.equal(typeof h.inbox, 'number');
     const dd = json(must(['dashboard-data']));
-    assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter((k) => k.status === 'candidate').length, "the Inbox as the dashboard counts it: its questions and lessons to keep");
+    const owners = (k) => k.status === 'candidate' && k.for_owner === true;
+    assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter(owners).length, "the Inbox as the dashboard counts it: its questions and the lessons sent to the owner");
     // every lesson waiting on the owner reaches the Inbox, however many (the dashboard showed only the
-    // recent 60 lessons, so older candidates never did, while the hub's badge counted them)
+    // recent 60 lessons, so older candidates never did, while the hub's badge counted them); the
+    // agents' own candidates reach the dashboard too, and never the badge
     {
       const logDir = path.join(repo, 'docs/devteam/run/log');
       const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
       const keptLog = fs.readFileSync(supFile, 'utf8');
       const at = (i) => new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString();
-      fs.appendFileSync(supFile, Array.from({ length: 65 }, (_, i) => line({ id: `k-20200101-0000${String(i).padStart(2, '0')}000-supervisor`, type: 'knowledge', op: 'new', at: at(i), by: 'supervisor', kind: 'fact', statement: `old candidate ${i}`, scope: 'project', status: 'candidate', confidence: 0.5 })).join(''));
+      fs.appendFileSync(supFile, Array.from({ length: 65 }, (_, i) => line({ id: `k-20200101-0000${String(i).padStart(2, '0')}000-supervisor`, type: 'knowledge', op: 'new', at: at(i), by: 'supervisor', kind: 'fact', statement: `old candidate ${i}`, scope: 'project', status: 'candidate', confidence: 0.5, ...(i % 2 ? {} : { for_owner: true, plain: `An old lesson for you, number ${i}` }) })).join(''));
       try {
         const many = json(must(['dashboard-data']));
         const cands = many.ooda.knowledge.filter((k) => k.status === 'candidate');
         assert.ok(cands.length >= 65, `all candidates reach the dashboard (${cands.length})`);
-        assert.equal(json(must(['hello', '--json'])).inbox, many.questions.length + cands.length, 'the hub badge and the Inbox count the same');
+        assert.ok(cands.filter(owners).length >= 33, 'every one sent to the owner among them');
+        assert.equal(json(must(['hello', '--json'])).inbox, many.questions.length + cands.filter(owners).length, 'the hub badge and the Inbox count the same');
       } finally { fs.writeFileSync(supFile, keptLog); }
     }
     assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));

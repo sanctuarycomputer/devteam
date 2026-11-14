@@ -1018,7 +1018,7 @@
             "type": "boolean"
           },
           "for_owner": {
-            "description": "The supervisor sent this candidate to you: it would change something you set (the product's direction, a goal, a rule you gave, or a kind of call only you make), so it waits in your Inbox and only you keep it. Without it, a candidate is about how the agents work, and the supervisor accepts or retires it itself. Set once, never taken back; it grants nothing.",
+            "description": "The supervisor sent this candidate to you: it would change something you set (the product's direction, a goal, a rule you gave, or a kind of call only you make), so it waits in your Inbox and only you keep it. Without it, a candidate is about how the agents work, and the supervisor accepts or retires it itself. Set once and never unsent: from then on the supervisor may only retire it, never keep it or change its words or scope. It grants nothing.",
             "const": true
           },
           "plain": {
