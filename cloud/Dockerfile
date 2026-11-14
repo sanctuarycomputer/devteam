@@ -40,9 +40,6 @@ ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIE
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
- && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
- && apt-get update && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
 # A general-purpose dev machine, like the owner's Mac, without a container per project. Everything
@@ -66,41 +63,75 @@ RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/
       watchman inotify-tools ripgrep fd-find tree htop file zip rsync wget lsof dnsutils netcat-openbsd iputils-ping nano \
  && rm -rf /var/lib/apt/lists/*
 
-# ttyd 1.7.7, the web terminal, checked against the release's published sums
+# The box's tools, each pinned only in the ARGs just above the layer that installs it. Bumped by
+# `devteam.mjs box-pins bump` at each release (or by hand), and redeployed with it.
+#   Names: <TOOL>_VERSION, and for a downloaded binary <TOOL>_SHA256_X86_64 and <TOOL>_SHA256_AARCH64
+#   (the release's published sha256 for each arch). One ARG per line, the value unquoted, in that
+#   order, right above the tool's RUN; no version or sum is written anywhere else in this file.
+#   To hold a tool back, put a line `# hold: <reason>` right above its _VERSION ARG: box-pins check
+#   reports it held, and bump leaves it alone. (A Dockerfile comment is a whole line, never the end of one.)
+#   A changed ARG rebuilds its layer and every one after it, so the tools come after the apt layers,
+#   the least often bumped first and Claude Code last.
+
+# ttyd, the web terminal
+ARG TTYD_VERSION=1.7.7
+ARG TTYD_SHA256_X86_64=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55
+ARG TTYD_SHA256_AARCH64=b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165
 RUN case "$(uname -m)" in \
-      x86_64) sum=8a217c968aba172e0dbf3f34447218dc015bc4d5e59bf51db2f2cd12b7be4f55 ;; \
-      aarch64) sum=b38acadd89d1d396a0f5649aa52c539edbad07f4bc7348b27b4f4b7219dd4165 ;; \
+      x86_64) sum=$TTYD_SHA256_X86_64 ;; \
+      aarch64) sum=$TTYD_SHA256_AARCH64 ;; \
       *) echo "no ttyd for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m)" \
+ && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
-# These pins are bumped by editing them here and redeploying.
-# mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
+# gh, from its release tarball (only the binary; the image has no man). /usr/bin/gh stays, as a
+# link: `gh auth setup-git` wrote that path into ~/.gitconfig's credential helper, on the volume.
+ARG GH_VERSION=2.104.0
+ARG GH_SHA256_X86_64=98cb101ad87dbbd3f6b2f2bfcbd43197ccd07643140121d8a9cfaa91eadbc24e
+ARG GH_SHA256_AARCH64=cb34cefc6f4e77b90731374a2b737516bb8f3033c6ca46aa949e5344f68069e3
 RUN case "$(uname -m)" in \
-      x86_64) arch=x64; sum=fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a ;; \
-      aarch64) arch=arm64; sum=e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b ;; \
+      x86_64) arch=amd64; sum=$GH_SHA256_X86_64 ;; \
+      aarch64) arch=arm64; sum=$GH_SHA256_AARCH64 ;; \
+      *) echo "no gh for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
+ && echo "$sum  /tmp/gh.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/gh.tgz --no-same-owner -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_$arch/bin/gh" && rm /tmp/gh.tgz \
+ && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
+
+# mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
+ARG MISE_VERSION=v2026.10.17
+ARG MISE_SHA256_X86_64=fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a
+ARG MISE_SHA256_AARCH64=e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b
+RUN case "$(uname -m)" in \
+      x86_64) arch=x64; sum=$MISE_SHA256_X86_64 ;; \
+      aarch64) arch=arm64; sum=$MISE_SHA256_AARCH64 ;; \
       *) echo "no mise for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-linux-$arch" \
+ && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
-# Claude Code, pinned, and updated by changing this and redeploying (its own updater can't write to /usr/local)
-ARG CLAUDE_CODE_VERSION=2.1.307
-RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
-
-# claude-swap, pinned: with it devteam rotates this box's Claude accounts on its own. uv brings the
-# Python 3.12 it needs (Debian's is older); its logins land in $HOME, on the volume.
-ARG CLAUDE_SWAP_VERSION=1.0.0
+# uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
+ARG UV_VERSION=0.13.7
+ARG UV_SHA256_X86_64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
+ARG UV_SHA256_AARCH64=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
 RUN case "$(uname -m)" in \
-      x86_64) sum=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83 ;; \
-      aarch64) sum=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc ;; \
+      x86_64) sum=$UV_SHA256_X86_64 ;; \
+      aarch64) sum=$UV_SHA256_AARCH64 ;; \
       *) echo "no uv for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
- && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz \
- && UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.12 "claude-swap==$CLAUDE_SWAP_VERSION" \
+ && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
+ && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
+
+# claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume
+ARG CLAUDE_SWAP_VERSION=1.0.0
+RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.12 "claude-swap==$CLAUDE_SWAP_VERSION" \
  && chmod -R a+rX /opt/uv
+
+# Claude Code (its own updater can't write to /usr/local)
+ARG CLAUDE_CODE_VERSION=2.1.307
+RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
 # the gateway and alone can read its passkeys and sessions, so no agent can add itself a way in.
@@ -481,6 +512,13 @@ while :; do
 done &
 while :; do ttyd -d 3 -i lo -p 7681 -W -t macOptionClickForcesSelection=true -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
+
+# What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
+# release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
+# stamp rebuilds nothing.
+ARG DEVTEAM_RELEASE=v0.52.0
+ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
+    DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
 VOLUME /data
 EXPOSE 8080
