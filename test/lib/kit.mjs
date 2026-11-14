@@ -308,6 +308,22 @@ export function gitFactFns(cwd, runDir) {
   const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
   return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
 }
+// The script's box detection, loaded by itself on a machine of the test's making: the box's files
+// exist only as files names them ({ path: text }), HOME is home, the password file's home is passwd
+// (null: the uid has none, and userInfo throws), and the environment is { HOME, ...env }.
+export function boxFns({ files = {}, home, passwd, env = {} }) {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
+  const BOX = ['/opt/devteam/gateway.mjs', '/etc/devteam/thread-key.pub'];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-boxfns-'));
+  process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }));
+  const stand = Object.fromEntries(BOX.filter((f) => f in files).map((f, i) => { const p = path.join(dir, `box-${i}`); fs.writeFileSync(p, files[f]); return [f, p]; }));
+  const at = (f) => (BOX.includes(f) ? stand[f] ?? path.join(dir, 'none') : f);
+  const sandboxFs = { existsSync: (f) => fs.existsSync(at(f)), statSync: (f) => fs.statSync(at(f)), readFileSync: (f, e) => fs.readFileSync(at(f), e), realpathSync: (f) => fs.realpathSync(f) };
+  const sandboxOs = { homedir: () => home, userInfo: () => { if (passwd === null) throw new Error('no passwd entry'); return { homedir: passwd }; } };
+  const ctx = vm.createContext({ fs: sandboxFs, os: sandboxOs, crypto, URL, process: { env: { HOME: home, ...env } } });
+  return vm.runInContext(`${cut('/* preview box start */', '/* preview box end */')}\n${cut('/* box start */', '/* box end */')}\n;({ onBox, threadsNeedGateway, gatewayThreadKey, boxFilesOff, BOX_GATEWAY_FILE, BOX_THREAD_KEY })`, ctx);
+}
 // The script's ranked keyword search, loaded by itself.
 export function searchFns() {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');

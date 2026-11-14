@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, hasTmux, kit, startDashboard, until, write } from './lib/kit.mjs';
+import { PORTS, bareProject, boxFns, hasTmux, kit, startDashboard, until, write } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import { hubSignature } from '../cloud/gateway.mjs';
 
@@ -108,6 +108,47 @@ function seat(M, screens = [box(prompt)]) {
 }
 const shown = (pane, text) => until(() => tmuxSh(['capture-pane', '-p', '-t', pane]).stdout.includes(text), `pane ${pane} drawn`);
 const SUBJECT = (root, selector = 'inbox', label = 'Inbox 3') => ({ kind: 'overview', root, name: path.basename(root), anchor: { selector, label } });
+
+// A test on a box turns the box's files off (DEVTEAM_BOX=off, lib/kit.mjs), and the kit takes that only
+// for a throwaway HOME: at the account's own home, however it is spelled, a box stays a box.
+test('DEVTEAM_BOX=off turns the box\'s files off only for a throwaway home: at the account\'s own home a box stays a box', () => {
+  const passwd = path.join(tmp, 'box-home');
+  const link = path.join(tmp, 'box-home-link');
+  const tmpHome = path.join(tmp, 'box-tmp-home');
+  fs.mkdirSync(passwd);
+  fs.mkdirSync(tmpHome);
+  fs.symlinkSync(passwd, link);
+  const pem = (f) => crypto.createPublicKey(fs.readFileSync(f, 'utf8')).export({ type: 'spki', format: 'pem' });
+  const envKey = path.join(tmp, 'box-env-key.pub');
+  fs.writeFileSync(envKey, crypto.createPublicKey(otherKey).export({ type: 'spki', format: 'pem' }));
+  const files = { '/opt/devteam/gateway.mjs': '', '/etc/devteam/thread-key.pub': fs.readFileSync(GW_PUBLIC, 'utf8') };
+  const keyOf = (B) => B.gatewayThreadKey()?.export({ type: 'spki', format: 'pem' }) ?? null;
+  const off = { DEVTEAM_BOX: 'off', DEVTEAM_GATEWAY_THREAD_KEY: envKey };
+  const stays = (B, why) => {
+    assert.equal(B.boxFilesOff(), false, why);
+    assert.equal(B.onBox(), true, why);
+    assert.equal(B.threadsNeedGateway(), true, why);
+    assert.equal(keyOf(B), pem(GW_PUBLIC), `${why}: the box's own key`);
+  };
+  stays(boxFns({ files, home: passwd, passwd, env: off }), 'HOME is the passwd home');
+  stays(boxFns({ files, home: link, passwd, env: off }), 'HOME is a symlink to it');
+  stays(boxFns({ files, home: `${passwd}/`, passwd, env: off }), 'HOME is it, with a trailing slash');
+  stays(boxFns({ files, home: path.join(tmpHome, 'missing'), passwd, env: off }), 'HOME names nothing');
+  stays(boxFns({ files, home: tmpHome, passwd: null, env: off }), 'no passwd entry');
+  for (const v of [undefined, 'on', 'OFF', '']) stays(boxFns({ files, home: tmpHome, passwd, env: { DEVTEAM_GATEWAY_THREAD_KEY: envKey, ...(v === undefined ? {} : { DEVTEAM_BOX: v }) } }), `DEVTEAM_BOX=${v}`);
+  const T = boxFns({ files, home: tmpHome, passwd, env: off });
+  assert.equal(T.boxFilesOff(), true, 'a throwaway HOME');
+  assert.equal(T.onBox(), false, 'no box but the environment\'s');
+  assert.equal(T.threadsNeedGateway(), false);
+  assert.equal(keyOf(T), pem(envKey), 'the environment\'s key, not the box\'s');
+  const U = boxFns({ files, home: tmpHome, passwd, env: { ...off, DEVTEAM_PUBLIC_URL: 'https://box.example.com' } });
+  assert.equal(U.onBox(), true, 'a box by its environment');
+  assert.equal(keyOf(U), pem(envKey));
+  const L = boxFns({ home: passwd, passwd });
+  assert.equal(L.onBox(), false, 'a laptop');
+  assert.equal(L.threadsNeedGateway(), false);
+  assert.equal(keyOf(L), null);
+});
 
 test('the store: a thread, its turns, closed and opened again, kept beside the operator in no repo', () => {
   const M = machine({ starts: false });
