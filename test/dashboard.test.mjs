@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { PORTS, kit, freePort, write, json, pastDeadline, fleetFixture, bareProject, startDashboard, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
+import { PORTS, kit, freePort, write, json, pastDeadline, fleetFixture, bareProject, startDashboard, dashboardOnFreePort, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 // A wait on a condition in a page. Page.navigate answers before the new page is parsed, so an
@@ -321,10 +321,14 @@ test('a question links a preview: the link for this page, with its state, and no
 
 // The page polls every 10s here; the fixture polls every 300ms, and a test can stop /api/data
 // answering to catch a refresh in flight (the fetch outlasts the moment focus arrives).
+// DEVTEAM_TEST_READ_DELAY_MS=600 makes each /api/data and /api/threads read take 0.5 to 1.5 times
+// that, as a loaded CI runner's do: how a race between a read and a step shows on a fast machine.
+const READ_DELAY_MS = Number(process.env.DEVTEAM_TEST_READ_DELAY_MS) || 0;
 const POLL_FAST = `(() => {
   const si = window.setInterval;
   window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
-  const rf = window.fetch;
+  const rf0 = window.fetch;
+  const rf = async (u, o) => { if (${READ_DELAY_MS} && /^\\/api\\/(data|threads)/.test(String(u))) await new Promise((r) => setTimeout(r, ${READ_DELAY_MS} * (0.5 + Math.random()))); return rf0(u, o); };
   window.__polls = 0;
   window.__gate = null;
   window.__answerHold = null;
@@ -334,7 +338,8 @@ const POLL_FAST = `(() => {
     // 30 s from its fetch, gate included: a gate held that long reads as a read given up at 0 ms.
     if (String(u).startsWith('/api/data')) {
       window.__polls++;
-      if (window.__gate) await window.__gate;
+      // how many reads wait at the gate: a refresh in flight, as the page sees it, held
+      if (window.__gate) { window.__gated = (window.__gated ?? 0) + 1; try { await window.__gate; } finally { window.__gated--; } }
       const x = { at: Date.now(), ms: null, status: null };
       (window.__reads ??= []).push(x);
       if (window.__reads.length > 20) window.__reads.shift();
@@ -363,6 +368,11 @@ const POLL_FAST = `(() => {
     while (window.__landing) await new Promise((r) => setTimeout(r, 10));
   };
   window.__stir = () => { const h = window.__hush; window.__hush = null; h?.go(); };
+  // The gate stops reads not yet begun; one already past it (a poll, or the forced read after a press)
+  // can still land, seconds later on a loaded runner, and redraw the cards under a click. __quiet()
+  // says none is left: every read past the gate has answered and its answer has been drawn (a read
+  // draws as soon as its body is in, before __landing goes back down).
+  window.__quiet = () => !(window.__reads ?? []).some((x) => x.ms === null) && !window.__landing;
   window.fetch = async (u, o) => {
     const r = await inner(u, o);
     if (!['/api/data', '/api/threads'].some((x) => String(u).startsWith(x))) return r;
@@ -430,14 +440,12 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const Q3 = dt(['ask', '--question', 'Which port?', '--default', '8080'], SUP);
   pastDeadline(root, Q3);
   dt(['answer', Q3, '--defaulted'], SUP);
-  const port = await freePort();
-  const dash = startDashboard(root, env, ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(root, env);
   t.after(() => dash.stop());
   const chrome = await openChrome();
   t.after(() => chrome.close());
   const p = await chrome.newPage();
   t.after(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -448,13 +456,16 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const hold = () => p.ev('void (window.__postHold = new Promise((r) => { window.__let = r; }))');
   const letGo = () => p.ev('window.__let(); window.__postHold = null; void 0');
   const card = (q) => `document.querySelector('#questions [data-qcard="${q}"]')`;
+  // a step no read lands in, from finding what to click to the release's own work (pointerup's
+  // setTimeout draws what the press held back): a redraw can't move or replace what is clicked
+  const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   const answeredOnServer = (q) => /answered/.test(dt(['questions', '--id', q]).split('\n')[0]);
   await soon(`!!${card(Q1)} && !!${card(Q2)}`, 'the question cards');
 
   await t.test('an answer: the card says so at once; the server has it once the post goes through', async () => {
     await hold();
-    await p.click(`${'#questions'} [data-qcard="${Q1}"] input[data-pick][value="Left"]`);
-    await p.click(`#questions [data-qcard="${Q1}"] [data-answer]`);
+    await still(() => p.click(`${'#questions'} [data-qcard="${Q1}"] input[data-pick][value="Left"]`));
+    await still(() => p.click(`#questions [data-qcard="${Q1}"] [data-answer]`));
     await soon(`/Answered: Left/.test(${card(Q1)}?.textContent ?? '')`, 'drawn while the post is held');
     assert.equal(await p.ev(`$('saving').hidden`), false, 'the page says it is saving');
     assert.equal(answeredOnServer(Q1), false, 'and the server has not got it yet');
@@ -470,8 +481,15 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     // keeps the question while the supervisor withdraws it
     await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))');
     try {
+      // and what was past the gate drawn: the last press's own read (Q1 answered, its card leaving,
+      // Q2's moving up) would otherwise land between finding the note and clicking it, or bring the
+      // withdrawal in. Anything it left held is drawn now, not on the pick's release.
+      await soon('window.__quiet()', 'the reads already past the gate landed');
+      await p.ev('drawHeld(); void 0');
+      await soon('window.__quiet() && !HELD', 'nothing held back');
       await p.click(`#questions [data-qcard="${Q2}"] input[data-pick][value="No"]`);
       await p.click(`#questions [data-qcard="${Q2}"] textarea[data-q]`);
+      await soon(`document.activeElement === document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]')`, 'the note focused');
       await p.type('not this week');
       await soon(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]')?.value === 'not this week'`, 'the note typed');
       await hold();
@@ -549,15 +567,13 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
   };
   const Q = ask('Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]');
   for (let i = 0; i < 12; i++) ask(`Filler ${i}?`); // enough cards that the page scrolls
-  const port = await freePort();
-  const dash = startDashboard(root, env, ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(root, env);
   t.after(() => dash.stop());
   const chrome = await openChrome();
   t.after(() => chrome.close());
   const p = await chrome.newPage();
   t.after(() => p.close());
   {
-    await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
     await p.send('Page.enable');
     await p.send('Runtime.enable');
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 600, deviceScaleFactor: 1, mobile: false });
@@ -580,12 +596,18 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
 
     await t.test('a refresh already in flight when you click in and type', async () => {
       await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))'); // void: evaluating a promise would wait for it
-      await polls(1);
-      await p.click(box);
-      const y = await p.ev('window.scrollY');
-      assert.ok(y > 0, 'the fixture page scrolls');
-      await p.type('hello');
-      await p.ev('window.__open(); window.__gate = null; window.__t = document.querySelector(\'' + box + '\')');
+      let y;
+      try {
+        // a read waiting at the gate, and none past it: counting polls can't say so, since a poll that
+        // reached the gate before the count was read is the last one until the gate opens
+        await soon('window.__gated > 0 && window.__quiet()', 'a refresh held at the gate');
+        await p.click(box);
+        await soon(`document.activeElement === document.querySelector('${box}')`, 'the field focused');
+        y = await p.ev('window.scrollY');
+        assert.ok(y > 0, 'the fixture page scrolls');
+        await p.type('hello');
+        await p.ev('window.__t = document.querySelector(\'' + box + '\'); void 0');
+      } finally { await p.ev('window.__open(); window.__gate = null; void 0'); } // never left shut: it would hold every later read
       await polls();
       assert.deepEqual(await state(y), wrote('hello'), 'still in the field after the refresh lands');
       assert.equal(await p.ev('window.__t.isConnected'), true, 'the same field, not a redrawn one');
@@ -706,10 +728,8 @@ test('a slow data run: a read with data to fall back on has it at once, marked s
   const root = bareProject(base, 'slow');
   const ask = (q) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', q], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
   ask('First?');
-  const port = await freePort();
-  const dash = startDashboard(root, env, ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(root, env);
   t.after(() => dash.stop());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   const read = async () => { const r = await fetch(`http://127.0.0.1:${port}/api/data`); return { stale: r.headers.get('x-devteam-stale') === 'true', asked: (await r.json()).questions.map((q) => q.question) }; };
   assert.deepEqual(await read(), { stale: false, asked: ['First?'] }, 'the first read waits for its run: there is nothing to fall back on');
   ask('Second?');
@@ -725,10 +745,8 @@ test('a stale read is said on the page: a note at the top with the time of what 
   const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '0', DEVTEAM_HUB_PORT: String(PORTS + 42), DEVTEAM_PORT_BASE: String(PORTS + 43), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'stale');
-  const port = await freePort();
-  const dash = startDashboard(root, env, ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(root, env);
   t.after(() => dash.stop());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   const chrome = await openChrome();
   t.after(() => chrome.close());
   const p = await chrome.newPage();
@@ -1135,15 +1153,13 @@ test('the artifact lens in Chrome: a framed artifact\'s own inline scripts run b
     'index.html': '<!doctype html><html><head><title>Inline mock</title><script>window.blocked = []; addEventListener("securitypolicyviolation", (e) => { window.blocked.push(e.violatedDirective); }); document.title = "Retitled by its own script";</script></head>'
       + '<body style="margin:0"><p id="art" style="margin:0;padding:20px">the mock</p><p id="share" style="margin:0;padding:20px">http://box.example/c/1.abc.def/artifact/main/inline-mock/</p><script>document.getElementById("art").dataset.ran = "yes"; addEventListener("message", (e) => { if (e.data && e.data.ask === "own") parent.postMessage({ own: 1, ran: document.getElementById("art").dataset.ran, blocked: window.blocked }, "*"); });</script></body></html>',
   });
-  const port = await freePort();
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `${B}/` });
@@ -1282,14 +1298,12 @@ test('every item the dashboard draws says what it is; a question asked in a thre
   const Ui = F.owner(['thread', 'say', T, 'ship it <b>now</b>']).split('\n')[0];
   F.sup(['answer', Qi, 'yes', '--from-turn', Ui]);
   const O = F.sup(['observe', '--subject', F.goal, '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
-  const port = await freePort();
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   t.after(() => dash.stop());
   const chrome = await openChrome();
   t.after(() => chrome.close());
   const p = await chrome.newPage();
   t.after(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#inbox` });
@@ -1672,15 +1686,13 @@ test('the dashboard inside a frame of its own origin draws one line and runs not
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
   const F = threadsFixture('framed-dash');
   undo.push(() => F.done());
-  const port = await freePort();
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
@@ -1701,8 +1713,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   const F = threadsFixture('viewer-page');
   undo.push(() => F.done());
   const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
-  const port = await freePort();
-  const B = `http://127.0.0.1:${port}`;
+  let B = null; // the dashboard's address, once it listens
   // A page of another origin to frame the viewer from, as the hub and the owner's wrapper do: the
   // dashboard's frame-ancestors name the hub's address, so a small server stands in as the hub.
   const hubPort = await freePort();
@@ -1714,13 +1725,13 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
   });
   await new Promise((r) => hub.listen(hubPort, '127.0.0.1', r));
   undo.push(() => new Promise((r) => { hub.closeAllConnections?.(); hub.close(r); }));
-  const dash = startDashboard(F.old, F.env({ DEVTEAM_HUB_PORT: String(hubPort) }), ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({ DEVTEAM_HUB_PORT: String(hubPort) }));
+  B = `http://127.0.0.1:${port}`;
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -1894,15 +1905,13 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
   undo.push(() => F.done());
   landArtifact(F, 'pin-mock', PIN_MOCK);
   landArtifact(F, 'liar-mock', LIAR_MOCK);
-  const port = await freePort();
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -2175,11 +2184,9 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
   undo.push(() => F.done());
   landArtifact(F, 'pin-mock', PIN_MOCK);
   landArtifact(F, 'liar-mock', LIAR_MOCK);
-  const port = await freePort();
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
   undo.push(() => dash.stop());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   // two threads as the Shift test starts them: one on the button (where it was clicked, inside it), one
   // on the liar's page to be resolved with an outcome
@@ -2394,14 +2401,12 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   undo.push(() => F.done());
   landArtifact(F, 'viewer-mock', VIEWER_MOCK);
   F.sup(['ask', '--question', 'Does [[mock]] read right?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ name: 'mock', title: 'The mock', artifact: 'viewer-mock' }]), '--stake', '1', '--urgency', '1']);
-  const port = await freePort();
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
@@ -2849,14 +2854,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const F = threadsFixture('threads-page');
   undo.push(() => F.done());
   const Q0 = F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-  const port = await freePort();
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -2867,7 +2870,11 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   // A step no poll may move: the page held still from finding what to press until it is pressed, so a
   // redraw (the Inbox growing above the goal, the card placed again as it grows) can't move it between.
   const still = async (f) => { await p.ev('window.__still()'); try { return await f(); } finally { await p.ev('window.__stir()'); } };
-  const click = (sel) => still(() => p.click(sel));
+  // A release's own work runs a task later (pointerup's setTimeout: the press let go, what it held back
+  // drawn, the card placed again as it has grown), and a CDP call can come first: the next step's
+  // look at where a button is could see the card before it moves. So a click ends once that has run.
+  const released = () => soon('!TL.pressed && PRESSED === 0', 'the release handled');
+  const click = (sel) => still(async () => { await p.click(sel); await released(); });
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
@@ -3285,6 +3292,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev('tlRefresh()');
     assert.ok(await p.ev('window.__rb.isConnected'), 'the pressed button kept, not drawn again');
     await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
+    // the card, grown by the form under the press, placed again only once the release is handled
+    await released();
     await soon(`!!document.getElementById('tl-outcome')`, 'the form from the pressed button');
     await click('[data-tl-resolve-cancel]');
     await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
@@ -3360,7 +3369,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const [R] = F.owner(['thread', 'new', 'Keep my note']).split('\n');
     const Q = F.sup(['thread', 'ask', R, '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--stake', '1', '--urgency', '1']);
     await p.ev(`location.hash = '#talk/${R}'`);
-    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'its card');
+    // its own card: the card already open has a Resolve too, until the read of the new thread lands
+    await soon(`document.getElementById('tl-card').dataset.key === '${R}' && !!document.querySelector('[data-tl-resolve]')`, 'its card');
     await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form');
     await p.ev(`document.getElementById('tl-outcome').focus()`);
@@ -3456,15 +3466,13 @@ test('Shift over a preview, through the relay: what the app has under the pointe
   const app = await fakeApp({ 'x-frame-options': 'DENY', 'content-security-policy': "frame-ancestors 'none'" }, { '/': APP_PAGE, '/second': APP_PAGE });
   undo.push(() => app.close());
   const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
-  const port = await freePort();
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env(RELAY_ENV));
   const B = `http://127.0.0.1:${port}`;
-  const dash = startDashboard(F.old, F.env(RELAY_ENV), ['--port', String(port)]);
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -3755,14 +3763,12 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
   undo.push(() => app.close());
   const name = /preview (\S+) /.exec(F.sup(['preview', String(app.port), '--label', 'Checkout']))[1];
   F.sup(['ask', '--question', 'Does [[flow]] feel right?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ name: 'flow', title: 'The flow', preview: name }]), '--stake', '1', '--urgency', '1']);
-  const port = await freePort();
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
   undo.push(() => dash.stop());
   const chrome = await openChrome();
   undo.push(() => chrome.close());
   const p = await chrome.newPage();
   undo.push(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
@@ -3787,8 +3793,12 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
 // The Loop's sidepeeks (the OODA spec, PR 3): every card opens one when clicked anywhere on it; an
 // observation's says where it came from and where it sits; a signal opens by its key, / and all.
 test('the Loop: a card opens its sidepeek; an observation says where it came from and where it sits; a signal opens by its key', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
+  // dashboard writing into them (a data run every 300 ms here) has stopped
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
   const F = fleetFixture('loop-peeks');
-  t.after(() => F.done());
+  undo.push(() => F.done());
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const O1 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow'], SUP);
   const O2 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', `slower than ${O1}`], SUP);
@@ -3803,19 +3813,27 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
     const d = new Date(Date.now() - h * 3600000);
     fs.appendFileSync(path.join(logDir, `supervisor-${d.toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, op: 'new', type: 'observation', id: `o-${stamp(d)}-supervisor`, at: d.toISOString(), by: 'supervisor', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed, then passed', source_key: 'metrics:flaky-gate:web/e2e' })}\n`);
   }
-  const port = await freePort();
-  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
-  t.after(() => dash.stop());
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  undo.push(() => dash.stop());
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  undo.push(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
-  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  undo.push(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
+  // the fixture's hooks, so a click can hold the page still; its polls every 300 ms, so a refresh
+  // landing mid-step is the usual case here, not a rare one
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#loop` });
-  const soon = async (expr, what) => { for (let i = 0; i < 400; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  // 30 s a look, by the clock: a count of looks is shorter the slower each one is
+  const soon = soonIn(p, 30000, () => dash.out());
+  // The first read waits for the server's first data run, however long: on a loaded runner a fleet
+  // fixture's takes tens of seconds, and the server gives it 2 minutes before it stops it.
+  await soonIn(p, 120000, () => dash.out())('!!DATA', 'the first data drawn');
+  // A click with nothing landing from finding the card to the release's own work (pointerup's
+  // setTimeout draws what the press held back), so a refresh can't move or replace what is clicked.
+  const click = async (sel) => { await p.ev('window.__still()'); try { await p.click(sel); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   const card = (sel) => `#observations [data-open="observation/${sel}"]`;
   await soon(`!!document.querySelector('${card(O1)}')`, 'the observation card');
   // a young instance, no weekly learning record yet: tiles above the tabs, not charts
@@ -3825,7 +3843,7 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // an o- id in text links to its sidepeek
   assert.equal(await p.ev(`document.querySelector('${card(O2)}').querySelector('a[href="#observation/${O1}"]') !== null`), true, 'an o- id in text is a link');
   // a click anywhere on the card (here its detail, no link in it) opens it
-  await p.click(`${card(O1)} > div`);
+  await click(`${card(O1)} > div`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
   await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
   // an attribute's value, by its label (the label's tooltip is in its text)
@@ -3834,12 +3852,12 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
   // a signal whose key holds a /: its card opens #signal/<key>
   await p.ev(`document.getElementById('drawer-close').click()`);
-  await p.click('[data-tab="orient"]');
+  await click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
   // thirty hours unexplained: orientation debt, whose card opens the same signal
   assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
-  await p.click(`${sig} > div`);
+  await click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
   await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
@@ -3860,6 +3878,6 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
   assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
-  await p.click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
+  await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });
