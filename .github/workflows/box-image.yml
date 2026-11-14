@@ -9,10 +9,18 @@ permissions:
   contents: read
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # TEMPORARY (kit-47 probe, reverted before merge): native arm too, never QEMU
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
       # the kit's own commands from the image's copy, with no repo and no tmux server: they say so, and never fail
       - run: |
           docker run --rm --entrypoint sh box -ec 'box-recover --dry-run; box-status | grep -q "^machine: disk "; test "$(node /opt/devteam/kit/scripts/devteam.mjs machine pane-state %0)" = gone; if command -v box-supervisors; then exit 1; fi; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'
+      # TEMPORARY (kit-47 probe, reverted before merge): the versions the built image reports
+      - run: |
+          docker run --rm --entrypoint sh box -ec 'uname -m; echo $DEVTEAM_KIT_RELEASE; echo $DEVTEAM_BOX_TOOLS; claude --version; gh --version; ttyd --version; mise --version; uv --version; UV_TOOL_DIR=/opt/uv/tools uv tool list; /usr/bin/gh --version; /usr/local/bin/uv --version; ls -l /usr/local/bin/gh /usr/bin/gh'
