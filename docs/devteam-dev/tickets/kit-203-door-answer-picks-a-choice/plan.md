@@ -7,8 +7,8 @@
 - A choice posts `"<label> — <words>"`; None posts the words alone; the words are that card's note when the button is pressed.
 - The ask lives in page memory (`ASKS`, per question, with the copy it is on) so an Inbox redraw keeps it; a radio pick takes it away; posting clears it; a refused post brings the card back without it.
 - The Answer handler's body is reused for the ask's buttons, so the standing rule, next-time rung and seen hash go with either.
-- Tested first: a new Chrome test in `test/dashboard.test.mjs` on two one-way doors (Something else, and nothing picked), checking the log's answer and `matched` through `questions --all --json`.
-- Risk: the ask lost or duplicated on a redraw, or a post with empty words; the test checks the redraw and the empty case is guarded in code.
+- Tested first: a new Chrome test in `test/dashboard.test.mjs` on three one-way doors (Something else; nothing picked; the note emptied under the ask) and a thread copy of a card, checking the log's answer and `matched` through `questions --all --json`.
+- Risk: the ask lost or duplicated on a redraw, shown on the wrong copy, or a post with empty words; the test checks all three.
 
 > **For agentic workers:** executed inline with superpowers:executing-plans and test-driven-development.
 
@@ -51,17 +51,17 @@ Check `devteam.mjs messages` and `history kit-203-door-answer-picks-a-choice` fo
 
 - [ ] **Step 1: Write the failing test**
 
-`test('a typed answer on a question with choices asks which choice it means, on the card, before posting', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, …)`, set up like the `presses` test (bareProject, `dt` helper, `dashboardOnFreePort`, Chrome at 1100×800, `POLL_FAST`, `#questions`). Two doors:
-`D1 = dt(['ask', '--kind', 'one-way-door', '--question', 'Keep the sales data?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes'], SUP)`, `D2` the same with question `Open the box?`. (If `ask` needs a `--ticket`/`--goal` for a door, add the fixture's goal.)
+`test('a typed answer on a question with choices asks which choice it means, on the card, before posting', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, …)`, set up like the `presses` test (bareProject, `dt` helper, `dashboardOnFreePort`, Chrome at 1100×800, `POLL_FAST`, `#questions`). Three doors:
+`D1 = dt(['ask', '--kind', 'one-way-door', '--question', 'Keep the sales data?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes'], SUP)`, `D2` the same with question `Open the box?`, `D3` with `Turn it on?`. (If `ask` needs a `--ticket`/`--goal` for a door, add the fixture's goal.)
 
 Subtests and assertions:
-1. `Something else and words: the ask, and nothing posted` — click D1's `input[data-pick][value="__other"]`, type `agreed, keep it` in its `textarea[data-q]`, click `[data-answer]`. Assert `[data-which-for="D1"]` exists in the Inbox card with buttons whose values are `['Yes', 'No', '']`, the `Yes` button has the `Recommended` tag, `SAVING === 0` (no post in flight), and, after `polls(2)`, `questions --id D1` still says open.
+1. `Something else and words: the ask, and nothing posted` — click D1's `input[data-pick][value="__other"]`, type `agreed, keep it` in its `textarea[data-q]`, click `[data-answer]`. Assert `[data-which-for="D1"]` exists in the Inbox card with buttons whose values are `['Yes', 'No', '']`, the `Yes` button has the `Recommended` tag, `SAVING === 0` (no post in flight), the card's text has no `Answered:`, and, after `polls(2)`, `questions --id D1` still says open.
 2. `the ask survives a redraw` — `await polls(2)`; assert exactly one `[data-which-for="D1"]` in `#questions`.
 3. `a radio pick takes it away` — click D1's `value="No"` radio; assert no `[data-which-for="D1"]`; click `__other` again, then `[data-answer]`; assert the ask is back.
 4. `a choice in the ask posts "<label> — <words>", matched` — click `button[data-which="D1"][value="Yes"]`; `until` the log's D1 (from `questions --all --json`) has `answer === 'Yes — agreed, keep it'` and `matched === true`.
 5. `a note with nothing picked asks too; None posts the words alone` — type `not sure yet` in D2's note, click `[data-answer]`; assert `[data-which-for="D2"]`; click `button[data-which="D2"][data-which-none]`; `until` D2's `answer === 'not sure yet'` and `matched === false`.
 6. `the note emptied under the ask: nothing posted` — on a third door D3 (`Turn it on?`), type `ok`, click `[data-answer]` (ask shows), set the note to empty (`value = ''` and an `input` event), click `button[data-which="D3"][value="Yes"]`; assert no `[data-which-for="D3"]`, `#e-D3` says `Pick a choice or write an answer.`, `SAVING === 0`, and after `polls(2)` D3 is still open.
-7. `the ask is drawn on its own copy only` — in the page: `ASKS[D3] = 't'`; assert `questionCard(q, DATA.ooda, {}, true)` (q = D3 from `DATA.questions`) contains `data-which-for` and `questionCard(q, DATA.ooda, {})` doesn't; then `ASKS[D3] = 'q'` and the reverse; `delete ASKS[D3]`.
+7. `an ask raised on a thread's copy stays on that copy` — in the page, put a thread copy of D3 into the document the way a thread draws it: a `<div id="tl">` appended to `body` holding `questionCard(q, DATA.ooda, {}, true)` (q = D3 from `DATA.questions`); type `ok` in that copy's `textarea[data-q]` and click its `button[data-answer]` (real clicks). Assert `#t-q-D3 [data-which-for="D3"]` exists and `#q-D3 [data-which-for="D3"]` doesn't, after `polls(2)` too (the Inbox redraw draws it on the Inbox copy only when `ASKS[D3] === 'q'`). Remove the `#tl` div after.
 
 - [ ] **Step 2: Run it and see it fail**
 
