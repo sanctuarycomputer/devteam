@@ -11555,9 +11555,10 @@ function startHub(log) {
       try { const parsed = JSON.parse(raw.toString('utf8') || '{}'); args = isObj(parsed) ? act(parsed) : null; } catch { args = null; }
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await runOwnerAction(args, { env: ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null });
-      // what the operator is at is asked again on the next read: a press may have started it
-      if (op.at) op.at = 1;
+      const r = await runOwnerAction(args, { env: proof ? { ...ownerEnv, DEVTEAM_THREAD_PROOF: 'stdin' } : ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null });
+      // what the operator is at is asked afresh before the next read answers: a press may have
+      // started it, and a read served from before the press would offer Start again
+      op.at = 0;
       send(r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || r.stdout.trim() || 'failed' }));
     });
   };
@@ -12669,7 +12670,9 @@ function machineTell(words) {
 //
 // Where the operator is: on a box, window "operator" of tmux session home, started by the boot
 // (cloud/Dockerfile) and never from here. On a laptop, the same window in a machine-level session
-// of its own, started here on the owner's first words or the dock's button, and never twice.
+// of its own, started here on the owner's first words or the dock's button, and never twice: the
+// session is the operator's, whatever a window in it is called, and a tmux that doesn't answer is
+// never taken for no operator.
 const OPERATOR_WINDOW = 'operator';
 const OPERATOR_THREAD_ID = /^ot-\d{8}-\d{9}-[0-9a-f]{6}$/;
 const OPERATOR_SUBJECT_MAX = 1200; // bytes, as encoded in the line
@@ -12769,13 +12772,22 @@ function operatorThreads(lines = operatorLines()) {
     const pr = o.proof;
     if (!isObj(pr) || used.has(pr.nonce) || gatewayProofProblem(pr, Date.parse(o.at))) return false;
     const b = proofBody(pr);
+    if (!b || typeof b.text !== 'string') return false;
     const action = pr.path.slice('/operator/'.length);
     const first = t.turns.length === 0;
     // a first turn's proof also names the title and subject it was signed with: never one moved under another thread
-    const sameThread = first ? action === 'thread-new' && threadTitle((typeof b.title === 'string' && b.title.trim()) || b.text.trim()) === t.title && JSON.stringify(b.subject ?? null) === JSON.stringify(t.subject ?? null) : ['thread-say', 'thread-reopen'].includes(action) && b.id === t.id;
-    const ok = !!b && typeof b.text === 'string' && b.text.trim() === o.text && sameThread;
+    const sameThread = first ? t.signed === true && action === 'thread-new' && threadTitle((typeof b.title === 'string' && b.title.trim()) || b.text.trim()) === t.title && JSON.stringify(b.subject ?? null) === JSON.stringify(t.subject ?? null) : ['thread-say', 'thread-reopen'].includes(action) && b.id === t.id;
+    const ok = b.text.trim() === o.text && sameThread;
     if (ok) used.add(pr.nonce);
     return ok;
+  };
+  // The thread's own line: on a box its title and subject are the owner's only as the press the
+  // gateway signed named them (the proof is kept on the thread's line as on its first turn's).
+  const signedThread = (o) => {
+    const pr = o.proof;
+    if (!isObj(pr) || pr.path !== '/operator/thread-new' || gatewayProofProblem(pr, Date.parse(o.at))) return false;
+    const b = proofBody(pr);
+    return !!b && typeof b.text === 'string' && threadTitle((typeof b.title === 'string' && b.title.trim()) || b.text.trim()) === threadTitle(o.title) && JSON.stringify(b.subject ?? null) === JSON.stringify(o.subject ?? null);
   };
   // on a box a thread is closed or opened again only by a press the gateway signed for it
   const signedSet = (o, t) => {
@@ -12785,7 +12797,7 @@ function operatorThreads(lines = operatorLines()) {
     return !!b && b.id === t.id && pr.path === (o.status === 'closed' ? '/operator/thread-close' : '/operator/thread-reopen');
   };
   for (const o of lines) {
-    if (o.type === 'thread' && o.op === 'new' && !threads.has(o.id)) threads.set(o.id, { id: o.id, title: threadTitle(o.title), subject: operatorSubjectProblem(o.subject) ? null : o.subject, status: 'open', turns: [], created_at: o.at, closed_at: null, activity_at: o.at });
+    if (o.type === 'thread' && o.op === 'new' && !threads.has(o.id)) threads.set(o.id, { id: o.id, title: threadTitle(o.title), subject: operatorSubjectProblem(o.subject) ? null : o.subject, status: 'open', turns: [], created_at: o.at, closed_at: null, activity_at: o.at, ...(boxed ? { signed: signedThread(o) } : {}) });
     const t = threads.get(o.type === 'turn' ? o.thread : o.id);
     if (!t) continue;
     if (o.type === 'turn') t.turns.push({ id: o.id, by: o.by, at: o.at, text: capBytes(o.text, TURN_MAX), ...(boxed && o.by === 'owner' ? { signed: signedTurn(o, t) } : {}) });
@@ -12795,34 +12807,98 @@ function operatorThreads(lines = operatorLines()) {
   return [...threads.values()].map((t) => ({ ...t, waiting: t.turns[t.turns.length - 1]?.by === 'owner' ? 'operator' : 'owner' }));
 }
 // One line, whole: the store is shared by the hub's children and the operator's own commands.
-function operatorAppend(o) {
-  const line = { v: 1, at: nowIso(), ...o };
+// Several lines (a thread and its first turn) go in one write, so a reader never sees the first
+// without the rest; and a thread with no turn yet is still a thread to every reader.
+function operatorAppend(...os) {
+  const at = nowIso();
+  const lines = os.map((o) => ({ v: 1, at, ...o }));
   fs.mkdirSync(operatorDir(), { recursive: true });
-  fs.appendFileSync(operatorThreadsFile(), `${JSON.stringify(line)}\n`);
-  return line;
+  fs.appendFileSync(operatorThreadsFile(), lines.map((l) => `${JSON.stringify(l)}\n`).join(''));
+  return lines.length === 1 ? lines[0] : lines;
 }
 const operatorLocked = (fn) => { fs.mkdirSync(operatorDir(), { recursive: true }); return withLock(operatorThreadsFile(), fn); };
-// The operator's pane: the first in the window named for it, in its session. null when there is none.
-function operatorPane() {
-  const rows = sh('tmux', ['list-panes', '-s', '-t', `=${operatorSession()}`, '-F', '#{window_name}\t#{pane_id}\t#{pane_current_command}']);
-  const row = (rows ?? '').split('\n').map((l) => l.split('\t')).find(([w, p]) => w === OPERATOR_WINDOW && /^%\d+$/.test(p ?? ''));
-  return row ? { pane: row[1], cmd: row[2] ?? '' } : null;
+// tmux, asked something whose failure must not read as "nothing there": { ok, out }, or { ok: false,
+// none } where none is tmux itself saying there is no such server, session or pane. A timeout, a
+// signal or any other error says nothing either way.
+function tmuxAsk(args) {
+  const r = spawnSync('tmux', args, { encoding: 'utf8', timeout: TMUX_TIMEOUT_MS, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status === 0) return { ok: true, out: r.stdout };
+  return { ok: false, none: r.status === 1 && /can't find (session|window|pane)|no server running|error connecting to|no sessions/i.test(r.stderr ?? '') };
+}
+// A pane as the operator's commands read one: its id first and bars between, never a tab, which tmux
+// prints as "_" under a C locale (a line then names no pane, and a start would see no operator and
+// launch another). mark: the pane a start marked as the operator's (a tmux user option on the pane),
+// so a renamed or moved window is still it.
+const OPERATOR_PANE_FORMAT = '#{pane_id}|#{pane_dead}|#{@devteam_operator}|#{pane_current_command}|#{window_name}';
+const OPERATOR_MARK = '@devteam_operator';
+function operatorPaneRows(out) {
+  const rows = [];
+  for (const l of out.split('\n')) {
+    if (!l) continue;
+    const m = /^(%\d+)\|([01])\|([^|]*)\|([^|]*)\|(.*)$/.exec(l);
+    if (!m) return null;
+    rows.push({ pane: m[1], dead: m[2] === '1', mark: m[3] === '1', cmd: m[4], window: m[5] });
+  }
+  return rows;
+}
+// Every pane in the operator's session: { panes } (none when tmux says there is no such session),
+// or { unknown } when tmux didn't answer or said something this can't read. Unknown is never
+// "missing": nothing is started on it.
+function operatorPanes() {
+  const r = tmuxAsk(['list-panes', '-s', '-t', `=${operatorSession()}`, '-F', OPERATOR_PANE_FORMAT]);
+  if (!r.ok) return r.none ? { panes: [] } : { unknown: true };
+  const panes = operatorPaneRows(r.out);
+  return panes ? { panes } : { unknown: true };
 }
 // A start types the agent's command into a shell, which stays a shell to tmux until the agent
-// execs: noted, so nothing else is typed there and no second start is tried meanwhile.
+// execs: noted, so nothing else is typed there and no second start is tried meanwhile. The note
+// also names the pane for good (with the tmux server it is on: pane ids restart with the server).
 const operatorStartFile = () => path.join(operatorDir(), 'operator-start.json');
-function operatorStarting(pane) {
-  try { const r = readJson(operatorStartFile()); return r?.pane === pane && Date.now() - Number(r.at) < OPERATOR_STARTING_MS; } catch { return false; }
+const operatorStartNote = () => { try { const r = readJson(operatorStartFile()); return isObj(r) && /^%\d+$/.test(r.pane ?? '') ? r : null; } catch { return null; } };
+const operatorStarting = (pane) => { const r = operatorStartNote(); return r?.pane === pane && Date.now() - Number(r.at) < OPERATOR_STARTING_MS; };
+// The pane a start noted, if it is still alive on this tmux server, wherever its window is now:
+// the pane, null (gone, or another server's), or { unknown }.
+function operatorNoted() {
+  const r = operatorStartNote();
+  if (!r) return null;
+  const server = tmuxServerPid();
+  if (r.server && server && String(r.server) !== String(server)) return null;
+  const a = tmuxAsk(['display-message', '-p', '-t', r.pane, OPERATOR_PANE_FORMAT]);
+  if (!a.ok) return a.none ? null : { unknown: true };
+  const rows = operatorPaneRows(a.out);
+  if (!rows || rows.length !== 1) return { unknown: true };
+  return rows[0].pane === r.pane && !rows[0].dead ? rows[0] : null;
+}
+const isShellPane = (p) => SHELLS.has(p.cmd.replace(/^-/, ''));
+// The operator's pane: { pane } (null when there is none) or { unknown }. On a box, the boot's
+// window, by its name (nothing is ever started there from here). On a laptop the session is the
+// operator's own, so the window's name decides nothing: the pane a start noted, else the one it
+// marked, else the window named for it, else whatever is there; and anything in the session that
+// isn't a shell is taken for the operator before a shell is, so a start never runs beside one.
+function operatorSeat() {
+  const ps = operatorPanes();
+  if (ps.unknown) return { unknown: true };
+  const live = ps.panes.filter((p) => !p.dead);
+  if (onBox()) return { pane: live.find((p) => p.window === OPERATOR_WINDOW) ?? null };
+  const noted = operatorNoted();
+  if (noted?.unknown) return { unknown: true };
+  let pane = noted ?? live.find((p) => p.mark) ?? live.find((p) => p.window === OPERATOR_WINDOW) ?? live[0] ?? null;
+  const agent = live.find((p) => !isShellPane(p));
+  if (pane && isShellPane(pane) && agent && !operatorStarting(pane.pane)) pane = agent;
+  return { pane };
 }
 // What the operator is at, for the dock and for whether a line may be typed: its pane's state (as
-// machine pane-state has it), or missing (no window), starting, stopped (its window is at a shell
-// prompt: the agent has exited) or no-tmux. can_start: only on a laptop, and only with no agent there.
+// machine pane-state has it), or missing (no pane), starting, stopped (its pane is at a shell
+// prompt: the agent has exited), no-tmux, or no-answer (tmux didn't answer, or not in words this
+// reads). can_start: only on a laptop, and only when tmux has said there is no agent there.
 function operatorState() {
   const base = { box: onBox(), session: operatorSession(), window: OPERATOR_WINDOW };
   if (sh('tmux', ['-V']) === null) return { ...base, state: 'no-tmux', can_start: false };
-  const p = operatorPane();
+  const seat = operatorSeat();
+  if (seat.unknown) return { ...base, state: 'no-answer', can_start: false };
+  const p = seat.pane;
   if (!p) return { ...base, state: 'missing', can_start: !base.box };
-  const at = paneState(p.pane, p.cmd);
+  const at = isShellPane(p) ? 'shell' : paneState(p.pane, p.cmd);
   const state = at !== 'shell' ? at : operatorStarting(p.pane) ? 'starting' : 'stopped';
   return { ...base, pane: p.pane, state, can_start: !base.box && state === 'stopped' };
 }
@@ -12838,16 +12914,20 @@ function operatorStart() {
   if (sh('tmux', ['-V']) === null) return { started: false, say: 'NOT started (no tmux here)' };
   const dir = operatorDir();
   fs.mkdirSync(dir, { recursive: true });
+  // Everything that can die (settings that don't parse) before the lock: an exit under it would
+  // leave it held for the next start to wait out.
+  const cmd = (process.env.DEVTEAM_OPERATOR_COMMAND ?? loadSettings().agent_command ?? '').trim();
+  if (!cmd) return { started: false, say: 'NOT started (no agent_command to start it with)' };
+  const session = operatorSession();
+  const marker = sessionMarkerPrefix(session);
   return withLock(path.join(dir, 'start'), () => {
-    const session = operatorSession();
-    const had = operatorPane();
+    const seat = operatorSeat();
+    if (seat.unknown) return { started: false, say: 'NOT started (tmux did not say whether an operator is running, so none was started beside it; try again)' };
+    const had = seat.pane;
     if (had) {
-      const at = paneState(had.pane, had.cmd);
-      if (at !== 'shell') return { started: false, say: `already running (pane ${had.pane}, ${at})` };
+      if (!isShellPane(had)) return { started: false, say: `already running (pane ${had.pane}, ${paneState(had.pane, had.cmd)})` };
       if (operatorStarting(had.pane)) return { started: false, say: 'already running (started moments ago)' };
     }
-    const cmd = (process.env.DEVTEAM_OPERATOR_COMMAND ?? loadSettings().agent_command ?? '').trim();
-    if (!cmd) return { started: false, say: 'NOT started (no agent_command to start it with)' };
     const doc = path.join(kitDir, 'process', 'operator.md');
     const claude = /^claude(\s|$)/.test(cmd);
     const promptFile = path.join(dir, 'operator-prompt.txt');
@@ -12857,21 +12937,32 @@ function operatorStart() {
     try { resumed = claude && fs.readdirSync(path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(dir).replace(/[^a-zA-Z0-9]/g, '-'))).some((f) => f.endsWith('.jsonl')); } catch {}
     let pane = had?.pane ?? null;
     if (!pane) {
-      pane = tmux(['has-session', '-t', `=${session}`])
+      const there = tmuxAsk(['has-session', '-t', `=${session}`]);
+      if (!there.ok && !there.none) return { started: false, say: 'NOT started (tmux did not say whether its session exists; try again)' };
+      pane = there.ok
         ? sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', OPERATOR_WINDOW, '-c', dir])
         : sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', OPERATOR_WINDOW, '-c', dir], { env: tmuxServerEnv() });
-      if (!pane) return { started: false, say: 'NOT started (tmux would not open its window)' };
+      if (!pane || !/^%\d+$/.test(pane)) return { started: false, say: 'NOT started (tmux would not open its window)' };
     }
-    writeJson(operatorStartFile(), { pane, at: Date.now() });
-    const line = `cd ${shq(dir)} && export DEVTEAM_ROLE=operator DEVTEAM_KIT=${shq(fileURLToPath(import.meta.url))}; ${sessionMarkerPrefix(session)}${cmd}${resumed ? ' --continue' : ''}${claude ? ` --append-system-prompt "$(cat ${shq(doc)})"` : ''} "$(cat ${shq(promptFile)})"`;
-    if (!tmux(['send-keys', '-t', pane, '-l', line]) || !tmux(['send-keys', '-t', pane, 'Enter'])) { fs.rmSync(operatorStartFile(), { force: true }); return { started: false, say: `NOT started (its window opened but could not be typed into: pane ${pane})` }; }
-    return { started: true, say: `${resumed ? 'started on its own conversation' : 'started fresh'} (tmux attach -t ${session})` };
+    // the pane is the operator's from here on, whatever its window is called or moved to (a tmux
+    // from before pane options keeps only the note)
+    tmux(['set-option', '-p', '-t', pane, OPERATOR_MARK, '1']);
+    writeJson(operatorStartFile(), { pane, at: Date.now(), server: tmuxServerPid() });
+    const line = `cd ${shq(dir)} && export DEVTEAM_ROLE=operator DEVTEAM_KIT=${shq(fileURLToPath(import.meta.url))}; ${marker}${cmd}${resumed ? ' --continue' : ''}${claude ? ` --append-system-prompt "$(cat ${shq(doc)})"` : ''} "$(cat ${shq(promptFile)})"`;
+    if (!typeLine(pane, line)) { fs.rmSync(operatorStartFile(), { force: true }); return { started: false, say: `NOT started (its window opened but could not be typed into: pane ${pane})` }; }
+    // Claude Code asks once whether to trust a folder it hasn't run in, and waits there: nothing
+    // here answers that for the owner, so the first start says where to
+    return { started: true, fresh: claude && !resumed, session, say: `${resumed ? 'started on its own conversation' : 'started fresh'} (tmux attach -t ${session})${claude && !resumed ? '. If Claude Code asks whether to trust its folder, answer it there' : ''}` };
   }, { staleMs: 90000, waitMs: 100000 });
 }
+// A line and its Enter in one tmux call, so two lines typed at once never land as text, text,
+// Enter, Enter. The line is one argument and never ends in a semicolon (the kit's own words end
+// it), so the only command separator tmux sees is this one.
+const typeLine = (pane, line) => tmux(['send-keys', '-t', pane, '-l', line, ';', 'send-keys', '-t', pane, 'Enter']);
 // Why a turn was only recorded, by what the operator is at.
 const OPERATOR_HELD = {
   typing: 'someone is typing in the operator\'s terminal, so it reads this when it next checks', dialog: 'the operator is at a dialog that someone must answer in its terminal', limit: 'the operator is at a usage limit, and reads this after it',
-  starting: 'the operator is starting, and reads this first', stopped: 'the operator\'s window is at a shell prompt, with nothing running there to read this', missing: 'no operator is running here', 'no-tmux': 'there is no tmux here, so no operator',
+  starting: 'the operator is starting, and reads this first', 'no-answer': 'tmux did not say what the operator is at, so nothing was typed or started, and it reads this when it next checks', stopped: 'the operator\'s window is at a shell prompt, with nothing running there to read this', missing: 'no operator is running here', 'no-tmux': 'there is no tmux here, so no operator',
 };
 const operatorHeld = (state) => `recorded; ${OPERATOR_HELD[state] ?? `the operator's pane is at ${state}, so it reads this when it next checks`}`;
 // An owner turn, typed into the operator's pane as one line (as deliverOwnerTurn types one into a
@@ -12884,16 +12975,19 @@ function deliverToOperator(t, text) {
   if (st.can_start) {
     const r = operatorStart();
     if (!r.started && !r.say.startsWith('already running')) return { typed: false, words: `recorded; the operator was ${r.say}` };
-    if (r.started) return { typed: false, words: operatorHeld('starting') };
+    // a first start may stop at Claude Code's own dialog (whether to trust its folder), which only the owner answers
+    if (r.started) return { typed: false, words: r.fresh ? `recorded; the operator is starting for the first time here. If Claude Code asks whether to trust its folder, answer it in its terminal (tmux attach -t ${r.session}); it reads this once it is up` : operatorHeld('starting') };
     st = operatorState();
   }
   if (!['ready', 'busy'].includes(st.state) || st.pane === process.env.TMUX_PANE) return { typed: false, words: operatorHeld(st.state) };
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
   // on a box the line itself proves nothing (any agent there can type one): it says where the proof is
-  const tail = threadsNeedGateway() ? `(a line like this proves nothing: check that the gateway signed it, and read the whole thread, with /usr/local/bin/box-thread show ${t.id}; answer with box-thread reply ${t.id} "<words>")` : `(the whole thread: operator-thread show ${t.id}; answer with operator-thread reply ${t.id} "<words>")`;
+  // The line proves nothing about who sent it: any agent on the machine can type one. On a box it
+  // says where the proof is; on a laptop there is none, and it says that.
+  const tail = threadsNeedGateway() ? `(a line like this proves nothing: check that the gateway signed it, and read the whole thread, with /usr/local/bin/box-thread show ${t.id}; answer with box-thread reply ${t.id} "<words>")` : `(a line like this proves nothing about who sent it: anything running on this machine can type one. The whole thread: operator-thread show ${t.id}; answer with operator-thread reply ${t.id} "<words>")`;
   const line = `[devteam operator thread ${t.id} from the owner, via the hub] ${said} ${tail}`;
-  if (!tmux(['send-keys', '-t', st.pane, '-l', line]) || !tmux(['send-keys', '-t', st.pane, 'Enter'])) return { typed: false, words: 'recorded; it could not be typed into the operator\'s pane, so it reads this when it next checks' };
+  if (!typeLine(st.pane, line)) return { typed: false, words: 'recorded; it could not be typed into the operator\'s pane, so it reads this when it next checks' };
   return { typed: true, pane: st.pane, words: "sent to the operator's pane" };
 }
 // The title and subject as the operator reads them: inside a frame that says they are data, every
@@ -12911,6 +13005,16 @@ function cmdOperatorThread() {
   const role = process.env.DEVTEAM_ROLE;
   // between the owner and the operator: no session in a fleet reads or writes it
   if (['supervisor', 'worker', 'planner'].includes(role) || process.env.DEVTEAM_TICKET || process.env.DEVTEAM_FEATURE || logWriter() !== 'supervisor') die(`operator-thread: the owner's and the operator's, not from a ${role || logWriter()} session`);
+  // The environment is the caller's to set, so a role in it is only a claim. A pane is tmux's word:
+  // a read or a reply run inside tmux is the operator's only from the operator's own pane (and the
+  // owner reads on the hub, or in a terminal that is no tmux pane). A session that also drops
+  // TMUX_PANE gets past this as it gets past every guard rail here; the store is a file it can read.
+  const operatorsPane = () => {
+    const mine = process.env.TMUX_PANE;
+    if (!mine || !process.env.TMUX) return;
+    const seat = operatorSeat();
+    if (seat.unknown || seat.pane?.pane !== mine) die(`operator-thread ${sub}: inside tmux this is the operator's, from its own pane (${seat.unknown ? 'tmux did not say which that is' : seat.pane ? `pane ${seat.pane.pane}` : 'there is no operator here'}); this is pane ${mine}. The owner reads threads on the hub's Overview, or in a terminal outside tmux`);
+  };
   // The owner's verbs. On a box, only as the hub runs them for a press the gateway signed: the
   // signature on stdin, for exactly these arguments, each taken once (it is kept on what is written).
   let proof = null;
@@ -12918,7 +13022,8 @@ function cmdOperatorThread() {
     ownerWriter('a thread with the operator is the owner\'s to write in');
     if (!threadsNeedGateway()) return;
     let given = null;
-    try { if (!process.stdin.isTTY) given = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+    // only when the hub says it has put one there: a read of an idle pipe (a terminal's, an agent's) would wait for ever
+    try { if (process.env.DEVTEAM_THREAD_PROOF === 'stdin' && !process.stdin.isTTY) given = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
     const no = (why) => die(`operator-thread ${sub}: on a box the owner writes to the operator only on the hub's Overview, which the box's gateway signs, and ${why}. In a terminal, talk to the operator in its own window`);
     const why = gatewayProofProblem(given);
     if (why) no(why);
@@ -12962,8 +13067,8 @@ function cmdOperatorThread() {
     const { t } = locked(() => {
       const no = taken() ?? full();
       if (no) return no;
-      const made = operatorAppend({ id: operatorId('ot'), type: 'thread', op: 'new', by: 'owner', title, subject });
-      operatorAppend(signed({ id: operatorId('ou'), type: 'turn', op: 'new', by: 'owner', thread: made.id, text: words }));
+      const tid = operatorId('ot');
+      const [made] = operatorAppend(signed({ id: tid, type: 'thread', op: 'new', by: 'owner', title, subject }), signed({ id: operatorId('ou'), type: 'turn', op: 'new', by: 'owner', thread: tid, text: words }));
       return { t: made };
     });
     out(t.id);
@@ -12971,6 +13076,7 @@ function cmdOperatorThread() {
   }
   if (sub === 'say' || sub === 'reply') {
     const by = sub === 'say' ? (owner(), 'owner') : 'operator';
+    if (by === 'operator') operatorsPane();
     if (by === 'operator' && role !== 'operator') die('operator-thread reply: the operator\'s (DEVTEAM_ROLE=operator); the owner writes with operator-thread say, or on the hub\'s Overview');
     const words = turnText(wordsFrom(2));
     const { t, u } = locked(() => { const f = by === 'owner' ? taken() ?? find(by) : find(by); return f.problem ? f : { t: f.t, u: operatorAppend(by === 'owner' ? signed({ id: operatorId('ou'), type: 'turn', op: 'new', by, thread: f.t.id, text: words }) : { id: operatorId('ou'), type: 'turn', op: 'new', by, thread: f.t.id, text: words }) }; });
@@ -13011,6 +13117,7 @@ function cmdOperatorThread() {
     return flags.json ? json(st) : out(`operator: ${st.state}${st.pane ? ` (pane ${st.pane})` : ''} in tmux session ${st.session}, window ${st.window}`);
   }
   if (sub === 'show') {
+    operatorsPane();
     const f = find();
     if (f.problem) die(f.problem);
     const { t } = f;
@@ -13024,6 +13131,7 @@ function cmdOperatorThread() {
     return;
   }
   if (sub === 'list') {
+    operatorsPane();
     let vs = operatorThreads().sort((a, b) => b.activity_at.localeCompare(a.activity_at));
     if (flags.waiting) vs = vs.filter((x) => x.status === 'open' && x.waiting === 'operator');
     else if (flags.open) vs = vs.filter((x) => x.status === 'open');
