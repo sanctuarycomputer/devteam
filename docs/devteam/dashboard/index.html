@@ -4606,13 +4606,21 @@ function tlRef(r) {
 // A question asked in the thread: the Inbox's own card while it is open there (from /api/data),
 // answered from either place once; once it isn't open, its answer. A review or a secret is answered
 // in the Inbox, where its page or its form is: two forms that post values is one too many.
+// A question as /api/data has it once it isn't open (only its 80 newest such: ooda.answered), or
+// nothing: answered elsewhere (the terminal, another tab), the page's data can say so before the
+// card's read of the threads does.
+const dataAnswered = (id) => (DATA?.ooda?.answered || []).find((x) => x.id === id);
 function tlQuestion(q, reasonText) {
   if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
   const open = (DATA?.questions || []).find((x) => x.id === q.id);
   if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
+  const said = q.status === 'open' && !open ? dataAnswered(q.id) : null;
+  if (said) return tlDone(q, said);
   if (q.status === 'open') return `<div class="card small tl-q"><b>${qinline(q.question, q.links)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+  return tlDone(q, q);
 }
+// A question that isn't open, with its answer and where from as a (the thread's copy, or the page's data) has them.
+const tlDone = (q, a) => `<div class="card small tl-q"><div>${qinline(q.question, q.links)}</div>${a.answer ? `<div><b>${esc(a.answer)}</b></div>` : ''}<div class="meta">${esc(a.status === 'answered' ? `answered ${CHANNEL_WORDS[a.channel] || ''}` : a.status)}</div></div>`;
 // A turn's words, or the question it asks.
 function tlTurnBody(u, t) {
   const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
@@ -4643,7 +4651,7 @@ function tlCardBody(t) {
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
-  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
+  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id)])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
@@ -5151,7 +5159,10 @@ function drawOrHold(d, force = false) {
     render(shown);
     if (first) route();
     inboxTitle(shown);
-    // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
+    // the thread layer, which the redraw doesn't touch: the open card as this data has its questions
+    // (one answered elsewhere shows answered now, not at the next read), its pins on what was just
+    // drawn, then its threads again
+    tlCard();
     tlPins();
     tlRefresh();
   } catch (e) {

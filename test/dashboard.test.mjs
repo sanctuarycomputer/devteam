@@ -3188,6 +3188,32 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev('window.__obs.disconnect(); void 0');
   });
 
+  await t.test("answered elsewhere (the terminal), with the page's data newer than the card's read: its answer, never \"Answer it in the Inbox\"", async () => {
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to Canada too?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
+    // a read of the threads let through and held, so it says open; any Inbox link drawn noted
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
+    await p.ev('window.__stale = window.__threadsQueue.length; void 0');
+    try {
+      F.owner(['answer', Q, 'Not this quarter']);
+      // the page's data lands with the answer, while every read of the threads is still held
+      await p.ev('load({ force: true }); void 0');
+      await soon(`(DATA?.ooda?.answered || []).some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page\'s data, with the answer');
+      await soon(`/Not this quarter/.test(document.getElementById('tl-c-turns').textContent)`, 'the open card redrawn with it, before any read of the threads');
+      // the stale reads land: the card draws a copy from before the answer
+      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
+      await p.ev('window.__still()');
+      await p.ev('window.__stir()');
+      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
+      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
+      assert.ok(await p.ev(`(() => { const s = document.getElementById('tl-c-turns').textContent; return /Not this quarter/.test(s) && /answered in your terminal/.test(s); })()`), 'its answer, and where from');
+    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
+    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered'`, 'the answer as the log has it');
+    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
+    await p.ev('window.__obs.disconnect(); void 0');
+  });
+
   await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
     const Q = F.sup(['thread', 'ask', T, '--kind', 'owner-action', '--question', 'Post the API key', '--secrets', JSON.stringify([{ name: 'KEY', sink: 'file:secrets/key.txt' }]), '--goal', F.goal, '--stake', '1', '--urgency', '1']);
     await soon(`!!document.querySelector('#q-${Q} [data-secret]') && /Post the API key/.test(document.getElementById('tl-c-turns').textContent)`, 'the Inbox form, the thread turn');
