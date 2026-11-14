@@ -44,15 +44,16 @@ under test believe it is on that box, whatever the test's environment says.
    `lib/kit.mjs` so its spawns inherit the scrub. Check:
    `grep -nE "DEVTEAM_(ROLE|TICKET|FEATURE|RUN|HOME|SUPERVISOR|PUBLIC_URL)'?[],|)]|delete [a-zA-Z.]*\[k\]" test/{machine,operator-threads,hub-overview,gateway}.test.mjs`
    finds no denylist; the scrub is the only one.
-2. **Proven against a decoy.** A test in `machine.test.mjs` runs the incident's own test ("status says
-   at a glance…") in a child `node --test` whose environment carries `DEVTEAM_RUN=<decoy>/run`,
-   `DEVTEAM_HOME=<decoy>`, `DEVTEAM_ROLE=worker`, `DEVTEAM_TICKET=<id>`, `DEVTEAM_PUBLIC_URL`, `TMUX`
-   and `TMUX_PANE`; the child's own TAP says exactly one test ran and passed (`# pass 1`,
-   `# skip 0`, `# fail 0`: a skipped test, or a name pattern matching nothing, fails the proof), and
-   the decoy folder holds nothing but its empty `run/` afterwards. The test skips, as the incident's
-   does, where there is no tmux. Before the scrub lands, it is run once and fails with files in the
-   decoy (the pre-fix kit does write into `DEVTEAM_RUN`, as the incident shows); that run is recorded
-   in `reviews/task-2.md` or `verification.md`. A second, quick
+2. **Proven against a decoy.** A test in `machine.test.mjs` runs exactly the supervisor's
+   reproduction (m-20261114-224904663): from the kit's checkout, `DEVTEAM_HOME` unset,
+   `DEVTEAM_ROLE=worker`, `DEVTEAM_RUN=<decoy>`, `node --test --test-name-pattern 'status says at a
+   glance' test/machine.test.mjs` (with `--test-reporter=tap`, so its summary can be read). At main
+   that writes the owner rule into `<decoy>/log/owner-2026-11.jsonl`; after this change the decoy
+   is empty. The child's own TAP says the incident's test ran, unskipped, and passed (`# pass 1`,
+   `# fail 0`; a skipped test, or a name pattern matching nothing, fails the proof). The test skips,
+   as the incident's does, where there is no tmux. The pre-fix failing run is recorded in
+   `reviews/task-2.md`. The other session variables (`DEVTEAM_HOME`, `DEVTEAM_TICKET`,
+   `DEVTEAM_PUBLIC_URL`, `TMUX`, `TMUX_PANE`, …) are covered by the env-names test. A second, quick
    check: a child that imports `lib/kit.mjs` and prints its `DEVTEAM_*` names shows only the harness
    knobs and the kit's own settings.
 3. **Box detection can be turned off.** `DEVTEAM_BOX=off` makes the kit ignore the box's files
@@ -83,17 +84,34 @@ under test believe it is on that box, whatever the test's environment says.
    the dashboard, home's own spawns (they carry `DEVTEAM_RUN=<mainRoot>/docs/devteam/run`), and an
    unset `DEVTEAM_RUN`.
    Tests (machine.test.mjs), on `bareProject` fixtures `app` (the kit run) and `app-api` (standing
-   in for home; a prefix check would wrongly pass it), each run folder seeded by one command run
-   with no `DEVTEAM_RUN`: refused, from `app` with `DEVTEAM_RUN=<app-api>/docs/devteam/run`:
+   in for home; a prefix check would wrongly pass it), each run folder seeded by one `observe` run
+   with no `DEVTEAM_RUN` (`status` writes nothing): refused, from `app` with `DEVTEAM_RUN=<app-api>/docs/devteam/run`:
    `phase spec` (as a worker), `observe …` and `status` each exit non-zero with the message above
    (both paths in it), and `app-api`'s run folder is byte-for-byte unchanged. Taken: `DEVTEAM_RUN`
    as `app`'s own run folder, a symlink to it, a not-yet-made folder inside `app`, and unset, from
    `app`; from a `git worktree` of `app` with `app`'s run folder (a worker in home's worktree); from
    a third repo's checkout with `DEVTEAM_HOME=<app>` and `app`'s kit by absolute path (a worker in a
-   linked repo); and with `app`'s `docs/devteam/run` a symlink to a folder outside it: `observe …`
-   exits 0 and its line is in that run folder's log, `status` exits 0.
+   linked repo); and a fresh fixture `app-ln` whose `docs/devteam/run` is a symlink to a folder
+   outside it: `observe …` exits 0 and its line is in that run folder's log, `status` exits 0.
+   **Must not break** (m-20261114-224640331-supervisor): a worker on a repo link, cwd in the link
+   repo's worktree, `DEVTEAM_HOME=<home>`, `DEVTEAM_RUN=<home>/docs/devteam/run` (as kit-46 and this
+   ticket's worker run today) keeps every command it uses: `phase`, `send`, `gate`, `send … --kind
+   merge-request` exit 0 with their lines in home's run, and `check-ticket` is never refused by the
+   guard (it may fail on the ticket's own merits).
    Not defended (P6): a `DEVTEAM_RUN` that names, on purpose, a folder inside the kit's home other
    than its run folder, or a kit copied into home's own tree.
+
+7. **A kit nested in a home without a repo of its own can't take that home** (m-20261114-224904663).
+   A kit copied into a folder inside home's checkout that has no `.git` of its own (a fixture made
+   without `git init`) resolves home's git, so it would run against home's project and live log.
+   When the running kit's script is not `<its checkout's top level>/docs/devteam/scripts/` (by real
+   path; `git rev-parse --show-toplevel` from the script's folder), every command but `help` dies:
+   `this kit (<script>) is not its checkout's own (<top level>/docs/devteam): a copy inside another
+   repo can't run against that repo's home; give the copy a repo of its own (git init)`. And
+   `bareProject` asserts each fixture is a repo of its own (its top level is itself). Tests: a copy
+   of the kit under `<home>/fixtures/plain/docs/devteam`, no `git init`: `status` and `observe` die
+   with that message, and home's run folder is unchanged; `bareProject`'s fixtures pass the new
+   assertion (every test that uses it).
 
 ## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 
@@ -169,6 +187,12 @@ comment beside `onBox()`.
 
 ## Rulings
 
+- m-20261114-224640331-supervisor: guarding every command but help and the machine-wide ones is
+  fine. Must not break, with a test: a worker on a repo link keeps phase, send, check-ticket, gate,
+  merge-request (acceptance 6).
+- m-20261114-224904663-supervisor: the decoy test is exactly the reproduction (acceptance 2), and it
+  writes nothing after the change. Also: a fixture with no .git of its own, nested under a home,
+  can't resolve that home; tests create fixtures with git init, so assert they do (acceptance 7).
 - m-20261114-222834445-supervisor: scope change, new done-when 3: the kit refuses a DEVTEAM_RUN not
   inside the resolved home (mainRoot, realpath) for log-writing commands, dying with both paths;
   inside home unchanged; test both; update spec and plan with a short review pass, then build.
