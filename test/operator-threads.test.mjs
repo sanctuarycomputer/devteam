@@ -911,3 +911,20 @@ test('the Overview in Chrome: the Threads dock, a pin on what it is about across
   await p.ev(`document.getElementById('tl-pill').click()`);
   await page('the dock: one open, one closed', `document.querySelectorAll('#tl-list > .tl-row').length === 1 && document.querySelector('#tl-list .tl-closed summary')?.textContent === 'Closed (1)'`);
 });
+test('a start\'s note from a kit that did not name its tmux server is never taken for another session\'s pane', { skip: !hasTmux }, async () => {
+  // a v0.51 note ({ pane, at }), left from before a tmux restart: its pane id is now some other
+  // session's (a supervisor's), which must not be read as the operator, typed into, or block a start
+  const M = machine({ starts: false });
+  const a = agentProgram([box(prompt)]);
+  const other = `fleet-${M.hub}`;
+  const pane = tmuxSh(['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', other, '-x', '200', '-y', '50', '-c', nowhere, `exec ${process.execPath} ${a.prog}`]).stdout.trim();
+  try {
+    await shown(pane, 'the operator');
+    write(path.join(M.dir, 'operator-start.json'), JSON.stringify({ pane, at: Date.now() - 86400000 }));
+    const st = JSON.parse(M.ok(['status', '--json']));
+    assert.equal(st.state, 'missing', 'another session\'s pane is not the operator');
+    M.ok(['new', 'for the operator only']);
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(a.keys(), '', 'nothing typed into another session\'s pane');
+  } finally { tmuxSh(['kill-session', '-t', `=${other}`]); }
+});

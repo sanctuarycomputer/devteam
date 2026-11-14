@@ -12861,8 +12861,12 @@ const operatorStarting = (pane) => { const r = operatorStartNote(); return r?.pa
 function operatorNoted() {
   const r = operatorStartNote();
   if (!r) return null;
-  const server = tmuxServerPid();
-  if (r.server && server && String(r.server) !== String(server)) return null;
+  // a note that names no server (a kit from before it did) or another one names a pane id that
+  // may now be any session's (a supervisor's): the mark and the session say where the operator is
+  if (!r.server) return null;
+  const sv = tmuxAsk(['list-sessions', '-F', '#{pid}']);
+  if (!sv.ok) return sv.none ? null : { unknown: true };
+  if (String(r.server) !== sv.out.split('\n')[0]) return null;
   const a = tmuxAsk(['display-message', '-p', '-t', r.pane, OPERATOR_PANE_FORMAT]);
   if (!a.ok) return a.none ? null : { unknown: true };
   const rows = operatorPaneRows(a.out);
