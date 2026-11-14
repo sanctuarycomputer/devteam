@@ -185,6 +185,7 @@ test('tell types into a supervisor, marked as not the owner, and only when its p
   const notDelivered = told();
   assert.equal(notDelivered.status, 3);
   assert.match(notDelivered.stdout, /not delivered: the message is still in its input/);
+  assert.equal(stuck.keys().split('\r').length - 1, 3, 'pressed three times in all before saying so');
   stuck.kill();
 
   // the operator's window, the owner's shell window, and a pane started elsewhere are never it
