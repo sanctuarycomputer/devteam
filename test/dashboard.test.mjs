@@ -1216,7 +1216,10 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
     try {
       r = await view({ slug: 'viewer-mock', at: 'demo-01-locked' });
       assert.deepEqual([r.status, await r.json()], [500, { error: 'the artifact could not be read' }]);
-    } finally { fs.chmodSync(path.join(draft, 'locked'), 0o755); }
+    } finally {
+      fs.chmodSync(path.join(draft, 'locked'), 0o755);
+      fs.rmSync(path.join(F.old, '.worktrees/demo-01-locked'), { recursive: true, force: true });
+    }
   }
   const many = await Promise.all([1, 2, 3].map(() => view({ slug: 'viewer-mock', at: 'main' }).then((x) => x.json())));
   assert.deepEqual(many.map((x) => x.fp), [lib.fp, lib.fp, lib.fp], 'asks at once share one run, and each has its answer');
