@@ -11394,7 +11394,9 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // instance in the block by asking each port /api/hello: a tab per instance, with that instance's
 // own dashboard in a sandboxed frame on its own address. It owns no state and does nothing for the
 // owner: GET only, no proxy, its own Host only, a page that fetches only from itself and frames only
-// the block. The others retry, so the hub moves when its dashboard stops. Something
+// the block. The page's Overview can run, drain and park a fleet, but not through this server: it
+// asks that project's dashboard, in its frame, and the dashboard posts to itself (index.html, "The
+// hub's Overview"). The others retry, so the hub moves when its dashboard stops. Something
 // that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
 function startHub(log) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
@@ -12906,7 +12908,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -13548,6 +13550,8 @@ async function cmdDashboard() {
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
+      // what the hub lists (the Inbox count, the fleet's mode) follows an owner action at once
+      if (r.ok) refreshHello();
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
@@ -16387,14 +16391,108 @@ function boxAlert() {
   } catch { return null; }
 }
 const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
+// The hub's Overview: is this project moving, and if not, why. From the log in one pass; from git,
+// only whether each ticket has merged (main's log and the refs, one call each under cmdHello's
+// read cache, never one per ticket), so hello stays cheap at every 10 s.
+// Blocked on the owner, per open ticket that could move (its goal not parked or let go): named in
+// the --blocks of an open question with no default, or depending on one that is, however far down.
+// blocking: 'full' when every such ticket is, 'partial' when some are and the rest can move.
+// state: parked (every goal held), blocked (fully: nothing can move until the owner answers),
+// waiting (an approved goal with nothing planned yet, and a question with no default open on it),
+// building (a worker mid-ticket and the fleet wrote in the last hour), stalled (open work and
+// nothing written by the fleet for 2 h), idle (no open work: no ticket that could move, no
+// approved goal still to plan), moving (anything else: the supervisor planning, reviewing, merging). activity: the fleet's log lines per day, oldest first,
+// the last 84 days ending today (UTC).
+const PULSE_DAYS = 84;
+function helloPulse() {
+  const now = Date.now();
+  const lines = readLog().lines;
+  const day0 = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate());
+  const activity = new Array(PULSE_DAYS).fill(0);
+  const lastBy = new Map();
+  const phaseBy = new Map();
+  let last = 0;
+  for (const l of lines) {
+    if (l.by === 'owner') continue;
+    const t = Date.parse(l.at);
+    if (!(t > 0)) continue;
+    if (t > last) last = t;
+    if (t > (lastBy.get(l.by) ?? 0)) lastBy.set(l.by, t);
+    if (l.type === 'phase' && (!phaseBy.has(l.by) || l.at >= phaseBy.get(l.by).at)) phaseBy.set(l.by, l);
+    const back = Math.floor((day0 - t) / 86400000) + 1;
+    if (t >= day0) activity[PULSE_DAYS - 1]++;
+    else if (back < PULSE_DAYS) activity[PULSE_DAYS - 1 - back]++;
+  }
+  const ts = [...tickets().values()].filter(isActive);
+  const done = ts.filter((t) => mergeShaFor(t.id)).length;
+  const open = ts.length - done;
+  const working = ts.filter((t) => !mergeShaFor(t.id) && phaseBy.has(t.id) && !['done', 'parked'].includes(phaseBy.get(t.id).to));
+  const quietMin = last ? Math.round((now - last) / 60000) : null;
+  const silent = working.filter((t) => now - (lastBy.get(t.id) ?? 0) > 3600000);
+  const qs = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
+  const holdingQs = qs.filter((q) => (q.blocks ?? []).length && q.default == null);
+  const named = new Set(holdingQs.flatMap((q) => q.blocks));
+  const openTs = ts.filter((t) => !mergeShaFor(t.id));
+  // what could move: a ticket whose goal the owner parked or let go waits by choice, so it is
+  // neither stalled nor blocked, and it isn't what a question holds up
+  const live = openTs.filter((t) => !['park', 'let-go'].includes(ticketMode(t)));
+  const liveIds = new Set(live.map((t) => t.id));
+  const held = new Set(live.filter((t) => named.has(t.id)).map((t) => t.id));
+  // and whatever depends on a held ticket, however far down
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of live) if (!held.has(t.id) && (t.depends_on ?? []).some((d) => held.has(d))) { held.add(t.id); grew = true; }
+  }
+  // the questions that hold tickets, and the ones that hold something else (an incident, work not
+  // planned yet)
+  const holding = holdingQs.filter((q) => q.blocks.some((b) => liveIds.has(b))).length;
+  const holdingElse = holdingQs.length - holding;
+  const blocking = !held.size ? null : held.size === live.length ? 'full' : 'partial';
+  const mode = fleetMode() ?? 'run';
+  // what it is working on: the approved goal first in priority (one that is running before one on
+  // hold), and its tickets merged of planned
+  const goals = logObjects('goal').filter((g) => g.status === 'ready').sort((a, b) => (goalMode(a) === 'park') - (goalMode(b) === 'park') || (a.priority ?? Infinity) - (b.priority ?? Infinity));
+  const goalTs = (g) => ts.filter((t) => ticketGoals(t).some((x) => x.id === g.id));
+  // an approved goal, running, with no ticket yet: planning is owed, so the project is not idle
+  const unplanned = goals.filter((g) => goalMode(g) !== 'park' && !goalTs(g).length).length;
+  const work = live.length + unplanned;
+  const state = mode === 'park' ? 'parked'
+    : blocking === 'full' ? 'blocked'
+    : !live.length && unplanned && holdingElse ? 'waiting'
+    : working.length > silent.length && quietMin !== null && quietMin < 60 ? 'building'
+    : work && (quietMin === null || quietMin >= 120) ? 'stalled'
+    : !work ? 'idle'
+    : 'moving';
+  const ago = (m) => (m < 120 ? `${m} min` : m < 2880 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`);
+  const incidents = (() => { try { return incidentList().filter((p) => p.status !== 'resolved').length; } catch { return 0; } })();
+  const answers = (n) => (n === 1 ? 'your answer to 1 question' : `your answers to ${n} questions`);
+  const onHold = openTs.length - live.length;
+  const attention = [
+    blocking === 'full' ? `Fully blocked: all ${live.length} open ticket${live.length === 1 ? '' : 's'} wait on ${answers(holding)}`
+    : blocking === 'partial' ? `Partly blocked: ${held.size} of ${live.length} open tickets wait on ${answers(holding)}; the rest can move`
+    : null,
+    holdingElse ? `${holdingElse} question${holdingElse === 1 ? '' : 's'} with no default ${holdingElse === 1 ? 'is' : 'are'} holding up work that is not an open ticket` : null,
+    state === 'stalled' ? (quietMin === null ? 'Open work, and the fleet has never written to the log' : `${live.length ? 'Open work' : 'An approved goal with no tickets'}, and nothing has moved in ${ago(quietMin)}`) : null,
+    silent.length ? `${silent.length} worker${silent.length === 1 ? ' has' : 's have'} been silent for over an hour` : null,
+    incidents ? `${incidents} open production incident${incidents === 1 ? '' : 's'}` : null,
+    mode === 'drain' ? 'Draining: workers finish what they have, nothing new starts' : null,
+    onHold && mode !== 'park' ? `${onHold} open ticket${onHold === 1 ? ' is' : 's are'} on hold with ${onHold === 1 ? 'its' : 'their'} goal` : null,
+  ].filter(Boolean);
+  const top = goals[0] ?? null;
+  const topTs = top ? goalTs(top) : [];
+  const goal = top ? { title: String(top.title ?? top.id).slice(0, 120), done: topTs.filter((t) => mergeShaFor(t.id)).length, total: topTs.length, mode: goalMode(top) } : null;
+  return { state, blocking, blocked_tickets: held.size, goal, goals_open: goals.length, last_activity: last ? new Date(last).toISOString() : null, working: working.length, open_tickets: open, done_tickets: done, holding: holdingQs.length, attention, activity };
+}
 function cmdHello() {
+  // read-only, and the pulse asks whether each open ticket has merged: every ref in one git call
+  gitReadCache = new Map();
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and the lessons sent to the owner to keep
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter(forOwner).length;
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
