@@ -20,7 +20,7 @@
 ## Global constraints
 
 - Only `docs/devteam/dashboard/index.html` and `test/dashboard.test.mjs` change (touches); no file is added outside this ticket's records.
-- Running text in the ask stays short (≤ 39ch a line: the owner's typography rule).
+- Running text: no wider than half the 12-column grid at full desktop width, no ch cap (k-20261114-214823656-supervisor; replaces the 39ch rule). The ask sits inside the card, which already meets it.
 - Copy (exact): heading `Which choice do your words mean?`; last button `None of them` with detail `Post my words as they are.`; the recommended choice carries the card's `Recommended` tag.
 
 ## Review focus
@@ -87,3 +87,5 @@ Run the Step 2 command; expected: every subtest passes. Then the suite as test.y
 
 - m-20261114-220752354-supervisor: spec approved; draw a small clickable mock (artifact door-answer-pick: one Inbox door card with the real choices, own words, the inline ask, each pick and None) before building; plan meanwhile, build only after the owner's notes. The build follows whatever the owner's notes change in the mock's wording or layout.
 - m-20261114-221051654-supervisor: the mock landed in home (chore-artifact-door-answer-pick); the uncommitted copy here is deleted. Wait for the owner's notes; if none have come by the time this plan is approved, build. Step 0 below.
+- m-20261114-221830547-supervisor: plan approved. (1) The width rule is k-20261114-214823656-supervisor (half the 12-column grid at full desktop width, no ch cap); the 39ch line is dropped. (2) Every test run in Step 4, full-suite runs included, is prefixed `env -u DEVTEAM_RUN -u DEVTEAM_HOME -u DEVTEAM_ROLE -u DEVTEAM_TICKET -u DEVTEAM_FEATURE TMUX_TMPDIR=$(mktemp -d)` until kit-201 lands.
+- Step 0: no owner notes on door-answer-pick by plan approval (messages and history checked 2026-11-14 22:19); built as written.
