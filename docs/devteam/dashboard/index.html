@@ -5593,6 +5593,33 @@ document.addEventListener('click', (e) => {
 });
 if (VIEWER) viewerBoot();
 else { loadSchemaDocs(); load(); setInterval(load, 10000); }
+// The hub's Overview: Run, Drain and Park for this project, from the hub page that frames this one.
+// The hub never posts an owner action itself (it only lists); it asks this page, and this page
+// posts it to its own origin as a click here would. Who asks: only this window's parent, and only
+// when the parent is not this origin. frame-ancestors lets only this origin and the hub frame this
+// page, so a parent on another origin is the hub. Never in the viewer: on a box its parent may be
+// the owner's wrapper on the public name, which is not the hub (it runs no script, and this does
+// not rest on that). And only straight under the top page, as the hub holds it. Three ops, each
+// once per nonce; the answer goes back to that parent alone.
+if (!VIEWER && window.parent === window.top) {
+  const HUB_OPS = { park: 'park', drain: 'drain', run: 'resume' };
+  const seen = new Set();
+  window.addEventListener('message', async (ev) => {
+    if (window.parent === window || ev.source !== window.parent || ev.origin === location.origin || ev.origin === 'null') return;
+    const m = ev.data;
+    if (!m || typeof m !== 'object' || m.devteam !== 'hub-fleet' || !Object.hasOwn(HUB_OPS, m.mode) || typeof m.nonce !== 'string' || !/^[a-z0-9]{8,40}$/.test(m.nonce)) return;
+    const reply = (o) => { try { ev.source.postMessage({ devteam: 'hub-fleet-done', nonce: m.nonce, ...o }, ev.origin); } catch {} };
+    if (seen.has(m.nonce)) return;
+    seen.add(m.nonce);
+    try {
+      const r = await fetch('/api/fleet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: HUB_OPS[m.mode], ...(m.mode === 'run' ? {} : { reason: m.all ? `${m.mode === 'park' ? 'parked' : 'drained'} with every project, from the hub's Overview` : `${m.mode === 'park' ? 'parked' : 'drained'} from the hub's Overview` }) }) });
+      const j = await r.json().catch(() => ({}));
+      // "nothing to resume" is the fleet already running: what was asked for holds
+      if (r.ok || (m.mode === 'run' && /nothing to resume/.test(String(j.error ?? '')))) { reply({ ok: true }); if (typeof loadFleet === 'function') loadFleet(); }
+      else reply({ ok: false, error: String(j.error ?? `the dashboard answered ${r.status}`).slice(0, 300) });
+    } catch (e) { reply({ ok: false, error: String(e?.message ?? e).slice(0, 300) }); }
+  });
+}
 </script>
 </body>
 </html>
