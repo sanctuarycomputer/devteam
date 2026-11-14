@@ -276,11 +276,12 @@ cd "$HOME"
 mkdir -p code
 note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
-# start again at %0, so one noted before this boot could be another program's by now.
+# start again at %0, so one noted before this boot could be another program's by now; its mark
+# (supervisor-pane-role) goes with it.
 find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
 # so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
 rm -f "$HOME"/.pg/*/postmaster.pid
-rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
+rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
 # tmux starts login shells, which read .profile, and Debian's reads .bashrc
 [ -f .profile ] || cp /etc/skel/.profile .profile
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf

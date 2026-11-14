@@ -612,6 +612,18 @@ test('the box\'s boot keeps the list in the form recover reads', () => {
   assert.match(fs.readFileSync(`${up}.boot`, 'utf8'), /^100 \/r\/a\n\/r\/old\n\d{10} \/r\/a\n$/, 'b is back up: off the list');
 });
 
+test('the box\'s boot forgets every repo\'s noted pane and its mark', () => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8');
+  const line = df.split('\n').find((l) => l.startsWith('rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane'));
+  assert.ok(line, 'the boot line');
+  const home = fs.mkdtempSync(path.join(tmp, 'boot-'));
+  const run = path.join(home, 'code', 'a', 'docs', 'devteam', 'run');
+  fs.mkdirSync(run, { recursive: true });
+  for (const f of ['supervisor-pane', 'supervisor-pane-role', 'supervisor-up.json']) fs.writeFileSync(path.join(run, f), '%3\n');
+  execFileSync('sh', ['-c', line], { env: { ...process.env, HOME: home } });
+  assert.deepEqual(fs.readdirSync(run).sort(), ['supervisor-up.json'], 'the pane and its mark gone; the up record kept');
+});
+
 test('after the first deploy, a supervisor only an older image\'s ages still named stays stopped', { skip: !hasTmux || skipOld() }, () => {
   const dir = path.join(tmp, 'box-code-fold');
   const kept = repo('fold-kept', { tag: 'v0.25.0', dir });
