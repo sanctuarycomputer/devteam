@@ -13541,6 +13541,23 @@ function versionBefore(a, b) {
   return false;
 }
 const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) }); return 'up'; } catch { return 'DOWN'; } };
+// What serves the hub, from its list as the hub's own page asks for it: the release serving it (the
+// image's, marked), `kit ?` from a hub too old to say, `not a hub`, or DOWN. The release comes off the
+// network and goes to a terminal, so it is printed only in a release's own characters.
+const hubLine = (port) => new Promise((resolve) => {
+  const r = http.get({ host: '127.0.0.1', port, path: '/instances.json', timeout: 3000, headers: { host: `127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; if (b.length > 65536) { res.destroy(); resolve('up, not a hub'); } });
+    res.on('end', () => {
+      let j = null;
+      try { j = JSON.parse(b); } catch {}
+      if (j?.hub !== 1) return resolve('up, not a hub');
+      resolve(typeof j.kit === 'string' && /^[\w.+-]{1,64}$/.test(j.kit) ? `up, kit ${j.kit}${j.image === true ? ' (image)' : ''}` : 'up, kit ?');
+    });
+  });
+  r.on('timeout', () => { r.destroy(); resolve('DOWN'); });
+  r.on('error', () => resolve('DOWN'));
+});
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
 // The machine's memory in bytes, { inUse, max, source }, or null when nothing says (macOS: no cgroup
@@ -13613,7 +13630,7 @@ async function machineStatus() {
   out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
-  out(`machine: hub ${HUB_PORT} ${await portAnswers(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
+  out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
   const flagged = [];
