@@ -38,7 +38,20 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
 {
   const self = fileURLToPath(import.meta.url);
   let common = null;
-  try { common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  let top = null;
+  // asked of the script's own folder, never of the caller's repo: git sets GIT_DIR for a hook and for
+  // rebase --exec, and with it would take the script's folder for a checkout's top level
+  const scriptGit = Object.fromEntries(Object.entries(process.env).filter(([k]) => !['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE'].includes(k)));
+  try { [common, top] = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd: path.dirname(self), env: scriptGit, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n'); } catch {}
+  // A kit copied into a folder inside another checkout with no repo of its own (a fixture made
+  // without git init) would take that checkout's git, and so its kit, home and live log: a kit in a
+  // repo runs only as that checkout's own docs/devteam. (A kit in no repo, as a box image's, is free.)
+  const cmd = process.argv[2];
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  if (top && cmd && !['help', '--help'].includes(cmd) && real(path.join(top, 'docs', 'devteam', 'scripts')) !== real(path.dirname(self))) {
+    process.stderr.write(`devteam: this kit (${self}) is not its checkout's own (${path.join(top, 'docs', 'devteam')}): a copy inside another repo can't run against that repo's home; give the copy a repo of its own (git init)\n`);
+    process.exit(1);
+  }
   const kitMain = common && path.join(path.dirname(common), 'docs', 'devteam');
   const mainScript = kitMain && path.join(kitMain, 'scripts', 'devteam.mjs');
   if (mainScript && !process.env.DEVTEAM_OWN_KIT && path.resolve(mainScript) !== path.resolve(self) && fs.existsSync(path.join(kitMain, 'project')) && fs.existsSync(mainScript) && fs.readFileSync(mainScript, 'utf8') !== fs.readFileSync(self, 'utf8')) {
@@ -460,7 +473,17 @@ const devteamDir = !cwdIsHome && commonDir ? path.join(mainRoot, 'docs', 'devtea
 // project that is the main checkout's (the re-exec above), so every session folds by the same rules.
 const kitDir = path.resolve(here, '..');
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
-const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
+const runDir = path.resolve(process.env.DEVTEAM_RUN || path.join(mainRoot, 'docs', 'devteam', 'run'));
+// DEVTEAM_RUN is home's run folder, given to each session by the kit that starts it. One that isn't
+// inside the home this kit resolved is a session's, leaked into another repo's kit (a test's fixture,
+// a sibling): refused by name, never followed into that session's live log. The machine's commands
+// run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
+// DEVTEAM_RUN that names some other folder inside home on purpose.
+const realPathMade = (p) => { let a = p; const rest = []; while (!fs.existsSync(a) && path.dirname(a) !== a) { rest.unshift(path.basename(a)); a = path.dirname(a); } return path.join(realPath(a), ...rest); };
+if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread'].includes(command) && !(command === 'recover' && flags.machine)) {
+  const r = realPathMade(runDir), root = realPath(mainRoot);
+  if (r !== realPathMade(path.join(mainRoot, 'docs', 'devteam', 'run')) && r !== root && !r.startsWith(`${root}${path.sep}`)) die(`DEVTEAM_RUN=${runDir} is not inside this kit's home (${mainRoot}): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`);
+}
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
@@ -6615,9 +6638,11 @@ async function previewClaim(session, label) {
 const probePort = async (port) => { try { return (await answers(port, '127.0.0.1')) || (await answers(port, '::1')); } catch { return false; } };
 // The box's address when this machine has one, and whether its gateway serves previews: only the
 // release that does sets DEVTEAM_PREVIEWS, so the kit never prints a link that would answer 421.
+/* preview box start */
 function previewBox() {
   try { return process.env.DEVTEAM_PUBLIC_URL ? new URL(process.env.DEVTEAM_PUBLIC_URL) : null; } catch { return null; }
 }
+/* preview box end */
 const previewServed = () => !!previewBox() && process.env.DEVTEAM_PREVIEWS === '1';
 const previewLink = (r) => { const b = previewBox(); return previewServed() ? `${b.protocol}//${r.name}.${b.host}` : `http://127.0.0.1:${r.port}`; };
 function previewSay(r, up) {
@@ -12999,9 +13024,10 @@ const OPERATOR_WINDOW = 'operator';
 const OPERATOR_THREAD_ID = /^ot-\d{8}-\d{9}-[0-9a-f]{6}$/;
 const OPERATOR_SUBJECT_MAX = 1200; // bytes, as encoded in the line
 const OPERATOR_STARTING_MS = 60000;
+/* box start */
 // The image's own file says box too: an agent can unset DEVTEAM_PUBLIC_URL for a dashboard it starts,
 // and that dashboard's hub would then keep threads elsewhere and start an operator of its own.
-const onBox = () => !!previewBox() || fs.existsSync(BOX_GATEWAY_FILE);
+const onBox = () => !!previewBox() || boxFile(BOX_GATEWAY_FILE);
 // On a box the owner is never on the machine: they reach the hub only through the gateway, behind
 // their passkey. And every agent runs as the hub's own Unix user (dev), so nothing a request says
 // about where it came from, Origin and Sec-Fetch-Site included, tells the owner's press from an
@@ -13013,13 +13039,24 @@ const onBox = () => !!previewBox() || fs.existsSync(BOX_GATEWAY_FILE);
 // which an agent can change for a command it runs itself. On a laptop nothing is signed.
 const BOX_GATEWAY_FILE = '/opt/devteam/gateway.mjs';
 const BOX_THREAD_KEY = '/etc/devteam/thread-key.pub';
+// DEVTEAM_BOX=off: a test run on a box ignores the box's files, so the kit under test sees only the
+// box its environment describes, as on a CI runner. It holds only while HOME (by real path) isn't
+// the account's own home, from the password file: every test that needs it runs on a throwaway
+// HOME, and a switch leaked into a command run at the real home changes nothing. Anything that
+// can't be resolved leaves the files on. Not defended (the agents are trusted not to forge): a
+// command run with HOME set elsewhere on purpose gets a laptop's unsigned threads and pane answers.
+const boxFilesOff = () => {
+  if (process.env.DEVTEAM_BOX !== 'off') return false;
+  try { return fs.realpathSync(os.homedir()) !== fs.realpathSync(os.userInfo().homedir); } catch { return false; }
+};
+const boxFile = (f) => !boxFilesOff() && fs.existsSync(f);
 const OPERATOR_PROOF_MS = 120000;
-const threadsNeedGateway = () => onBox() || fs.existsSync(BOX_GATEWAY_FILE);
+const threadsNeedGateway = () => onBox() || boxFile(BOX_GATEWAY_FILE);
 // The public half: on a box only the root-owned file; elsewhere (a test of a box) the file the
 // environment names. null when there is none, and then nothing on a box is signed.
 let threadKeyMemo = { at: null, key: null };
 function gatewayThreadKey() {
-  const f = fs.existsSync(BOX_GATEWAY_FILE) || fs.existsSync(BOX_THREAD_KEY) ? BOX_THREAD_KEY : process.env.DEVTEAM_GATEWAY_THREAD_KEY;
+  const f = boxFile(BOX_GATEWAY_FILE) || boxFile(BOX_THREAD_KEY) ? BOX_THREAD_KEY : process.env.DEVTEAM_GATEWAY_THREAD_KEY;
   if (!f) return null;
   let at;
   try { const st = fs.statSync(f); at = `${f}:${st.ino}:${st.mtimeMs}:${st.size}`; } catch { return null; }
@@ -13029,6 +13066,7 @@ function gatewayThreadKey() {
   threadKeyMemo = { at, key };
   return key;
 }
+/* box end */
 // What the gateway signs (gateway.mjs, hubSignature): the route, when, a nonce, and the body's hash.
 const gatewaySigned = (p, ts, nonce, body) => Buffer.from(`devteam-operator-post-v1\n${p}\n${ts}\n${nonce}\n${sha256(body)}`);
 // Why a press's proof isn't the gateway's (null when it is): { path, ts, nonce, sig, body (base64) },
