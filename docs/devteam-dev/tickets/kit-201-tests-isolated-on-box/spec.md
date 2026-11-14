@@ -64,6 +64,24 @@ under test believe it is on that box, whatever the test's environment says.
 4. **CI and files.** test.yml passes on every job at the PR head; no file is added (the records
    under `docs/devteam-dev/tickets/kit-201-tests-isolated-on-box/` aside).
 
+6. **The kit refuses a foreign run folder** (scope change, m-20261114-222834445-supervisor; the
+   ticket's new done-when 3). `runDir` (devteam.mjs ~463) takes `DEVTEAM_RUN` from any cwd; that is
+   how a fixture repo's kit, with a worker's `DEVTEAM_RUN`, wrote owner-credited lines into home's
+   log. Now, when `DEVTEAM_RUN` is set and its real path (the nearest existing ancestor's, when the
+   folder isn't made yet) is not `mainRoot`'s real path or inside it, every command but `help` dies
+   before anything is read or written, naming both: `DEVTEAM_RUN=<run> is not inside this kit's home
+   (<mainRoot>): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run
+   home's kit from home`. Every command, not only the writing ones: one rule that a reader can't
+   get wrong, and a read of another fleet's log is as misleading as a write (my call; the ticket says
+   log-writing commands, which this covers). Within home (a worker or planner in home's worktree, a
+   worker in a linked repo's worktree with `DEVTEAM_HOME`, the dashboard, home's own spawns, which
+   carry `DEVTEAM_RUN=<home>/docs/devteam/run`) nothing changes; unset `DEVTEAM_RUN` is unchanged.
+   Tests (machine.test.mjs): from a `bareProject` fixture with `DEVTEAM_RUN` pointing at a second
+   fixture's run folder (standing in for home's), `log`-writing `phase`/`observe` and a read
+   (`status`) die with both paths in stderr and the second fixture's run folder is byte-for-byte
+   unchanged; with `DEVTEAM_RUN` pointing at the fixture's own run folder, a symlink to it, or
+   unset, the same commands work.
+
 ## The off switch's limit (ruled: B, d-20261114-215844973-supervisor)
 
 The box files exist so that normal use of a command on a box can't take an owner's press unsigned
@@ -137,6 +155,10 @@ comment beside `onBox()`.
 - Any change to what a real box does when `DEVTEAM_BOX` is unset.
 
 ## Rulings
+
+- m-20261114-222834445-supervisor: scope change, new done-when 3: the kit refuses a DEVTEAM_RUN not
+  inside the resolved home (mainRoot, realpath) for log-writing commands, dying with both paths;
+  inside home unchanged; test both; update spec and plan with a short review pass, then build.
 
 - d-20261114-215844973-supervisor (m-20261114-215845202-supervisor, re m-20261114-215838230): rule B,
   the switch honored only off the account's own home. Add a test that on a box-shaped fixture with

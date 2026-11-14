@@ -7,7 +7,8 @@
 - devteam.mjs: `DEVTEAM_BOX=off` makes the kit ignore the box's files, honored only while `$HOME` (by real path) isn't the passwd home (ruling d-20261114-215844973-supervisor).
 - The box code is marked as a block and loaded in a vm with a stand-in fs/os/env, so the limit is tested in CI.
 - A decoy test re-runs the incident's own test with a worker's env pointed at a decoy run folder: nothing lands there.
-- Three tasks; no file added; risk normal.
+- The kit refuses a `DEVTEAM_RUN` outside its resolved home (scope change m-20261114-222834445): every command but help dies naming both paths.
+- Four tasks; no file added; risk normal.
 
 > **For agentic workers:** executed natively (executing-plans), each task reviewed by a fresh subagent into `reviews/task-<n>.md`.
 
@@ -81,7 +82,22 @@ Readings of the approved spec (spec-2 F2-1..F2-4, plan-1): the spec's "`# skip 0
 - [ ] **Step 4: run them, see them pass.**
 - [ ] **Step 5: commit** `kit-201: one env scrub for every test that spawns the kit`; review into `reviews/task-2.md`.
 
-### Task 3: the three files on the box, and the suite
+### Task 3: the kit refuses a foreign run folder
+
+**Files:**
+- Modify: `docs/devteam/scripts/devteam.mjs:463` (beside `runDir`)
+- Test: `test/machine.test.mjs`
+
+**Interfaces:**
+- Produces: right after `runDir`, a check (inline: `insideDir` is defined later and is a `const`) that, when `process.env.DEVTEAM_RUN` is set and `command` isn't `help`/`--help`/missing, compares `realPath(mainRoot)` with the real path of `runDir`'s nearest existing ancestor (re-joined with the rest) and `die()`s with spec §6's text unless they are equal or the run is under the root. No other change.
+
+- [ ] **Step 1: write the failing tests** in `machine.test.mjs`: `test('a kit refuses a run folder outside its home: a worker\'s DEVTEAM_RUN leaked into a fixture\'s kit writes nothing there, and names both', …)` and `test('a kit keeps its own run folder, by any spelling, as it always did', …)`. Fixtures: `A = bareProject(base, 'fixture')`, `H = bareProject(base, 'home')` (the stand-in home; its `docs/devteam/run` exists). Snapshot `H`'s run folder (relative path → sha of each file). Run `A`'s kit from `A` with `{ DEVTEAM_RUN: H/docs/devteam/run }` for `['phase', 'spec']` (as `DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-1'`), `['observe', '--subject', 'x', '--kind', 'other', '--detail', 'x']` and `['status']`: each status ≠ 0, stderr contains both `H/docs/devteam/run` (or its real path) and `A`, and the snapshot is unchanged. Second test: `DEVTEAM_RUN` = `A/docs/devteam/run`, = a symlink to it, and unset: `status` exits 0 each time, and `observe …` exits 0 with its line in `A`'s own run log.
+- [ ] **Step 2: run them, see them fail** (the refusal test: the commands succeed and `H`'s run folder changes).
+- [ ] **Step 3: implement** the check.
+- [ ] **Step 4: run them, see them pass**; also the decoy test (it must still pass: its child's kit commands carry the fixture's own run, or none). Move the decoy test's `filesIn(decoy)` assertion before its status assertion (task-2 T2-1).
+- [ ] **Step 5: commit** `kit-201: the kit refuses a DEVTEAM_RUN outside its home`; review into `reviews/task-3.md`.
+
+### Task 4: the three files on the box, and the suite
 
 - [ ] **Step 1:** `run-isolated.sh --test-reporter=tap test/operator-threads.test.mjs test/machine.test.mjs test/hub-overview.test.mjs` on this box (both box files present) → `# fail 0` (baseline at cca0976: operator-threads 1 pass / 15 fail).
 - [ ] **Step 2:** only after Task 2's decoy proof passes: the same three with a worker-shaped env (`run-as-worker.sh` beside run-isolated.sh: `DEVTEAM_RUN`, `DEVTEAM_HOME` set to a fresh decoy, `DEVTEAM_ROLE=worker`, `DEVTEAM_TICKET`, `DEVTEAM_PUBLIC_URL`, `TMUX`, `TMUX_PANE` set, never home's run) → `# fail 0`, decoy empty. The hub-overview tests on `fleetFixture` keep the real `HOME`, so the off switch is ignored for them; they passed on this box at main and must still.
