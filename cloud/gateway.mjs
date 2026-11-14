@@ -1219,13 +1219,17 @@ export function createGateway(opts = {}) {
     deadline = setTimeout(() => { up.destroy(); none(); }, data ? 160000 : opts.hubDeadlineMs ?? 15000);
     up.end(data ?? undefined);
   });
-  // An answer the hub gave as JSON goes back as it is, 200 or a refusal with its reason. Anything
-  // else (no hub, a hub on a kit from before these threads, something else on the port) is a 502.
+  // An answer the hub gave as JSON goes back as it is: 200, or a refusal with its reason (400 for
+  // what the press asked, 403 for a press the hub wouldn't take: its signature, its key, a
+  // replay). Only the status and the one line of error go back from a refusal. Anything else (no
+  // hub, a hub on a kit from before these threads, something else on the port) is a 502.
   const operatorThreads = async (req, res, action) => {
     let body = null;
     if (action) { body = await readJson(req, 20000); if (!body || typeof body !== 'object' || Array.isArray(body)) return json(res, 400, { error: 'missing or invalid fields' }); }
     const r = await hubAsk(action ? 'POST' : 'GET', action ? `/operator/${action}` : '/operator/threads', body);
-    if (r && r.json && typeof r.json === 'object' && !Array.isArray(r.json) && [200, 400].includes(r.status)) return json(res, r.status, r.json);
+    const answered = r && r.json && typeof r.json === 'object' && !Array.isArray(r.json);
+    if (answered && r.status === 200) return json(res, 200, r.json);
+    if (answered && [400, 403].includes(r.status) && typeof r.json.error === 'string') return json(res, r.status, { error: r.json.error.slice(0, 600) });
     return json(res, 502, { error: r ? 'the hub on this box is served by a kit from before threads with the operator' : 'the hub on this box is not answering' });
   };
 
