@@ -518,3 +518,49 @@ test('records in home: a half-done merge, then a review record added on home\'s 
     assert.ok(fs.existsSync(r.w) && fs.existsSync(r.rw), 'neither worktree removed');
   } finally { F.done(); }
 });
+
+test('records in home: a hand-made merge borrowing the records subject is never named by the act, whichever check it fails', () => {
+  const F = recordsFixture('records-borrowed');
+  const { old, g, okIn } = F;
+  const id = 'console-02-b';
+  const T = `docs/devteam/project/tickets/${id}`;
+  try {
+    F.ticket(id);
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), `${id}\n`);
+    g(['add', '-A'], w); g(['commit', '-qm', 'work'], w); g(['push', '-q', 'origin', `ticket/${id}`], w);
+    const code = g(['rev-parse', 'HEAD'], w);
+    // the records' own first commit also edits README.md (outside the folder): refused as it stands
+    const first = homeRecords(F, id, { 'spec.md': '# spec\n', 'plan.md': '# plan\n\n## TL;DR\n\n- x\n', 'verification.md': VERIF });
+    write(path.join(first.rw, 'README.md'), 'through the records branch\n');
+    g(['commit', '-qam', 'readme too'], first.rw); g(['push', '-q', 'origin', `ticket/${id}`], first.rw);
+    const h = g(['rev-parse', 'HEAD'], first.rw);
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'ok'], SUP);
+    okIn(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], SUP);
+    // by hand, onto home's main, with the records subject: (1) that commit, a clean merge of an
+    // ancestor of what merge will check, which changes README.md: only the footprint check stops it;
+    // (2) a clean, in-folder merge of a commit that is no ancestor: only the ancestry check stops it
+    const forge = path.join(F.base, 'borrowed');
+    g(['clone', '-q', path.join(F.base, 'origin.git'), forge], F.base);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], forge);
+    g(['fetch', '-q', 'origin', `ticket/${id}`], forge);
+    g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'FETCH_HEAD'], forge);
+    const viaFootprint = g(['rev-parse', 'HEAD'], forge);
+    g(['checkout', '-q', '-b', 'y', 'origin/main'], forge);
+    write(path.join(forge, `${T}/notes.md`), 'not a records commit\n');
+    g(['add', '-A'], forge); g(['commit', '-qm', 'notes'], forge);
+    g(['checkout', '-q', 'main'], forge);
+    g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'y'], forge);
+    const viaAncestry = g(['rev-parse', 'HEAD'], forge);
+    g(['push', '-q', 'origin', 'main'], forge);
+    // the reviewed records, now that home's main has the README change (merge-base moved past it)
+    homeRecords(F, id, { 'reviews/final-1.md': `- Records: ${h}\n${review('reviewer-b', code)}` });
+    write(path.join(old, `docs/devteam/run/pr/ticket/${id}.md`), `# ${id}: work\n\n## One-way doors\n\nNone.\n`);
+    okIn(old, ['merge', id], SUP);
+    const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
+    assert.doesNotMatch(act.what, /and earlier at/, 'neither hand-made merge is named');
+    const flagged = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
+    assert.deepEqual(flagged, [`home:${viaAncestry.slice(0, 12)}`, `home:${viaFootprint.slice(0, 12)}`].sort());
+  } finally { F.done(); }
+});
