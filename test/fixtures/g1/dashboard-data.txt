@@ -397,7 +397,10 @@ exit 0
       }
     ],
     "best": null,
-    "score": null,
+    "score": {
+      "this_week": null,
+      "last_week": null
+    },
     "parts": null,
     "observe": null,
     "waste": [],

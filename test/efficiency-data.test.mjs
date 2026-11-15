@@ -160,3 +160,76 @@ test('/api/data carries the same efficiency, read fresh on each request', async 
     assert.deepEqual(second.weeks[9].usd_by_phase, { build: 4, verify: 3 });
   } finally { dash?.stop(); E.done(); }
 });
+
+// three S tickets merged in week k, each with `usd` of spend and a cycle of `hours`
+const threeIn = (E, k, tag, { usd, hours, from = 0 }) => [0, 1, 2].map((j) => { const id = `eff-${String(k).padStart(2, '0')}-${tag}${j}`; E.shipped(id, k, from + j, { hours, spends: [{ usd }] }); return id; });
+const defectIn = (E, k) => E.hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'eff', kind: 'escaped-defect', detail: 'found after merge', severity: 3, valence: -1 }, E.mergeAt(k, 9));
+
+test('score against hand-computed answers', (t) => {
+  const E = effFixture('eff-score');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    threeIn(E, 3, 'a', { usd: 4, hours: 10 });
+    const [w5] = threeIn(E, 5, 'b', { usd: 2, hours: 20 });
+    E.reviewFile(w5, 'spec-1.md', 'APPROVE'); E.reviewFile(w5, 'plan-1.md', 'CHANGES');
+    const [w7] = threeIn(E, 7, 'c', { usd: 5, hours: 5 });
+    for (const [f, v] of [['spec-1.md', 'APPROVE'], ['plan-1.md', 'APPROVE'], ['task-1.md', 'APPROVE'], ['task-2.md', 'CHANGES']]) E.reviewFile(w7, f, v);
+    threeIn(E, 11, 'd', { usd: 2.5, hours: 8 });
+    defectIn(E, 11);
+    E.shipped('eff-09-e0', 9, 0, { spends: [{ usd: 1 }] }); E.shipped('eff-09-e1', 9, 1, { spends: [{ usd: 1 }] });
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    const w = eff.weeks;
+    assert.deepEqual([w[3].usd_per_point, w[3].hours_per_point, w[5].first_pass, w[7].first_pass, w[11].usd_per_point, w[11].escaped_defects], [4, 10, 0.5, 0.75, 2.5, 1]);
+    assert.deepEqual(eff.best, { usd_per_point: 2, hours_per_point: 5 });
+    assert.deepEqual([w[3].score, w[3].parts], [67, { spend: 0.5, time: 0.5, rework: 1 }]);
+    assert.deepEqual([w[5].score, w[5].parts], [58, { spend: 1, time: 0.25, rework: 0.5 }]);
+    assert.deepEqual([w[7].score, w[7].parts], [72, { spend: 0.4, time: 1, rework: 0.75 }]);
+    assert.deepEqual([w[11].score, w[11].parts], [55, { spend: 0.4, time: 0.25, rework: 1 }], 'a defect week takes the lowest raw spend and time of the other scored weeks');
+    assert.deepEqual([w[9].tickets, w[9].usd_per_point, w[9].score, w[9].parts], [2, 1, null, null], 'under 3 tickets: counts, no score');
+    assert.deepEqual(eff.score, { this_week: 55, last_week: null });
+    assert.deepEqual(eff.parts, { spend: 0.4, time: 0.25, rework: 1 });
+  } finally { E.done(); }
+});
+
+test('a defect week with the lowest dollars still sets best', (t) => {
+  const E = effFixture('eff-best');
+  try {
+    threeIn(E, 2, 'a', { usd: 1, hours: 1 });
+    defectIn(E, 2);
+    threeIn(E, 4, 'b', { usd: 2, hours: 1 });
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    assert.equal(eff.best.usd_per_point, 1);
+    assert.deepEqual(eff.weeks[4].parts, { spend: 0.5, time: 1, rework: 1 });
+    assert.deepEqual(eff.weeks[2].parts, { spend: 0.5, time: 1, rework: 1 }, "w2 takes w4's spend");
+    assert.deepEqual([eff.weeks[2].score, eff.weeks[4].score], [83, 83]);
+  } finally { E.done(); }
+});
+
+test('one scored week with a defect scores rework only', (t) => {
+  const E = effFixture('eff-one');
+  try {
+    const [a] = threeIn(E, 6, 'a', { usd: 3, hours: 2 });
+    for (const [f, v] of [['spec-1.md', 'APPROVE'], ['plan-1.md', 'APPROVE'], ['task-1.md', 'APPROVE'], ['final-1.md', 'CHANGES']]) E.reviewFile(a, f, v);
+    defectIn(E, 6);
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    assert.deepEqual([eff.weeks[6].score, eff.weeks[6].parts], [25, { spend: 0, time: 0, rework: 0.75 }]);
+  } finally { E.done(); }
+});
+
+test('usd_per_point 0 scores spend 1', (t) => {
+  const E = effFixture('eff-zero');
+  try {
+    threeIn(E, 5, 'a', { usd: 0, hours: 2 });
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    assert.equal(eff.weeks[5].usd_per_point, 0);
+    assert.deepEqual([eff.weeks[5].score, eff.weeks[5].parts], [100, { spend: 1, time: 1, rework: 1 }]);
+  } finally { E.done(); }
+});

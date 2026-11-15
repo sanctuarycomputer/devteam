@@ -11474,6 +11474,24 @@ function tokensByPhase(items) {
   for (const r of items) { const t = (o[r.phase] ??= { input: 0, output: 0, cache_read: 0, cache_write: 0 }); for (const k of TOKEN_KINDS) t[k] += r[k]; }
   return o;
 }
+// The score (the design's Efficiency section): a week with 3 or more tickets is scored against the
+// best (lowest) dollars and hours per point among the 12 weeks' scored weeks. A week with an escaped
+// defect can't score a saving it made by letting the defect through: its spend and time are the
+// lowest raw values of the other scored weeks, 0 with none.
+function scoreWeeks(weeks) {
+  const scored = weeks.filter((w) => w.tickets >= 3);
+  if (!scored.length) return { best: null };
+  const best = { usd_per_point: Math.min(...scored.map((w) => w.usd_per_point)), hours_per_point: Math.min(...scored.map((w) => w.hours_per_point)) };
+  const raw = (w, k) => (w[k] === 0 ? 1 : best[k] / w[k]);
+  for (const w of scored) {
+    const others = scored.filter((o) => o !== w);
+    const part = (k) => (!w.escaped_defects ? Math.min(1, raw(w, k)) : others.length ? Math.min(...others.map((o) => raw(o, k))) : 0);
+    const p = { spend: part('usd_per_point'), time: part('hours_per_point'), rework: w.first_pass };
+    w.score = Math.round((100 * (p.spend + p.time + p.rework)) / 3);
+    w.parts = Object.fromEntries(Object.entries(p).map(([k, v]) => [k, +v.toFixed(2)]));
+  }
+  return { best };
+}
 function efficiencyData(m) {
   const { cycles, ticketUsd, perPoint, items } = m[METRICS_INTERNALS];
   const walk = ticketReviewWalk();
@@ -11500,7 +11518,8 @@ function efficiencyData(m) {
       score: null, parts: null,
     };
   });
-  return { weeks, best: null, score: null, parts: null, observe: null, waste: [], trials: [], suggestions: [] };
+  const { best } = scoreWeeks(weeks);
+  return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, observe: null, waste: [], trials: [], suggestions: [] };
 }
 
 function collectMetrics(since) {
