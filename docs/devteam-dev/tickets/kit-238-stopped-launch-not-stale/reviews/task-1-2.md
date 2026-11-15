@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | none | test/kit.test.mjs:822-829 | The memory-full guard never skips under the harness: test/lib/kit.mjs:36-37 points DEVTEAM_CGROUP and DEVTEAM_MEMINFO at a missing path, so machineMemory is null and memoryFull is always null. The skip is sound (idle-capacity is withheld while memory-full fires), but the memory-full detail carries the same `N/M workers active` text, so an else branch could assert `2/` there too and keep the active-count check in both cases. | |
+| F1 | Suggestion | none | test/kit.test.mjs:822-829 | The memory-full guard never skips under the harness: test/lib/kit.mjs:36-37 points DEVTEAM_CGROUP and DEVTEAM_MEMINFO at a missing path, so machineMemory is null and memoryFull is always null. The skip is sound (idle-capacity is withheld while memory-full fires), but the memory-full detail carries the same `N/M workers active` text, so an else branch could assert `2/` there too and keep the active-count check in both cases. | wont-fix the skip is sound and never taken in the fixture; checking the count in memory-full text would change an approved test for a branch the fixture cannot reach. |
 
 Checked:
 
