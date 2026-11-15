@@ -13994,6 +13994,49 @@ const releaseFlag = () => {
   if (r !== undefined && !/^v\d+\.\d+\.\d+$/.test(r)) die(`box-pins: --release ${JSON.stringify(r)} is not vX.Y.Z`);
   return r;
 };
+// Each tool's latest release upstream: npm's latest dist-tag, PyPI's version, or the highest GitHub
+// release that is neither a draft nor a prerelease (read from the list, so a backport published after
+// a newer line is not taken for the latest). Throws an Error whose message is the why, in our words.
+// GitHub is read anonymously, or with GH_TOKEN, which goes to the API only: never with a download.
+const pinsBase = (k, dflt) => (process.env[k] || dflt).replace(/\/+$/, '');
+async function upstreamJson(url, headers = {}) {
+  let res;
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins', ...headers }, signal: AbortSignal.timeout(15000) }); } catch (e) { throw new Error(`unreachable (${safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? (e?.name === 'TimeoutError' ? 'timed out' : e?.name))})`); }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  try { return await res.json(); } catch { throw new Error('bad JSON'); }
+}
+const notRelease = (v) => new Error(`not a release: ${safe(v)}`);
+async function latestOf(tool) {
+  if (tool.source === 'npm') {
+    const v = (await upstreamJson(`${pinsBase('DEVTEAM_PINS_NPM', 'https://registry.npmjs.org')}/${tool.pkg.replace('/', '%2f')}/latest`))?.version;
+    if (!versionParts(v)) throw notRelease(v);
+    return { version: v };
+  }
+  if (tool.source === 'pypi') {
+    const v = (await upstreamJson(`${pinsBase('DEVTEAM_PINS_PYPI', 'https://pypi.org')}/pypi/${tool.pkg}/json`))?.info?.version;
+    if (!versionParts(v)) throw notRelease(v);
+    return { version: v };
+  }
+  const auth = process.env.GH_TOKEN ? { authorization: `Bearer ${process.env.GH_TOKEN}` } : {};
+  const list = await upstreamJson(`${pinsBase('DEVTEAM_PINS_GITHUB', 'https://api.github.com')}/repos/${tool.repo}/releases?per_page=30`, { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...auth });
+  if (!Array.isArray(list)) throw new Error('bad JSON');
+  const best = list.filter((r) => r && !r.draft && !r.prerelease && versionParts(r.tag_name)).reduce((a, r) => (!a || newer(r.tag_name, a.tag_name) ? r : a), null);
+  if (!best) throw new Error('no release');
+  return { version: best.tag_name, release: best };
+}
+// Every tool against upstream, in table order: held (nothing asked), current, stale or unknown.
+const holdText = (r) => String(r).replace(/[^\x20-\x7e]/g, '?');
+function checkPins(pins) {
+  return Promise.all(pins.tools.map(async ({ tool, version, hold }) => {
+    const row = { name: tool.name, pinned: version };
+    if (hold) return { ...row, status: 'held', reason: hold };
+    try {
+      const { version: latest } = await latestOf(tool);
+      return newer(latest, version) ? { ...row, status: 'stale', latest: pinForm(latest, version) } : { ...row, status: 'current' };
+    } catch (e) { return { ...row, status: 'unknown', why: e.message }; }
+  }));
+}
+const pinsCheckLine = (r) => `${r.name}: ${r.status === 'stale' ? `stale ${safe(r.pinned)} -> ${safe(r.latest)}` : r.status === 'held' ? `held ${holdText(r.reason)}` : r.status === 'unknown' ? `unknown ${r.why}` : `current ${safe(r.pinned)}`}`;
 const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
@@ -14009,7 +14052,23 @@ async function cmdBoxPins() {
     out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
     return;
   }
-  if (['check', 'bump', 'installed'].includes(mode)) die(`box-pins ${mode}: not yet`);
+  if (mode === 'check') {
+    const pins = readPins(pinsFile().text);
+    // a file whose pins can't be read is not checked: exit 2, as for no file
+    if (pins.problems.length) {
+      if (flags.json) out(JSON.stringify({ box_pins: 1, problems: pins.problems }, null, 2));
+      else for (const p of pins.problems) out(`box-pins check: ${p}`);
+      process.exitCode = 2;
+      return;
+    }
+    const rows = await checkPins(pins);
+    if (flags.json) out(JSON.stringify({ box_pins: 1, tools: rows }, null, 2));
+    else for (const r of rows) out(pinsCheckLine(r));
+    // 1: a pin is behind; 3: none is, but some upstream couldn't be asked; 0: all current or held
+    process.exitCode = rows.some((r) => r.status === 'stale') ? 1 : rows.some((r) => r.status === 'unknown') ? 3 : 0;
+    return;
+  }
+  if (['bump', 'installed'].includes(mode)) die(`box-pins ${mode}: not yet`);
   die(`usage: ${BOX_PINS_USAGE}`);
 }
 

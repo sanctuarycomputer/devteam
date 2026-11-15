@@ -7,6 +7,7 @@ import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { HARNESS_ENV, bareProject, hasTmux, kit, testDir, until, write } from './lib/kit.mjs';
@@ -946,4 +947,120 @@ test('verify takes a hold above the _VERSION ARG, and refuses one with no reason
   assert.equal(far.status, 1); assert.match(far.stdout, /the hold on line \d+ is not directly above a _VERSION ARG/);
   const odd = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^ARG MISE_VERSION=/m, '# Hold: x\n$&'))]);
   assert.equal(odd.status, 1); assert.match(odd.stdout, /line \d+ looks like a hold but is not "# hold: <reason>"/);
+});
+
+// npm, PyPI and GitHub in one in-process server; downloads redirect to the bytes, as GitHub's do.
+// Every tool's default latest is one release past FIXED; each asset's bytes are its own.
+const LATEST = { 'claude-code': '2.1.308', 'claude-swap': '1.0.1', gh: 'v2.105.0', ttyd: '1.7.8', mise: 'v2026.11.8', uv: '0.13.8' };
+const REPOS = { gh: 'cli/cli', ttyd: 'tsl0922/ttyd', mise: 'jdx/mise', uv: 'astral-sh/uv' };
+const assetNames = (tool, tag) => ({
+  gh: [`gh_${tag.replace(/^v/, '')}_linux_amd64.tar.gz`, `gh_${tag.replace(/^v/, '')}_linux_arm64.tar.gz`],
+  ttyd: ['ttyd.x86_64', 'ttyd.aarch64'],
+  mise: [`mise-${tag}-linux-x64`, `mise-${tag}-linux-arm64`],
+  uv: ['uv-x86_64-unknown-linux-gnu.tar.gz', 'uv-aarch64-unknown-linux-gnu.tar.gz'],
+}[tool]);
+const sha256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
+async function upstream(t) {
+  const state = { npm: { '@anthropic-ai/claude-code': LATEST['claude-code'] }, pypi: { 'claude-swap': LATEST['claude-swap'] }, releases: {}, assets: {}, hits: [] };
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    state.hits.push({ path: u.pathname, headers: req.headers });
+    const json = (o, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(typeof o === 'string' ? o : JSON.stringify(o)); };
+    let m;
+    if ((m = /^\/npm\/(.+)\/latest$/.exec(u.pathname))) { const v = state.npm[decodeURIComponent(m[1])]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ version: v }); }
+    if ((m = /^\/pypi\/pypi\/([^/]+)\/json$/.exec(u.pathname))) { const v = state.pypi[m[1]]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ info: { version: v } }); }
+    if ((m = /^\/gh\/repos\/([^/]+\/[^/]+)\/releases$/.exec(u.pathname))) { const v = state.releases[m[1]]; return v === undefined ? json([], 404) : v.status ? json({}, v.status) : json(v); }
+    if ((m = /^\/dl\/(.+)$/.exec(u.pathname))) { res.writeHead(302, { location: `/assets/${m[1]}` }); return res.end(); }
+    if ((m = /^\/assets\/(.+)$/.exec(u.pathname))) { const a = state.assets[m[1]]; if (!a || a.status) { res.writeHead(a?.status ?? 404); return res.end(); } res.writeHead(200); return res.end(a.body); }
+    res.writeHead(404); res.end();
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  srv.unref();
+  t.after(() => { srv.closeAllConnections?.(); srv.close(); });
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  // a release of tool at tag, with both arch assets served, and a digest of their real bytes
+  const release = (tool, tag, extra = {}) => ({ tag_name: tag, draft: false, prerelease: false, ...extra, assets: assetNames(tool, tag).map((name) => {
+    const key = `${REPOS[tool]}/${name}`;
+    const body = `${key}/${tag}`;
+    state.assets[key] = { body };
+    return { name, browser_download_url: `${url}/dl/${key}`, digest: `sha256:${sha256(body)}` };
+  }) });
+  for (const tool of Object.keys(REPOS)) state.releases[REPOS[tool]] = [release(tool, LATEST[tool])];
+  return { url, state, release };
+}
+const upEnv = (u) => ({ DEVTEAM_PINS_NPM: `${u.url}/npm`, DEVTEAM_PINS_PYPI: `${u.url}/pypi`, DEVTEAM_PINS_GITHUB: `${u.url}/gh` });
+const closedPort = async () => { const s = net.createServer(); await new Promise((r) => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise((r) => s.close(r)); return p; };
+
+test('box-pins check: one line per tool; stale exits 1; held, current; --json the same', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  const r = await pinsAsync(['check', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.deepEqual(r.stdout.trim().split('\n'), [
+    'claude-code: stale 2.1.307 -> 2.1.308', 'claude-swap: stale 1.0.0 -> 1.0.1', 'gh: stale 2.104.0 -> 2.105.0',
+    'ttyd: stale 1.7.7 -> 1.7.8', 'mise: stale v2026.10.17 -> v2026.11.8', 'uv: stale 0.13.7 -> 0.13.8',
+  ]);
+  // everything current but gh, which is held: nothing asked of cli/cli, exit 0
+  u.state.npm['@anthropic-ai/claude-code'] = FIXED.CLAUDE_CODE;
+  u.state.pypi['claude-swap'] = FIXED.CLAUDE_SWAP;
+  for (const [tool, p] of [['ttyd', 'TTYD'], ['mise', 'MISE'], ['uv', 'UV']]) u.state.releases[REPOS[tool]] = [u.release(tool, FIXED[p])];
+  u.state.hits.length = 0;
+  const held = pinsCopy((x) => x.replace(/^ARG GH_VERSION=/m, '# hold: 2.105 breaks auth\n$&'));
+  const c = await pinsAsync(['check', '--dockerfile', held], upEnv(u));
+  assert.equal(c.status, 0, c.stderr + c.stdout);
+  assert.deepEqual(c.stdout.trim().split('\n'), ['claude-code: current 2.1.307', 'claude-swap: current 1.0.0', 'gh: held 2.105 breaks auth', 'ttyd: current 1.7.7', 'mise: current v2026.10.17', 'uv: current 0.13.7']);
+  assert.ok(!u.state.hits.some((h) => h.path.includes('cli/cli')), 'a held tool is not asked about');
+  const j = await pinsAsync(['check', '--json', '--dockerfile', held], upEnv(u));
+  assert.equal(j.status, 0);
+  const o = JSON.parse(j.stdout);
+  assert.equal(o.box_pins, 1);
+  assert.deepEqual(o.tools.map((x) => [x.name, x.status]), [['claude-code', 'current'], ['claude-swap', 'current'], ['gh', 'held'], ['ttyd', 'current'], ['mise', 'current'], ['uv', 'current']]);
+  assert.equal(o.tools[2].reason, '2.105 breaks auth');
+  const sj = JSON.parse((await pinsAsync(['check', '--json', '--dockerfile', f], upEnv(u))).stdout);
+  assert.deepEqual(sj.tools.find((x) => x.name === 'gh'), { name: 'gh', pinned: '2.104.0', status: 'stale', latest: '2.105.0' });
+});
+
+test('check ignores a GitHub prerelease and a draft, and takes the highest release, not the newest entry', async (t) => {
+  const u = await upstream(t);
+  u.state.releases['tsl0922/ttyd'] = [u.release('ttyd', '1.9.0', { prerelease: true }), u.release('ttyd', '2.0.0', { draft: true }), u.release('ttyd', '1.6.9'), u.release('ttyd', '1.7.8')];
+  const r = await pinsAsync(['check', '--dockerfile', pinsCopy()], upEnv(u));
+  assert.match(r.stdout, /^ttyd: stale 1\.7\.7 -> 1\.7\.8$/m);
+});
+
+test('check reports an unreachable upstream as unknown, and junk as unknown, never raw', async (t) => {
+  const u = await upstream(t);
+  for (const [tool, p] of [['gh', 'GH'], ['ttyd', 'TTYD'], ['mise', 'MISE'], ['uv', 'UV']]) u.state.releases[REPOS[tool]] = [u.release(tool, tool === 'gh' ? `v${FIXED[p]}` : FIXED[p])];
+  u.state.pypi['claude-swap'] = '1.2.3\u001b[2J';
+  const r = await pinsAsync(['check', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_NPM: `http://127.0.0.1:${await closedPort()}` });
+  assert.equal(r.status, 3, r.stderr + r.stdout);
+  assert.match(r.stdout, /^claude-code: unknown unreachable/m);
+  assert.match(r.stdout, /^claude-swap: unknown not a release: \?$/m);
+  assert.match(r.stdout, /^gh: current 2\.104\.0$/m);
+  assert.ok(!r.stdout.includes('\u001b'));
+  u.state.releases['jdx/mise'] = { status: 500 };
+  assert.match((await pinsAsync(['check', '--dockerfile', pinsCopy()], upEnv(u))).stdout, /^mise: unknown HTTP 500$/m);
+});
+
+test('check sends GH_TOKEN to the GitHub API, and nowhere else', async (t) => {
+  const u = await upstream(t);
+  await pinsAsync(['check', '--dockerfile', pinsCopy()], { ...upEnv(u), GH_TOKEN: 'fake-token' });
+  const gh = u.state.hits.filter((h) => h.path.startsWith('/gh/'));
+  assert.equal(gh.length, 4);
+  for (const h of gh) assert.equal(h.headers.authorization, 'Bearer fake-token');
+  for (const h of u.state.hits.filter((x) => !x.path.startsWith('/gh/'))) assert.equal(h.headers.authorization, undefined, h.path);
+  u.state.hits.length = 0;
+  await pinsAsync(['check', '--dockerfile', pinsCopy()], upEnv(u));
+  for (const h of u.state.hits) assert.equal(h.headers.authorization, undefined, 'none without GH_TOKEN');
+});
+
+test('check on a broken file exits 2 with its problems, in --json too', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy((x) => x.replace(/^ARG TTYD_SHA256_X86_64=\w+\n/m, ''));
+  const r = await pinsAsync(['check', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 2);
+  assert.match(r.stdout, /^box-pins check: ttyd has no TTYD_SHA256_X86_64$/m);
+  const j = await pinsAsync(['check', '--json', '--dockerfile', f], upEnv(u));
+  assert.equal(j.status, 2);
+  assert.deepEqual(JSON.parse(j.stdout), { box_pins: 1, problems: ['ttyd has no TTYD_SHA256_X86_64'] });
+  assert.equal(u.state.hits.length, 0, 'nothing asked of upstream');
 });
