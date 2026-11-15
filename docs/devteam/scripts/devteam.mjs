@@ -12757,18 +12757,50 @@ function cmdRecover() {
 // dashboard ports, and after a dead machine none does, which is exactly when this is needed.
 // Named for the hub port, so a fixture has its own. One file each, so nothing there is shared.
 const machineRepoDir = () => path.join(os.homedir(), '.devteam', `repos-${HUB_PORT}`);
+// Only a project's own runs record it: never a kit run in the temp folder or a session's scratchpad
+// (a probe, a reviewer's check: o-20261115-080748314 showed one on the owner's Overview), nor one a
+// worker or planner started, nor any run with DEVTEAM_HUB_RECORD=off (what a session's dashboard
+// gives its tick, which runs as the supervisor). An explicit DEVTEAM_HUB_PORT is a fixture with a
+// hub of its own, whose projects all live in the temp folder: it records as before, unless told off.
+const hubPortExplicit = () => !!process.env.DEVTEAM_HUB_PORT;
+const hubRecordOff = () => process.env.DEVTEAM_HUB_RECORD === 'off';
+const sessionRun = () => !!process.env.DEVTEAM_TICKET || !!process.env.DEVTEAM_FEATURE || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE);
+// p is dir or inside it, by whole segments (/tmpx is not under /tmp)
+const within = (dir, p) => { const rel = path.relative(dir, p); return rel === '' || (!!rel && !rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
+// The temp folders, resolved; never one that holds the home folder (a TMPDIR set that wide would
+// make every real project a stray, and recover --machine would skip them all)
+const tempDirs = () => { const home = realPath(os.homedir()); return [...new Set([os.tmpdir(), process.env.TMPDIR].filter(Boolean).map((d) => realPath(path.resolve(d))))].filter((d) => !within(d, home)); };
+const scratchRootWhy = (root) => {
+  const r = realPath(root);
+  if (tempDirs().some((d) => within(d, r))) return 'under the temp folder';
+  if (r.split(path.sep).includes('scratchpad')) return 'in a scratchpad';
+  return null;
+};
 function registerOnMachine() {
   try {
     const root = realPath(mainRoot);
+    if (hubRecordOff() || (!hubPortExplicit() && (sessionRun() || scratchRootWhy(root)))) return;
     writeJson(path.join(machineRepoDir(), `${crypto.createHash('sha1').update(root).digest('hex').slice(0, 16)}.json`), { root, at: nowIso() });
   } catch {}
 }
-function machineRepos() {
+// The records, and the strays among them: a root in the temp folder or a scratchpad, recorded by a
+// kit from before these were refused (or by hand). Ignored, and named by machine status for removal;
+// a fixture's (explicit hub port) are its projects.
+function machineRecords() {
   let files = [];
-  try { files = fs.readdirSync(machineRepoDir()).filter((f) => f.endsWith('.json')); } catch { return []; }
-  const roots = files.flatMap((f) => { try { const r = readJson(path.join(machineRepoDir(), f)).root; return typeof r === 'string' && path.isAbsolute(r) ? [r] : []; } catch { return []; } });
-  return [...new Set(roots)].sort();
+  try { files = fs.readdirSync(machineRepoDir()).filter((f) => f.endsWith('.json')).sort(); } catch { return { roots: [], strays: [] }; }
+  const strays = [];
+  const roots = files.flatMap((f) => {
+    let r;
+    try { r = readJson(path.join(machineRepoDir(), f)).root; } catch { return []; }
+    if (typeof r !== 'string' || !path.isAbsolute(r)) return [];
+    const why = hubPortExplicit() ? null : scratchRootWhy(r);
+    if (why) { strays.push({ file: f, why }); return []; }
+    return [r];
+  });
+  return { roots: [...new Set(roots)].sort(), strays };
 }
+const machineRepos = () => machineRecords().roots;
 const kitAt = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
 // A sibling is started by the home that links it, unless the two link each other. Only for --force,
 // where nothing says it was up: a repo that ran its own supervisor is a home whatever links to it.
@@ -13722,6 +13754,8 @@ async function machineStatus() {
   out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
   const boxed = boxStatusLine();
   if (boxed) out(boxed);
+  // after the box line, which stays right after the hub's; the file name only, never the root it holds
+  for (const s of machineRecords().strays) out(`machine: stray hub record ${/^[\w.-]{1,80}$/.test(s.file) ? s.file : '?'} (${s.why}; ignored, remove it)`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
   const flagged = [];
@@ -14591,6 +14625,8 @@ async function cmdDashboard() {
     accountsRunning = true;
     const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
+    // its tick runs as the supervisor, so a session's dashboard says here that it isn't the project's own
+    if (sessionRun() || hubRecordOff()) env.DEVTEAM_HUB_RECORD = 'off';
     execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       accountsRunning = false;
       const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
