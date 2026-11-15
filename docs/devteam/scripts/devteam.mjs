@@ -510,7 +510,8 @@ const SETTINGS_DEFAULTS = {
   // stderr; a failure only warns, and the blocked-prompt finding still shows a dialog. Empty runs
   // nothing. For Claude Code, set projects[$DEVTEAM_WORKTREE].hasTrustDialogAccepted to true in
   // ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, written atomically (a temp file, then a rename): running
-  // sessions rewrite that file. The owner's, like agent_command; home's only.
+  // sessions rewrite that file. Name scripts by absolute path: it runs in the worktree, so a relative
+  // one would run the branch's own file. The owner's, like agent_command; home's only.
   agent_trust_command: '',
   main_branch: 'main',
   merge_method: 'merge',
@@ -11254,7 +11255,7 @@ function collectMetrics(since) {
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
-    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree`);
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
@@ -11267,7 +11268,7 @@ function collectMetrics(since) {
     const who = `plan-${p.feature}`;
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
-    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11)`);
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
