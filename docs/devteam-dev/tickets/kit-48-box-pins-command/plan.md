@@ -200,3 +200,4 @@ test('installed without DEVTEAM_BOX_TOOLS exits 2', () => { /* `DEVTEAM_BOX_TOOL
 
 - m-20261115-004401439-supervisor: hold line above `_VERSION`; the env-cleared test command.
 - m-20261115-011227101-supervisor: spec approved at c989c4a, its calls beyond the done-whens included (check exits 3 on unknown-and-none-stale and 2 on a broken file; bump refuses an older --release; verify checks DEVTEAM_BOX_TOOLS). The supervisor reads the whole plan once its review passes (risk high).
+- m-20261115-012104539-supervisor: plan approved (read whole); buffered hashing is fine. The PR body's "doesn't defend against" line must say: bump pins whatever upstream publishes (trust on first download, cross-checked only against GitHub's own digest), so a compromised upstream release would be pinned; the reviewed release-prep PR is the check.
