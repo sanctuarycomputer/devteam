@@ -70,7 +70,7 @@ Every check below is in `test/owner-setting.test.mjs` unless it says `gateway.te
 - **CLI** `owner-setting <key> <1..20|none>` (the owner's).
   - It runs `ownerWriter`, and then accepts only the dashboard channel (`DEVTEAM_CHANNEL=dashboard`, as `ownerActionEnv` sets it) or the owner's own terminal (stdin is a TTY). Otherwise: `owner-setting: the owner asks for a setting on the dashboard's Settings page or in their own terminal; you change your own with settings set in the settings chore` (spec-1 F1-1).
   - The rule is a visibility fence (P6), not a wall: an agent that sets `DEVTEAM_CHANNEL=dashboard` on purpose is deliberate forgery, as with `/api/answer` today. It stops the confused case, an agent's shell running it outside tmux or before its pane is marked.
-  - On a box it reads `{ proof }` on stdin and checks it again. The signature must be valid and recent. The proof's `port` must equal this checkout's dashboard port (`run/dashboard-port`), so another project's proof on the same box is refused (spec-1 F1-6). The signed body must be exactly `{key, value}` equal to the arguments. No `owner-setting` act may hold the nonce already.
+  - On a box it reads `{ proof }` on stdin and checks it again. The signature must be valid and recent. The proof's `port` must equal this checkout's dashboard port, so another project's proof on the same box is refused (spec-1 F1-6). That port is the one the running dashboard logged last in `run/dashboard.log` (`started on http://127.0.0.1:<port>`), else `run/dashboard-port`, the same reading `machine status` uses. The log line comes first, because `run/dashboard-port` isn't written for a pinned `--port` (plan-1 P1-1). The signed body must be exactly `{key, value}` equal to the arguments. No `owner-setting` act may hold the nonce already.
   - It writes `{ type: 'act', class: 'owner-setting', key, value, what: 'asked for <key> <n|no limit>', refs: [], reversible: true, proof? }`. Its `at` is the envelope's. It prints the act id.
 - **CLI** `settings set <key> <1..20|none> [--for <act-id>]` (supervisor only; refused for the operator, workers and planners). It writes the key into `.worktrees/chore-settings/<projectRel>/settings.md` and refuses when that worktree doesn't exist ("chore start settings first").
   - With `--for`, the act must be an owner `owner-setting` act for the same key and the latest one for that key, and the value must equal the act's.
@@ -100,7 +100,9 @@ Every check below is in `test/owner-setting.test.mjs` unless it says `gateway.te
 - **The allowlist** is `OWNER_ASKABLE = { max_active_tickets, max_active_per_component }`, each an integer from 1 to 20 or `null`. The design gave 1–20 for one key, and I use the same range for the second.
 - **`settings set` always writes into the settings chore's worktree,** whatever the cwd. This makes "never a working-tree edit" structural: there is no path that edits the main checkout's file. The edit is a targeted text change to the one top-level key (inserted when absent), then re-parsed and checked, so the rest of the block (gate order included) stays byte-identical.
 - **`--for` must name the latest owner act for the key.** Applying a superseded request would leave the finding raised and the label saying "Saved", which is misleading. It is refused with the newer act's id.
-- **A `settings-edit` has landed** when main's `settings.md` holds its value and a `merge-chore` act with refs `chore-settings`, newer than the edit, merged a head whose `settings.md` holds that value (spec-1 F1-5). The head's sha is the one in the act's `what`, `merged chore-settings at <sha>`. This is the design's rule plus the proof that the edit was in the merge, so a no-op edit followed by an unrelated settings merge doesn't count. A head git can't read doesn't count.
+- **A `settings-edit` has landed** when main's `settings.md` holds its value and a `merge-chore` act with refs `chore-settings` is newer than the edit: the design's rule as written. An edit that never merged clears nothing, because no settings merge follows it.
+  - A no-op edit counts (spec-2 F2-1, F2-2, plan-1 P1-4). That is a supervisor `settings set` without `--for`, after the owner's act, of the value main already holds, followed by a settings merge. It is the supervisor deliberately keeping its value, and the label says so truthfully: "Set by the supervisor (you asked for N)".
+  - I dropped pass 1's F1-5 head check: it read an old head commit that a squash or rebase merge, or a fresh clone, loses, after which the label would wrongly go back to "Saved". Nothing here reads a commit other than main.
 - **The fix hint always carries the Upkeep sentence:** "while Upkeep is drained or parked, chore start and merge --chore refuse, so the value waits until Upkeep runs (or --force, logged)". It leads with that sentence when Upkeep is held now.
 - **`null` in the readers:**
   - `ready` prints "active workers: 3 (no limit)" and never marks a component at cap. It drops the "(+N for fix tickets)" suffix, because no limit leaves nothing for fix tickets to run past;
@@ -111,6 +113,8 @@ Every check below is in `test/owner-setting.test.mjs` unless it says `gateway.te
 - **The labels are full sentences** ("Set by you"), matching the mock's row. The done-whens' fragments are their lowercase cores; the test matches the full text. On "Saved N" against "Saved" (spec-1 F1-8), I follow the ticket's done-when and `kit-87`'s ("saved; applies once the supervisor lands it"): the label is `Saved; applies once the supervisor lands it`, and `kit-87` shows N from `asked`. With no limit asked, the second label reads `Set by the supervisor (you asked for no limit)`.
 - **Proof on the CLI** comes on stdin as `{ proof }`, and the route passes it there. This is pane answered's pattern, so it never appears in argv.
 
+- **What validate checks on a logged `owner-setting` act** (plan-1 P1-12): its shape, not today's allowlist. `key` is a settings-key name (`/^[a-z][a-z0-9_]{0,63}$/`), `value` is an integer from 1 to 20 or `null`, and it carries no `artifact` or `tree`. So narrowing the allowlist later never breaks `log-check` on old acts; the CLI and the route enforce the allowlist when writing.
+
 ## Edge cases
 
 - Two tabs save different values: each writes its act, and the latest is compared.
@@ -120,7 +124,7 @@ Every check below is in `test/owner-setting.test.mjs` unless it says `gateway.te
 - A `settings-edit` without `--for` lands, then the owner asks again: the newer act wins, and the finding is raised again.
 - An `owner-setting` act with no chore landed is inert: nothing reads it as the value.
 - A body that isn't JSON, has any field beside `key` and `value`, or is over 512 bytes gets a 400 and writes nothing.
-- On a box: a signature for another port (at the route, its own port; at the CLI, `run/dashboard-port`), an old timestamp (over `OPERATOR_PROOF_MS`), a nonce used before (in memory, and in the log for the CLI), a pane-answer signature, or a body whose key or value differs from the arguments. Each is refused.
+- On a box: a signature for another port (at the route, its own port; at the CLI, the dashboard's logged port), an old timestamp (over `OPERATOR_PROOF_MS`), a nonce used before (in memory, and in the log for the CLI), a pane-answer signature, or a body whose key or value differs from the arguments. Each is refused.
 
 ## Out of scope
 

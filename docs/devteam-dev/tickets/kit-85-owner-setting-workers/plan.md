@@ -9,7 +9,7 @@
 - `loadSettings` pins both keys to main, so the value in force is main's alone. The supervisor changes them only through `settings set` in the settings chore, then `chore pr settings` and `merge --chore settings`.
 - `metrics` raises `owner-setting-unlanded` until main has the owner's value, or until a landed supervisor edit made without `--for` overrides it.
 - `/api/data.asked_settings` gives each key's value in force, with one label from the design's five.
-- Six tasks, in this order: allowlist and pin; the act; the route and the gateway; `settings set`; the finding and the label; verification and the PR.
+- Task 0 waits for `kit-84` to merge and merges main, then reuses its `CLASS_WORDS`, `mainRef()` and settings view. Then six tasks: allowlist and pin; the act; the route and the gateway; `settings set`; the finding and the label; verification and the PR.
 - Tests: `test/owner-setting.test.mjs` (new) and `test/gateway.test.mjs`. Run each alone with `--test-concurrency=2`; CI is the gate.
 
 **Goal:** implement the spec at `docs/devteam-dev/tickets/kit-85-owner-setting-workers/spec.md`.
@@ -22,7 +22,7 @@
 - the finding in metrics;
 - the label in `dashboardData`.
 
-The gateway gets one more signer and a signed route. The log schema gets four act properties.
+The gateway gets one more signer and a signed route. The log schema gets three act properties (`key`, `value`, `for`).
 
 **Tech stack:** Node ESM, with `node:test` and `node:assert/strict` only. No dependencies.
 
@@ -31,7 +31,7 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
 ## Global constraints
 
 - Allowlist: `OWNER_ASKABLE = ['max_active_tickets', 'max_active_per_component']`. A value is `Number.isInteger(v) && v >= 1 && v <= 20`, or `null`. In argv, `null` is written `none`.
-- Act classes: `owner-setting` (owner) and `settings-edit` (supervisor). `CLASS_WORDS` (from `kit-84`) names them "Asking for a setting" and "Changing one of its own settings".
+- Act classes: `owner-setting` (owner) and `settings-edit` (supervisor). `CLASS_WORDS` (from `kit-84`, which already lists both) names them "Asking for a setting" and "Changing one of its own settings"; this ticket adds them only if `kit-84` merged without them.
 - Gateway domain string: `devteam-owner-setting-v1\n<port>\n<ts>\n<nonce>\n<sha256(body)>`.
 - Pin warning, verbatim: `<keys> here differs from main; it applies as on main, so change it with settings set in the settings chore`.
 - Labels, verbatim:
@@ -49,12 +49,29 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
 ## Review focus
 
 1. **A `null` cap reaching arithmetic.** `active < null` is false, so idle-capacity would never fire. Task 1 adds a test that `ready --json` and `metrics` give the right answers with `null`.
-2. **A string `"7"` or `true` in the HTTP body.** A string can't reach argv as `"7"`. Task 3's route test sends each, and also `7.0` written as JSON `7.0`, which JSON.parse turns into 7 and which is allowed, so the test says so.
+2. **A string `"7"` or `true` in the HTTP body.** A string can't reach argv as `"7"`. Task 3's route test sends each. It also sends the raw text `{"key":"max_active_tickets","value":7.0}`, which JSON.parse reads as 7 and which is accepted; the test asserts the 200 and `value 7`.
 3. **A replayed signed body after the dashboard restarts,** when its in-memory nonces are gone. The CLI checks the log's `owner-setting` acts for the nonce (Task 3 test).
 4. **`settings set` leaving the rest of `settings.md` unchanged:** the gates' key order and other keys stay byte-identical. Task 4 test: a diff shows only the one line.
 5. **A settings chore that already holds another change** (a link edit) when `settings set` runs. It must add to the file, not overwrite it (Task 4 test).
 
 ---
+
+### Task 0: Start from kit-84 (plan-1 P1-2)
+
+- [ ] Wait until `kit-84-dashboard-data` is merged and the supervisor has recorded approve-plan. Then `git fetch origin && git merge origin/main`.
+- [ ] Read what `kit-84` landed:
+  - `CLASS_WORDS`: whether it has both names;
+  - `mainRef()`;
+  - the settings view (`settings_all`, or whatever it named it, including how it tells a set key from a default).
+- [ ] Record in this plan's Rulings and calls the names this plan then uses in place of its own:
+  - Task 5's `mainSettingsRaw()` is replaced by kit-84's settings view where it gives "set on main" per key, else built on `mainRef()`;
+  - Task 2's `CLASS_WORDS` step becomes an assertion only.
+
+  Commit the plan.
+- [ ] **Fixture notes** for every task (plan-1 P1-13):
+  - `monoFixture` with `F.lines(F.STD)` first, so `ready` lists tickets (it holds every ticket while main has files no component line owns);
+  - tickets added with `ticket add` as SUP, component `web`;
+  - between two settings-chore cycles, `git worktree remove .worktrees/chore-settings` and `git branch -D chore-settings` after each merge, so `chore start settings` starts fresh from main.
 
 ### Task 1: The allowlist, the pin, and `null` in every reader
 
@@ -85,17 +102,21 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
     - stderr matches `/max_active_tickets, max_active_per_component here differs from main; it applies as on main, so change it with settings set in the settings chore/`.
     - The warning shows once per process: a single command shows it once.
     - Committed and pushed, the value applies.
-  - `'null means no limit wherever a cap is read'`. With main holding `max_active_tickets: null` and `max_active_per_component: null`, and two ready tickets:
-    - `ready` prints `active workers: 0 (no limit)` and no `(component at cap)`;
+  - `'null means no limit wherever a cap is read'` (plan-1 P1-3). With main holding `max_active_tickets: null` and `max_active_per_component: null`, `incident_slots: 1`, an open incident, a ready fix ticket and two ready tickets in one component, one worker counted active in it (a `phase build` line and the window faked as in `fleetFixture`'s active-worker helpers):
+    - `ready` prints `active workers: 1 (no limit)`, with no `(+1 for fix tickets)` and no `(component at cap)`;
     - `ready --json`'s `caps.max_active_tickets` is `null`;
-    - `metrics --json` has an `idle-capacity` finding.
+    - `metrics --json` has exactly one `idle-capacity` finding, the plain one (`/ready/` in the subject, not `/fix ready/`), with `no limit` in its detail and not `null`;
+    - with `DEVTEAM_MEMINFO` making memory full (as `memory-ceiling.test.mjs` does), the `memory-full` finding is raised, and its detail says `no limit`;
+    - the goal forecast (`goal show <g> --json`'s forecast) with `null` equals the forecast with `max_active_tickets` set to the goal's open-ticket count;
+    - and the same fixture with `max_active_tickets: 1` raises the fix-ready idle-capacity line, a control proving the test reaches it.
 - [ ] **Step 2: Run, and expect failures.** `node --test --test-concurrency=2 test/owner-setting.test.mjs`.
 - [ ] **Step 3: Implement.**
-  - In `loadSettings`, pin `OWNER_ASKABLE` keys like `OWNER_SETTINGS`, but warn on a separate line in the words above. Keep the existing owner-settings warning for its own keys, and use the same `DEVTEAM_QUIET_SETTINGS` guard for both lines, so each process prints them once.
+  - In `loadSettings`, pin `OWNER_ASKABLE` keys like `OWNER_SETTINGS`, but warn on a separate line in the words above. Keep the existing owner-settings warning for its own keys. Each line has its own once-guard (`DEVTEAM_QUIET_SETTINGS` for the owner line, `DEVTEAM_QUIET_ASKABLE` for this one), so both print when both kinds differ (plan-1 P1-7). The test covers that case: `gates` and `max_active_tickets` both edited, both lines shown once.
   - Readers use `capOf()`:
     - `ready` prints `${n}/${cap}`, or `${n} (no limit)`;
     - the component mark uses `capOf(s.max_active_per_component)`;
-    - idle-capacity and memory-full use `capOf` (the detail says `no limit` in place of `/null`);
+    - both idle-capacity lines and memory-full use `capOf`; the detail says `no limit` in place of `/null`;
+    - `ready`'s `(+N for fix tickets)` suffix shows only with a finite cap;
     - forecast `slots = s.max_active_tickets === null ? Math.max(1, <the goal's open, unmerged ticket count>) : Math.max(1, s.max_active_tickets)`.
 - [ ] **Step 4: Run.** Expect PASS.
 - [ ] **Step 5: Commit.** `kit-85: T1 allowlist, main pin and no-limit readers`.
@@ -127,7 +148,8 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
     - `none` writes `value: null`.
   - `'owner-setting refuses, writes nothing and names why'`. Each case is checked by log line count and stderr regex:
     - `DEVTEAM_ROLE=worker`, matching `/DEVTEAM_ROLE=worker/`;
-    - the supervisor's pane (`TMUX=x`, `TMUX_PANE=%9`, `DEVTEAM_SUPERVISOR=%9`), matching `/supervisor's session/`;
+    - the supervisor's pane through `DEVTEAM_SUPERVISOR` (`TMUX=x`, `TMUX_PANE=%9`, `DEVTEAM_SUPERVISOR=%9`), matching `/supervisor's session/`;
+    - the supervisor's marked pane (plan-1 P1-9): `run/supervisor-pane` and `run/supervisor-pane-role` both hold `%9`, with `TMUX=x`, `TMUX_PANE=%9` and no `DEVTEAM_SUPERVISOR`, matching `/recorded as the supervisor's/`;
     - `max_active_planners`, matching `/not a setting the owner asks for/`;
     - each `OWNER_SETTINGS` key, matching `/owner's own setting/`;
     - `links`;
@@ -137,15 +159,15 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
     - an owner `owner-setting` act with `proof: {...}` gives `log-check` exit 0;
     - a `goal-order` act with `proof` gives non-zero, matching `/proof is the gateway's signature/`;
     - an `owner-setting` act by `supervisor` is refused (`/owner-setting is the owner's/`);
-    - an owner `owner-setting` act with key `gates` or value `21` is refused.
-  - `'CLASS_WORDS names both classes'`. Through kit-84's test hook or `/api/data` class names, check the two names verbatim.
+    - an owner `owner-setting` act with value `21`, `0` or `"7"`, or key `Bad Key`, is refused; one with key `max_active_planners` (well formed, off today's allowlist) passes (plan-1 P1-12: validate checks shape, not the allowlist).
+  - `'CLASS_WORDS names both classes'`: through what `kit-84` exposes (its test reads the map; this test does the same), check the two names verbatim. This is an assertion on `kit-84`'s map; it is written first and must pass at the merge with main.
 - [ ] **Step 2: Run.** Expect FAIL.
 - [ ] **Step 3: Implement.**
   - Add `'owner-setting'` to `OWNER_ACTS`.
-  - The validate rule for an owner `owner-setting` act: it requires `askableProblem(o.key, o.value) === null`, and no `artifact` or `tree`.
+  - The validate rule for an owner `owner-setting` act: `key` matches `/^[a-z][a-z0-9_]{0,63}$/`, `value` is `null` or an integer from 1 to 20, and there is no `artifact` or `tree`.
   - Widen the proof rule to `['pane-answer', 'owner-setting'].includes(o.class)`.
   - Add the schema properties.
-  - In `CLASS_WORDS`, map `'owner-setting'` and `'settings-edit'` to the names above.
+  - `CLASS_WORDS`: only if `kit-84` merged without the two names, add them.
   - `what`: `asked for max_active_tickets 7` (or `… no limit`).
 - [ ] **Step 4: Run.** Expect PASS.
 - [ ] **Step 5: Commit.** `kit-85: T2 the owner-setting act`.
@@ -173,7 +195,8 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
   6. 200 `{ ok, out }` or 400 `{ error }`.
 - CLI box check: when `threadsNeedGateway()`, read `{ proof }` from stdin. Refuse unless all of these hold:
   - `ownerSettingProofProblem(proof)` is null;
-  - the signed body's `{key, value}` equals the arguments;
+  - the signed body is exactly `{key, value}`, equal to the arguments;
+  - `proof.port === ownDashboardPort()`, a new helper: the last `started on http://127.0.0.1:<port>` in `run/dashboard.log`, else `run/dashboard-port` (the reading at ~13980 moves into it and is used there too); else `that signature is for another dashboard`;
   - no `owner-setting` act in the log has that nonce.
 
   The reason reads `owner-setting: on a box the owner saves settings only on the dashboard through the box's gateway, which signs the press, and <why>`. The act keeps `proof`.
@@ -186,7 +209,8 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
       - no headers, Origin alone, Sec-Fetch-Site alone, and a cross-site origin (403 each);
       - `text/plain` (403);
       - values `0`, `21`, `7.5`, `"7"` and `true` (400 each, with a reason);
-      - key `gates` (400, `/owner's own setting/`);
+      - every `OWNER_SETTINGS` key (400, `/owner's own setting/`), read from the kit's source as in Task 1 (plan-1 P1-8);
+      - the raw text `{"key":"max_active_tickets","value":7.0}`: 200, `value 7`;
       - key `nope` (400).
   - `'on a box the save needs the gateway's owner-setting signature, once'`. Following the pane-answer box test (`DEVTEAM_GATEWAY_THREAD_KEY`, `DEVTEAM_PUBLIC_URL`):
     - unsigned gives 403;
@@ -196,14 +220,16 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
     - the same headers again give 403, `/used already/`;
     - the CLI run with the act's proof on stdin is refused, `/taken already/`;
     - the CLI with no stdin on a box is refused;
-    - the CLI with a proof whose `port` isn't `run/dashboard-port`'s is refused (`/another dashboard/`);
+    - the CLI with the gateway's valid, fresh proof for another body is refused: signed `{key:'max_active_tickets', value:9}` run as `owner-setting max_active_tickets 7`, and signed for `max_active_per_component` run for `max_active_tickets`, each matching `/signed another/` (plan-1 P1-5);
+    - the CLI with a valid proof for another port is refused (`/another dashboard/`); the dashboard is started with `--port`, so this also proves the port comes from `dashboard.log` (plan-1 P1-1);
     - a body with an extra field, or over 512 bytes, gets 400 and writes nothing;
     - `log-check` gives 0.
   - In `gateway.test.mjs`, beside the pane-answer block (~397):
     - `POST /api/owner-setting` through the gateway gives upstream headers signed under `devteam-owner-setting-v1` for that port and body, and the browser's forged signature headers are replaced;
     - the signature does not verify under the `devteam-pane-answer-v1` bytes, and the reverse;
     - the route needs the session (401 without the cookie);
-    - other requests stay unsigned.
+    - other requests stay unsigned. The existing assertion at `test/gateway.test.mjs:406` ("nothing else an instance gets is signed") is rewritten to allow exactly the two signed routes (plan-1 P1-11);
+    - the gateway keeps no nonces, so the replay test lives in `owner-setting.test.mjs` (above), and `verification.md` says so.
 - [ ] **Step 2: Run both files.** Expect FAIL.
 - [ ] **Step 3: Implement** as in the interfaces. The gateway's body cap and error texts follow `panePost`'s.
 - [ ] **Step 4: Run both files.** Expect PASS.
@@ -228,10 +254,15 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
      - the act exists, is an owner `owner-setting` act and has the same key, else `--for names the owner's owner-setting act for <key>`;
      - it is the latest for the key, else `a newer request <id> asks for <v>`;
      - its value equals this one, else `the owner asked for <v>; --for applies exactly that`.
-  5. `setSettingsKey(file, key, value)`: the targeted text edit, then a re-parse that checks every other key is canonical-equal to before.
+  5. `setSettingsKey(file, key, value)` (below).
   6. Log `{ type: 'act', class: 'settings-edit', key, value, ...(for ? { for: id, refs: [id] } : { refs: [] }), what: 'set <key> to <v> in the settings chore', reversible: true }` by `supervisor`.
   7. Print the file's path and the next commands.
-- `setSettingsKey(file: string, key: string, value: number|null) -> void`. If the block has `"<key>": <json>` at top level exactly once, replace the value. Otherwise insert `  "<key>": <v>,` after the block's opening `{`. Die if the result doesn't parse to the expected object.
+- `setSettingsKey(file: string, key: string, value: number|null) -> void` (plan-1 P1-6). Before editing, it dies if `jsonDuplicateKeys(block)` is undefined (the block isn't JSON) or lists any repeated key. Then:
+  - if the key is at top level, its value text is replaced: the regex `"<key>"\s*:\s*(null|-?\d+(\.\d+)?)` must match exactly once;
+  - else, for an empty block (`{}` with optional whitespace), the text becomes `{\n  "<key>": <v>\n}`;
+  - else `\n  "<key>": <v>,` is inserted after the opening `{`.
+
+  Afterwards it re-parses, and dies, writing nothing, unless `jsonDuplicateKeys` lists none, the key equals the value, and every other top-level key is canonical-equal to before.
 
 - [ ] **Step 1: Failing tests.**
   - `'settings set applies the owner's act in the settings chore, and lands through merge --chore'`:
@@ -241,12 +272,12 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
     4. `settings set max_active_tickets 6 --for <id>` is refused (`/asked for 7/`).
     5. `settings set links …` (`/link set and link land/`) and every `OWNER_SETTINGS` key are refused.
     6. Write the PR file as `link-edits.test.mjs` does. `chore pr settings --title "settings: max_active_tickets 7"`, then `merge --chore settings` exits 0. `git show origin/main:<settings>` has 7, and a `merge-chore` act with refs `chore-settings` exists.
-    7. A `settings set max_active_per_component 2` without `--for` that doesn't change the file (main has 2 already), followed by an unrelated settings chore merged: `landedOverride` is null, because the merged head's file doesn't differ by this edit. The landing check reads the merged head's file, so this is covered with the Task 5 states.
   - `'settings set is the supervisor's alone'`: `DEVTEAM_ROLE=worker`, `planner` and `operator` are each refused with nothing written. The operator matches `/the operator only reads/`.
   - `'settings set adds to a chore that holds other edits'` (review focus 4 and 5):
     - the chore worktree first gets an unrelated key edit and a reordered `gates` object in the file;
     - after `settings set max_active_per_component none`, those bytes are unchanged, and the key reads `null`.
   - `'settings set without the chore worktree'` is refused, naming `chore start settings`.
+  - `'settings set refuses a settings block it can't edit safely'`: a block that repeats `max_active_tickets` is refused (`/repeats/`) and the file is unchanged; an empty block `{}` gets `{"max_active_tickets": 4}`, valid JSON.
 - [ ] **Step 2: Run.** Expect FAIL.
 - [ ] **Step 3: Implement** as in the interfaces.
 - [ ] **Step 4: Run.** Expect PASS.
@@ -262,8 +293,8 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
 - Test: `test/owner-setting.test.mjs`.
 
 **Interfaces:**
-- `mainSettingsRaw() -> object|null`: main's settings block without defaults, so the code can tell "not set" from set. It uses the ref `loadSettings` resolves; that resolution moves into a helper `mainSettingsRef()`, which both use.
-- `landedOverride(key, sinceIso) -> act|null`: the newest supervisor `settings-edit` without `for`, for `key`, newer than `sinceIso`, whose value equals main's value, with a `merge-chore` act with refs `['chore-settings']` newer than it whose merged head (the sha in `what`, `merged chore-settings at <sha>`) has `settingsAt(sha)[key]` equal to the edit's value. An unreadable sha doesn't count.
+- `mainSettingsRaw() -> object|null`: main's settings block without defaults, so the code can tell "not set" from set. It is built on `kit-84`'s `mainRef()` or its settings view, per Task 0's note; no second ref resolver.
+- `landedOverride(key, sinceIso) -> act|null`: the newest supervisor `settings-edit` without `for`, for `key`, newer than `sinceIso`, whose value equals main's value, with a `merge-chore` act with refs `['chore-settings']` newer than it. This is the design's rule; it reads no commit but main (spec: "A settings-edit has landed"; plan-1 P1-4, spec-2 F2-1, F2-2).
 - `askedSettingView(key)` (`asked` is always present: the act's value, or `null` with `act: null`):
   - `value` is main's value (`loadSettings()[key]`, which is pinned);
   - `act = latestOwnerSetting(key)`;
@@ -283,6 +314,8 @@ The gateway gets one more signer and a signed route. The log schema gets four ac
   6. The owner asks for 3: `Set by you`.
   7. The owner asks for none, then the supervisor lands none `--for`: `Set by you`, `shown` is `No limit`, no finding.
   8. Upkeep parked (`goal hold upkeep park --owner`) and a new ask: the fix begins `Upkeep is parked`.
+  9. A no-op override (plan-1 P1-4): with main at 3 and the owner asking for 5, the supervisor runs `settings set max_active_tickets 3` without `--for` (the file is unchanged) and lands the settings chore (another key's edit rides along). The label is `Set by the supervisor (you asked for 5)`, and there is no finding: the supervisor deliberately kept 3.
+  10. An override that never merged clears nothing: a `settings set … 5` without `--for`, chore not merged, while main holds 3 and the owner asked for 6. Still `Saved…`, with the finding (this is state 4's rule; checked here once more after state 9's merge, so the override from state 9 doesn't count for the newer act).
 - [ ] **Step 2: Run.** Expect FAIL.
 - [ ] **Step 3: Implement** as in the interfaces.
 - [ ] **Step 4: Run.** Expect PASS.
