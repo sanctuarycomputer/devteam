@@ -44,7 +44,7 @@ function cleanup(ms = 30000) {
     async run() {
       state = 'running';
       let first = await runSteps(steps, ms);
-      for (let i = 0; i < late.length; i++) first ??= await late[i];
+      for (let i = 0; i < late.length; i++) { const e = await late[i]; first ??= e; }
       state = 'done';
       if (first) throw first;
     },
@@ -83,6 +83,12 @@ test('cleanup: a step added while cleanup runs is awaited and its error counts',
   const c = cleanup();
   c.add(() => c.add(() => { throw new Error('late'); }));
   await assert.rejects(c.run(), /late/);
+  // and when a step before it failed: run still waits for it, and the earlier error is the one thrown
+  const d = cleanup();
+  let lateDone = false;
+  d.add(() => { d.add(() => new Promise((r) => setTimeout(() => { lateDone = true; r(); }, 100))); throw new Error('first'); });
+  await assert.rejects(d.run(), /^Error: first$/);
+  assert.equal(lateDone, true, 'the late step finished before run did');
 });
 
 test('cleanup: a step added after cleanup ran still runs', async () => {
@@ -503,6 +509,7 @@ test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names 
     const A = bareProject(M.base, 'alpha');
     execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
     const d = startDashboard(A, M.env);
+    defer(t, () => d.stop());
     try {
       await until(() => /dashboard on http/.test(d.out()), 'the dashboard');
       return { d, logOf: () => readOr(path.join(A, 'docs/devteam/run/dashboard.log')) };
