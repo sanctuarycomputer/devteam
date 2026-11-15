@@ -5,7 +5,7 @@ import fs from 'node:fs';
 
 export const schema = JSON.parse(fs.readFileSync(new URL('../../../docs/devteam/schema/browser.schema.json', import.meta.url), 'utf8'));
 
-const asList = (x) => (Array.isArray(x) ? x : [x]);
+const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
 
 export function check(s, value, where) {
   const errs = [];
