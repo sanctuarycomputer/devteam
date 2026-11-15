@@ -190,7 +190,8 @@ test('--list prints the plan and runs nothing', () => {
 const { spawn } = await import('node:child_process');
 const { PassThrough } = await import('node:stream');
 const fx = (name) => `test/fixtures/run/${name}`;
-const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+// the real tmux, past any shim: under run.mjs the first tmux on PATH is its shim, which refuses -V
+const hasTmux = !!R.realTmux(process.env.PATH);
 const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // dead: gone, or a zombie nobody has reaped yet
@@ -205,7 +206,8 @@ const waitFor = async (f, ms) => { for (let i = 0; i < ms / 100; i++) { if (fs.e
 // its leader, hasn't exited, so the group can't be someone else's) and the call rejects.
 function runRunner(args, { env, cwd = root, deadline = 60000, umask, script = runMjs } = {}) {
   const argv = umask ? ['sh', ['-c', `umask ${umask}; exec "$0" "$@"`, process.execPath, script, ...args]] : [process.execPath, [script, ...args]];
-  const child = spawn(argv[0], argv[1], { cwd, env: nodeEnv(env), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // the caller's DEVTEAM_TEST_CONCURRENCY would change what the runner prints; a test sets its own
+  const child = spawn(argv[0], argv[1], { cwd, env: nodeEnv({ DEVTEAM_TEST_CONCURRENCY: undefined, ...env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = [];
   child.stdout.on('data', (b) => out.push(b));
   child.stderr.on('data', (b) => err.push(b));
@@ -245,6 +247,11 @@ test('exit codes', async (t) => {
     assert.match(r.stdout, new RegExp(`^failed: test/fixtures/run/${f.replace('.', '\\.')} \\(`, 'm'));
   }
   assert.equal((await runRunner([fx('pass.mjs')], { env })).code, 0);
+  // the exit code decides, not the TAP: a failing todo test prints "not ok" and its file exits 0
+  const todo = await runRunner([fx('todo-fails.mjs')], { env });
+  assert.match(todo.stdout, /^not ok \d+ - known broken # TODO/m);
+  assert.equal(todo.code, 0, todo.stdout + todo.stderr);
+  assert.match(todo.stdout, /^test\/fixtures\/run\/todo-fails\.mjs {2}\d+\.\d {2}ok$/m);
   const both = await runRunner([fx('pass.mjs'), fx('fail.mjs')], { env });
   assert.equal(both.code, 1);
   assert.match(both.stdout, /^failed: test\/fixtures\/run\/fail\.mjs/m);
@@ -314,9 +321,23 @@ test('socketsUnder finds the sockets inside a folder, never through a symlink', 
   fs.writeFileSync(path.join(d, 'plain'), '');
   fs.symlinkSync(outside, path.join(d, 'to-outside'));
   fs.symlinkSync(path.join(outside, 's3'), path.join(d, 'link-to-s3'));
+  // a socket hard-linked in from outside: the same socket as s3, so not this folder's
+  let hard = true;
+  try { fs.linkSync(path.join(outside, 's3'), path.join(d, 'hard-s3')); } catch { hard = false; }
   const real = fs.realpathSync(d);
-  assert.deepEqual(R.socketsUnder(d).sort(), [path.join(real, 'a', 'b', 's2'), path.join(real, 's1')]);
+  assert.deepEqual(R.socketsUnder(d).sort(), [path.join(real, 'a', 'b', 's2'), path.join(real, 's1')], hard ? 'no hard-linked socket' : 'no link(2) for sockets here');
   assert.deepEqual(R.socketsUnder(path.join(d, 'no-such')), []);
+  // a folder that is itself a symlink (a test replaced its TMPDIR with one) is walked not at all
+  assert.deepEqual(R.socketsUnder(path.join(d, 'to-outside')), []);
+});
+
+test('a file never sees the TMUX of the session that ran the runner', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const r = await runRunner([fx('path.mjs')], { env: { ...env, TMUX: '/tmp/tmux-1000/default,1,0', TMUX_PANE: '%1' } });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const o = readJson(path.join(out, 'path.json'));
+  assert.equal(o.TMUX, undefined);
+  assert.equal(o.TMUX_PANE, undefined);
 });
 
 test('an unset PATH gives the child no empty PATH entry', async (t) => {
@@ -412,6 +433,17 @@ test('from another cwd, through a symlink', async (t) => {
   const L = path.join(d, 'kit');
   fs.symlinkSync(root, L);
   const r = await runRunner([path.join(L, fx('fail.mjs'))], { env, cwd: '/', script: path.join(L, 'test/run.mjs') });
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^failed: test\/fixtures\/run\/fail\.mjs/m);
+});
+
+test('through a symlink with --preserve-symlinks-main, it still runs', async (t) => {
+  const { env } = fixtureEnv(t);
+  const d = fresh('link');
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const L = path.join(d, 'kit');
+  fs.symlinkSync(root, L);
+  const r = await runRunner([path.join(L, fx('fail.mjs'))], { env: { ...env, NODE_OPTIONS: '--preserve-symlinks-main' }, cwd: '/', script: path.join(L, 'test/run.mjs') });
   assert.equal(r.code, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /^failed: test\/fixtures\/run\/fail\.mjs/m);
 });

@@ -164,7 +164,8 @@ export function rowFor({ file, run, seconds, result, timeout, repeat }) {
 
 export function isEntry(argv1, metaUrl) {
   if (!argv1) return false;
-  try { return fs.realpathSync(argv1) === fileURLToPath(metaUrl); } catch { return false; }
+  // both sides real: with --preserve-symlinks-main, import.meta.url keeps the symlinked path too
+  try { return fs.realpathSync(argv1) === fs.realpathSync(fileURLToPath(metaUrl)); } catch { return false; }
 }
 
 // ---- running files ----
@@ -215,10 +216,11 @@ export function ensureShim(shared, PATH) {
 }
 
 // Every socket under dir, by a walk that never follows a symlink (a Dirent's type is the link's
-// own), whose real path is still under dir: nothing outside a file's scratch folder is touched.
+// own), whose real path is still under dir and that has no other name (a hard link from outside):
+// nothing outside a file's scratch folder is touched. A dir that is itself a symlink isn't walked.
 export function socketsUnder(dir) {
   let base;
-  try { base = fs.realpathSync(dir); } catch { return []; }
+  try { if (fs.lstatSync(dir).isSymbolicLink()) return []; base = fs.realpathSync(dir); } catch { return []; }
   const out = [];
   const walk = (d) => {
     let entries;
@@ -226,7 +228,7 @@ export function socketsUnder(dir) {
     for (const e of entries) {
       const p = path.join(d, e.name);
       if (e.isDirectory()) walk(p);
-      else if (e.isSocket()) { try { const r = fs.realpathSync(p); if (r.startsWith(base + path.sep)) out.push(r); } catch {} }
+      else if (e.isSocket()) { try { const r = fs.realpathSync(p); if (r.startsWith(base + path.sep) && fs.lstatSync(p).nlink === 1) out.push(r); } catch {} }
     }
   };
   walk(base);
@@ -315,9 +317,12 @@ const SETTLED = /^[TZ]/;
 //   it had when stopped, or orphaned from a parent that has since exited (gone, or a zombie): a
 //   stopped process can't exit, so its pid can't have been reused.
 // Whatever the walk stopped and didn't kill, and that hasn't exited and still has its recorded
-// parent (or an orphan's), is sent SIGCONT, so nothing is left stopped. One exception to "seen
-// stopped": if ps fails partway, the last good snapshot can't show a stop landing, so what it
-// showed under its recorded parent is killed without that check. No other pid is ever signalled.
+// parent (or an orphan's), is sent SIGCONT. One exception to "seen stopped": if ps fails partway,
+// the last good snapshot can't show a stop landing, so what it showed under its recorded parent is
+// killed without that check.
+// What this doesn't defend against: a pid that exits and is reused by an unrelated process in the
+// milliseconds between a snapshot and its SIGSTOP (it takes a wrap of pid_max). That process is
+// then stopped, and left stopped (or killed, if its recorded parent has exited or ps failed).
 export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   if (!snap !== !signal) throw new Error('stopTree: snapshot and signal go together');
   snap ??= snapshot;
@@ -390,6 +395,9 @@ function startFile(p, run, ctx) {
   const env = { ...process.env, TMPDIR: dir, DEVTEAM_TEST_SHARED_TMP: ctx.shared, PATH: [ctx.shimDir, ...(process.env.PATH ?? '').split(path.delimiter)].filter(Boolean).join(path.delimiter) };
   // run under node --test (as run.test.mjs does), node would see this and skip the file's tests
   delete env.NODE_TEST_CONTEXT;
+  // tmux takes $TMUX's socket ahead of TMUX_TMPDIR: the session that ran the runner is never a file's
+  delete env.TMUX;
+  delete env.TMUX_PANE;
   const child = spawn(process.execPath, childArgs(p.file), { cwd: ROOT, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const entry = { file: p.file, run, timeout: p.timeout, child, dir, out: [], start: Date.now(), exited: false, timer: null, result: null, seconds: 0 };
   child.stdout.on('data', (b) => entry.out.push(b));
@@ -447,6 +455,20 @@ export function schedule(plan, concurrency) {
 async function runAll(opts, plan) {
   const shared = sharedDir(process.env);
   const ctx = { shared, shimDir: ensureShim(shared, process.env.PATH), tmux: realTmux(process.env.PATH), running: new Set(), repeat: opts.repeat, stopping: false };
+  try {
+    return await runFiles(opts, plan, ctx);
+  } catch (e) {
+    // the runner itself failed (a file that couldn't start, a bug): nothing it started is left
+    // running unwatched
+    ctx.stopping = true;
+    const running = [...ctx.running];
+    for (const en of running) { en.result ??= `failed (runner error: ${e.message})`; cleanup(en); }
+    await Promise.all(running.map((en) => en.done));
+    throw e;
+  }
+}
+
+async function runFiles(opts, plan, ctx) {
   // Children have process groups of their own, so a terminal's Ctrl-C reaches only this process,
   // and a dropped session's SIGHUP too: each running file is cleaned up before it exits.
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
