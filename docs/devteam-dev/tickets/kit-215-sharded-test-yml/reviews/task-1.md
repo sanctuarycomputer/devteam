@@ -5,8 +5,8 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T1-1 | Suggestion |  | .github/workflows/test.yml kit job `name:` | The explicit `name: kit (${{ matrix.node }}, ${{ matrix.part }})` is now load-bearing in a new way: without it GitHub would append every include key (key, groups, shard, alone, gitleaks) to the check name. The old line's comment saying why was dropped and nothing replaces it, so a later edit could remove the name and change every check name. A one-line comment would keep it. |  |
-| T1-2 | Suggestion |  | coverage-step.sh `rows=` | The harness carries its own copy of the 16 rows' arguments, so it can drift from the matrix; plan step 4 checks the match by eye only. It matches at this head (checked row by row). Deriving the rows from the workflow's include list would remove the second copy. Not a defect: the CI coverage step itself reads only the jobs' own lists. |  |
+| T1-1 | Suggestion |  | .github/workflows/test.yml kit job `name:` | The explicit `name: kit (${{ matrix.node }}, ${{ matrix.part }})` is now load-bearing in a new way: without it GitHub would append every include key (key, groups, shard, alone, gitleaks) to the check name. The old line's comment saying why was dropped and nothing replaces it, so a later edit could remove the name and change every check name. A one-line comment would keep it. | fixed: a comment above the kit job's name says why it is there |
+| T1-2 | Suggestion |  | coverage-step.sh `rows=` | The harness carries its own copy of the 16 rows' arguments, so it can drift from the matrix; plan step 4 checks the match by eye only. It matches at this head (checked row by row). Deriving the rows from the workflow's include list would remove the second copy. Not a defect: the CI coverage step itself reads only the jobs' own lists. | wont-fix the harness is a local proof of the coverage step's script; CI's coverage step reads only the jobs' own lists, so a drift in the harness can't hide a gap in CI, and the final review checks its rows against the matrix |
 
 What I checked, at 4111a9a:
 

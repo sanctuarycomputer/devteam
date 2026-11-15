@@ -11,6 +11,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   kit:
+    # named, so a check reads kit (22, rest 1/2): without a name GitHub joins every include key
+    # (key, groups, shard, alone, gitleaks) into it
     name: kit (${{ matrix.node }}, ${{ matrix.part }})
     # Projects run the kit on whatever Node they pin, so every supported major is tested. Every job
     # runs test/run.mjs, which runs each file in a process of its own under a per-file watchdog (300 s,
