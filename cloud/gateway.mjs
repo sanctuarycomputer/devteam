@@ -1238,7 +1238,7 @@ export function createGateway(opts = {}) {
   });
   // No hub answering (nothing on the port, or an answer no list could be) is the empty list with
   // down: true, which only this fallback ever sets: the page says the hub isn't answering.
-  const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
+  const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [], down: true }));
   // The owner's threads with the box's operator (the Overview's dock): the hub keeps them and types
   // each owner turn into the operator's pane, so the box's name passes these few requests to it, after
   // the session check, as the hub's own page would send them on the machine. What comes back is JSON

@@ -13,6 +13,6 @@ No new Critical or Important finding in the diff.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1-2 | Minor | spec §1 ("writes one line to stdout at start, before listening") | test/gateway.test.mjs:2903-2905 | The order assertion doesn't tell "before `listen`" apart from "inside the listen callback, before `up()`". Removing L2458 and putting the `image:` line at the start of `up()` passes all tests. The comment claims the line appears "even when the port can't be had", but no test holds the port. To pin it, hold `PORT` with a listener of its own and assert that the `image:` line still appears, or drop the claim from the comment. | |
+| F1-2 | Minor | spec §1 ("writes one line to stdout at start, before listening") | test/gateway.test.mjs:2903-2905 | The order assertion doesn't tell "before `listen`" apart from "inside the listen callback, before `up()`". Removing L2458 and putting the `image:` line at the start of `up()` passes all tests. The comment claims the line appears "even when the port can't be had", but no test holds the port. To pin it, hold `PORT` with a listener of its own and assert that the `image:` line still appears, or drop the claim from the comment. | fixed (comment reworded in T2) |
 
 Verdict: APPROVE c4f563e19c2e8c2ed13007e5975e6e7ed20c3551

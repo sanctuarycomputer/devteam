@@ -489,13 +489,13 @@ test('whatever an agent binds to the hub\'s port, the box\'s name serves only th
     assert.equal(list.headers['content-security-policy'], undefined);
     assert.equal(list.body, '{"hub":1,"instances":[{"name":"x"}]}');
     huge = true;
-    assert.equal((await gw.req('GET', '/instances.json')).body, '{"hub":1,"instances":[]}', 'and no more of it than a list could be');
+    assert.equal((await gw.req('GET', '/instances.json')).body, '{"hub":1,"instances":[],"down":true}', 'and no more of it than a list could be');
     assert.equal((await gw.req('GET', '/anything')).status, 404);
   } finally { evil.close(); await gw.close(); }
   const gw2 = await gateway('nohub');
   try {
     assert.equal((await gw2.claim(authenticator())).status, 200);
-    await until(async () => (await gw2.req('GET', '/instances.json')).body === '{"hub":1,"instances":[]}', 'an empty list when nothing holds the port');
+    await until(async () => (await gw2.req('GET', '/instances.json')).body === '{"hub":1,"instances":[],"down":true}', 'an empty list when nothing holds the port');
     assert.equal((await gw2.req('GET', '/')).status, 200, 'and the page, with its Terminal tab, on first boot');
   } finally { await gw2.close(); }
 });
@@ -2900,7 +2900,7 @@ test('serve writes image: <release> at start, or image: none', { timeout: 60000 
     try {
       const started = Date.now();
       while (!/^image: /m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
-      // before listening: the line is there even when the port can't be had
+      // written before it listens (the code's order): it comes ahead of the listen line
       while (!/^gateway: .* on :/m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
       assert.ok(out.indexOf('image: ') < out.search(/^gateway: .* on :/m), `the image line comes before the listen line: ${out}`);
       return /^image: .*$/m.exec(out)?.[0] ?? `(no image line: ${out})`;
