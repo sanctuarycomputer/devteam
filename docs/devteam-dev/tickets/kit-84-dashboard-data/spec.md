@@ -114,15 +114,17 @@ The overhaul's page tickets (kit-87 onward, kit-93, kit-94) each draw from data 
     The plan lists every description, so the reviewers check each one against the code.
 - **What is shown** (F2-1): never a credential, by construction rather than by scrubbing. Each key's `show` is one of four kinds:
   - `value`: the value as main has it, for the 29 keys of a narrow shape. The kit does not type-check settings (`loadSettings` merges the JSON as it is; `validate` checks little), so the serializer checks it itself (F3-2). A `value` key is shown only when both hold:
-    - **Its shape is right for the key:**
-      - a finite number for the counts, minutes, hours, days, the ceiling and the port;
+    - **Its shape is right for the key (F4-1, F4-2).** Wherever a key's default is `null`, `null` is allowed:
+      - a finite number, or `null`, for the counts, minutes, hours, days, the ceiling, the port and `max_active_planners`;
       - a boolean for `merge_admin`;
       - one of the known words for `forge`, `merge_method` and `upstream_sync`;
-      - `'tag'`, `'merge'`, `{ branch }` or `{ on, paths }` for `release`, with no other key;
-      - `/^v\d+\.\d+\.\d+$/` or null for `upstream_base`;
-      - a name (`/^[A-Za-z0-9._\/-]{1,100}$/`) for `main_branch`, `tmux_session` and `project`;
-      - a list of such short strings for `usage_sources`, `ignored_checks`, `worktree_files` and `worker_denied_commands` (which allows `*` and spaces);
+      - for `release`, whatever the kit's own `releaseProblem(r)` accepts (it returns `null`): `'tag'`, `'merge'`, `{ branch }`, or `{ on: 'merge' }` with optional glob `paths`. It refuses any other key;
+      - `/^v\d+\.\d+\.\d+$/` or `null` for `upstream_base`;
+      - a name (`/^[A-Za-z0-9._\/-]{1,100}$/`) or `null` for `main_branch`, `tmux_session` and `project`;
+      - a list of one-line strings (printable, no control or bidi characters, at most 100 long) for `usage_sources`, `ignored_checks`, `worktree_files` and `worker_denied_commands`. Forge check names have spaces, parentheses, commas and slashes, and the deny patterns have `*` and `+`;
       - an object of class names to the numbers 1 to 3 for `autonomy_ceilings`.
+
+      **Every default passes.** On a fresh project, no `value` key is withheld, and each shows its default. An acceptance check asserts this for all 29.
     - **No string in it is changed by the kit's own scrubber** (`scrubText`: tokens with known prefixes, long random strings, credentials in URLs, secret-named keys).
 
     Otherwise the entry is shown as `hidden`, with `withheld: true`, so the page can say "not shown: it doesn't look like a plain value".
@@ -177,6 +179,7 @@ All of these are in `test/dashboard-data.test.mjs`, green in CI at the PR head.
    - `settings_all` has one entry for every key in the union (44 today), in group order. Each entry has key, group, name, description, shown, value, set, default and owner_only.
    - A value set on main shows with `set: true`. A working-tree-only edit shows in `local`, not in `value`.
    - Owner settings carry their class. A `names` key shows only names, and a `count` key only its count.
+   - On a fresh project with no settings changed, none of the 29 `value` keys is withheld, and each `value` equals its kit default (F4-1).
    - Credentials are also planted in `value` keys: an off-shape `release` (`{ branch: 'production', token: '…' }`) and `main_branch` set to a `ghp_…` token. Both come back `withheld: true` with `value: null`.
    - No planted credential appears anywhere in `settings_all`.
    - A missing or stale `SETTINGS_WORDS` entry fails, naming its key. A key read in the code and missing from the union fails too.
