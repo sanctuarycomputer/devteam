@@ -760,11 +760,24 @@ test('bye shows its reason in words, closes the socket, and nothing reconnects u
     await until(() => !c.open, 'the page to close its socket');
     assert.equal(c.closedByPage, true, 'the page closed it');
     await noHandBack(p);
+    assert.equal(await p.ev(`document.getElementById('chip').hidden`), true, 'no Live or Reconnecting… once it has ended');
     await sleep(3000);
     assert.equal(srv.conns.length, 1, 'no new socket by itself');
     await p.click('#again');
     await srv.waitConn(2);
     await until(async () => (await p.ev(`document.getElementById('bye').hidden`)), 'the panel gone');
+    await until(async () => !(await p.ev(`document.getElementById('chip').hidden`)) && (await text(p, 'chip')) === 'Live', 'the chip back, Live');
+    // why is 1 to 200 characters (code points, as the schema counts them): 200 emoji is a bye, 201 letters isn't
+    srv.last().send({ t: 'bye', why: 'x'.repeat(201) });
+    await sleep(400);
+    assert.equal(await p.ev(`document.getElementById('bye').hidden`), true, 'a why of 201 is no bye');
+    srv.last().send({ t: 'bye', why: '' });
+    await sleep(400);
+    assert.equal(await p.ev(`document.getElementById('bye').hidden`), true, 'nor an empty one');
+    srv.last().send({ t: 'bye', why: '😀'.repeat(200) });
+    await until(async () => !(await p.ev(`document.getElementById('bye').hidden`)), 'a why of 200 emoji is a bye');
+    await p.click('#again');
+    await srv.waitConn(3);
     srv.last().send({ t: 'bye', why: '<b>x</b><img src=x>' });
     await until(async () => (await text(p, 'bye-why')) === '<b>x</b><img src=x>', 'the reason, as text');
     assert.equal(await p.ev(`document.querySelectorAll('b, img').length`), 0, 'no element made of it');
@@ -843,10 +856,27 @@ test('what the owner types goes nowhere else: not queued while down, not logged,
 async function pageMemory(p) {
   const strings = [];
   const props = async (objectId) => (await p.send('Runtime.getProperties', { objectId, ownProperties: true }));
+  const fns = new Set(); // each function's closure is walked once, by where it is in the source
+  const scopes = async (fn, depth) => {
+    const internal = (await props(fn.objectId)).internalProperties ?? [];
+    const at = internal.find((d) => d.name === '[[FunctionLocation]]')?.value?.value;
+    const key = at ? `${at.scriptId}:${at.lineNumber}:${at.columnNumber}` : null;
+    if (!key || fns.has(key)) return;
+    fns.add(key);
+    const list = internal.find((d) => d.name === '[[Scopes]]');
+    if (!list?.value?.objectId) return;
+    for (const sc of (await props(list.value.objectId)).result ?? []) {
+      if (!sc.value?.objectId || /^Global/.test(sc.value.description ?? '')) continue;
+      for (const v of (await props(sc.value.objectId)).result ?? []) if (v.value) { if (v.value.type === 'string') strings.push(v.value.value); await walk(v.value, depth + 1); }
+    }
+  };
   const walk = async (obj, depth) => {
-    if (!obj || depth > 4) return;
+    if (!obj || depth > 6) return;
     if (obj.type === 'string') return void strings.push(obj.value);
+    if (obj.type === 'function' && obj.objectId) return scopes(obj, depth);
     if (obj.type !== 'object' || !obj.objectId || obj.subtype === 'node' || obj.subtype === 'null' || obj.className === 'Window') return;
+    // an event kept after its handler returned keeps what was typed in its getters
+    if (/Event$/.test(obj.className ?? '')) return void strings.push(`a kept ${obj.className}`);
     const r = await props(obj.objectId);
     const members = [];
     for (const d of r.result ?? []) if (d.value) { if (d.value.type === 'string') members.push(d.value.value); await walk(d.value, depth + 1); }
@@ -872,22 +902,25 @@ async function pageMemory(p) {
   const pageScript = (await p.send('DOMDebugger.getEventListeners', { objectId: canvasId })).listeners[0].scriptId;
   const own = listeners.filter((l) => l.scriptId === pageScript && l.handler?.objectId);
   assert.ok(own.length >= 10, `the page's listeners are found (${own.length})`);
-  for (const l of own) {
-    const scopes = ((await props(l.handler.objectId)).internalProperties ?? []).find((d) => d.name === '[[Scopes]]');
-    if (!scopes?.value?.objectId) continue;
-    for (const sc of (await props(scopes.value.objectId)).result ?? []) {
-      if (!sc.value?.objectId || /^Global/.test(sc.value.description ?? '')) continue;
-      for (const v of (await props(sc.value.objectId)).result ?? []) if (v.value) { if (v.value.type === 'string') strings.push(v.value.value); await walk(v.value, 1); }
-    }
-  }
+  for (const l of own) await scopes(l.handler, 0);
   await p.send('Runtime.releaseObjectGroup', { objectGroup: 'walk' });
   return strings;
 }
 
-test('nothing typed is kept in page memory after it is sent', { skip, timeout: 90000 }, async () => {
+test('nothing typed is kept in page memory after it is sent', { skip, timeout: 120000 }, async () => {
   const srv = await startServer();
-  const { p, c } = await ready(srv);
+  const { p, c: first } = await ready(srv);
   try {
+    // typed while the socket is down: dropped, and kept nowhere either
+    srv.refuse(true);
+    first.close();
+    await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'Reconnecting…');
+    await p.ev(`document.getElementById('screen').focus()`);
+    await p.type('Ю');
+    srv.refuse(false);
+    await srv.waitConn(2, 8000);
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    const c = srv.last();
     await clip(p, srv, 'pasted-Щ');
     await ctrlV(p);
     await p.ev(`document.getElementById('screen').focus()`);
@@ -896,8 +929,12 @@ test('nothing typed is kept in page memory after it is sent', { skip, timeout: 9
     assert.deepEqual((await p.send('Runtime.globalLexicalScopeNames', {})).names, [], 'no top-level let, const or class');
     const strings = await pageMemory(p);
     assert.ok(strings.length > 0, 'the walk read something');
-    const kept = strings.filter((x) => x.includes('Ж') || x.includes('Щ'));
-    assert.deepEqual(kept, [], 'neither marker in any variable, Set, Map or array the page\'s listeners reach');
+    const kept = strings.filter((x) => /[ЖЩЮ]/.test(x) || x.startsWith('a kept '));
+    assert.deepEqual(kept, [], 'no marker, and no event, in any variable, closure, Set, Map or array the page\'s listeners reach');
+    // nor on the window or any element, as a property of its own
+    assert.deepEqual(await p.ev(`[window, ...document.querySelectorAll('*')].flatMap((o) => Object.keys(o).map((k) => {
+      try { const v = o[k]; return typeof v === 'string' ? v : v && typeof v === 'object' && !(v instanceof Node) && v !== window ? JSON.stringify(v) : ''; } catch { return ''; }
+    })).filter((v) => /[ЖЩЮ]/.test(v))`), [], 'no marker on the window or an element');
   } finally { await shut(p); await srv.close(); }
 });
 

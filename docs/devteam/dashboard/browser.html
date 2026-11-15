@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-8GoKaTCryy4Nv4PCB8CRLtl0MFBwDBDAVxrab20qHWo='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-HBuAxLnf+sD9cqBvPcxM1gWAgPs/BJWqlqqMmZq/uMI='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -149,7 +149,8 @@
     if (m.t === 'frame') draw(m, sock);
     else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
     else if (m.t === 'bye') {
-      if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || m.why.length < 1 || m.why.length > 200) return;
+      // 1 to 200 characters, counted as the schema counts them: by code point
+      if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || !int([...m.why].length, 1, 200)) return;
       ended = true;
       $('bye-why').textContent = m.why;
       $('bye').hidden = false;
@@ -168,6 +169,9 @@
     const s = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
     socket = s;
     drawnSeq = -1;
+    // nothing held down on an earlier socket gets its up on this one
+    press = null;
+    held.clear();
     s.addEventListener('open', () => { if (s !== socket) return; wait = 500; opened = true; chip('Live'); area.classList.remove('down'); });
     s.addEventListener('message', (e) => { if (s === socket && typeof e.data === 'string') onMessage(e.data, s); });
     s.addEventListener('close', () => {
