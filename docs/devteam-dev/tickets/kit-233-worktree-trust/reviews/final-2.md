@@ -7,6 +7,6 @@ I read final-1 and its dispositions, and the diff from 0d171ca to b44ec60. Outsi
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | Clarity | devteam.mjs collectMetrics, worker `blocked-prompt` next step | The new clause leaves out its verb ("... need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree"), so it can read as a relative clause with no main verb. "and a folder-trust dialog means agent_trust_command could pre-trust the worktree", the planner's wording, would read plainly. | |
+| F1 | Suggestion | Clarity | devteam.mjs collectMetrics, worker `blocked-prompt` next step | The new clause leaves out its verb ("... need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree"), so it can read as a relative clause with no main verb. "and a folder-trust dialog means agent_trust_command could pre-trust the worktree", the planner's wording, would read plainly. | wont-fix: the clause shares the sentence verb means (a gapped clause, as in A means X, and B that Y); a reword would void this verdict for no change in sense |
 
 Verdict: APPROVE b44ec60b76c7ac9ac3f7431eeec1bf8a8569e71b
