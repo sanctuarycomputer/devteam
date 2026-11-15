@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { canDrive, cleanup } from './lib/chrome.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const lib = (f) => JSON.stringify(pathToFileURL(path.join(here, 'lib', f)).href);
@@ -34,8 +34,12 @@ async function child(t, body) {
   const file = path.join(dir, 'child.test.mjs');
   fs.writeFileSync(file, body);
   const env = { ...process.env, HOME: dir };
-  // a test file of its own, not a part of this one's run (node marks its test files' environment)
-  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') || k.startsWith('TMUX') || k === 'NODE_TEST_CONTEXT') delete env[k];
+  // a test file of its own, not a part of this one's run (node marks its test files' environment), and
+  // no session's: every DEVTEAM_ variable goes but the test runner's own (DEVTEAM_TEST_SHARED_TMP, where
+  // every file's port claims are, so the child's block is one no other file holds) and the machine
+  // stand-ins test.yml sets
+  const keep = (k) => k.startsWith('DEVTEAM_TEST_') || ['DEVTEAM_CGROUP', 'DEVTEAM_MEMINFO', 'DEVTEAM_BOX'].includes(k);
+  for (const k of Object.keys(env)) if ((k.startsWith('DEVTEAM_') && !keep(k)) || k.startsWith('TMUX') || k === 'NODE_TEST_CONTEXT') delete env[k];
   const c = spawn(process.execPath, ['--test', '--test-reporter=tap', file], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const kill = (pid) => { try { process.kill(pid, 'SIGKILL'); } catch {} };
   let stdout = '', stderr = '', timedOut = false;
@@ -149,8 +153,10 @@ test('a removal registered first throws', async (t) => {
   const root = bareProject(base, 'teardown');
   const { dash } = await dashboardOnFreePort(root, process.env);
   later(() => dash.stop());
+  say({ dash: dash.p.pid }); // each said as it starts: a hang after it leaves nothing the parent can't find
   const kid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   later(() => kid.kill('SIGKILL'));
+  say({ kid: kid.pid });
   const srv = http.createServer(() => {});
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   later(() => new Promise((r) => { srv.closeAllConnections?.(); srv.close(r); }));
@@ -158,10 +164,10 @@ test('a removal registered first throws', async (t) => {
   later(() => { throw new Error('a stop that throws'); });
   const chrome = await openChrome();
   later(() => chrome.close());
+  say({ chrome: chrome.pid });
   const p = await chrome.newPage();
   later(() => p.close());
   await p.send('Page.navigate', { url: 'data:text/html,<p id=x>here</p>' });
-  say({ dash: dash.p.pid, kid: kid.pid, chrome: chrome.pid });
 });
 `);
   assert.equal(r.timedOut, false, `the file ended by itself, not at the 120 s limit: ${r.out}`);
@@ -172,4 +178,21 @@ test('a removal registered first throws', async (t) => {
   await gone(-r.pids.dash, "the dashboard's process group");
   await gone(r.pids.kid, 'the child process');
   await gone(-r.pids.chrome, "Chrome's process group");
+});
+
+test("a page's connection closed fails the calls waiting on it, and every call after, at once and saying so", { skip: needsChrome, timeout: 60000 }, async (t) => {
+  const later = cleanup(t);
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  assert.equal(await p.ev('1 + 1'), 2);
+  // a call Chrome will never answer, then the page's socket closed under it
+  const waiting = p.ev('new Promise(() => {})');
+  const failed = assert.rejects(waiting, /Runtime\.evaluate: Chrome's page connection closed \(code \d+/);
+  p.close();
+  const t0 = Date.now();
+  await failed;
+  assert.ok(Date.now() - t0 < 5000, 'failed when the socket closed, not at the 30 s limit');
+  await assert.rejects(p.send('Page.enable'), /Page\.enable: Chrome's page connection closed/);
 });

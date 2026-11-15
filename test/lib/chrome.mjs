@@ -37,10 +37,10 @@ export async function openChrome() {
   proc.unref();
   proc.stderr.unref();
   let closing = null;
-  // Waiting for its exit holds this process's event loop (the process is held again for it): with
-  // nothing else to hold it, a Chrome slow to act on SIGTERM would let the loop empty while close() is
-  // pending, and node would cancel every test left in the file. SIGKILL after 3 s; if even that brings
-  // no exit in 5 s more, close() ends anyway.
+  // A timer is pending for as long as close() is: SIGKILL at 3 s, then a 5 s bound on the exit. Chrome
+  // and its stderr are unref'd, so without one a Chrome slow to act on SIGTERM would let this process's
+  // event loop empty while close() waits for its exit, and node would cancel every test left in the
+  // file. If even SIGKILL brings no exit in 5 s, close() ends anyway.
   const close = () => (closing ??= new Promise((r) => {
     let last = null;
     const hard = setTimeout(() => { signal('SIGKILL'); last = setTimeout(done, 5000); }, 3000);
@@ -50,14 +50,12 @@ export async function openChrome() {
       signal('SIGKILL'); // whatever helpers outlived it
       process.off('exit', atExit);
       proc.off('exit', done);
-      proc.unref(); // ended by the bound, the process handle must not hold the loop either
       proc.stderr.destroy();
       try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
       r();
     }
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
     if (proc.exitCode !== null || proc.signalCode !== null) return done();
-    proc.ref();
     proc.once('exit', done);
     signal('SIGTERM');
   }));
