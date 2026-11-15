@@ -2,48 +2,55 @@
 
 ## TL;DR
 
-- One new verb, `goal order`, in `cmdGoal`: the owner's ids, or the supervisor's `--approved <qid>`; both go through one `applyGoalOrder`.
-- `ask --class goal-change --order '[…]'` records `order` on the question; `questionView` carries it.
-- The fold checks a supervisor's order line with a new `goalOrderProblem`; the one-goal `goalChangeProblem` path is untouched.
+- One new verb, `goal order`, in `cmdGoal`: the owner's ids, or the supervisor's `--approved <qid>`; both go through one `applyGoalOrder`, planned by one `goalOrderPlan` the fold shares.
+- `ask --class goal-change --order '[…]'` records `order` on the question (log.schema.json gains the field); `questionView` carries it.
+- The fold checks a supervisor's order line exactly with a new `goalOrderProblem` and applies its priority at the owner's rank; the one-goal `goalChangeProblem` path is untouched.
 - The dashboard gains the `goal-order` action; the hub does not.
 - supervisor.md gains a goal-change row in the question-kinds table.
-- One new test file, `test/goal-order.test.mjs`, written first (TDD), run alone at `--test-concurrency=2`.
+- One new test file, `test/goal-order.test.mjs`, written first (TDD) per task, run alone at `--test-concurrency=2`.
 
-Files (all inside `touches`): `docs/devteam/scripts/devteam.mjs`, `docs/devteam/process/supervisor.md`, `test/goal-order.test.mjs`. Records under `docs/devteam-dev/tickets/kit-235-goal-order-command/`.
+Files: `docs/devteam/scripts/devteam.mjs`, `docs/devteam/process/supervisor.md`, `test/goal-order.test.mjs` (touches), and `docs/devteam/schema/log.schema.json` (added by ruling m-20261115-093203792). Records under `docs/devteam-dev/tickets/kit-235-goal-order-command/`.
 
-## Task 1: the owner's `goal order` and the fold (TDD)
+## Task 1: the owner's `goal order` (TDD)
 
-1. Write `test/goal-order.test.mjs` with `fleetFixture` (CLI only): goals A, B, C, D (C, D ready via `goal decide approve --force`), priorities 1..4; a met goal M (owner `goal status M met --force` or via the log as goal-met.test does) and a let-go goal L.
-   - owner `goal order C A`: C=1, A=2, B=3, D=4; lines: one per named goal (2) and one per left-out goal whose priority changed (B 2→3, D stays 4: none) → 3 goal lines with priority, 1 act class `goal-order` by owner.
-   - owner `goal order A M` → exit 1, stderr names M "is met", nothing written (line count unchanged); same for L "is let go"; unknown id and a duplicate refused.
-   - supervisor (`DEVTEAM_ROLE=supervisor`) `goal order A B` → refused.
-2. Run it: fails (no verb).
-3. Implement in `devteam.mjs`:
-   - `liveGoalsForOrder()` and `goalOrderRefusal(ids)` (unknown, duplicate, Upkeep, met, abandoned) near `goalChangeProblem`.
-   - `goalOrderPlan(ids)`: `[{ id, priority }]` for the named goals, then left-out live goals with a numeric priority sorted by (priority, created_at), numbered n+1…, kept only where it changes.
-   - `applyGoalOrder(ids, by, approved)`: appends the lines (`{ type: 'goal', op: 'set', id, priority, ...(approved ? { approved } : {}) }`), then the act (`class: 'goal-order'`, `refs`, `what`, `reversible: true`, `approved_by` when approved), prints the order.
-   - `cmdGoal` `sub === 'order'`: no `--approved` → `ownerWriter('the supervisor asks one goal-change --order question, then goal order --approved <qid>')`, ids from `positional.slice(1)`.
-   - Fold: before the existing supervisor check at the goal-past-draft branch, when `l.approved` names a question with an `order`, use `goalOrderProblem(q, obj.id, l, seen)` and skip `goalApprovals`; keep a `orderApprovals` map qid → Set of goal ids applied.
-   - `questionView`: `order: q.order ?? null`.
-   - Help lines for `goal order`.
+1. Test, with `fleetFixture` (CLI only): goals A, B, C, D at priorities 1..4 (C, D approved with `goal decide approve --force`), a met goal M (`goal status M met --force`), a let-go goal L.
+   - owner `goal order C A`: C=1, A=2, B=3, D=4; written: goal lines C, A (named) and B (2→3), none for D; each sets only priority; one act class `goal-change` by the owner, refs [C, A, B]; nothing else.
+   - refused, nothing written: a met goal named (stderr "M is met"), a let-go one ("L is let go"), a duplicate, an unknown id, no ids (usage).
+   - every live goal named: no left-out lines.
+   - the supervisor (`DEVTEAM_ROLE=supervisor`) without `--approved`: refused, pointing at `goal-change --order`.
+2. Run: fails (no verb).
+3. Implement in `devteam.mjs`, near `goalChangeProblem`:
+   - `orderableGoals(objs)`: goals not met/abandoned, not Upkeep.
+   - `goalOrderRefusal(ids, objs)`: unknown, duplicate, Upkeep, met (`is met`), abandoned (`is let go`); null when fine.
+   - `goalOrderPlan(ids, objs)`: `[{ id, priority }]`: named i+1; left-out orderable goals with a numeric priority sorted by (priority, created_at), numbered n+1…, kept only where it changes. Named goals always listed.
+   - `applyGoalOrder(ids, by, approved)`: one line per plan entry (`{ type: 'goal', op: 'set', id, priority, ...(approved ? { approved } : {}) }`), then the act (`class: 'goal-change'`, refs, what, `reversible: true`, `approved_by` when approved), prints `1 <id> <title>` per named goal.
+   - `cmdGoal` `sub === 'order'`: without `--approved` → `ownerWriter(...)`, ids from `positional.slice(1)`, refusal, apply, `nudgeSupervisor`. Help lines.
 4. Run the file: passes. Commit. Review `reviews/task-1.md`.
 
-## Task 2: the question and the supervisor's `--approved`
+## Task 2: the question, `--approved`, and the fold
 
-1. Tests: `ask --class goal-change --order '["C","A","B"]' --recommendation "Yes, this order" --stake 2 --urgency 1` → question with `order`, no `goal`; `--order` with `--goal`, with `--change`, on another class, with one id, with a met goal → refused. Owner answers something else → `goal order --approved Q` refused (not its recommendation). New question answered with the recommendation (`answer Q "Yes, this order"` as owner) → `goal order --approved Q` applies exactly (priorities checked); `goal order --approved Q B A C` (another order) on a fresh answered question refused, and the same ids as proposed accepted; second use of Q refused. Hand-written supervisor line with `approved: Q` and a wrong priority → ignored by the fold (`goal show` keeps the old priority). One-goal path: `ask --class goal-change --goal D --change '{"priority":9}'`, answered, `goal set D --approved` applies; again → refused with today's message.
-2. Implement: `ask` reads `--order` (`goalOrderFlag(cls)`), refusing as the spec says; adds `order` to the question line. `cmdGoal` order with `--approved`: `supervisorOnly('goal order --approved')`, `goalOrderApproval(qid, ids)` checks (question, class, order, answered, matched, unused, ids equal), then `goalOrderRefusal(order)` and `applyGoalOrder(order, 'supervisor', qid)`.
+1. Tests:
+   - `ask --class goal-change --order '[D,C,A]' --recommendation "Yes, this order"` → question with `order`, `goal` null. Refused: `--order` with `--goal`, with `--change`, on another class, one id, a met goal, a duplicate.
+   - `goal order --approved Q` before an answer: refused (not answered); answered otherwise: refused (not its recommendation), nothing applied.
+   - Answered with the recommendation on a fresh question (asked with another wording or `--new-because` if the earlier-answer check refuses the repeat): another order refused, a prefix refused, the same ids or none apply; priorities exact, lines carry `approved`, one act with `approved_by`; a second use refused (`already authorised`); `goal set <g> --approved <order qid>` refused.
+   - Rank: the owner runs `goal order` first, then an approved order on the same goals applies (priorities move).
+   - Fold: hand-written supervisor lines under an answered order question: a wrong priority, a line that also sets `title`, a left-out goal at a number other than its place, a goal set twice under the answer (second ignored): all ignored; `goal show` keeps the values.
+   - `questionView.order` is null on a one-goal goal-change question.
+   - Schema: hand-written question lines with `order` holding a duplicate, or a string, fail `log-check` (exit 1); with `order` deleted from the fixture's copy of log.schema.json (an older reader), `log-check` exits 0 and `questions --json` still lists the question.
+2. Implement: schema `question.order` (array of goal-id strings, minItems 2, uniqueItems) and the two descriptions; `uniqueItems` in `schemaErrors`; `questionView` `order`; `goalOrderFlag(cls)` in `ask` (refusals as the spec), `order` on the question line; `cmdGoal` order `--approved`: `supervisorOnly`, `goalOrderApproval(qid, ids)` (question, class, order, answered, matched, unused, ids equal the order when given), then refusal, then `applyGoalOrder(order, 'supervisor', qid)`; the fold: `orderPlans` map qid → { plan Map, done Set }, `goalOrderProblem`, owner rank for a passing line, `goalApprovals` untouched for order answers.
 3. Run the file; commit; `reviews/task-2.md`.
 
 ## Task 3: channels and supervisor.md
 
-1. Tests (one dashboard, `bareProject` + `dashboardOnFreePort`, env with `DEVTEAM_HUB_PORT` and `DEVTEAM_PORT_BASE` from `PORTS` offsets unused by other files, `DEVTEAM_*` unset): POST `/api/goal-order` with Origin/sec-fetch-site same-origin and `{ ids: [B, A] }` → 200, and the log's goal lines carry `channel: 'dashboard'`; a bad body (`{ ids: 'x' }`) → 400; POST to the hub's `/operator/goal-order` → refused (405), after waiting for the hub to answer `/instances.json`. supervisor.md: the test reads the file and matches the goal-change row's `--order` sentence.
-2. Implement: `ACTIONS['goal-order']` in the dashboard; the supervisor.md row.
+1. Tests: one dashboard (`bareProject` + `dashboardOnFreePort`, `DEVTEAM_HUB_PORT` = PORTS+0, `DEVTEAM_PORT_BASE` = PORTS+1, this file's own block): POST `/api/goal-order` `{ ids: [B, A] }` same-origin → 200, the lines are the owner's on channel `dashboard`; bad bodies (`ids` a string, empty, a non-id, 51 ids, missing) → 400; the hub's POST `/operator/goal-order` (after the hub answers `/instances.json`) → refused (405), nothing applied. supervisor.md: the goal-change row names `--order`, `goal order --approved`, carries no `--goal`, and "never one question per goal".
+2. Implement: `ACTIONS['goal-order']` (`Array.isArray(b.ids)`, 1–50, each `ID.test`) → `['goal', 'order', ...ids]`; the supervisor.md row.
 3. Run the file; commit; `reviews/task-3.md`.
 
 ## Verification and finish
 
-`verification.md` with a row per done-when (command, result, commit). Merge `origin/main`, run the file again, push, PR, final review from a fresh reviewer, `check-ticket`, CI via `gate ci -- <real command>` (memory), merge-request.
+`verification.md` with a row per done-when (command, result, commit). Merge `origin/main`, run the file again, push, PR, final review from a fresh reviewer, `check-ticket`, CI via `gate ci -- <real command>`, merge-request.
 
 ## Rulings
 
 - m-20261115-092227487-supervisor: combined spec+plan review; isolated kit runs; touched test files only at `--test-concurrency=2`.
+- m-20261115-093128804-kit-235-goal-order-command (design-change) answered by m-20261115-093203792-supervisor: docs/devteam/schema/log.schema.json is in touches. `order` stays a plain array of goal ids, unique, at least two. A schema test must refuse a duplicate and an unknown shape, and an older reader must still pass a log with the field in it.

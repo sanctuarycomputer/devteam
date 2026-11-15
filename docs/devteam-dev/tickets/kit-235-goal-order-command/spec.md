@@ -13,23 +13,29 @@ A supervisor had to ask six goal-change questions to put the owner's priorities 
 - Owner only (`ownerWriter`): the owner's terminal or the dashboard. In an agent session (`DEVTEAM_ROLE` set, or the supervisor's pane) it is refused, as every owner command is.
 - Names at least one goal; each id is a goal of this log, named once. A goal whose status is `met` or `abandoned` is refused with its status (`<id> is met`, `<id> is let go`); Upkeep is refused (it has no place in the order); an unknown id or a duplicate is refused. Nothing is written when any is refused.
 - The named goals get priority 1..n in the order given. The live goals left out (status draft or ready, not Upkeep, with a numeric priority) keep their relative place after the named ones: priority n+1, n+2, … in their current order (by priority, then by when they were created). A left-out goal with no priority stays without one.
-- One goal line (`op: set`, `priority`) per named goal, and one per left-out goal whose priority changes; then one act (`class: goal-order`, `refs` every goal written, `what` the order). For the owner the act is a record of what the owner did (`created_by: owner`), not a call.
-- Prints the new order.
+- One goal line (`op: set`, `priority`) per named goal, and one per left-out goal whose priority changes; then one act (`class: goal-change`, `refs` every goal written, `what` the order). goal-change is already an owner-only class in constitution.md, so no new class. For the owner the act is a record of what the owner did (`created_by: owner`), not a call.
+- Prints the new order. The owner's order nudges the supervisor (`nudgeSupervisor`), as `goal decide` does.
 
 ### 2. One goal-change question that proposes a whole order
 
 - `ask --class goal-change --order '["g-…","g-…",…]' --recommendation "…" …` records `order` on the question; no `--goal`, no `--change` (each refused alongside `--order`). The order must be a JSON array of at least two distinct goal ids, each live (the same refusals as §1). `--order` on any other class is refused.
 - `questionView` carries `order` (null when none), so the Inbox, `questions --json` and the fold see it.
+- The log schema gains `question.order` (an array of at least two goal ids; part of what the question's hash covers, like `change`), and its prose is brought in line: `goal.approved` says an order answer authorises one set per goal it orders, and the top-level rule names the order question. The schema file was added to touches by ruling m-20261115-093203792. The field is `{ type: array, items: string matching a goal id, minItems: 2, uniqueItems: true }`; the kit's validator (`schemaErrors`) learns `uniqueItems`, so a duplicate is refused on write and in log-check.
+- An older reader (a kit whose schema lacks `order`) strips the field as a newer kit's (parseLines' rule) and log-check passes. On such a kit the order question's hash differs, so it shows unanswered, and the supervisor's order lines are ignored with a reason; a mixed fleet reads the new order only once upgraded. Said here, not defended.
 
 ### 3. The supervisor's `goal order --approved <qid> [<g-id> …]`
 
-- Supervisor only (`supervisorOnly`). Applies the question's order exactly as §1 does (same lines, same act with `approved_by: <qid>` and class `goal-order`).
+- Supervisor only (`supervisorOnly`). Applies the question's order exactly as §1 does (same lines, each with `approved: <qid>`, and the act with `approved_by: <qid>`, class `goal-change`).
 - Refused unless: the question exists, is class goal-change and carries an order; it is answered by the owner; the answer is its recommendation (`matched`); the answer has not been used (no goal line with `approved: <qid>`, no act with `approved_by: <qid>`); any ids given equal the proposed order exactly (no ids applies the proposed order); and every goal in the order is still live.
 - The supervisor without `--approved` is refused, pointing at `ask --class goal-change --order`.
 
 ### 4. The fold accepts order lines
 
-A supervisor's line on a goal past draft is ignored today unless `goalChangeProblem` passes for its `approved` question, and `goalApprovals` lets one answer authorise one goal line. Lines written under an order question are checked by a new `goalOrderProblem` instead: the question is a matched, answered goal-change question with an order; the line sets only `priority` (plus envelope and `approved`); a goal named in the order gets its index + 1; a goal left out gets a priority greater than the order's length; and each goal is set at most once under that answer. `goalChangeProblem` and the one-goal path are unchanged for questions without an order.
+A supervisor's line on a goal past draft is ignored today unless `goalChangeProblem` passes for its `approved` question, and `goalApprovals` lets one answer authorise one goal line. Lines written under an order question are checked by a new `goalOrderProblem` instead: the question is a matched, answered goal-change question with an order; the line sets only `priority` (plus envelope and `approved`); the goal is live at that point in the fold; and its priority is exactly what the order plans for it. The plan is computed once per answer, when the fold meets its first line, from the goals as the fold holds them then, by the same `goalOrderPlan` the command uses (named goals index + 1; left-out live goals with a priority n+1… in their order), so a left-out goal's number is checked exactly too. Each goal is set at most once under that answer, and a goal the plan doesn't list is refused. `goalChangeProblem` and the one-goal path are unchanged for questions without an order.
+
+Rank: the fold applies a set only if no higher-ranked writer set the field, and the owner outranks the supervisor. An order line that passes `goalOrderProblem` carries the owner's own answer, so its `priority` applies at the owner's rank; otherwise an owner's earlier priority (from `goal order`, the dashboard, or `goal set --owner`) would silently win over the order the owner later approved, while the answer counted as used. Only order lines get this; the one-goal path keeps its rank as today (out of scope).
+
+Not defended: a line written by another hand between the command's first and last line could change the fold's plan for the remaining lines; the command writes its lines in one run, so this needs a concurrent owner write in that window, and the result is lines ignored (never a wrong priority applied).
 
 ### 5. Channels
 
@@ -39,19 +45,21 @@ A supervisor's line on a goal past draft is ignored today unless `goalChangeProb
 
 ### 6. supervisor.md
 
-A new row in the question-kinds table: `owner-decision`, `--class goal-change`: one goal's change with `--goal` and `--change`, applied with `goal set --approved`; to reorder several goals, one `--order` question applied with `goal order --approved`, never one question per goal.
+A new row in the question-kinds table: `owner-decision`, `--class goal-change`: one goal's change with `--goal` and `--change`, applied with `goal set --approved`; to reorder several goals, one `--order` question (which carries no `--goal`: the order names its goals) applied with `goal order --approved`, never one question per goal.
 
 ## Acceptance checks (the done-whens)
 
 1. `test/goal-order.test.mjs` passes in CI: the owner's `goal order A B C` sets priority 1..3 on A, B, C in that order, writing one goal line per named goal and one act; a left-out goal keeps its relative place after them (n+1…); a met or let-go goal named is refused with its status, and nothing is written.
 2. Same test: `ask --class goal-change --order '[…]' --recommendation …` records the order on one question, without `--goal`; `goal order --approved <qid>` applies exactly that order once the owner answers its recommendation; a second use of the same answer, an answer that isn't the recommendation, and any order other than the one proposed are refused.
+   Also: the owner orders goals first, then an approved order on the same goals applies (the rank case); a prefix of the proposed order is refused; hand-written supervisor lines under an order answer that set another field, set a goal twice, or give a left-out goal a priority other than its place are ignored.
 3. Same test: the dashboard's `POST /api/goal-order` (owner channel) applies an order and the line says channel `dashboard`; `goal order` from the supervisor (DEVTEAM_ROLE=supervisor) is refused; the hub's `POST /operator/goal-order` is refused.
 4. Same test: the one-goal path is unchanged: `ask --class goal-change --goal G --change '{"priority":…}'`, answered, then `goal set G --approved <qid>` applies, and a second `goal set` with it is refused (goalChangeProblem's messages as today); a hand-written supervisor goal line with an order question's `approved` but a wrong priority is ignored by the fold.
+   Also: a hand-written question line with a duplicate in `order`, or an order that is not an array of goal ids, fails log-check; with the field taken out of a copy of the schema (an older reader), log-check passes and the question still reads.
 5. supervisor.md's goal-change row says to ask one `--order` question to reorder several goals, never one question per goal.
 
 ## Contracts
 
-Provided: the `goal order` command (owner, and supervisor with `--approved`); the dashboard action `goal-order` `{ ids }` (consumed by kit-234); the question field `order`. Consumed: none new.
+Provided: the `goal order` command (owner, and supervisor with `--approved`); the dashboard action `goal-order` `{ ids }` (consumed by kit-234); the question field `order` in log.schema.json. Consumed: none new.
 
 ## Edge cases
 
@@ -69,3 +77,4 @@ Provided: the `goal order` command (owner, and supervisor with `--approved`); th
 ## Rulings
 
 - m-20261115-092227487-supervisor: write spec and plan before the first review, one combined review (spec-1.md and plan-1.md from one fresh session), approve-spec and approve-plan asked together; any kit run outside tests gets its own HOME, a DEVTEAM_HUB_PORT away from 4320, its own port and DEVTEAM_* unset; on this box run only the touched test files at --test-concurrency=2.
+- m-20261115-093128804-kit-235-goal-order-command (design-change) answered by m-20261115-093203792-supervisor: docs/devteam/schema/log.schema.json is in touches. `order` stays a plain array of goal ids, unique, at least two. A schema test must refuse a duplicate and an unknown shape, and an older reader must still pass a log with the field in it.
