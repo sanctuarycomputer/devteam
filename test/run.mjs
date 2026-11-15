@@ -192,6 +192,9 @@ export function realTmux(PATH) {
 // shim, never the real tmux, and its folder is gone, so it is refused.
 const shimText = (real) => `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(real || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`;
 export function ensureShim(shared, PATH) {
+  let isDir = false;
+  try { isDir = fs.statSync(shared).isDirectory(); } catch {}
+  if (!isDir) throw new UsageError(`DEVTEAM_TEST_SHARED_TMP (${shared}) is not a directory`);
   const text = shimText(realTmux(PATH));
   const uid = process.getuid ? process.getuid() : 0;
   const dir = path.join(shared, `devteam-test-tmux-shim-run-${uid}-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`);
@@ -199,6 +202,7 @@ export function ensureShim(shared, PATH) {
   // the shared dir may be /tmp, which other users write to: only a shim of this user's, that no one
   // else can change, is run
   const safe = (p) => { const st = fs.lstatSync(p); return !st.isSymbolicLink() && st.uid === uid && (st.mode & 0o022) === 0; };
+  // mkdir's mode is narrowed by the umask; the chmod sets it whole, so every runner makes the same dir
   try { fs.mkdirSync(dir, { mode: 0o755 }); fs.chmodSync(dir, 0o755); } catch (e) { if (e.code !== 'EEXIST') throw e; }
   if (!safe(dir) || (fs.existsSync(f) && !safe(f))) throw new UsageError(`unsafe shim at ${dir}: not this user's, or writable by others`);
   if (fs.existsSync(f) && fs.readFileSync(f, 'utf8') === text) return dir;
@@ -319,7 +323,8 @@ function cleanup(entry) {
 
 function startFile(p, run, ctx) {
   const dir = scratchDir();
-  const env = { ...process.env, TMPDIR: dir, DEVTEAM_TEST_SHARED_TMP: ctx.shared, PATH: `${ctx.shimDir}${path.delimiter}${process.env.PATH ?? ''}` };
+  // no empty entry: an empty PATH entry means the cwd
+  const env = { ...process.env, TMPDIR: dir, DEVTEAM_TEST_SHARED_TMP: ctx.shared, PATH: [ctx.shimDir, ...(process.env.PATH ?? '').split(path.delimiter)].filter(Boolean).join(path.delimiter) };
   // run under node --test (as run.test.mjs does), node would see this and skip the file's tests
   delete env.NODE_TEST_CONTEXT;
   const child = spawn(process.execPath, childArgs(p.file), { cwd: ROOT, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -371,6 +376,11 @@ async function runPool(items, limit, ctx) {
   return results;
 }
 
+// The steps of one run: the `alone` files one at a time, then every other file at the concurrency.
+export function schedule(plan, concurrency) {
+  return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency }].filter((st) => st.files.length);
+}
+
 async function runAll(opts, plan) {
   const shared = sharedDir(process.env);
   const ctx = { shared, shimDir: ensureShim(shared, process.env.PATH), tmux: realTmux(process.env.PATH), running: new Set(), repeat: opts.repeat, stopping: false };
@@ -389,8 +399,7 @@ async function runAll(opts, plan) {
   }
   const results = [];
   for (let run = 1; run <= opts.repeat && !ctx.stopping; run++) {
-    results.push(...await runPool(plan.filter((p) => p.group === 'alone').map((p) => [p, run]), 1, ctx));
-    results.push(...await runPool(plan.filter((p) => p.group !== 'alone').map((p) => [p, run]), opts.concurrency, ctx));
+    for (const st of schedule(plan, opts.concurrency)) results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx));
   }
   if (!plan.length) say('no files\n');
   else {

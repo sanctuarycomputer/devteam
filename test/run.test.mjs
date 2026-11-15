@@ -164,6 +164,12 @@ test('lastFinished', () => {
   assert.equal(R.lastFinished('TAP version 13\n# Subtest: first\n', 'test/x.test.mjs'), null);
 });
 
+test('alone files run first, one at a time', () => {
+  const plan = R.planRun({ files: ['test/search.test.mjs', 'test/bounds.test.mjs', 'test/kit.test.mjs'], groups: null, shard: null }, root);
+  const steps = R.schedule(plan, 3);
+  assert.deepEqual(steps.map((st) => [st.files.map((p) => p.file), st.limit]), [[['test/bounds.test.mjs'], 1], [['test/search.test.mjs', 'test/kit.test.mjs'], 3]]);
+});
+
 test('childArgs', () => {
   assert.deepEqual(R.childArgs('test/x.test.mjs'), ['--test', '--test-reporter=tap', 'test/x.test.mjs']);
 });
@@ -219,8 +225,12 @@ const fixtureEnv = (t, extra = {}, teardown = null) => {
   return { out, env: { DTR_FIXTURE_OUT: out, ...extra } };
 };
 
+// The one slow run (all of search.test.mjs, done-when 1) starts now and overlaps the tests below.
+const searchRun = runRunner(['test/search.test.mjs'], { deadline: 120000 });
+searchRun.catch(() => {});
+
 test('a passing file', async () => {
-  const r = await runRunner(['test/search.test.mjs']);
+  const r = await searchRun;
   assert.equal(r.code, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^# test\/search\.test\.mjs\n(TAP version 13\n)?/m);
   assert.match(r.stdout, /^summary: 1 file, concurrency 2$/m);
@@ -265,6 +275,58 @@ test('per-file temp and the shim', async (t) => {
   const again = await runRunner([fx('env.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: S } });
   assert.equal(again.code, 0, again.stdout + again.stderr);
   assert.equal(readJson(path.join(out, 'env.json')).PATH.split(path.delimiter)[1], second, 'the shim is reused');
+});
+
+test('an unsafe shim is refused, and so is a shared dir that does not exist', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const S = fresh('shared');
+  t.after(() => fs.rmSync(S, { recursive: true, force: true }));
+  const e = { ...env, DEVTEAM_TEST_SHARED_TMP: S };
+  assert.equal((await runRunner([fx('pass.mjs')], { env: e })).code, 0);
+  const dir = fs.readdirSync(S).map((f) => path.join(S, f)).find((f) => /devteam-test-tmux-shim-run-/.test(f));
+  assert.ok(dir, 'the shim dir was made');
+  for (const [what, target, mode] of [['a group-writable dir', dir, 0o775], ['a group-writable shim', path.join(dir, 'tmux'), 0o775]]) {
+    fs.chmodSync(target, mode);
+    const r = await runRunner([fx('pass.mjs')], { env: e });
+    assert.equal(r.code, 2, `${what}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /unsafe shim at /);
+    fs.chmodSync(target, 0o755);
+  }
+  fs.rmSync(path.join(dir, 'tmux'));
+  fs.symlinkSync('/bin/sh', path.join(dir, 'tmux'));
+  const linked = await runRunner([fx('pass.mjs')], { env: e });
+  assert.equal(linked.code, 2, 'a symlinked shim');
+  const gone = await runRunner([fx('pass.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: path.join(S, 'no-such-dir') } });
+  assert.equal(gone.code, 2, gone.stdout + gone.stderr);
+  assert.match(gone.stderr, /DEVTEAM_TEST_SHARED_TMP .* is not a directory/);
+  assert.deepEqual(fs.readdirSync(out), [], 'nothing ran');
+});
+
+test('socketsUnder finds the sockets inside a folder, never through a symlink', async (t) => {
+  const net = await import('node:net');
+  const d = fresh('sock');
+  const outside = fresh('sock-out');
+  const servers = [];
+  t.after(() => { for (const v of servers) v.close(); fs.rmSync(d, { recursive: true, force: true }); fs.rmSync(outside, { recursive: true, force: true }); });
+  const listen = (f) => new Promise((resolve) => { const v = net.createServer(); servers.push(v); v.listen(f, resolve); });
+  fs.mkdirSync(path.join(d, 'a', 'b'), { recursive: true });
+  await listen(path.join(d, 's1'));
+  await listen(path.join(d, 'a', 'b', 's2'));
+  await listen(path.join(outside, 's3'));
+  fs.writeFileSync(path.join(d, 'plain'), '');
+  fs.symlinkSync(outside, path.join(d, 'to-outside'));
+  fs.symlinkSync(path.join(outside, 's3'), path.join(d, 'link-to-s3'));
+  const real = fs.realpathSync(d);
+  assert.deepEqual(R.socketsUnder(d).sort(), [path.join(real, 'a', 'b', 's2'), path.join(real, 's1')]);
+  assert.deepEqual(R.socketsUnder(path.join(d, 'no-such')), []);
+});
+
+test('an unset PATH gives the child no empty PATH entry', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const r = await runRunner([fx('path.mjs')], { env: { ...env, PATH: undefined } });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const parts = readJson(path.join(out, 'path.json')).PATH.split(path.delimiter);
+  assert.ok(parts.every(Boolean), `no empty entry: ${parts.join(':')}`);
 });
 
 test('the default shared dir', async (t) => {
@@ -322,6 +384,14 @@ test('--timings writes wall seconds', async (t) => {
   assert.equal(typeof o.files['test/fixtures/run/pass.mjs'], 'number');
 });
 
+test('--timings keeps the longest of a file\'s runs', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const f = path.join(out, 'timings.json');
+  const r = await runRunner(['--repeat', '2', '--timings', f, fx('slow-once.mjs')], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.ok(readJson(f).files['test/fixtures/run/slow-once.mjs'] >= 1.5, 'the slow first run, not the quick second');
+});
+
 test('--list runs nothing', async (t) => {
   const { out, env } = fixtureEnv(t);
   const r = await runRunner(['--list', fx('env.mjs')], { env });
@@ -333,7 +403,8 @@ test('a loud file', async (t) => {
   const { env } = fixtureEnv(t);
   const r = await runRunner([fx('loud.mjs')], { env });
   assert.equal(r.code, 0, r.stderr);
-  assert.ok(r.stdout.length > 2000000);
+  // node --test may break a long line where its chunks split, so count the characters: none lost
+  assert.ok(r.stdout.split('x').length - 1 >= 2048 * 1023, 'every x the file printed');
 });
 
 test('from another cwd, through a symlink', async (t) => {
