@@ -7,6 +7,6 @@ I read only the fix diff (`git show 5b1d3c113a63ca432c26c4c478373ba012757a02`) a
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | quality.md §2 Comments and readability (a non-obvious decision with no comment saying why) | render, `OA_PEEKS.clear()` | The clear went in between the comment "a refusal goes with its question …" and the REFUSED loop that comment describes. The clear has no comment of its own, and "cleared here, refilled by oaState as the cards draw" is not obvious from the line. Move it above that comment with one line saying why. | |
+| F1 | Suggestion | quality.md §2 Comments and readability (a non-obvious decision with no comment saying why) | render, `OA_PEEKS.clear()` | The clear went in between the comment "a refusal goes with its question …" and the REFUSED loop that comment describes. The clear has no comment of its own, and "cleared here, refilled by oaState as the cards draw" is not obvious from the line. Move it above that comment with one line saying why. | wont-fix: a comment-only placement; no behaviour |
 
 Verdict: APPROVE 5b1d3c113a63ca432c26c4c478373ba012757a02
