@@ -7,7 +7,7 @@ I checked the diff against plan Task 2 and spec acceptance check 1 with ruling m
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T2-1 | Suggestion | (none) | .github/workflows/test.yml, the `if: failure()` step | Two parts of the step-timeout path have been shown only by the box probe that kills the shell, not on a real runner. One is that the step runs after a real step timeout. The other is that the runner does not wait on the leaked `node --test` runner holding the step's stdout. Spec check 1 accepts the box probe as the evidence, so this does not block. If CI ever shows a hang, read that log to confirm the listing appeared. | |
+| T2-1 | Suggestion | (none) | .github/workflows/test.yml, the `if: failure()` step | Two parts of the step-timeout path have been shown only by the box probe that kills the shell, not on a real runner. One is that the step runs after a real step timeout. The other is that the runner does not wait on the leaked `node --test` runner holding the step's stdout. Spec check 1 accepts the box probe as the evidence, so this does not block. If CI ever shows a hang, read that log to confirm the listing appeared. | noted: verification.md says the listing after a real step timeout is shown on the box only |
 
 What I checked, and what held:
 - **Matrix include.** The three `include` entries have only `node:` set (numbers, as the matrix has them) and add `test_timeout` as a new key. Under Actions rules a new key joins every existing combination with that node and creates no job. The CI run on this head (43682089828, headSha 0c3d214) has exactly 8 jobs:
