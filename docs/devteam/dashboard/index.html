@@ -1284,12 +1284,13 @@ function oaState(q, id) {
     const rec = pk?.record;
     if (!rec && !set) return { kind: 'knowledge', loading: true };
     const f = rec?.fields || {};
-    r = rec ? { status: f.status, at: rec.set_by?.status?.at ?? rec.created_at, by: rec.set_by?.status?.by ?? rec.created_by, words: f.plain || f.statement || id, owner: f.status === 'candidate' && f.for_owner === true } : { words: id };
+    r = rec ? { status: f.status, at: rec.set_by?.status?.at ?? rec.created_at, by: rec.set_by?.status?.by ?? rec.created_by, words: f.plain || f.statement || id, owner: f.status === 'candidate' && f.for_owner === true } : { words: set.words || id };
   }
   if (set && r.status === set.status) OA_SET.delete(id);
   // a status the owner set here counts at once; else the record's own, kept only when the owner set it after the ask
-  const mine = OA_SET.has(id) ? { status: set.status, at: set.at, by: 'owner' } : r;
-  const kept = mine.status === 'accepted' && mine.by === 'owner' && String(mine.at || '') > String(q.asked_at || '');
+  const here = OA_SET.has(id);
+  const mine = here ? { status: set.status } : r;
+  const kept = mine.status === 'accepted' && (here || (r.by === 'owner' && String(r.at || '') > String(q.asked_at || '')));
   return { kind: 'knowledge', words: r.words, href: `#lesson/${encodeURIComponent(id)}`, owner: r.owner, done: mine.status === 'retired' ? 'Done: retired' : kept ? 'Done: kept' : null };
 }
 // The named records not done yet: a press still being sent counts as not done, a record that isn't one never holds Done.
@@ -1330,7 +1331,7 @@ function oaPaint() {
   focusBack(m);
 }
 // for the thread card's signature: what the rows show, so a copy redraws when it changes
-const oaSig = (q) => (isOa(q) ? [oaRecords(q).map((id) => { const s = oaState(q, id); return [id, s.done, !!s.missing, !!s.loading, oaConfirming(id)]; }), NOT_DONE.get(q.id) ?? null] : null);
+const oaSig = (q) => (isOa(q) ? [oaRecords(q).map((id) => { const s = oaState(q, id); return [id, s.done, !!s.missing, !!s.loading, oaConfirming(id), PRESSES.has(`${id.startsWith('g-') ? 'g' : 'k'}:${id}`)]; }), NOT_DONE.get(q.id) ?? null] : null);
 const picks = {};
 // Words typed with no choice picked, on a question with choices and a recommendation: the card asks
 // which choice they mean before anything is posted, so the owner, never the supervisor, says whether
@@ -4245,6 +4246,7 @@ function render(d) {
   // kept while a thread's copy still says open: a read of the threads begun before the answer can land after this
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) ANSWERED.delete(qid);
   // a refusal goes with its question: once it is open in neither the Inbox nor a thread
+  OA_PEEKS.clear();
   for (const qid of [...NOT_DONE.keys()]) if (!d.questions.some((q) => q.id === qid)) NOT_DONE.delete(qid);
   for (const qid of [...REFUSED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) REFUSED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
@@ -5755,7 +5757,7 @@ document.addEventListener('click', async (ev) => {
     const pre = oak.closest('[data-qcard]')?.id.startsWith('t-') ? 't-' : '';
     press(`k:${id}`, {
       build: () => ({ action: 'knowledge', body: { id, status } }),
-      apply: () => { OA_SET.set(id, { status, at: new Date().toISOString() }); oaPaint(); },
+      apply: () => { const qv = DATA.questions.find((x) => x.id === qid); OA_SET.set(id, { status, at: new Date().toISOString(), words: qv ? oaState(qv, id).words : undefined }); oaPaint(); },
       undo: () => { OA_SET.delete(id); oaPaint(); },
       onOk: () => { PEEKS.delete(peekKey('lesson', id)); },
       errId: `${pre}oa-${qid}-${id}`,
