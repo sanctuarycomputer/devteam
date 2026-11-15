@@ -553,6 +553,15 @@ test('records in home: a hand-made merge borrowing the records subject is never 
     g(['checkout', '-q', 'main'], forge);
     g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'y'], forge);
     const viaAncestry = g(['rev-parse', 'HEAD'], forge);
+    // (3) an empty merge of an old main commit (an ancestor of everything): every other check passes
+    // trivially, so only "its merge brought the head in" stops it; (4) then a merge of that same head
+    // that edits README.md, which naming (3) would hide too
+    const oldMain = g(['rev-list', '--max-parents=0', 'HEAD'], forge).split('\n')[0];
+    const mergeOf = (tree) => { const c = g(['commit-tree', tree, '-p', 'HEAD', '-p', oldMain, '-m', `${id}: records`], forge); g(['reset', '-q', '--hard', c], forge); return c; };
+    const viaEmpty = mergeOf(g(['rev-parse', 'HEAD^{tree}'], forge));
+    write(path.join(forge, 'README.md'), 'hidden behind a named head\n');
+    g(['add', '-A'], forge);
+    const viaReadme = mergeOf(g(['write-tree'], forge));
     g(['push', '-q', 'origin', 'main'], forge);
     // the reviewed records, now that home's main has the README change (merge-base moved past it)
     homeRecords(F, id, { 'reviews/final-1.md': `- Records: ${h}\n${review('reviewer-b', code)}` });
@@ -561,6 +570,6 @@ test('records in home: a hand-made merge borrowing the records subject is never 
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
     assert.doesNotMatch(act.what, /and earlier at/, 'neither hand-made merge is named');
     const flagged = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
-    assert.deepEqual(flagged, [`home:${viaAncestry.slice(0, 12)}`, `home:${viaFootprint.slice(0, 12)}`].sort());
+    assert.deepEqual(flagged, [viaAncestry, viaFootprint, viaEmpty, viaReadme].map((s) => `home:${s.slice(0, 12)}`).sort());
   } finally { F.done(); }
 });

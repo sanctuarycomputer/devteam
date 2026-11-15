@@ -5121,8 +5121,9 @@ function pinRecords(id) {
 // add a fallback to home there. null, or why it didn't land.
 // Every earlier records head of a ticket merged into home's main by landRecords: a half-done
 // merge's first landing, before the records branch moved. The merge act names them, so none reads
-// as a merge no act made. A subject is only text anyone can write, so a head counts only when it is
-// an ancestor of the records merge checks now (so those checks covered it), its merge changed
+// as a merge no act made. A subject is only text anyone can write, so a head counts only when its
+// merge brought it in (it wasn't already in the first parent, as landRecords' --no-ff merge never
+// is), it is an ancestor of the records merge checks now (so those checks covered it), its merge changed
 // nothing outside the ticket's records folder, and its tree is exactly git's own merge of its two
 // parents (an evil merge adds what no records commit has); any other merge stays merged-without-merge.
 function landedRecordsHeads(id, recSha) {
@@ -5131,7 +5132,7 @@ function landedRecordsHeads(id, recSha) {
   mainRefCache = undefined;
   const main = mainRef();
   if (!main) return [];
-  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own)) && mergeTree(p1, h).tree === git(['rev-parse', `${m}^{tree}`])).map(([, , h]) => h);
+  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, p1) === false && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own)) && mergeTree(p1, h).tree === git(['rev-parse', `${m}^{tree}`])).map(([, , h]) => h);
 }
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
