@@ -53,6 +53,9 @@ try {
   .small { font-size: 12px; }
   .err { color: var(--red-fg); font-size: 12px; }
   .qcard .moved { margin: 0 0 8px; color: var(--amber-fg); font-size: 13px; }
+  .oa-recs { display: grid; gap: 6px; margin: 8px 0; }
+  .oa-rec { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
+  .oa-rec .oa-what { min-width: 0; overflow-wrap: anywhere; }
   .refused { margin: 8px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .empty { color: var(--muted); font-size: 12px; margin: 0; }
   .empty code { font-size: 11px; }
@@ -1226,17 +1229,114 @@ function choicesOf(q) {
     { label: 'Refine', detail: 'Something in the approach should change. Say what in the notes.', then: 'The design is reworked with your notes and comes back here for approval.' },
     { label: 'Let go', detail: 'Drop this goal.', then: 'Nothing is planned or built for it; any planning stops.' },
   ];
-  if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = [{ label: 'Done', detail: 'I did it; carry on.' }, { label: 'Can’t right now', detail: 'Say why in the note, and what would help.' }];
+  const doneCant = [{ label: 'Done', detail: 'I did it; carry on.' }, { label: 'Can’t right now', detail: 'Say why in the note, and what would help.' }];
+  // an open owner-action: its answers are always Done and Can't right now; a recommendation (or the
+  // question's own choices) is a line of text (oaSuggest), never a button that reads as doing the job
+  if (isOa(q)) return doneCant.map((c) => ({ ...c, rec: false }));
+  if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = doneCant;
   const rec = q.recommendation;
   if (rec && !list.some((c) => norm(c.label) === norm(rec))) list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
+// An open owner-action without secrets: the card the owner acts from. An answered one (its drawer)
+// keeps the list as asked, so the record shows what the owner saw.
+const isOa = (q) => !!q && q.kind === 'owner-action' && !(q.secrets || []).length && q.status === 'open';
+// What the supervisor suggested, and any ways it named, as words: the act itself is the records' own
+// controls (oaRows) or the owner's own doing; the answer is Done or Can't right now.
+function oaSuggest(q) {
+  const ways = (q.choices || []).length ? q.choices.map((c) => c.label) : q.options || [];
+  return (q.recommendation ? `<p class="meta" data-oa-suggest>Suggested: ${esc(q.recommendation)}</p>` : '')
+    + (ways.length ? `<p class="meta" data-oa-ways>Ways to do it: ${ways.map(esc).join('; ')}</p>` : '');
+}
+// The records an owner-action names for the owner to act on: the knowledge (k-) and goal (g-) ids in
+// its context, where the asker says what to do. Its evidence (what it rests on) and its own goal are
+// never read, so a rule it cites or the goal it serves never gets a control or holds Done.
+const OA_ID = /\b[kg]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g;
+const oaRecords = (q) => (isOa(q) ? [...new Set(String(q.context || '').match(OA_ID) || [])] : []);
+// Page memory: a status the owner set from a card, until the data or the record's peek shows it
+// (OA_SET, id → { status, at }); a goal's Let go waiting for its confirm (OA_CONFIRM, id → until);
+// the knowledge records read by peek, fetched again on each refresh (OA_PEEKS); the records a Done
+// press found unchanged (NOT_DONE, question id → ids).
+const OA_SET = new Map();
+const OA_CONFIRM = new Map();
+const OA_PEEKS = new Set();
+const NOT_DONE = new Map();
+const oaConfirming = (id) => (OA_CONFIRM.get(id) || 0) > Date.now();
+// A named record as the card shows it: done (and how), or not, with what it is and where it opens.
+function oaState(q, id) {
+  const set = OA_SET.get(id);
+  if (id.startsWith('g-')) {
+    const g = (DATA?.ooda?.goals || []).find((x) => x.id === id);
+    if (!g) return { kind: 'goal', missing: true };
+    if (set && g.status === set.status) OA_SET.delete(id);
+    const status = OA_SET.has(id) ? set.status : g.status;
+    return { kind: 'goal', words: g.title || id, href: `#goal/${encodeURIComponent(id)}`, done: status === 'abandoned' ? 'Done: let go' : status === 'met' ? 'Done: met' : null };
+  }
+  const k = (DATA?.ooda?.knowledge || []).find((x) => x.id === id);
+  let r;
+  if (k) {
+    const u = [...(k.updates || [])].reverse().find((x) => x.status);
+    r = { status: k.status, at: u ? u.at : k.created_at, by: u ? u.by : k.created_by, words: k.plain || k.statement, owner: ownerLesson(k) };
+  } else {
+    OA_PEEKS.add(id);
+    const pk = peekOf('lesson', id);
+    if (pk?.missing) return { kind: 'knowledge', missing: true };
+    const rec = pk?.record;
+    if (!rec && !set) return { kind: 'knowledge', loading: true };
+    const f = rec?.fields || {};
+    r = rec ? { status: f.status, at: rec.set_by?.status?.at ?? rec.created_at, by: rec.set_by?.status?.by ?? rec.created_by, words: f.plain || f.statement || id, owner: f.status === 'candidate' && f.for_owner === true } : { words: id };
+  }
+  if (set && r.status === set.status) OA_SET.delete(id);
+  // a status the owner set here counts at once; else the record's own, kept only when the owner set it after the ask
+  const mine = OA_SET.has(id) ? { status: set.status, at: set.at, by: 'owner' } : r;
+  const kept = mine.status === 'accepted' && mine.by === 'owner' && String(mine.at || '') > String(q.asked_at || '');
+  return { kind: 'knowledge', words: r.words, href: `#lesson/${encodeURIComponent(id)}`, owner: r.owner, done: mine.status === 'retired' ? 'Done: retired' : kept ? 'Done: kept' : null };
+}
+// The named records not done yet: a press still being sent counts as not done, a record that isn't one never holds Done.
+const oaOpen = (q) => oaRecords(q).filter((id) => { const s = oaState(q, id); return !s.missing && (!s.done || PRESSES.has(`${id.startsWith('g-') ? 'g' : 'k'}:${id}`)); });
+function oaRows(q, pre = '') {
+  const marks = NOT_DONE.get(q.id) || [];
+  const rows = oaRecords(q).map((id) => {
+    const s = oaState(q, id);
+    const qa = `data-oa-q="${esc(q.id)}"`;
+    const ctl = s.done ? `<span class="badge good" data-oa-done>${esc(s.done)}</span>`
+      : s.missing ? '<span class="muted small">no such record</span>'
+      : s.loading ? '<span class="muted small">checking…</span>'
+      : s.kind === 'goal' ? `<button class="ghost${oaConfirming(id) ? ' confirm' : ''}" data-oa-goal="${esc(id)}" ${qa}>${oaConfirming(id) ? 'Confirm let go' : 'Let go'}</button>`
+      : `${s.owner ? `<button class="ghost" data-oa-know="${esc(id)}" data-status="accepted" ${qa}>Keep it</button>` : ''}<button class="ghost" data-oa-know="${esc(id)}" data-status="retired" ${qa}>Retire it</button>`;
+    const what = s.href ? `<a class="linkish" href="${s.href}">${esc(s.words)}</a>` : `<code>${esc(id)}</code>`;
+    return `<div class="oa-rec" data-oa-rec="${esc(id)}"><span class="oa-what"><b>${s.kind === 'goal' ? 'Goal' : 'Rule'}:</b> ${what}</span>${ctl}${!s.done && !s.missing && marks.includes(id) ? '<span class="err" data-oa-notdone>not done yet</span>' : ''}<span class="err" id="e-${pre}oa-${esc(q.id)}-${esc(id)}"></span></div>`;
+  }).join('');
+  return `<div class="oa-recs" data-oa-recs>${rows}</div>`;
+}
+// Above Send, while a Done press found records unchanged: what to do instead.
+const oaAnyway = (q) => (NOT_DONE.has(q.id) && oaOpen(q).length
+  ? '<p class="err" data-oa-anyway>Not done yet. Change them above, or pick Can’t right now and say in the note why you’re leaving them.</p>'
+  : '<p data-oa-anyway hidden></p>');
+// Every copy of every owner-action card (the Inbox's, a thread's) gets its rows and its line again,
+// in place: a thread's copy isn't redrawn while its pressed button has focus. Focus stays where it was.
+function oaPaint() {
+  if (!DATA) return;
+  const m = focusMark();
+  for (const card of document.querySelectorAll('[data-qcard]')) {
+    const q = DATA.questions.find((x) => x.id === card.dataset.qcard);
+    if (!isOa(q)) continue;
+    const pre = card.id.startsWith('t-') ? 't-' : '';
+    const recs = card.querySelector('[data-oa-recs]');
+    if (recs) recs.outerHTML = oaRows(q, pre);
+    const any = card.querySelector('[data-oa-anyway]');
+    if (any) any.outerHTML = oaAnyway(q);
+  }
+  focusBack(m);
+}
+// for the thread card's signature: what the rows show, so a copy redraws when it changes
+const oaSig = (q) => (isOa(q) ? [oaRecords(q).map((id) => { const s = oaState(q, id); return [id, s.done, !!s.missing, !!s.loading, oaConfirming(id)]; }), NOT_DONE.get(q.id) ?? null] : null);
 const picks = {};
 // Words typed with no choice picked, on a question with choices and a recommendation: the card asks
 // which choice they mean before anything is posted, so the owner, never the supervisor, says whether
 // their words were the recommendation. ASKS[id] is the copy that asked: 'q' the Inbox's, 't' a thread's.
 const ASKS = {};
-const needsWhich = (q) => !!q && !!q.recommendation && choicesOf(q).length > 0 && !['goal-approval', 'review'].includes(q.kind) && !(q.secrets || []).length;
+const needsWhich = (q) => !!q && q.kind !== 'owner-action' && !!q.recommendation && choicesOf(q).length > 0 && !['goal-approval', 'review'].includes(q.kind) && !(q.secrets || []).length;
 // A question whose linked page moved since it was asked: the sentence that says so (plain text, so
 // callers escape it), or '' when nothing moved. The links counted are the ones the server counts
 // (pinnedArtifact): an artifact link pinned to a hash. The server's own reason when none is flagged.
@@ -1343,6 +1443,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${(q.approves || []).length ? `<div class="meta">Your answer approves each of these, once: ${q.approves.map((a) => !/^(chore|plan)-/.test(a) ? tlink(a) : `<code>${esc(a)}</code>`).join(', ')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
+      ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
       <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
@@ -1351,6 +1452,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
       ${ASKS[q.id] === (copy ? 't' : 'q') ? whichAsk(q, list) : ''}
       ${REFUSED.has(q.id) ? `<p class="err refused" data-refused="${esc(q.id)}"><span>Not saved: ${esc(REFUSED.get(q.id).reason)}</span><button class="ghost" data-dismiss-refused="${esc(q.id)}">Dismiss</button></p>` : ''}
+      ${isOa(q) ? oaAnyway(q) : ''}
       <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}${movedOff(q)}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
@@ -2451,6 +2553,8 @@ async function fetchPeek(kind, id, q = {}) {
   } catch (e) { if (!PEEKS.has(k)) PEEK_FAIL.set(k, { error: String(e?.message ?? e), at: Date.now() }); } finally { PEEK_FLIGHT.delete(k); }
   // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
   redraw();
+  // a record an owner-action card names: its rows, in place (never the whole Inbox, so typing holds)
+  if (kind === 'lesson' && OA_PEEKS.has(id)) oaPaint();
 }
 /* peeks end */
 // On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
@@ -4141,6 +4245,7 @@ function render(d) {
   // kept while a thread's copy still says open: a read of the threads begun before the answer can land after this
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) ANSWERED.delete(qid);
   // a refusal goes with its question: once it is open in neither the Inbox nor a thread
+  for (const qid of [...NOT_DONE.keys()]) if (!d.questions.some((q) => q.id === qid)) NOT_DONE.delete(qid);
   for (const qid of [...REFUSED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) REFUSED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
@@ -4189,6 +4294,8 @@ function render(d) {
   ].join('');
 
   refreshDrawer();
+  // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
+  for (const id of [...OA_PEEKS]) { const pk = PEEKS.get(peekKey('lesson', id)); if (pk && !pk.missing && pk.record?.fields?.status !== 'retired') fetchPeek('lesson', id); }
   // last, so every section that holds an input is drawn before its half-typed value comes back
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
@@ -4755,7 +4862,7 @@ function tlCardBody(t) {
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
-  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id), REFUSED.get(q.id)?.n ?? null, (DATA?.questions || []).find((x) => x.id === q.id)?.links_moved ?? null])]);
+  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id), REFUSED.get(q.id)?.n ?? null, (DATA?.questions || []).find((x) => x.id === q.id)?.links_moved ?? null, oaSig((DATA?.questions || []).find((x) => x.id === q.id))])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
@@ -5551,6 +5658,8 @@ document.addEventListener('click', async (ev) => {
     // one pick per question, made in whichever copy: the Inbox's card and the thread's show it alike
     for (const el of document.querySelectorAll(`input[data-pick="${CSS.escape(pick.dataset.pick)}"]`)) { el.checked = el.value === pick.value; el.closest('.choice')?.classList.toggle('picked', el.checked); }
     if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
+    // another answer than Done: the not-done marks go, on every copy
+    if (pick.value !== 'Done' && NOT_DONE.delete(pick.dataset.pick)) oaPaint();
     return;
   }
   const ps = ev.target.closest('[data-post-secrets]');
@@ -5638,6 +5747,38 @@ document.addEventListener('click', async (ev) => {
     redrawNow();
     return;
   }
+  // A named record's own control on an owner-action card: what the Knowledge page and the goal's hold
+  // bar post. The row shows the press at once on every copy (oaPaint), and comes back if refused.
+  const oak = ev.target.closest('[data-oa-know]');
+  if (oak) {
+    const id = oak.dataset.oaKnow, status = oak.dataset.status, qid = oak.dataset.oaQ;
+    const pre = oak.closest('[data-qcard]')?.id.startsWith('t-') ? 't-' : '';
+    press(`k:${id}`, {
+      build: () => ({ action: 'knowledge', body: { id, status } }),
+      apply: () => { OA_SET.set(id, { status, at: new Date().toISOString() }); oaPaint(); },
+      undo: () => { OA_SET.delete(id); oaPaint(); },
+      onOk: () => { PEEKS.delete(peekKey('lesson', id)); },
+      errId: `${pre}oa-${qid}-${id}`,
+    });
+    return;
+  }
+  // Let go, then Confirm let go: the confirm in page memory, so a refresh doesn't take it back
+  const oag = ev.target.closest('[data-oa-goal]');
+  if (oag) {
+    const id = oag.dataset.oaGoal, qid = oag.dataset.oaQ;
+    const pre = oag.closest('[data-qcard]')?.id.startsWith('t-') ? 't-' : '';
+    if (!oaConfirming(id)) { OA_CONFIRM.set(id, Date.now() + 6000); setTimeout(oaPaint, 6050); oaPaint(); return; }
+    OA_CONFIRM.delete(id);
+    press(`g:${id}`, {
+      build: () => ({ action: 'goal-decide', body: { id, verdict: 'let-go' } }),
+      overlay: holdOverlay(id, 'let-go'),
+      apply: () => { OA_SET.set(id, { status: 'abandoned', at: new Date().toISOString() }); oaPaint(); redrawNow(); redraw(); },
+      undo: () => { OA_SET.delete(id); oaPaint(); },
+      onOk: () => { loadFleet(); },
+      errId: `${pre}oa-${qid}-${id}`,
+    });
+    return;
+  }
   // Answer, or a choice in the card's ask (which choice the words mean; None posts them as they are)
   const btn = ev.target.closest('[data-answer], button[data-which]');
   if (btn) {
@@ -5661,6 +5802,13 @@ document.addEventListener('click', async (ev) => {
       return;
     }
     dropAsk(id);
+    // Done on an owner-action whose named records aren't all done: never an answer, however often it is
+    // pressed. Each unchanged record says so, and the line above Send says what to do instead.
+    if (isOa(qv) && picked === 'Done') {
+      const open = oaOpen(qv);
+      if (open.length) { NOT_DONE.set(id, open); oaPaint(); return; }
+    }
+    if (NOT_DONE.delete(id)) oaPaint();
     if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = card?.querySelector('input[data-auto]:checked')?.value;
