@@ -511,7 +511,8 @@ const SETTINGS_DEFAULTS = {
   // nothing. For Claude Code, set projects[$DEVTEAM_WORKTREE].hasTrustDialogAccepted to true in
   // ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, written atomically (a temp file, then a rename): running
   // sessions rewrite that file. Name scripts by absolute path: it runs in the worktree, so a relative
-  // one would run the branch's own file. The owner's, like agent_command; home's only.
+  // one would run the branch's own file. Keep it quick and idempotent: it runs on every launch, a
+  // resume and the tick's relaunches included. The owner's, like agent_command; home's only.
   agent_trust_command: '',
   main_branch: 'main',
   merge_method: 'merge',
