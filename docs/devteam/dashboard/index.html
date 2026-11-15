@@ -52,6 +52,8 @@ try {
   .dim { color: var(--muted); }
   .small { font-size: 12px; }
   .err { color: var(--red-fg); font-size: 12px; }
+  .qcard .moved { margin: 0 0 8px; color: var(--amber-fg); font-size: 13px; }
+  .refused { margin: 8px 0 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .empty { color: var(--muted); font-size: 12px; margin: 0; }
   .empty code { font-size: 11px; }
   .empty a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
@@ -1235,12 +1237,26 @@ const picks = {};
 // their words were the recommendation. ASKS[id] is the copy that asked: 'q' the Inbox's, 't' a thread's.
 const ASKS = {};
 const needsWhich = (q) => !!q && !!q.recommendation && choicesOf(q).length > 0 && !['goal-approval', 'review'].includes(q.kind) && !(q.secrets || []).length;
+// A question whose linked page moved since it was asked: the sentence that says so (plain text, so
+// callers escape it), or '' when nothing moved. The links counted are the ones the server counts
+// (pinnedArtifact): an artifact link pinned to a hash. The server's own reason when none is flagged.
+function movedText(q) {
+  if (!q?.links_moved) return '';
+  const pinned = (q.links || []).filter((l) => l && l.artifact !== undefined && l.sha256);
+  const changed = pinned.filter((l) => l.changed).map((l) => l.title || l.artifact);
+  const gone = pinned.filter((l) => l.gone).map((l) => l.title || l.artifact);
+  if (changed.length) return `${changed.join(', ')} changed since this was asked; the supervisor will ask again`;
+  if (gone.length) return `${gone.join(', ')} is no longer available; the supervisor will ask again`;
+  return String(q.links_moved);
+}
+// a moved question's buttons that would post an answer: disabled, saying why
+const movedOff = (q) => { const m = movedText(q); return m ? ` disabled title="${esc(m)}"` : ''; };
 const whichAsk = (q, list) => `
       <div class="which" data-which-for="${esc(q.id)}" role="group" aria-label="Which choice">
         <p>Which choice do your words mean?</p>
         <div class="choices">${list.map((c) => `
-          <button type="button" class="choice${c.rec ? ' rec' : ''}" data-which="${esc(q.id)}" value="${esc(c.label)}"><span><b>${esc(c.label)}</b>${c.rec ? '<span class="tag">Recommended</span>' : ''}</span></button>`).join('')}
-          <button type="button" class="choice" data-which="${esc(q.id)}" data-which-none value=""><span><b>None of them</b><div class="d">Post my words as they are.</div></span></button>
+          <button type="button" class="choice${c.rec ? ' rec' : ''}" data-which="${esc(q.id)}" value="${esc(c.label)}"${movedOff(q)}><span><b>${esc(c.label)}</b>${c.rec ? '<span class="tag">Recommended</span>' : ''}</span></button>`).join('')}
+          <button type="button" class="choice" data-which="${esc(q.id)}" data-which-none value=""${movedOff(q)}><span><b>None of them</b><div class="d">Post my words as they are.</div></span></button>
         </div>
       </div>`;
 const dropAsk = (id, card = null) => { delete ASKS[id]; for (const el of (card || document).querySelectorAll(`[data-which-for="${CSS.escape(id)}"]`)) el.remove(); };
@@ -1316,6 +1332,7 @@ function questionCard(q, o, reasonText, copy = false) {
   return `
     <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="${pre}q-${esc(q.id)}" data-qcard="${esc(q.id)}"${copy ? '' : subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
+      ${movedText(q) ? `<p class="moved" data-links-moved><i class="icon-triangle-alert" aria-hidden="true"></i> ${esc(movedText(q))}</p>` : ''}
       ${rankWhy(q)}
       ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
@@ -1333,7 +1350,8 @@ function questionCard(q, o, reasonText, copy = false) {
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
       ${ASKS[q.id] === (copy ? 't' : 'q') ? whichAsk(q, list) : ''}
-      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
+      ${REFUSED.has(q.id) ? `<p class="err refused" data-refused="${esc(q.id)}"><span>Not saved: ${esc(REFUSED.get(q.id).reason)}</span><button class="ghost" data-dismiss-refused="${esc(q.id)}">Dismiss</button></p>` : ''}
+      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}${movedOff(q)}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -1960,7 +1978,7 @@ async function reviewDecline(id, note, errId, btn) {
   const me = errId === 'rv' && RV?.qid === id ? RV : null;
   // in the panel, at once: it says it was sent back and takes no second press
   if (me) $('rv-actions').innerHTML = '<div class="small"><b>Sent back</b> · saving…</div><span class="err" id="e-rv"></span>';
-  const ok = await answerPress(id, document.querySelector(`[data-qcard="${CSS.escape(id)}"]`), errId, `Sent back: ${note}`, () => ({ action: 'answer', body: { id, answer: note, decline: true, autonomy: auto ? Number(auto) : undefined, seen } }));
+  const ok = await answerPress(id, document.querySelector(`[data-qcard="${CSS.escape(id)}"]`), errId, `Sent back: ${note}`, () => ({ action: 'answer', body: { id, answer: note, decline: true, autonomy: auto ? Number(auto) : undefined, seen } }), { stays: false });
   if (!me || RV !== me) return;
   if (!ok) {
     const e = $('e-rv')?.textContent;
@@ -3796,7 +3814,7 @@ function overlaid(raw) {
 const redrawNow = () => { if (RAW) drawOrHold(HELD ?? RAW, true); };
 const savingNote = () => { const el = $('saving'); if (el) el.hidden = SAVING === 0; };
 addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } });
-function press(key, { build, apply, overlay, undo, restore, errId, onOk }) {
+function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError }) {
   SAVING++;
   savingNote();
   const ov = overlay ? { ...overlay, confirmedAt: 0 } : null;
@@ -3817,9 +3835,11 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk }) {
       load({ force: true });
       if (ov && OVERLAYS.get(key) === ov) OVERLAYS.delete(key);
       try { undo?.(); } catch (e) { console.error(e); }
+      // a caller that keeps the refusal itself (a question card's, drawn on every redraw) says so here
+      try { onError?.(error); } catch (e) { console.error(e); }
       redrawNow();
       try { restore?.(); } catch (e) { console.error(e); }
-      const el = errId && $(`e-${errId}`);
+      const el = !onError && errId && $(`e-${errId}`);
       if (el) el.textContent = `Not saved: ${error}`;
       return false;
     }
@@ -3877,21 +3897,28 @@ function holdOverlay(id, mode) {
   };
 }
 // An answer, at once: the card says so, and the server is told. The answer names the question as
-// this page showed it; one changed since is refused, and the card comes back.
-function answerPress(id, card, errId, text, build) {
+// this page showed it; one changed since is refused, and the card comes back, saying why until the
+// owner dismisses it (REFUSED). stays: false keeps the caller's own one-off error line (a review's).
+function answerPress(id, card, errId, text, build, { stays = true } = {}) {
   const f = cardFields(id, card);
   return press(`q:${id}`, {
     build,
-    apply: () => markAnswered(id, text),
+    apply: () => { REFUSED.delete(id); markAnswered(id, text); },
     undo: () => putBackCard(id, f),
     restore: () => putBackBoxes(id, f),
-    onOk: () => { delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
+    onOk: () => { REFUSED.delete(id); delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
+    ...(stays ? { onError: (e) => REFUSED.set(id, { reason: e, n: ++REFUSALS }) } : {}),
     errId,
   });
 }
 const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
+// An answer the server refused, per question: { reason, n }, drawn on every copy of its card until the
+// owner dismisses it, presses again, the answer goes through or the question closes. n counts every
+// refusal, so a second one with the same reason still redraws a thread's copy.
+const REFUSED = new Map();
+let REFUSALS = 0;
 // The card a control is on, and its error line: the Inbox's copy of a question (q-<id>) or a thread
 // card's (t-q-<id>), found from the control itself, so the two copies never answer for each other.
 const qcardOf = (el) => { const card = el.closest('[data-qcard]'); return { card, errId: `${card?.id.startsWith('t-') ? 't-' : ''}${card?.dataset.qcard ?? ''}` }; };
@@ -4113,6 +4140,8 @@ function render(d) {
     </div>`).join('');
   // kept while a thread's copy still says open: a read of the threads begun before the answer can land after this
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) ANSWERED.delete(qid);
+  // a refusal goes with its question: once it is open in neither the Inbox nor a thread
+  for (const qid of [...REFUSED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) REFUSED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
   $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;
@@ -4726,7 +4755,7 @@ function tlCardBody(t) {
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
-  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id)])]);
+  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id), REFUSED.get(q.id)?.n ?? null, (DATA?.questions || []).find((x) => x.id === q.id)?.links_moved ?? null])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
@@ -5597,6 +5626,16 @@ document.addEventListener('click', async (ev) => {
     const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
     const seen = seenHash(id);
     answerPress(id, card, errId, answer, () => ({ action: 'answer', body: { id, answer, seen } }));
+    return;
+  }
+  // a refused answer's line, dismissed: from every copy of the card at once (a focused button in a
+  // thread's turns would hold that copy's redraw)
+  const dis = ev.target.closest('[data-dismiss-refused]');
+  if (dis) {
+    const id = dis.dataset.dismissRefused;
+    REFUSED.delete(id);
+    for (const el of document.querySelectorAll(`[data-refused="${CSS.escape(id)}"]`)) el.remove();
+    redrawNow();
     return;
   }
   // Answer, or a choice in the card's ask (which choice the words mean; None posts them as they are)
