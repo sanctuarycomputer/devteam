@@ -5,6 +5,10 @@ on:
   pull_request:
 permissions:
   contents: read
+# a push cancels the run before it (ruling m-20261115-165102445)
+concurrency:
+  group: kit-211-timing-${{ github.head_ref }}
+  cancel-in-progress: true
 jobs:
   alone:
     # only kit-211's own PR (a pull_request branches filter matches the base branch, not the head)
