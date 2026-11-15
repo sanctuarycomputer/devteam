@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { kit, line, write, json, multiFixture } from './lib/kit.mjs';
+import { kit, line, write, json, review, multiFixture } from './lib/kit.mjs';
 
 test('three repos: the fixture validates, and links shows each', () => {
   const F = multiFixture('multi-smoke');
@@ -204,5 +204,77 @@ test('records in home: the setting (repo by default, home or refused), and appro
     assert.match(runIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP).err, /no plan\.md for console-01-a on ticket\/console-01-a/, "a plan in the link doesn't count");
     homeRecords(F, 'console-01-a', { 'plan.md': '# plan\n\n## TL;DR\n\n- x\n' }, { push: false });
     assert.match(okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP), /^a-/, "the plan on home's ticket/<id>");
+  } finally { F.done(); }
+});
+// A records-in-home console ticket ready to merge: code only on console's ticket/<id>, records
+// (spec, plan, verification, then a final review naming both heads) on home's ticket/<id>.
+const VERIF = '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n';
+function readyInHome(F, id, { reviewer = 'reviewer-b' } = {}) {
+  const { old, g, okIn, ticket } = F;
+  ticket(id);
+  const w = path.join(old, '.worktrees', id);
+  g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+  write(path.join(w, 'src/main.js'), `${id}\n`);
+  g(['add', '-A'], w); g(['commit', '-qm', `${id}: work`], w); g(['push', '-q', 'origin', `ticket/${id}`], w);
+  const code = g(['rev-parse', 'HEAD'], w);
+  const rec = homeRecords(F, id, { 'spec.md': '# spec\n', 'plan.md': '# plan\n\n## TL;DR\n\n- x\n', 'verification.md': VERIF });
+  okIn(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'ok'], SUP);
+  okIn(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], SUP);
+  const final = homeRecords(F, id, { 'reviews/final-1.md': `- Records: ${rec.sha}\n${review(reviewer, code)}` });
+  write(path.join(old, `docs/devteam/run/pr/ticket/${id}.md`), `# ${id}: work\n\n## One-way doors\n\nNone.\n`);
+  return { w, code, rw: rec.rw, reviewed: rec.sha, head: final.sha };
+}
+// one commit on a branch's worktree, then the check, then the commit undone (and pushed back)
+function tryCommit(F, wt, files, fn) {
+  const before = F.g(['rev-parse', 'HEAD'], wt);
+  for (const [f, text] of Object.entries(files)) write(path.join(wt, f), text);
+  F.g(['add', '-A'], wt); F.g(['commit', '-qm', 'try'], wt);
+  try { fn(F.g(['rev-parse', 'HEAD'], wt)); } finally { F.g(['reset', '-q', '--hard', before], wt); }
+}
+
+test('records in home: check-ticket reads them from home\'s ticket/<id> at both heads; home\'s check-pr checks only the records footprint', () => {
+  const F = recordsFixture('records-check');
+  const { old, g, okIn, runIn, ticket } = F;
+  const id = 'console-01-a';
+  const T = `docs/devteam/project/tickets/${id}`;
+  try {
+    // no records branch yet: one failure, nothing read from home's working tree
+    ticket('console-02-b');
+    const w0 = path.join(old, '.worktrees', 'console-02-b');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-02-b', w0, 'origin/trunk'], F.console);
+    write(path.join(old, 'docs/devteam/project/tickets/console-02-b/spec.md'), '# spec in home\'s working tree\n');
+    const none = runIn(old, ['check-ticket', 'console-02-b', '--sha', g(['rev-parse', 'HEAD'], w0)]);
+    assert.notEqual(none.status, 0);
+    assert.match(none.out, /no records for console-02-b in home: commit them under docs\/devteam\/project\/tickets\/console-02-b\/ on home's ticket\/console-02-b/);
+    assert.doesNotMatch(none.out, /spec\.md missing|no final review/, 'the record checks are skipped');
+    fs.rmSync(path.join(old, 'docs/devteam/project/tickets/console-02-b'), { recursive: true });
+
+    const r = readyInHome(F, id);
+    const check = (args = []) => runIn(old, ['check-ticket', id, '--sha', r.code, ...args]);
+    assert.equal(check().status, 0, check().out);
+    // the link's own records folder is no longer exempt: nothing of the project's in the link
+    tryCommit(F, r.w, { [`${T}/spec.md`]: '# spec in the link\n' }, (sha) => {
+      assert.match(runIn(old, ['check-ticket', id, '--sha', sha]).out, new RegExp(`changes files outside touches: ${T}/spec\\.md`));
+    });
+    // the records branch holds only its records folder; home's check-pr on it says the same
+    tryCommit(F, r.rw, { 'README.md': 'changed through the records branch\n' }, (sha) => {
+      assert.match(check().out, new RegExp(`home's ticket/${id} changes files outside its records folder ${T}/: README\\.md`));
+      const pr = runIn(old, ['check-pr', '--head-ref', `ticket/${id}`, '--sha', sha]);
+      assert.notEqual(pr.status, 0);
+      assert.match(pr.out, /changes files outside its records folder .*README\.md/);
+    });
+    assert.equal(runIn(old, ['check-pr', '--head-ref', `ticket/${id}`, '--sha', r.head]).status, 0, 'a records-only branch passes home\'s check-pr');
+    // the records edited after the final review: the records verdict no longer holds
+    tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| more | x | pass |\n` }, () => {
+      assert.match(check().out, /final-1\.md: its records verdict is at \w{12}, which does not hold at home's \w{12}/);
+      assert.match(check().out, /needs 1 final APPROVE review/);
+    });
+    // a newly added review record keeps it holding; a final record without "- Records:" fails
+    tryCommit(F, r.rw, { [`${T}/reviews/task-1.md`]: review('task-reviewer', r.code) }, () => assert.equal(check().status, 0, check().out));
+    tryCommit(F, r.rw, { [`${T}/reviews/final-2.md`]: review('reviewer-c', r.code) }, () => {
+      assert.match(check().out, /final-2\.md: no "- Records: <full sha>" line/);
+    });
+    // --records pins the records commit read: the reviewed one has no review in it yet
+    assert.match(check(['--records', r.reviewed]).out, /no final review record/);
   } finally { F.done(); }
 });

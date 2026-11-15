@@ -4228,9 +4228,20 @@ function coverageGaps(cov, s) {
 }
 
 const OFF_LINE = 'changes files outside the line of';
+// A records-in-home ticket's home branch holds only its records: every file it changes against
+// home's main, by merge-base as a ticket's footprint is read, is in its own records folder. This
+// keeps a link ticket from changing home's settings, log or strategy through its records branch.
+function recordsBranchFails(id, recSha) {
+  const main = mainRef();
+  const base = main ? git(['merge-base', main, recSha]) : null;
+  if (!base) return [`cannot resolve home's main branch; home's ticket/${id} footprint not checked`];
+  const own = `${projectRel}/tickets/${id}/`;
+  const off = changedFiles(base, recSha).filter((x) => !x.startsWith(own));
+  return off.length ? [`home's ticket/${id} changes files outside its records folder ${own}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`] : [];
+}
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
-function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
+function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg }) {
   const t = tickets().get(id);
   if (!t) return [`no ticket ${id}`];
   const fails = [];
@@ -4239,11 +4250,23 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const R = repoOfTicketId(id);
   let sha = null;
   let src = WORKTREE;
+  // Records in home: the records are home's at recSha (merge pins it; else home's ticket/<id>, the
+  // local branch, else origin's), the code the link's at sha. Never home's working tree.
+  const H = recordsInHome(t);
+  let recSha = null;
   if (R.commonDir) {
     sha = headIn(R, shaArg);
     if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
-    if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
+    if (H) {
+      const ref = recordsArg ?? homeRecordsRef(id);
+      recSha = ref ? resolveCommit(ref) : null;
+      if (recordsArg && !recSha) return [`records commit ${recordsArg} not found in home (fetch it first)`];
+      src = { ref: recSha };
+    } else if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
   }
+  if (H && !recSha) fails.push(`no records for ${id} in home: commit them under ${projectRel}/tickets/${id}/ on home's ticket/${id}`);
+  if (H && recSha) fails.push(...recordsBranchFails(id, recSha));
+  if (!H || recSha) {
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
   if (read('spec.md') === null) fails.push('spec.md missing at this head');
   else if (approvals && !approvalOf(id, 'approve-spec')) fails.push('spec not approved (the supervisor logs act --class approve-spec --refs <id>)');
@@ -4265,25 +4288,34 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   }
   // The latest record in every final track must say APPROVE at a commit that holds at this head.
   const reviewsDir = R.projectInRepo ? `${R.projectRel}/tickets/${id}/reviews/` : null;
-  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
+  const codeHolds = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
+  // records in home: the verdict also names the records it reviewed (- Records: <sha>), which must
+  // hold at the records head by the same rule, in home
+  const homeReviewsDir = `${projectRel}/tickets/${id}/reviews/`;
+  const recordsHold = (r) => !H || (!!r.records && verdictHolds(r.records, recSha, homeReviewsDir, repo('home')));
+  const holdsAt = (r) => codeHolds(r.sha) && recordsHold(r);
   const latest = latestPerTrack(reviews, 'final');
   if (!latest.length) fails.push('no final review record (reviews/final-<n>.md)');
   for (const r of latest) {
     if (r.verdict === 'CHANGES') fails.push(`${r.file}: the latest final review in its track says CHANGES`);
     else if (r.verdict !== 'APPROVE') fails.push(`${r.file}: no verdict line (Verdict: APPROVE|CHANGES <sha>)`);
-    else if (!holdsAt(r.sha)) fails.push(`${r.file}: its verdict is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at ${sha?.slice(0, 12)}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+    else if (!codeHolds(r.sha)) fails.push(`${r.file}: its verdict is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at ${sha?.slice(0, 12)}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+    else if (H && !r.records) fails.push(`${r.file}: no "- Records: <full sha>" line; a review of a ticket whose records are in home names the home commit of the records it reviewed`);
+    else if (!recordsHold(r)) fails.push(`${r.file}: its records verdict is at ${r.records.slice(0, 12)}, which does not hold at home's ${recSha.slice(0, 12)}: the records changed since the review in more than newly added review records`);
   }
-  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
+  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
   // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
   for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
+  }
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
     const changed = R.changedFiles(base, sha);
-    const own = R.projectInRepo ? `${R.projectRel}/tickets/${id}/` : null;
+    // records in home: nothing of the project's in the link, its own folder included
+    const own = R.projectInRepo && !H ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}; if the supervisor widened touches with ticket set since the log last landed, land the log first (log-sync, then merge --chore log) and check again`);
@@ -4326,6 +4358,7 @@ function cmdCheckTicket() {
   let title = flagStr('title');
   let body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   let sha = flagStr('sha');
+  const records = flagStr('records');
   const R = repoOfTicketId(id);
   if (flagStr('pr')) {
     const pr = R.gh(['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
@@ -4339,7 +4372,7 @@ function cmdCheckTicket() {
     sha = R.resolveCommit(`ticket/${id}`) ?? R.resolveCommit(`origin/ticket/${id}`) ?? undefined;
     if (sha) out(`checking ticket/${id} at ${sha.slice(0, 12)} (no --sha given, and this checkout isn't on it)`);
   }
-  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
+  report(checkTicket(id, { sha, title, body, records }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
 
 
@@ -4514,12 +4547,15 @@ function artifactRule(sha) {
   }
   return fails;
 }
-function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   // A ticket's PR is in its own repo; plan and chore PRs are always home's.
   if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
   if (branch.startsWith('ticket/') && tickets().has(branch.slice('ticket/'.length))) {
     const own = repoOfTicketLink(tickets().get(branch.slice('ticket/'.length)));
+    // home's ticket/<id> of a records-in-home link ticket is its records branch: only its footprint
+    // is home's to check here (its code, reviews and gates are checked with the link's PR)
+    if (own !== R.name && R.name === 'home' && recordsInHomeId(branch.slice('ticket/'.length))) return recordsBranchFails(branch.slice('ticket/'.length), sha);
     if (own !== R.name) return [`${branch} is a ticket of ${own}, not ${R.name}`];
   }
   const fails = [...logRule(branch, sha, R), ...reviewRule(sha, { forge, repo: R }), ...(R.name === 'home' ? artifactRule(sha) : [])];
@@ -4540,7 +4576,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
   }
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -4726,6 +4762,9 @@ function cmdCheckPr() {
   const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   fetchMain(R);
+  // a records-in-home ticket's records are on home's ticket/<id>: as origin has it now
+  const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
+  if (R.name !== 'home' && tid && recordsInHomeId(tid)) git(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]);
   report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
