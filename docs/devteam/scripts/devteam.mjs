@@ -11804,7 +11804,8 @@ function ownerActionEnv(channel) {
 // moves when its dashboard stops: the others retry. Something that isn't a devteam hub on the
 // port: logged once, and a dashboard stops trying; the hub alone (standalone) keeps retrying whatever
 // holds the port, and never exits for it.
-// The list, /instances.json: { hub: 1, kit, image?, instances }. kit is the release serving the hub,
+// The list, /instances.json: { hub: 1, kit, image?, down?, instances }. down: true is never a hub's:
+// only the box's gateway sets it, on the empty list it serves when no hub answers (cloud/gateway.mjs). kit is the release serving the hub,
 // fixed when it starts: hub --release's, with image: true (only the box's boot passes it, so no other
 // hub can claim the image's release); else the running kit's own version (kitVersion()) when it is its
 // project's own checkout, or null (no project, or a kit run against someone else's: ownKitVersion). No hub reads DEVTEAM_KIT_RELEASE: the box's ENV reaches every process there.

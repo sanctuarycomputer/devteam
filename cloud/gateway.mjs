@@ -1217,6 +1217,8 @@ export function createGateway(opts = {}) {
     // the whole answer, not only each pause in it: one sent a byte at a time would hold the poller
     deadline = setTimeout(() => { up.destroy(); none(); }, opts.hubDeadlineMs ?? 15000);
   });
+  // No hub answering (nothing on the port, or an answer no list could be) is the empty list with
+  // down: true, which only this fallback ever sets: the page says the hub isn't answering.
   const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
   // The owner's threads with the box's operator (the Overview's dock): the hub keeps them and types
   // each owner turn into the operator's pane, so the box's name passes these few requests to it, after
@@ -2029,6 +2031,10 @@ export function createGateway(opts = {}) {
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      // /box.json, box: 1: { box, terminal, instance, passkeys, previews, push, image }. image is what the
+      // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
+      // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
+      // set (a laptop, an older image). Versions only. An additive change keeps box: 1.
       if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
