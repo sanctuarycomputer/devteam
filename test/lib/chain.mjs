@@ -3273,7 +3273,7 @@ http.createServer((req, res) => {
       const tick = Object.entries(m.phase_usd).filter(([k]) => !['supervisor', 'planning', 'review'].includes(k));
       const waitUsd = tick.filter(([k]) => ['awaiting-word', 'blocked', 'parked', 'starting'].includes(k)).reduce((a, [, v]) => a + v, 0);
       assert.equal(m.efficiency.wait_usd_pct, Math.round((100 * waitUsd) / tick.reduce((a, [, v]) => a + v, 0)), 'the blocked dollars count as waiting; the supervisor\'s do not count at all');
-      assert.ok(m.efficiency.score === null || (m.efficiency.score >= 0 && m.efficiency.score <= 100));
+      assert.ok(Array.isArray(m.efficiency.mis_rated) && Array.isArray(m.mis_rated), 'mis-rated tickets are listed, empty or not');
       assert.deepEqual(Object.keys(m.efficiency.first_pass_rejection), ['spec', 'plan', 'final']);
       for (const st of Object.values(m.reviews.by_stage)) assert.ok(Array.isArray(st.top_blocking_rules) && st.top_blocking_rules.every((x) => x.rule && x.count > 0), 'each stage says what its first passes block on');
       assert.equal(m.cost.tokens.output, 1000 + 1000 + 70);

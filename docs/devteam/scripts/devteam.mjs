@@ -11316,8 +11316,10 @@ function collectMetrics(since) {
   };
   // Efficiency (supervisor.md §3, Orient): tokens and clock time together, over ticket work (the
   // supervisor's own spend and planning are overhead, read from phase_usd). Waiting produces nothing:
-  // a ticket in awaiting-word, blocked, parked or starting. The score is the share of dollars not
-  // spent waiting times the share of hours not spent waiting, 0-100: a trend to orient on, not a grade.
+  // a ticket in awaiting-word, blocked, parked or starting. The Efficiency Score itself is the
+  // dashboard's (kit-173: spend, time and rework against the best of 12 weeks, quality held).
+  // mis_rated: merged tickets whose results contradict their rating (supervisor.md §9).
+  m.mis_rated = misRated(cycles, ts, ticketUsd);
   m.efficiency = efficiencyOf(m);
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
@@ -11610,6 +11612,7 @@ function collectMetrics(since) {
     // reject most first passes (each rejection is another round of tokens and hours)
     const eff = m.efficiency;
     if (eff?.wait_hours_pct !== null && eff?.wait_hours_pct > 50 && m.tickets_merged >= 5) add('medium', 'waiting-heavy', 'tickets', `${eff.wait_hours_pct}% of ticket hours were spent waiting (awaiting-word, blocked, parked, starting)`, 'answer review and merge requests the tick they arrive, give owner questions a default where one is allowed, and let small tickets build before their spec and plan approvals (quality.md §3, Review depth)');
+    for (const x of m.mis_rated ?? []) add('low', 'mis-rated', x.id, `rated ${x.rated}, but: ${x.why.join('; ')}`, 'at the retro, fold what it teaches into how planners rate (a lesson), which tasks go to a fast model, or the review depth (supervisor.md §9, Ratings checked against results)');
     for (const stage of ['spec', 'plan']) {
       const st = m.reviews?.by_stage?.[stage];
       if (st && st.first_passes >= 10 && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt (supervisor.md §10)`);
@@ -11732,6 +11735,31 @@ function cmdAck() {
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
+// Merged tickets (the last 30 days) rated light (S, normal risk, not high uncertainty) whose results
+// say otherwise: over three times the median merged cost per point, three or more final-review passes,
+// or an escaped defect that names them. What the loop reads to calibrate ratings (supervisor.md §9).
+function misRated(cycles, ts, ticketUsd) {
+  const POINTS = { S: 1, M: 2 };
+  const now = Date.now();
+  const recent = cycles.filter((c) => now - (mergedAt(c.id) ?? 0) < 30 * 86400000);
+  const per = (c) => (ticketUsd[c.id] === undefined ? null : ticketUsd[c.id] / (POINTS[ts.get(c.id)?.size] ?? 1));
+  const costs = cycles.map(per).filter((x) => x !== null);
+  const med = median(costs);
+  const passes = reviewPasses();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect');
+  const out = [];
+  for (const c of recent) {
+    const t = ts.get(c.id);
+    if (!t || t.size !== 'S' || t.risk === 'high' || t.uncertainty === 'high') continue;
+    const why = [];
+    const p = per(c);
+    if (med && p !== null && costs.length >= 5 && p > 3 * med) why.push(`cost ${(p / med).toFixed(1)}x the median per point`);
+    if ((passes[c.id] ?? 0) >= 3) why.push(`${passes[c.id]} final-review passes`);
+    if (defects.some((o) => (o.refs ?? []).includes(c.id) || String(o.subject ?? '') === c.id)) why.push('an escaped defect traced to it');
+    if (why.length) out.push({ id: c.id, rated: `S, ${t.risk ?? 'normal'}, ${t.uncertainty ?? 'low'} uncertainty`, why });
+  }
+  return out;
+}
 const EFFICIENCY_WAIT = ['awaiting-word', 'blocked', 'parked', 'starting'];
 const EFFICIENCY_OVERHEAD = ['supervisor', 'planning', 'review'];
 function efficiencyOf(m) {
@@ -11747,12 +11775,12 @@ function efficiencyOf(m) {
   const rej = (stage) => m.reviews?.by_stage?.[stage]?.rejection_rate ?? null;
   const pct = (x) => (x === null ? null : Math.round(100 * x));
   return {
-    score: h.share === null || u.share === null ? null : Math.round(100 * (1 - u.share) * (1 - h.share)),
     wait_hours_pct: pct(h.share),
     wait_usd_pct: pct(u.share),
     hours_per_point: points ? +(h.total / points).toFixed(1) : null,
     usd_per_point: m.cost?.per_point?.usd_per_point ?? null,
     first_pass_rejection: { spec: rej('spec'), plan: rej('plan'), final: rej('final') },
+    mis_rated: m.mis_rated ?? [],
   };
 }
 
@@ -11766,7 +11794,7 @@ function cmdMetrics() {
     `since: ${m.since ?? 'the beginning'}`,
     `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
     `time by phase (h): ${kv(m.phase_hours)}`,
-    `efficiency: ${m.efficiency.score ?? '-'} (waiting ${m.efficiency.wait_hours_pct ?? '-'}% of ticket hours, ${m.efficiency.wait_usd_pct ?? '-'}% of ticket dollars; ${m.efficiency.hours_per_point ?? '-'}h and $${m.efficiency.usd_per_point ?? '-'} per point)`,
+    `efficiency: waiting ${m.efficiency.wait_hours_pct ?? '-'}% of ticket hours, ${m.efficiency.wait_usd_pct ?? '-'}% of ticket dollars; ${m.efficiency.hours_per_point ?? '-'}h and $${m.efficiency.usd_per_point ?? '-'} per point; mis-rated ${m.efficiency.mis_rated.length}`,
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
     `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
