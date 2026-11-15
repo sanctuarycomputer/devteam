@@ -416,3 +416,35 @@ test('records in home: the worker\'s records worktree and prompt, review-worktre
     assert.equal(json(okIn(old, ['timeline', id, '--json'])).files.find((f) => f.title === 'spec').ref, 'origin/main');
   } finally { F.done(); }
 });
+
+test('records in home: a parked worker is settled only once its records are committed and pushed too', () => {
+  const F = recordsFixture('records-park');
+  const { old, g, okIn, ticket } = F;
+  const id = 'console-01-a';
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id };
+  try {
+    ticket(id);
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    g(['push', '-q', 'origin', `ticket/${id}`], w);
+    const rw = path.join(old, '.worktrees', `records-${id}`);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, rw, 'origin/main'], old);
+    // the park ruling names the records worktree
+    okIn(w, ['phase', 'build'], W);
+    okIn(old, ['fleet', 'park', '--reason', 'moving'], SUP);
+    const told = json(okIn(old, ['messages', '--to', id, '--json'])).pop();
+    assert.match(told.text, /^Park: .* Commit and push your records in \S*records-console-01-a too \(home's ticket\/console-01-a\)\./);
+    okIn(w, ['phase', 'parked', '--note', 'parked'], W);
+    const problems = () => json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).sessions.find((x) => x.name === id).problems.filter((p) => p.startsWith('records:'));
+    assert.deepEqual(problems(), [], 'a records branch with nothing of its own has nothing to lose');
+    write(path.join(rw, `docs/devteam/project/tickets/${id}/spec.md`), '# spec\n');
+    assert.match(problems().join('\n'), /records: 1 uncommitted change\(s\) in \S*records-console-01-a/);
+    g(['add', '-A'], rw); g(['commit', '-qm', 'spec'], rw);
+    assert.match(problems().join('\n'), /records: home's ticket\/console-01-a is not on origin: push it from/);
+    g(['push', '-q', 'origin', `ticket/${id}`], rw);
+    assert.deepEqual(problems(), []);
+    write(path.join(rw, `docs/devteam/project/tickets/${id}/plan.md`), '# plan\n');
+    g(['add', '-A'], rw); g(['commit', '-qm', 'plan'], rw);
+    assert.match(problems().join('\n'), /records: home's ticket\/console-01-a here \(\w{12}\) is not what origin has/);
+  } finally { F.done(); }
+});

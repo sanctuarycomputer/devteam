@@ -3728,7 +3728,8 @@ function parkMessage(s, cause) {
   const reason = cause.reason ? ` (${String(cause.reason).slice(0, 80)})` : '';
   const why = cause.kind === 'fleet' ? `the fleet is parked${reason}` : cause.kind === 'let-go' ? `the owner let go of "${title}"` : `"${title}" is parked${reason}`;
   const tail = ` [${cause.marker}]`;
-  const body = `Park: ${why}. Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
+  const recs = s.role === 'worker' && recordsInHomeId(s.id) ? ` Commit and push your records in ${recordsWorktreePath(s.id)} too (home's ticket/${s.id}).` : '';
+  const body = `Park: ${why}.${recs} Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
   // a message line holds 600 characters; the marker that sends it once per cause is kept whole
   return `${body.slice(0, 600 - tail.length)}${tail}`;
 }
@@ -3773,6 +3774,24 @@ const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', '
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
 // A parked session has settled once it stopped (phase parked), its branch is on origin as it is here,
 // its worktree is clean and its handoff is recorded: until then its goal is still parking.
+// A records-in-home worker's records must move with it too: home's ticket/<id> pushed (local =
+// origin) and its records worktree clean. A records branch with nothing of its own (none at all,
+// or a local one that is still in home's main, never pushed) has nothing to lose.
+function recordsParkProblems(s) {
+  if (s.role !== 'worker' || !recordsInHomeId(s.id)) return [];
+  const b = `ticket/${s.id}`;
+  const local = resolveCommit(`refs/heads/${b}`);
+  const remote = resolveCommit(`refs/remotes/origin/${b}`);
+  const main = mainRef();
+  const nothing = !remote && (!local || (!!main && ancestorOf(local, main) === true));
+  const rw = recordsWorktreePath(s.id);
+  const dirty = fs.existsSync(rw) ? workLines(git(['status', '--porcelain'], rw)) : [];
+  return [
+    !nothing && !remote && `records: home's ${b} is not on origin: push it from ${rw}`,
+    !nothing && remote && local && local !== remote && `records: home's ${b} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it from ${rw}`,
+    dirty.length > 0 && `records: ${dirty.length} uncommitted change(s) in ${rw}`,
+  ].filter(Boolean);
+}
 const settledMemo = new Map();
 function sessionSettled(s) {
   if (settledMemo.has(s.name)) return settledMemo.get(s.name);
@@ -3784,7 +3803,7 @@ function sessionSettled(s) {
     const remote = R.resolveCommit(`refs/remotes/origin/${s.branch}`);
     const dirty = fs.existsSync(s.wt) ? workLines(git(['status', '--porcelain'], s.wt)).join('\n') : '';
     const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name, R) || R.git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
-    ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
+    ok = !!remote && (!local || local === remote) && !dirty && !!handoff && !recordsParkProblems(s).length;
   }
   settledMemo.set(s.name, ok);
   return ok;
@@ -16627,6 +16646,7 @@ function fleetStatus() {
       !remote ? `${x.branch} is not on origin: push it` : !r.pushed && `${x.branch} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it`,
       !r.clean && `${dirty.length} uncommitted change(s) in its worktree`,
       r.parked && !r.handoff && (handoffAt ? 'its handoff on origin is older than the park that stopped it' : `no handoff commit on origin/${x.branch} (devteam.mjs handoff in its worktree)`),
+      ...recordsParkProblems(x),
     ].filter(Boolean);
     for (const p of r.problems) blockers.push(`${x.name}: ${p}`);
     return r;
