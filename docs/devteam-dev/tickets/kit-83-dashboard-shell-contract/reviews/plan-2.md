@@ -15,6 +15,6 @@ I read plan-1.md, then the plan diff since 35cda8a. I checked it against the new
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| P2-1 | Minor | spec-2 F2-1; spec §2 Contents (state classes on the `.shell` element) | T1 scope check | T1's pattern requires every selector to be `:where(.shell) …:not(:where(.no-shell, .no-shell *))[::pseudo]`. The block's frame rules (`.drawer` under `.shell.peek-open`, `.main` and the drawer's `right` under `.shell.threads-open`) need a compound prefix such as `:where(.shell.peek-open)`, which that pattern rejects. Accept exactly the prefixes F2-1 names, and keep the boundary required on the subject. | |
+| P2-1 | Minor | spec-2 F2-1; spec §2 Contents (state classes on the `.shell` element) | T1 scope check | T1's pattern requires every selector to be `:where(.shell) …:not(:where(.no-shell, .no-shell *))[::pseudo]`. The block's frame rules (`.drawer` under `.shell.peek-open`, `.main` and the drawer's `right` under `.shell.threads-open`) need a compound prefix such as `:where(.shell.peek-open)`, which that pattern rejects. Accept exactly the prefixes F2-1 names, and keep the boundary required on the subject. | fixed: T1's check accepts the state classes on the prefix and still requires the boundary on the subject |
 
 Verdict: APPROVE 47334feb50251880d671f54bc291f1a9101ba9c7
