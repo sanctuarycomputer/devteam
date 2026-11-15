@@ -34,7 +34,9 @@ const CASES = [
   ['operator-threads', 'hub', 'on a box the standalone hub', true],
 ];
 const env0 = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(DEVTEAM_|TMUX)/.test(k)));
-const killAll = (left) => { for (const p of left) { try { process.kill(-p.pgid, 'SIGKILL'); } catch {} try { process.kill(p.pid, 'SIGKILL'); } catch {} } };
+// never this runner's own process group: a child a test started without detached shares it (plan review I4)
+const ownGroup = Number(fs.readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[2]);
+const killAll = (left) => { for (const p of left) { if (p.pgid && p.pgid !== ownGroup) { try { process.kill(-p.pgid, 'SIGKILL'); } catch {} } try { process.kill(p.pid, 'SIGKILL'); } catch {} } };
 const look = (dirs) => { // a second look, by the run's own dirs
   const hits = [];
   for (const p of fs.readdirSync('/proc')) {
@@ -48,6 +50,7 @@ const look = (dirs) => { // a second look, by the run's own dirs
 let bad = false;
 const rows = [];
 const bases = new Map();
+try {
 for (const [name, part, title, expectBase] of CASES) {
   if (!bases.has(name)) { const b = `test/zz-probe-base-${name}.test.mjs`; fs.writeFileSync(b, execFileSync('git', ['show', `${base}:test/${name}.test.mjs`])); bases.set(name, b); }
   const row = { test: title, expectBase };
@@ -60,12 +63,13 @@ for (const [name, part, title, expectBase] of CASES) {
     const lines = fs.readFileSync(out, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const sum = lines.at(-1) ?? { left: null, note: 'no exit line (timed out)' };
     const left = lines.slice(0, -1);
-    const ran = /^# pass 1$/m.test(r.stdout) || /^# fail 1$/m.test(r.stdout) || /ℹ (pass|fail) 1/.test(r.stdout);
+    // the one test's own result line (the summary may never come from a process that hangs)
+    const ran = /^(not )?ok 1 - /m.test(r.stdout) || /^[✔✖] /m.test(r.stdout);
     killAll(left);
     spawnSync('sleep', ['1']);
     const again = look([...(sum.dirs ?? []), tmp]);
     if (again.length) { for (const p of again) { try { process.kill(p, 'SIGKILL'); } catch {} } bad = true; }
-    row[side] = `${ran ? '' : 'NOT RUN '}children ${sum.children ?? '?'} left ${sum.left ?? '?'}${left.length ? ` (${left.map((x) => x.args.split(' ').slice(0, 2).map((s) => path.basename(s)).join(' ')).join('; ')})` : ''}${again.length ? ` STILL ${again.length} after the kill` : ''}`;
+    row[side] = `${ran ? '' : 'NOT RUN '}children ${sum.children ?? '?'} (pool ${sum.pool ?? '?'}) left ${sum.left ?? '?'}${left.length ? ` (${left.map((x) => x.args.split(' ').slice(0, 2).map((s) => path.basename(s)).join(' ')).join('; ')})` : ''}${again.length ? ` STILL ${again.length} after the kill` : ''}`;
     if (!ran) bad = true;
     if (side === 'head' && sum.left !== 0) bad = true;
     if (side === 'base' && expectBase && !sum.left) bad = true;
@@ -74,5 +78,8 @@ for (const [name, part, title, expectBase] of CASES) {
   rows.push(row);
   console.log(`| ${row.test} | ${row.expectBase ? 'yes' : 'no'} | ${row.base} | ${row.head} |`);
 }
-for (const b of bases.values()) fs.rmSync(b, { force: true });
+} finally {
+  // the base copies never outlive the run (plan review M7)
+  for (const b of bases.values()) fs.rmSync(b, { force: true });
+}
 process.exit(bad ? 1 : 0);

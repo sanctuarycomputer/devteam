@@ -5,14 +5,20 @@
 // - the folders the test makes with fs.mkdtempSync are noted: those matching PROBE_THROW, and every
 //   tmux folder (dt-tmux-) made after the first, which is lib/kit.mjs's own for the whole file;
 // - every child the test process starts (spawn, execFile, fork, exec) is noted with its pid;
-// - on 'exit', before any exit listener runs (lib/kit.mjs prepends one that kills leftover
+// - in a root-level after hook, which node runs once the file's tests and their own t.after hooks
+//   are done, and so before any exit listener (lib/kit.mjs prepends one that kills leftover
 //   dashboards, lib/chrome.mjs adds one for Chrome), it writes to PROBE_OUT one JSON line per process
 //   still alive that the test started: a noted child, or any process of this user whose args or
 //   environment name a noted folder (a tmux server by its TMUX_TMPDIR, a pane's agent, a
-//   dashboard's children by their HOME). Then a last line: { file, children, dirs, left }.
+//   dashboard's children by their HOME). Then a last line: { file, children, dirs, left }. Then it
+//   lib/cli.mjs's warm pool (test/lib/cli-runner.mjs: idle node processes the file keeps ready for
+//   its next command, each gone with the file's process) is the file's, not a test's: it is counted
+//   as pool, never as left. Then it exits, a second later (the reporter's last lines): a test whose hooks didn't let go of a child
+//   would otherwise hold the process open, and no exit would come (plan review I3).
 import cp from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { after } from 'node:test';
 
 const THROW = process.env.PROBE_THROW ? new RegExp(process.env.PROBE_THROW) : null;
 const OUT = process.env.PROBE_OUT;
@@ -55,13 +61,11 @@ function survivors() {
   }
   return [...out.values()];
 }
-const realEmit = process.emit;
-let checked = false;
-process.emit = function (ev, ...a) {
-  if (ev === 'exit' && !checked && OUT) {
-    checked = true;
-    const left = survivors();
-    fs.appendFileSync(OUT, left.map((c) => `${JSON.stringify(c)}\n`).join('') + `${JSON.stringify({ file: process.argv.at(-1), children: children.length, dirs, left: left.length })}\n`);
-  }
-  return realEmit.call(this, ev, ...a);
-};
+after(() => {
+  if (!OUT) return;
+  const all = survivors();
+  const pool = all.filter((c) => /[\\/]test[\\/]lib[\\/]cli-runner\.mjs /.test(c.args));
+  const left = all.filter((c) => !pool.includes(c));
+  fs.appendFileSync(OUT, left.map((c) => `${JSON.stringify(c)}\n`).join('') + `${JSON.stringify({ file: process.argv.at(-1), children: children.length, pool: pool.length, dirs, left: left.length })}\n`);
+  setTimeout(() => process.exit(), 1000);
+});
