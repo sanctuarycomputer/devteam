@@ -107,7 +107,7 @@ The gateway gets one more signer and a signed route. The log schema gets three a
     - `ready --json`'s `caps.max_active_tickets` is `null`;
     - `metrics --json` has exactly one `idle-capacity` finding, the plain one (`/ready/` in the subject, not `/fix ready/`), with `no limit` in its detail and not `null`;
     - with `DEVTEAM_MEMINFO` making memory full (as `memory-ceiling.test.mjs` does), the `memory-full` finding is raised, and its detail says `no limit`;
-    - the goal forecast (`goal show <g> --json`'s forecast) with `null` equals the forecast with `max_active_tickets` set to the goal's open-ticket count;
+    - the goal forecast (`goal show <g> --json`'s forecast) with `null` equals the forecast with `max_active_tickets` set to the goal's open-ticket count, and differs from the forecast with `max_active_tickets: 1` (plan-2 P2-2). The fixture's goal has one feature holding three open tickets, the two ready ones and the fix ticket, so the count is 3, and the old `null ?? 1` gives 1, which fails;
     - and the same fixture with `max_active_tickets: 1` raises the fix-ready idle-capacity line, a control proving the test reaches it.
 - [ ] **Step 2: Run, and expect failures.** `node --test --test-concurrency=2 test/owner-setting.test.mjs`.
 - [ ] **Step 3: Implement.**
@@ -196,7 +196,7 @@ The gateway gets one more signer and a signed route. The log schema gets three a
 - CLI box check: when `threadsNeedGateway()`, read `{ proof }` from stdin. Refuse unless all of these hold:
   - `ownerSettingProofProblem(proof)` is null;
   - the signed body is exactly `{key, value}`, equal to the arguments;
-  - `proof.port === ownDashboardPort()`, a new helper: the last `started on http://127.0.0.1:<port>` in `run/dashboard.log`, else `run/dashboard-port` (the reading at ~13980 moves into it and is used there too); else `that signature is for another dashboard`;
+  - `proof.port === ownDashboardPort()`, a new helper returning a number or null (`Number(...)` on the log's capture; plan-2 P2-3): the last `started on http://127.0.0.1:<port>` in `run/dashboard.log`, else `run/dashboard-port`; else `that signature is for another dashboard`. `machine status` (~13980) is left as it is (spec-3 F3-2): it reads a project's port for display, and its order is not this check's;
   - no `owner-setting` act in the log has that nonce.
 
   The reason reads `owner-setting: on a box the owner saves settings only on the dashboard through the box's gateway, which signs the press, and <why>`. The act keeps `proof`.
@@ -314,7 +314,9 @@ The gateway gets one more signer and a signed route. The log schema gets three a
   6. The owner asks for 3: `Set by you`.
   7. The owner asks for none, then the supervisor lands none `--for`: `Set by you`, `shown` is `No limit`, no finding.
   8. Upkeep parked (`goal hold upkeep park --owner`) and a new ask: the fix begins `Upkeep is parked`.
-  9. A no-op override (plan-1 P1-4): with main at 3 and the owner asking for 5, the supervisor runs `settings set max_active_tickets 3` without `--for` (the file is unchanged) and lands the settings chore (another key's edit rides along). The label is `Set by the supervisor (you asked for 5)`, and there is no finding: the supervisor deliberately kept 3.
+  9. A no-op override (plan-1 P1-4): with main at 3 and the owner asking for 5, the supervisor runs `settings set max_active_tickets 3` without `--for` (the file is unchanged).
+     - **Before the merge** (plan-2 P2-1): the label is still `Saved; applies once the supervisor lands it`, with the finding. The edit's value equals main's, so only the "settings merge newer than the edit" half of the rule holds it back; this check fails if that half is dropped, or if the merge is compared with the owner's act instead of the edit.
+     - Then it lands the settings chore (another key's edit rides along). The label is `Set by the supervisor (you asked for 5)`, and there is no finding: the supervisor deliberately kept 3.
   10. An override that never merged clears nothing: a `settings set … 5` without `--for`, chore not merged, while main holds 3 and the owner asked for 6. Still `Saved…`, with the finding (this is state 4's rule; checked here once more after state 9's merge, so the override from state 9 doesn't count for the newer act).
 - [ ] **Step 2: Run.** Expect FAIL.
 - [ ] **Step 3: Implement** as in the interfaces.
