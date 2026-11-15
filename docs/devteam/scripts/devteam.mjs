@@ -11730,7 +11730,6 @@ function collectMetrics(since) {
   // parked or let-go goal (that one waits by choice)
   const H = heldByMap();
   const live = (id) => { const t = ts.get(id); return !!t && isActive(t) && !mergeShaFor(id) && !['park', 'let-go'].includes(ticketMode(t)); };
-  const blockedHint = (id) => `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`;
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
     // Blocked on an open owner question (asked for it, or naming it in blocks): the next move is the
@@ -11741,15 +11740,19 @@ function collectMetrics(since) {
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
     // the first hour of the same: blocked with nothing holding it, raised at once
-    else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, blockedHint(id));
+    else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
     // awaiting the word while an open owner question blocks it: the word waits on the owner
     if (p.phase === 'awaiting-word' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `waiting for the word for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     else if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
   }
-  // a planner can't log phase blocked: it says so in a blocked message, shown while unanswered
+  // a planner can't log phase blocked: it says so in a blocked message, shown while unanswered. It is
+  // held through waiting_on_owner (a question on its goal, or linking its branch), never --blocks; one
+  // parked, or whose goals are all parked or let go, waits by choice.
   for (const p of planners()) {
     const key = `plan-${p.feature}`;
-    if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', blockedHint(key));
+    if (p.parked || ['park', 'let-go'].includes(modeOf(p.goals.map((g) => logGet(g)).filter((g) => g?.type === 'goal')))) continue;
+    const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
+    if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;

@@ -193,6 +193,10 @@ test('each blocked item names the question holding it', { timeout: 300000 }, asy
   F.owner(['goal', 'hold', g2, 'park', '--owner']);
   all = findings();
   assert.ok(!all.some((f) => ['blocked-without-question', 'blocked'].includes(f.kind) && f.subject === 'app-05-e'), 'parked with its goal, it waits by choice');
+  // a question on a let-go goal holds nothing (spec, edge cases)
+  F.owner(['goal', 'decide', g2, 'let-go', '--owner']);
+  F.sup(['ask', '--blocks', 'app-05-e', '--question', 'Should e keep the old receipts?', '--recommendation', 'keep them', '--stake', '1', '--urgency', '2']);
+  assert.equal(heldBy('app-05-e'), null, 'a question on a let-go goal holds nothing');
 
   // the planner: once its question is withdrawn (answer refuses a goal approval), a blocked message raises it
   F.sup(['withdraw', qg, '--reason', 'test']);
@@ -202,5 +206,10 @@ test('each blocked item names the question holding it', { timeout: 300000 }, asy
   const [p] = bwq('plan-hb-plan');
   assert.ok(p, 'blocked-without-question for plan-hb-plan');
   assert.equal(p.severity, 'medium');
-  assert.match(p.suggestion, /ask --blocks plan-hb-plan/);
+  assert.match(p.suggestion, new RegExp(`ask on its goal \\(ask --goal ${g3} `), 'a planner is asked about on its goal');
+  assert.doesNotMatch(p.suggestion, /--blocks plan-/, 'ask refuses --blocks for a planner');
+  assert.match(p.suggestion, /answer its blocked message/);
+  // its goal parked: it waits by choice
+  F.owner(['goal', 'hold', g3, 'park', '--owner']);
+  assert.deepEqual(bwq('plan-hb-plan'), [], 'its goal parked, the planner waits by choice');
 });
