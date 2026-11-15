@@ -7,16 +7,16 @@
 - Task 2 moves every multi-step teardown in `test/dashboard*.test.mjs` onto `cleanup(t)` (mechanical, order kept).
 - Task 3 replaces the fixed sleeps in the failing tests with waits on state: typing, threads, viewer reload, pins 'ready 5,000 times' (with the poll held still).
 - Task 4 makes pane-question.answer:140 deterministic with a gated `tmux` wrapper on the dashboard's PATH.
-- Task 5 is the proof: test-stress.yml (5 repeats, load 2) on the branch, test.yml green, times from the Node 24 rest job.
+- Task 5 adds test-stress.yml's `node` input (ruling m-20261115-185043423). Task 6 is the proof: stress runs (5 repeats, load 2) on Node 22 and 24, test.yml green, and the times.
 - Local runs: only the touched files, one at a time, `--test-concurrency=2`, Node 22 at `/usr/local/bin/node`, under `timeout` (no `prlimit --as`).
 
 ## Rulings
 
-See spec.md § Rulings (m-20261115-181143331, m-20261115-181403894, m-20261115-182700815). All are folded into the tasks below.
+See spec.md § Rulings (m-20261115-181143331, m-20261115-181403894, m-20261115-185043423, m-20261115-182700815). All are folded into the tasks below. Review spec-1 and plan-1 findings are folded in, each marked with its id.
 
 ## Global constraints
 
-- Files: only `test/lib/chrome.mjs`, `test/dashboard*.test.mjs`, `test/pane-question.answer.test.mjs`, `test/lib/pane-question-fixture.mjs`, and this ticket's folder.
+- Files: only `test/lib/chrome.mjs`, `test/dashboard*.test.mjs`, `test/pane-question.answer.test.mjs`, `test/lib/pane-question-fixture.mjs`, `.github/workflows/test-stress.yml`, and this ticket's folder.
 - Each task is TDD where a test can fail first: write or adjust the test, see it fail for the reason expected, then fix.
 - Local test runs: `timeout 600 /usr/local/bin/node --test --test-concurrency=2 <one file>` (or `--test-name-pattern`), saved to a file. The exit code is checked (`echo $?`), never a piped tail. Never the full suite.
 - Gates: `node $DT gate test -- …` for the local file runs, and `gate ci` for the CI check, run through the real command.
@@ -34,14 +34,15 @@ See spec.md § Rulings (m-20261115-181143331, m-20261115-181403894, m-20261115-1
 
 Files: `test/lib/chrome.mjs`, `test/dashboard-teardown.test.mjs` (new).
 
-1. Write `test/dashboard-teardown.test.mjs`. Each case writes a child test file into `fs.mkdtempSync(os.tmpdir()/devteam-teardown-)`, importing `lib/chrome.mjs` and `lib/kit.mjs` by absolute file URL. It runs the file with `spawnSync(process.execPath, ['--test', '--test-reporter=tap', child], { timeout: 120000 })`, reads the pids the child printed (`PIDS {json}` lines in its stdout, as TAP comments), and checks:
+1. Write `test/dashboard-teardown.test.mjs`. Each case writes a child test file into `fs.mkdtempSync(os.tmpdir()/devteam-teardown-)`, importing `lib/chrome.mjs` and `lib/kit.mjs` by absolute file URL. It runs the file with `spawn(process.execPath, ['--test', '--test-reporter=tap', child], { detached: true })`, a process group of its own. A 120 s timer SIGKILLs that group on a timeout. The case's `cleanup` SIGKILLs it again, and every group or pid the child printed, after the checks, so a regression leaves nothing behind (P1-1). It reads the pids the child printed (`# PIDS {json}` lines in its stdout) and checks:
    - **thrown mid-page** (skip unless `canDrive`): Chrome opened, a page navigated to `data:text/html,…`, `throw`. Then Chrome's group is gone (ESRCH within 5 s), and the child failed with exactly 1 failure.
    - **thrown with Chrome slow to stop** (skip unless `canDrive`): as above, with `process.kill(chromePid, 'SIGSTOP')` before the throw, and a second test after it that passes. Then the group is gone, and the TAP says `# pass 1`, `# fail 1`, `# cancelled 0`, child exit 1 (not a timeout).
+   - **no exit ever reported** (skip unless `canDrive`; F1-1/P1-2): Chrome SIGSTOPped, `chrome.proc.removeAllListeners('exit')`, then `close()` resolves within 10 s (the 3 s SIGKILL plus the 5 s bound), and a second test after it passes: `# pass 2`, `# cancelled 0`, and the file ends well inside the timer.
    - **removal throws first** (skip unless `canDrive`; done-when 6): `bareProject` + `dashboardOnFreePort`, Chrome and a page, `spawn(node, ['-e', 'setInterval(() => {}, 1000)'])`, `http.createServer().listen(0)`, all through `later` from `cleanup(t)`. The removal is registered first and throws an ENOTEMPTY error. After the child exits (well inside 120 s): the dashboard's group, Chrome's group and the child pid are all gone, and the only failure the child reports is the ENOTEMPTY.
    - **cleanup's contract** (always runs): a child with three `later` steps, the second throwing. All three ran, in reverse order, and the error is the thrown one.
    - The child's env: own HOME (mkdtemp), `DEVTEAM_HUB_PORT`/`DEVTEAM_PORT_BASE` from `PORTS` (a block of its own: claim offsets in this file's header comment, per test/lib/ports.mjs's rule), and every `DEVTEAM_*` and `TMUX*` unset.
-2. Run it against main's chrome.mjs (with `cleanup`/`pid` stubbed in a scratch copy): the SIGSTOP case fails (cancelled or hung to the spawn timeout). Quote the result in verification.md.
-3. Implement in chrome.mjs: `proc.ref()` at the start of `close()`; the 5 s post-SIGKILL bound; `ws.onclose`/`onerror` after open reject all of `waiting` with `Chrome's page connection closed (code …)`; `pid: proc.pid` in the return; export `cleanup(t)`.
+2. Run it against main's chrome.mjs (with `cleanup`/`pid`/`proc` stubbed in a scratch copy): the SIGSTOP case fails, with `# cancelled 1` or a hang to the timer. Quote the result in verification.md. Note there that the group check passes at main too (the exit handler kills the group), so the TAP counts are the evidence for class A (P1-7).
+3. Implement in chrome.mjs: `proc.ref()` at the start of `close()`; the 5 s post-SIGKILL bound; `done()` calls `proc.unref()` and removes its `exit` listener (P1-2); `ws.onclose` after open rejects all of `waiting` with `Chrome's page connection closed (code …)`; `pid: proc.pid, proc` in the return; export `cleanup(t)`. `test/lib/pane-question-fixture.mjs` re-exports `cleanup` from chrome.mjs instead of its own copy (F1-9a).
 4. Run the file (Node 22): green. Run one existing Chrome file, `dashboard-owner-action.test.mjs`: green.
 5. Review `reviews/task-1.md`.
 
@@ -60,9 +61,9 @@ Files: `test/dashboard.test.mjs`, `test/dashboard-answers.test.mjs`, `test/dashb
 File: `test/dashboard.test.mjs`.
 
 1. **pins 'ready 5,000 times'**: before the flood, `await p.ev('window.__still()')`, and `__stir()` in a finally. Add `const heard = async (tag) => { post {probe: tag} to the frame; await soon(window.__own has heard with data.probe === tag) }`, and replace both 300 ms sleeps with `await heard(<unique>)`. Keep the asserts as they are (draws ≤ 2, resolves unchanged, one resolve on the next load).
-2. **typing radio**: `setTimeout(r, 300)` → `p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))')`.
-3. **threads**: `settle` → `ticks = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(\`window.__polls >= ${at + n}\`, \`${n} polls\`); }`, at its four call sites. Drawer 200 ms → two animation frames.
-4. **viewer reload**: dashboard subtest: `const n = await p.ev("__asked.filter((u) => u === '/api/threads').length")`, then `soonData(… > n)` in place of the 3 s. Viewer subtest: the same with `u.startsWith('/api/view?')` and `soonView`.
+2. **typing radio** (P1-4): `setTimeout(r, 300)` → `p.ev(atRest)`. `atRest` is a page-side promise that resolves once `scrollY` has been unchanged for 10 consecutive animation frames, giving up after 3 s. Mutation check, in a scratch copy: make the radio's space reach the page, so it scrolls. The test must then fail.
+3. **threads** (P1-9): `settle` → `ticks(8)` (`const at = await p.ev('window.__polls'); await soon(\`window.__polls >= ${at + 8}\`, …)`), about 2.4 s of the page's own polls, at its four call sites. Drawer 200 ms → two animation frames after the move: the cursor is set in the pointer handler, which has run before the next frame.
+4. **viewer reload** (P1-3): a test-local init script wraps `fetch`, recording `{ u, n, landed }` per read in `window.__reads2` (`n` is the start order; `landed` is set when `text()` or `json()` resolves). Dashboard subtest: take `n0` = the reads so far when the outline shows; wait (soonData, 45 s) until two `/api/data` reads with `n > n0` have landed; then `said('v2') === 0`. Viewer subtest: the same with `/api/view?` and soonView (37 s each).
 5. Run dashboard.test.mjs (Node 22, `--test-concurrency=2`, niced, pinned to 2 cores): green. Then the four changed tests by `--test-name-pattern` with `DEVTEAM_TEST_READ_DELAY_MS=600`: green.
 6. Review `reviews/task-3.md`.
 
@@ -75,11 +76,19 @@ Files: `test/pane-question.answer.test.mjs` (and `test/lib/pane-question-fixture
 3. Run the file (Node 22): green, 3 times.
 4. Review `reviews/task-4.md`.
 
-### Task 5: proof
+### Task 5: test-stress.yml's node input
+
+File: `.github/workflows/test-stress.yml`.
+
+1. Add `node` under `workflow_dispatch.inputs` (`type: choice`, `options: ['20', '22', '24']`, `default: '24'`, a description). setup-node: `node-version: ${{ inputs.node || '24' }}`. Stress step `env:` gains `NODE: ${{ inputs.node || '24' }}`, and `STRESS_TITLE` includes `node $NODE`. Nothing else changes.
+2. Run kit-216's `${{`-in-`run:` check script (`docs/devteam-dev/tickets/kit-216-daily-stress-run/`) on the file: clean. Run actionlint (pinned, as kit-216 did): exit 0.
+3. Review `reviews/task-5.md`.
+
+### Task 6: proof
 
 1. Merge `origin/main`, push, open the PR (title `kit-214-steady-chrome-tests: Chrome-driven dashboard tests wait on the page, not on timers, and leave no Chrome behind`).
-2. `gh workflow run test-stress.yml --ref ticket/kit-214-steady-chrome-tests -f files="test/dashboard.test.mjs test/dashboard-answers.test.mjs test/dashboard-measure.test.mjs test/dashboard-owner-action.test.mjs test/dashboard-shell.test.mjs test/dashboard-teardown.test.mjs" -f repeat=5 -f load=2`, plus one run of `test/pane-question.answer.test.mjs` (repeat 5, load 2). Wait for completion (Monitor, no polling loop). Conclusion from `gh run view --json conclusion`.
-3. test.yml at the head: every job's conclusion. From the `kit (24, rest)` log, each listed file's top-level `duration_ms` and its slowest test.
+2. `gh workflow run test-stress.yml --ref ticket/kit-214-steady-chrome-tests -f files="test/dashboard.test.mjs test/dashboard-answers.test.mjs test/dashboard-measure.test.mjs test/dashboard-owner-action.test.mjs test/dashboard-shell.test.mjs test/dashboard-teardown.test.mjs test/pane-question.answer.test.mjs" -f repeat=5 -f load=2 -f node=22`, and the same with `-f node=24` (P1-5). The workflow's concurrency group serializes them. Wait with Monitor, not a polling loop. Take the conclusion from `gh run view --json conclusion`, and quote both summaries.
+3. test.yml at the head: every job's conclusion. From the `kit (24, rest)` log (spec reporter), each listed file's top-level tests' `(<n>ms)` and their sum, and from step 2's Node 24 summary each file's wall seconds (P1-6).
 4. verification.md: a row per done-when, with command, result and sha. Then the final review (`reviews/final-1.md`, a fresh subagent that hasn't seen the build), `check-ticket`, and the merge-request.
 
 ## Verification
