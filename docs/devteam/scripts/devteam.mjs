@@ -783,7 +783,7 @@ const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
 const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The only acts the owner writes: records of what the owner did, never calls.
-const OWNER_ACTS = ['artifact-publish', 'pane-answer'];
+const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -1157,6 +1157,7 @@ function schemaErrors(schema, value, where) {
     if (schema.minItems !== undefined && value.length < schema.minItems) errs.push(`${where} needs at least ${schema.minItems} item(s)`);
     if (schema.maxItems !== undefined && value.length > schema.maxItems) errs.push(`${where} has more than ${schema.maxItems} items`);
     if (schema.items) value.forEach((v, i) => errs.push(...schemaErrors(schema.items, v, `${where}[${i}]`)));
+    if (schema.uniqueItems && new Set(value.map((v) => canonical(v))).size !== value.length) errs.push(`${where} names an item more than once`);
   }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const k of schema.required ?? []) if (!(k in value)) errs.push(`${where}.${k} is required`);
@@ -1208,10 +1209,11 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
-    // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish) and
-    // of answering what the supervisor's terminal asked (pane answer). Nobody else writes those
-    // classes: an agent can't make the log say the owner published, or gave a tool their yes.
-    if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? 'the owner\'s acts are artifact-publish and pane-answer only' : `${o.class} is the owner\'s`;
+    // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
+    // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
+    // (goal order). Nobody else writes those classes: an agent can't make the log say the owner
+    // published, gave a tool their yes, or ordered the goals.
+    if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
     if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
@@ -1319,6 +1321,10 @@ function fold(all) {
   const objects = new Map();
   const ignored = [];
   const goalApprovals = new Set();
+  const orderPlans = new Map();
+  // when each order answer was applied: its first act (approved_by), made in the pass above
+  const orderApplied = new Map();
+  let orderAppliedRead = false;
   const aliases = new Map();
   for (const l of lines) {
     if (l.op !== 'new') continue;
@@ -1337,6 +1343,8 @@ function fold(all) {
     }
     const rank = RANK[writerClass(by)];
     objects.set(l.id, { ...body, created_at: at, created_by: by, updates: [], __rank: Object.fromEntries(Object.keys(body).map((k) => [k, rank])) });
+    // a goal's title as made, for its title at a given time (goalTitleAt); not copied into views or JSON
+    if (body.type === 'goal') Object.defineProperty(objects.get(l.id), '__bornTitle', { value: body.title });
   }
   for (const l of lines) {
     if (l.op !== 'set') continue;
@@ -1376,7 +1384,22 @@ function fold(all) {
       }
       continue;
     }
-    if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft' && obj.kind !== 'upkeep') {
+    // A supervisor's line under an answer to a goal-change --order question is that answer applied, on
+    // any goal, a draft too: exactly the goal's place in the order, once, set at the owner's rank (the
+    // owner's own word, which an earlier priority of theirs must not outrank).
+    const orderQ = obj.type === 'goal' && cls === 'supervisor' && typeof l.approved === 'string' ? objects.get(l.approved) : null;
+    const byOrder = orderQ?.type === 'question' && isObj(orderQ.change) && Array.isArray(orderQ.change.order);
+    if (byOrder) {
+      if (!orderAppliedRead) {
+        orderAppliedRead = true;
+        for (const o of objects.values()) if (o.type === 'act' && typeof o.approved_by === 'string' && !(orderApplied.get(o.approved_by) <= o.created_at)) orderApplied.set(o.approved_by, o.created_at);
+      }
+      const problem = goalOrderProblem(orderQ, obj, l, orderPlans, objects, orderApplied);
+      if (problem) {
+        ignored.push({ line: l, why: `the supervisor sets a goal's place only as the owner's answer to ${l.approved} gave it: ${problem}` });
+        continue;
+      }
+    } else if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft' && obj.kind !== 'upkeep') {
       const problem = !l.approved ? null : goalApprovals.has(l.approved) ? `${l.approved} already authorised a goal set` : goalChangeProblem(objects.get(l.approved), obj.id, l.approved, l);
       if (!l.approved || problem) {
         ignored.push({ line: l, why: l.approved ? `the supervisor edits a ${obj.status} goal only with an answered goal-change question: ${problem}` : 'the supervisor edits a goal only while it is a draft' });
@@ -1411,11 +1434,14 @@ function fold(all) {
     }
     for (const [k, val] of Object.entries(l)) {
       if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
-      if ((obj.__rank[k] ?? -1) > rank) continue;
+      // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
+      // supervisor's, so a later answer's approved still lands and is seen as used
+      const r = byOrder && k === 'priority' ? RANK.owner : rank;
+      if ((obj.__rank[k] ?? -1) > r) continue;
       // a question's rating as first asked, so its history can show what a later rate replaced
       if (obj.type === 'question' && QUESTION_RATING.includes(k) && !(k in (obj.__asked ??= {}))) obj.__asked[k] = obj[k];
       obj[k] = val;
-      obj.__rank[k] = rank;
+      obj.__rank[k] = r;
       changed[k] = val;
     }
     if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
@@ -1812,7 +1838,7 @@ function questionView(q) {
   }
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: isObj(q.change) && Array.isArray(q.change.order) ? null : q.change ?? null, ...(isObj(q.change) && Array.isArray(q.change.order) ? { order: q.change.order } : {}), met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
@@ -1890,6 +1916,112 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   // the owner approved this change and no other: the set must be exactly it
   if (l && !legacy && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
   return null;
+}
+
+// The goal order (planning.md §1, priority is the owner's): the goals named take priority 1..n in
+// that order, and the live goals left out keep their relative place after them. goals: the goal
+// objects as they stand (the log's, or the fold's at one line), Upkeep among them or not.
+const orderableGoal = (g) => g?.type === 'goal' && g.kind !== 'upkeep' && !['met', 'abandoned'].includes(g.status ?? 'draft');
+// Why ids can't be ordered (null when they can): each a goal, named once, live, not Upkeep.
+function goalOrderRefusal(ids, goals) {
+  const byId = new Map(goals.map((g) => [g.id, g]));
+  const seen = new Set();
+  for (const id of ids) {
+    const g = byId.get(id);
+    if (seen.has(id)) return `${id} is named more than once`;
+    seen.add(id);
+    if (!g || g.type !== 'goal') return `no goal ${id}`;
+    if (g.kind === 'upkeep') return 'Upkeep has no place in the goal order';
+    if (g.status === 'met') return `${id} is met`;
+    if (g.status === 'abandoned') return `${id} is let go`;
+  }
+  return null;
+}
+// The lines an order writes: every goal named, at its place; then each live goal left out that has
+// a priority, numbered after them in its current order, only where its number changes.
+function goalOrderPlan(ids, goals) {
+  const plan = ids.map((id, i) => ({ id, priority: i + 1 }));
+  const rest = goals.filter((g) => orderableGoal(g) && !ids.includes(g.id) && typeof g.priority === 'number').sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+  rest.forEach((g, j) => { if (g.priority !== ids.length + j + 1) plan.push({ id: g.id, priority: ids.length + j + 1 }); });
+  return plan;
+}
+// Why the supervisor's line l on goal obj is not the owner's answer to order question q (null when
+// it is): q is a goal-change question proposing an order, answered by the owner with its
+// recommendation; l sets only priority, to the goal's place in that order's plan, once. The plan is
+// made once per answer, at its first line, from the goals as they stood then (made by that time, not
+// the fold's later ones); plans keeps it, and the goals already set under it.
+function goalOrderProblem(q, obj, l, plans, objects, appliedAt) {
+  const v = questionView(q);
+  if (v.class !== 'goal-change' || !v.order || v.order.length < 2) return `${v.id} proposes no goal order`;
+  if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
+  if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation ("${v.recommendation}")`;
+  const shown = orderContextProblem(v, [...objects.values()].filter((o) => o.type === 'goal'));
+  if (shown) return shown;
+  // the answer is used once its act is written: a line after that is not part of applying it
+  if (appliedAt.has(v.id) && appliedAt.get(v.id) < l.at) return `${v.id} was applied already`;
+  const set = Object.keys(l).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__') && k !== 'approved');
+  if (set.length !== 1 || set[0] !== 'priority') return `an order sets priority and nothing else (this sets ${set.join(', ') || 'nothing'})`;
+  if (!plans.has(v.id)) {
+    const goals = [...objects.values()].filter((o) => o.type === 'goal' && o.created_at <= l.at);
+    const why = goalOrderRefusal(v.order, goals);
+    plans.set(v.id, { why, plan: why ? null : new Map(goalOrderPlan(v.order, goals).map((p) => [p.id, p.priority])), done: new Set() });
+  }
+  const p = plans.get(v.id);
+  if (p.why) return p.why;
+  if (!orderableGoal(obj)) return obj.kind === 'upkeep' ? 'Upkeep has no place in the goal order' : `${obj.id} is ${obj.status === 'met' ? 'met' : 'let go'}`;
+  if (!p.plan.has(obj.id)) return `the order leaves ${obj.id} where it is`;
+  if (p.done.has(obj.id)) return `${v.id} already set ${obj.id}'s place`;
+  if (l.priority !== p.plan.get(obj.id)) return `${obj.id}'s place in that order is ${p.plan.get(obj.id)}, not ${l.priority}`;
+  p.done.add(obj.id);
+  return null;
+}
+// Why order question v doesn't show the owner the order it proposes (null when it does): its context
+// ends with exactly the list the kit writes for change.order (goalOrderText), each goal titled as it
+// was when the question was asked. The owner's Yes is to what they read; a question whose list and
+// order differ in an id, a title, a line or a word after it (a line written by hand) approves nothing.
+function orderContextProblem(v, goals) {
+  const byId = new Map(goals.map((g) => [g.id, g]));
+  const shown = goalOrderText(v.order, (id) => goalTitleAt(byId.get(id), v.asked_at) ?? id);
+  const ctx = String(v.context ?? '');
+  // one list only: another before the kit's would show the owner two orders
+  if (ctx.slice(0, Math.max(0, ctx.length - shown.length)).includes('The order proposed:')) return `${v.id}'s context shows another list before the kit's`;
+  return ctx === shown || ctx.endsWith(`\n\n${shown}`) ? null : `${v.id}'s context doesn't end with the kit's list of the order it proposes (${v.order.join(' ')}), titled as the goals were when it was asked`;
+}
+// A goal's title at time at: its latest title set by then, else the title it was made with.
+function goalTitleAt(g, at) {
+  if (!g) return null;
+  const u = g.updates.filter((x) => x.title !== undefined && x.at <= at).pop();
+  return u ? u.title : (g.__bornTitle ?? g.title);
+}
+// The supervisor applying the owner's answer to a goal-change --order question: exactly the order
+// it proposed (ids, when given, must be it), once, on goals still live.
+function goalOrderApproved(qid, ids) {
+  supervisorOnly('goal order --approved');
+  const q = logGet(qid);
+  if (q?.type !== 'question') die(`goal order --approved: ${qid} is not a question`);
+  const v = questionView(q);
+  if (v.class !== 'goal-change' || !v.order || v.order.length < 2) die(`goal order --approved: ${qid} proposes no order (a one-goal change is goal set <g-id> --approved ${qid})`);
+  if (v.status !== 'answered') die(`goal order --approved: ${qid} is not answered by the owner (${v.status})`);
+  if (!v.matched) die(`goal order --approved: ${qid} was answered "${v.answer}", not its recommendation ("${v.recommendation}"); ask again for the order the owner wants`);
+  const shown = orderContextProblem(v, readLog().byType.get('goal') ?? []);
+  if (shown) die(`goal order --approved: ${shown}; ask again`);
+  if ((readLog().byType.get('goal') ?? []).some((g) => g.updates.some((u) => u.approved === qid)) || calls().some((a) => a.approved_by === qid)) die(`goal order --approved: ${qid} already authorised a change; ask again for another`);
+  if (ids.length && canonical(ids) !== canonical(v.order)) die(`goal order --approved: ${ids.join(' ')} is not the order ${qid} proposed (${v.order.join(' ')}); give none to apply it`);
+  const why = goalOrderRefusal(v.order, readLog().byType.get('goal') ?? []);
+  if (why) die(`goal order --approved: ${why}, so the order ${qid} proposed can't be applied as approved; ask again`);
+  return out(applyGoalOrder(v.order, 'supervisor', qid));
+}
+// The order written: one goal line per planned goal, then one act: the owner's own record of it
+// (goal-order, never a call), or the supervisor's applying the owner's answer (goal-change, the
+// owner-only class the answer was asked in, with approved_by).
+function applyGoalOrder(ids, by, approved = null) {
+  const goals = [...(readLog().byType.get('goal') ?? [])];
+  const plan = goalOrderPlan(ids, goals);
+  for (const p of plan) appendLog({ type: 'goal', op: 'set', id: p.id, priority: p.priority, ...(approved ? { approved } : {}) }, by);
+  const title = (id) => goals.find((g) => g.id === id)?.title ?? id;
+  appendLog({ type: 'act', class: by === 'owner' ? 'goal-order' : 'goal-change', what: `${approved ? `applied ${approved}: ` : ''}put the goals in order: ${ids.map((id, i) => `${i + 1}. ${title(id)}`).join(', ')}${plan.length > ids.length ? '; the rest after them, in their order' : ''}`, refs: plan.map((p) => p.id), reversible: true, ...(approved ? { approved_by: approved } : {}) }, by);
+  logCache = null;
+  return ids.map((id, i) => `${i + 1} ${id} ${title(id)}`).join('\n');
 }
 
 // The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
@@ -2169,6 +2301,8 @@ function cmdLogCheck() {
   for (const u of newer) out(`a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
+  // an answered order question showed the owner its order: its context ends with the kit's list of change.order
+  for (const q of logObjects('question')) { const v = questionView(q); const p = v.order && v.status === 'answered' ? orderContextProblem(v, readLog().byType.get('goal') ?? []) : null; if (p) fails.push(p); }
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
   // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
@@ -5223,6 +5357,25 @@ function goalChangeFlag(cls) {
   if (!Object.keys(c).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
   return c;
 }
+// --order '["g-…",…]': the goal order a goal-change question proposes, about no one goal (its
+// answer authorises goal order --approved, exactly that order); undefined when absent.
+function goalOrderFlag(cls) {
+  const o = jsonFlag('order');
+  if (o === undefined) return undefined;
+  if (cls !== 'goal-change') die('--order belongs on a goal-change question (--class goal-change)');
+  if (flagStr('goal') !== undefined) die('--order proposes the order of several goals: it takes no --goal (the order names its goals)');
+  if (flagStr('change') !== undefined) die('--order is the whole change: it takes no --change');
+  if (!Array.isArray(o) || o.some((x) => typeof x !== 'string')) die('--order is a JSON list of goal ids: \'["g-…","g-…"]\'');
+  if (o.length < 2) die('--order puts at least two goals in order; one goal\'s priority is a goal-change with --goal and --change');
+  const why = goalOrderRefusal(o, readLog().byType.get('goal') ?? []);
+  if (why) die(`--order: ${why}`);
+  if (String(ownerText(flagStr('context')) ?? '').includes('The order proposed:')) die('--order: the kit writes "The order proposed:" itself, from the order; leave it out of --context');
+  if (!flagStr('recommendation')?.trim()) die('a goal-change --order question recommends the order (--recommendation "Yes, this order"): only the owner\'s answer with it approves');
+  return o;
+}
+// The order in the owner's words, written into the question's context (which its hash covers).
+// Each title on one line: a title can't add lines (or a list of its own) to what the owner reads.
+const goalOrderText = (ids, titleOf = (id) => logGet(id)?.title ?? id) => ['The order proposed:', ...ids.map((id, i) => `${i + 1}. ${String(titleOf(id)).replace(/\s+/g, ' ').trim()} (${id})`), 'Goals left out keep their order after these.'].join('\n');
 // --stake and --urgency on ask and rate: 1, 2 or 3 each; undefined when not given.
 function ratingFlags() {
   const r = {};
@@ -5442,6 +5595,8 @@ function askLine({ thread } = {}) {
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
+  // goal-change --order: one question proposing a whole goal order, applied by goal order --approved
+  const orderAsked = goalOrderFlag(cls);
   // goal-met: the owner's yes that a running goal is met (planning.md §1), for every source. Owner
   // only and never defaulted. The kit writes the words and the choices, and the question carries the
   // goal as asked (met.basis) and the reading it shows, so the owner's yes applies to that goal as it
@@ -5532,7 +5687,7 @@ function askLine({ thread } = {}) {
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
     ownerSaid = flagStr('owner-said')?.trim() || null;
   }
-  if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
+  if (!orderAsked && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
@@ -5681,8 +5836,8 @@ function askLine({ thread } = {}) {
   if (newBecause !== undefined && !newBecause.trim()) die('--new-because says what materially changed since the owner answered; it can\'t be blank');
   try { newBecause = askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), question: q, cls, kind, about: { goal: flagStr('goal'), ticket: flagStr('ticket'), blocks, secrets, links, sensor: flagStr('sensor') }, newBecause: newBecause?.trim() }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, new_because: newBecause?.trim() || undefined, question: q, context: kind === 'goal-approval' ? [ownerText(flagStr('context')), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : orderAsked ? [context, goalOrderText(orderAsked)].filter(Boolean).join('\n\n') : context,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: orderAsked ? { order: orderAsked } : goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -7601,7 +7756,7 @@ const artifactStarter = (title) => `<!doctype html>
 
 // The JSON schema keywords schemaErrors checks; anything else in a result schema would be ignored
 // silently, so review check refuses it.
-const SCHEMA_CHECKED = ['type', 'enum', 'const', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems', 'items', 'properties', 'required', 'additionalProperties'];
+const SCHEMA_CHECKED = ['type', 'enum', 'const', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems', 'uniqueItems', 'items', 'properties', 'required', 'additionalProperties'];
 const SCHEMA_NOTES = ['description', 'title', '$schema', '$id', '$comment', 'examples', 'default'];
 function schemaSubsetErrors(s, where) {
   if (!s || typeof s !== 'object' || Array.isArray(s)) return [`${where} is not a schema object`];
@@ -10241,6 +10396,24 @@ function cmdGoal() {
     registryPreconditionCheck(id, { ...logGet(id), ...Object.fromEntries(Object.entries(f).filter(([, x]) => x !== undefined)) });
     appendLog({ type: 'goal', op: 'set', id, ...f }, by);
     return out(`updated ${id}`);
+  }
+  // The goal order in one step: the owner's ids, 1..n, the rest after in their own order (the
+  // owner's terminal or the dashboard); or the supervisor applying an answered goal-change --order
+  // question, exactly the order it proposed (goal order --approved <qid>).
+  if (sub === 'order') {
+    const ids = positional.slice(1);
+    const approved = flagStr('approved') ?? null;
+    if (flags.approved !== undefined && !approved) die('goal order --approved needs the question id: goal order [<g-id> …] --approved <qid>');
+    if (approved && /\s/.test(approved)) die('goal order --approved takes one question id: name any goals before it (goal order [<g-id> …] --approved <qid>)');
+    if (approved) return goalOrderApproved(approved, ids);
+    if (process.env.DEVTEAM_ROLE) die(`goal order is the owner's (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE}): the supervisor asks one goal-change --order question, then goal order --approved <qid>`);
+    const { by } = ownerWriter('the owner orders the goals; ask one goal-change --order question, then goal order --approved <qid>');
+    if (!ids.length) die('usage: goal order <g-id> <g-id> … (the owner) | goal order [<g-id> …] --approved <qid> (the supervisor)');
+    const why = goalOrderRefusal(ids, readLog().byType.get('goal') ?? []);
+    if (why) die(`goal order: ${why}`);
+    const said = applyGoalOrder(ids, by);
+    nudgeSupervisor(`[devteam goal order from owner] the goals are in a new order: devteam.mjs goal list`);
+    return out(said);
   }
   // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine
   // (notes the planner must take into account; the supervisor reworks the design and asks again),
@@ -14318,6 +14491,8 @@ async function cmdDashboard() {
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     // the card's Mark met: goal status met, which reads a repo or prod check again first
     'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
+    // the owner's goal order (kit-234's drag to reorder): the goals named, first to last
+    'goal-order': (b) => (Array.isArray(b.ids) && b.ids.length >= 1 && b.ids.length <= 50 && b.ids.every((x) => typeof x === 'string' && ID.test(x)) ? ['goal', 'order', ...b.ids] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
@@ -19580,9 +19755,11 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions|impact] …
+  goal [list|check|show|forecast|add|set|order|decide|approve|status|reading|hold|park-sessions|impact] …
   goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
+  goal order <g-id> <g-id> …   owner: put the goals in order, 1..n; the goals left out keep their order after them (a line per goal named and per goal left out that moves, one goal-order act)
+  goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR

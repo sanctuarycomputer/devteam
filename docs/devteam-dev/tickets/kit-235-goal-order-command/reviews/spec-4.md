@@ -1,0 +1,12 @@
+# Spec review, pass 4
+
+- Reviewer: cold-confirm reviewer 4 (fresh subagent, claude-opus-5-5)
+- Reviewed: 09db04fe16f8b6205eb1b7c840619e2c0c682677 (spec.md, diff since 01f8e46)
+
+Read the spec diff since 01f8e46 against spec-3.md and its dispositions, and checked it against the code: `questionHash` (~1770), `questionView` (~1783/1815), every reader of `change` (`goalChangeProblem` ~1878-1891, `goal set --approved` ~10222-10237, dashboard/index.html ~1445, planning.md's note), `askLine`'s context assembly (~5562-5600, 5684) and `askPlainChecks` (~5387), and log.schema.json's `question.context`. F3-1 is fixed. With `change: null` for an order question the Inbox card's change block is skipped, and the order is shown in words in the context, which is hashed, so the owner approves what they read. Returning `change: null` breaks no reader. The fold and `goal set --approved` both reach `goalChangeProblem`, which refuses at the goal check (`about no goal`) before its legacy "carries no change" test. That holds with or without `--change`: the carried flag becomes true but the goal check comes first. `goal set`'s carry-forward branch is never reached for an order question, and `questionHash` reads the raw line, so the view's null `change` does not touch the hash. No other renderer of `change` exists in the kit. `question.context` has no `maxLength` in the schema, and `askPlainChecks` only warns on context (it never refuses), so the appended order cannot fail a write. F3-2 is fixed: the older-reader bullet now says draft-goal lines apply unchecked with the approved values. F3-3 is fixed: the x-tip is named. I found one Minor point.
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| F4-1 | Minor | plain-language checks (askPlainChecks) | spec §2 (context bullet) | The spec does not say whether the kit-written order text is joined to `context` before or after `askPlainChecks` (~5677). Today's kit-written parts (goal-met words, the remediation lines) are joined before it. If this text is joined the same way, every order question warns `--context names a kit id`, because `KIT_ID` matches the `(g-…)` ids the kit wrote itself. A goal title holding a kit word would also warn, though the supervisor did not write it. Join it after the checks, or check only the supervisor's own `--context`. | fixed in build: the order text is added after askPlainChecks, so only the supervisor's own --context is checked; Task 2's test asserts no kit-id warning |
+
+Verdict: APPROVE 09db04fe16f8b6205eb1b7c840619e2c0c682677
