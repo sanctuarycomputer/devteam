@@ -3,7 +3,9 @@
 Dashboard data: the governance listing, plain names for every kind of decision, what holds each item that needs the owner, Upkeep's days, and every kit setting.
 
 - Feature: dashboard-cleanup (stories DCL-S6, DCL-S7); design `project/designs/a-cleaner-more-consistent-dashboard.md` (home): Board, Autonomy pages, Goals page (Upkeep's heartbeat), the hub card head, How a governance file changes, Data, Failure modes.
-- Touches: `docs/devteam/scripts/devteam.mjs`, `test/dashboard-data.test.mjs`. Nothing else.
+- Touches: `docs/devteam/scripts/devteam.mjs`, `test/dashboard-data.test.mjs`, plus `test/fixtures/g1/dashboard-data.txt` once the supervisor rules on it, as it did for kit-81 (m-20261115-060510348-supervisor). Nothing else.
+  - **Why the golden (F3-1).** G1 compares `dashboard-data` output byte for byte with that file (`test/lib/kit.mjs` g1Outputs, `test/components.test.mjs`). Every new `/api/data` field changes the output, so the golden has to be re-recorded (`DEVTEAM_G1_RECORD=1`). The only change in the golden is the added fields; the plan's final review checks the diff of the golden shows nothing else. No other golden changes: no G1 fixture is blocked, so `metrics.txt` holds, and `hello` and `governance` have no golden.
+  - The request goes to the supervisor as a `design-change`.
 - Depends on: kit-81 (merged), kit-208 (in review). Build waits for both and approve-plan (m-20261115-194943086-supervisor).
 - Reference: the mock at home main 3cb8d6b, `project/artifacts/dashboard-cleanup/` (`UPKEEP_DAYS`, `heartbeat`, `HUB_THREADS`, the Governance page, `SETTINGS_ALL` on Settings).
 
@@ -75,7 +77,7 @@ The overhaul's page tickets (kit-87 onward, kit-93, kit-94) each draw from data 
 
 ### 5. Upkeep's days
 
-- `/api/data` gains `upkeep_days`: the last 14 UTC days, oldest first and today last. Each day is `{ date: 'YYYY-MM-DD', items: [{ kind, ref, words, at }], failed }`. A quiet day has `items: []` and `failed: false`.
+- `/api/data` gains `upkeep_days`: the last 14 UTC days, oldest first and today last. Each day is `{ starts_at, items: [{ kind, ref, words, at }], failed }`. `starts_at` is the ISO time of the day's UTC midnight. A `date` field would change the G1 golden every day; G1's `untimed` drops `*_at` keys, so `starts_at` keeps the golden stable (F3-1). A quiet day has `items: []` and `failed: false`.
 - Items:
   - `chore`, from a supervisor `merge-chore` act whose ref is `chore-<slug>`. Its words are "Merged chore <slug>".
     - Left out: record-keeping chores (`isRecordKeeping`: `log`, the handoffs, `secret-*`), which aren't upkeep, and `retro-*` chores, whose retro is counted once as `retro` (F1-7).
@@ -96,7 +98,8 @@ The overhaul's page tickets (kit-87 onward, kit-93, kit-94) each draw from data 
   - `OWNER_SETTINGS`, which adds `gates` and `remediations`;
   - one short list beside them, `SETTINGS_READ_ONLY_HERE`, for keys the kit reads with no default and no owner class. Today that is only `sensor_scrub`, read by `scrubExtra` and checked by merge.
 
-  That makes 44 keys. The test scans `devteam.mjs` for `loadSettings().<key>` and `settingsAt(…)?.<key>` reads, so a key read anywhere and missing from the union fails it. A missing default is never added: that would change what `settings` prints, which the G1 goldens pin.
+  That makes 44 keys: 29 `value`, 7 `names`, 2 `count`, 6 `hidden` (F3-4).
+  - **The scan's reach (F3-3).** The test scans `devteam.mjs` for direct `loadSettings().<key>` and `settingsAt(…)?.<key>` reads, about 72 sites today. It misses reads through a variable (`s.x` where `s = loadSettings()`), bracket reads over key lists, and iteration over `OWNER_SETTINGS` or `REPO_KEYS`. A rough scan of today's code finds no setting read only those ways outside the 44. A future key with no default, read only as `s.newkey`, would get past it. That is accepted: the kit's rule is that every setting has a default (`SETTINGS_DEFAULTS`, 'Every setting has a default here'), and a key with a default is in the union anyway.
 - **The count** (F2-4). The done-when says "all 42": the mock's 42 are the 41 defaults plus `gates`. `remediations` (the owner's, `governance-edit`) and `sensor_scrub` are real settings too, so they are listed under Production. The review request asks the supervisor to amend the done-when to "every setting the kit reads (44 today)", or to record a ruling.
 - Each entry is `{ key, group, name, description, shown, value, local, set, default, owner_only }`. The group, name and description come from one `SETTINGS_WORDS` map beside `SETTINGS_DEFAULTS`, written `{ key: [group, name, description, show] }`.
   - **Groups** follow the mock's order (`SETTINGS_ALL` at 3cb8d6b): Fleet and capacity, Agents and sessions, Merging and checks, Questions and findings, Upstream and releases, Production, Rhythm, Project and links. Entries come in `SETTINGS_WORDS` order.
@@ -110,9 +113,21 @@ The overhaul's page tickets (kit-87 onward, kit-93, kit-94) each draw from data 
 
     The plan lists every description, so the reviewers check each one against the code.
 - **What is shown** (F2-1): never a credential, by construction rather than by scrubbing. Each key's `show` is one of four kinds:
-  - `value`: the value as main has it. Only for keys whose values the kit types narrowly: numbers, booleans, branch and method names, enums (`forge`, `merge_method`, `upstream_sync`, `release`), the release tag, the project and session names, the port, `usage_sources` and `ignored_checks` (names), `worktree_files` (paths), `worker_denied_commands` (patterns), and `autonomy_ceilings` (class to number).
+  - `value`: the value as main has it, for the 29 keys of a narrow shape. The kit does not type-check settings (`loadSettings` merges the JSON as it is; `validate` checks little), so the serializer checks it itself (F3-2). A `value` key is shown only when both hold:
+    - **Its shape is right for the key:**
+      - a finite number for the counts, minutes, hours, days, the ceiling and the port;
+      - a boolean for `merge_admin`;
+      - one of the known words for `forge`, `merge_method` and `upstream_sync`;
+      - `'tag'`, `'merge'`, `{ branch }` or `{ on, paths }` for `release`, with no other key;
+      - `/^v\d+\.\d+\.\d+$/` or null for `upstream_base`;
+      - a name (`/^[A-Za-z0-9._\/-]{1,100}$/`) for `main_branch`, `tmux_session` and `project`;
+      - a list of such short strings for `usage_sources`, `ignored_checks`, `worktree_files` and `worker_denied_commands` (which allows `*` and spaces);
+      - an object of class names to the numbers 1 to 3 for `autonomy_ceilings`.
+    - **No string in it is changed by the kit's own scrubber** (`scrubText`: tokens with known prefixes, long random strings, credentials in URLs, secret-named keys).
+
+    Otherwise the entry is shown as `hidden`, with `withheld: true`, so the page can say "not shown: it doesn't look like a plain value".
   - `names`: only the object's own keys, for `links`, `sensors`, `remediations`, `gates`, `components` and `model_prices`. `sensor_defaults` shows its key names, never its values.
-  - `count`: how many entries, for `sensor_scrub`, `secret_commands` and the like ("3 patterns"), never their text.
+  - `count`: how many entries, for exactly `sensor_scrub` and `secret_commands` ("3 patterns"), never their text.
   - `hidden`: nothing of the value (`value: null`), with `set` saying whether the project changed it. This covers every free-text command (`agent_command`, `resume_command`, `agent_trust_command`, `usage_command`, `worktree_setup`), since a command can carry a token anywhere. It also covers `upstream_repo`, a locator that can carry credentials; its `redactUrl` form is not enough here, because only a URL's userinfo is redacted.
 
   The kit's own `default` shows only for `value` keys and for the hidden commands, whose defaults are the kit's own constants (`claude --dangerously-skip-permissions`, `''`, `null`). Otherwise `default` is in the same kind as the value.
@@ -157,11 +172,12 @@ All of these are in `test/dashboard-data.test.mjs`, green in CI at the PR head.
    - a chores-feature ticket merged;
    - a line 15 days old.
 
-   `upkeep_days` has 14 days with today last, and each day's items are as expected. The CI-fix day has `failed: true`. The retro counts once. The log chore and the old line are absent. A quiet day is empty.
+   `upkeep_days` has 14 days with today last (`starts_at` of today's UTC midnight), and each day's items are as expected. The CI-fix day has `failed: true`. The retro counts once. The log chore and the old line are absent. A quiet day is empty.
 6. **Every setting.**
    - `settings_all` has one entry for every key in the union (44 today), in group order. Each entry has key, group, name, description, shown, value, set, default and owner_only.
    - A value set on main shows with `set: true`. A working-tree-only edit shows in `local`, not in `value`.
    - Owner settings carry their class. A `names` key shows only names, and a `count` key only its count.
+   - Credentials are also planted in `value` keys: an off-shape `release` (`{ branch: 'production', token: '…' }`) and `main_branch` set to a `ghp_…` token. Both come back `withheld: true` with `value: null`.
    - No planted credential appears anywhere in `settings_all`.
    - A missing or stale `SETTINGS_WORDS` entry fails, naming its key. A key read in the code and missing from the union fails too.
 
