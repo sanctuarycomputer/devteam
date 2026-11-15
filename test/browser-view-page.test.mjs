@@ -827,27 +827,34 @@ test('a key or a button held across a reconnect sends no up to the new socket', 
 test('what the owner types goes nowhere else: not queued while down, not logged, stored or in the page', { skip, timeout: 90000 }, async () => {
   const srv = await startServer();
   const { p, c } = await ready(srv);
+  // While the socket is down the owner types Ю and Я and pastes one text; once it is back they
+  // type and paste others. A key goes one character a message, so each is looked for by itself.
+  const down = (m) => (m.t === 'key' && /[ЮЯ]/.test(`${m.key}${m.text ?? ''}`)) || (m.t === 'paste' && m.text.includes('down-pasted'));
   try {
-    await clip(p, srv, 'marker-pasted-7Q');
+    await clip(p, srv, 'down-pasted-Ф');
     srv.refuse(true);
     c.close();
     await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'Reconnecting…');
     await p.ev(`document.getElementById('screen').focus()`);
-    await p.type('marker-typed-7Q');
+    await p.type('ЮЯ');
     await ctrlV(p);
     srv.refuse(false);
     await srv.waitConn(2, 8000);
-    await sleep(1000);
-    assert.ok(srv.conns.every((k) => !k.raw.some((t) => t.includes('marker'))), 'nothing typed or pasted while down reached any socket');
     await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    // all later input, so a queue flushed ahead of the next message would show
+    await clip(p, srv, 'live-pasted-Ц');
     await p.ev(`document.getElementById('screen').focus()`);
-    await p.type('marker-typed-7Q');
+    await p.type('kБ');
     await ctrlV(p);
-    await until(() => srv.last().raw.some((t) => t.includes('marker-pasted-7Q')), 'the paste sent once connected');
+    await mouse(p, 'mouseWheel', pt(await canvasState(p), 0.5, 0.5), { deltaX: 0, deltaY: 40 });
+    await until(() => srv.last().got.some((m) => m.t === 'paste' && m.text === 'live-pasted-Ц') && srv.last().got.some((m) => m.t === 'wheel'), 'the later input sent');
+    await sleep(500);
+    assert.deepEqual(srv.conns.flatMap((k) => k.got.filter(down)), [], 'nothing typed or pasted while down ever reached a socket, after all later input');
+    assert.ok(srv.last().got.some((m) => m.t === 'key' && m.text === 'Б'), 'while the later typing did');
     const seen = JSON.stringify(await p.ev('window.__seen'));
-    assert.ok(!seen.includes('marker'), `nothing logged: ${seen}`);
+    assert.ok(!/pasted|[ЮЯБ]/.test(seen), `nothing logged: ${seen}`);
     assert.deepEqual(await p.ev(`(async () => [localStorage.length, sessionStorage.length, (await indexedDB.databases()).length, document.cookie, window.name])()`), [0, 0, 0, '', '']);
-    assert.equal(await p.ev(`[document.documentElement.outerHTML, ...[...document.querySelectorAll('input')].map((i) => i.value)].join(' ').includes('marker')`), false, 'nothing in the DOM');
+    assert.equal(await p.ev(`/pasted|[ЮЯБ]/.test([document.documentElement.outerHTML, ...[...document.querySelectorAll('input')].map((i) => i.value)].join(' '))`), false, 'nothing in the DOM');
   } finally { await shut(p); await srv.close(); }
 });
 
@@ -881,6 +888,8 @@ async function pageMemory(p) {
     const members = [];
     for (const d of r.result ?? []) if (d.value) { if (d.value.type === 'string') members.push(d.value.value); await walk(d.value, depth + 1); }
     for (const d of r.internalProperties ?? []) {
+      // what a Promise resolved to, or a WeakRef still holds
+      if (d.name === '[[PromiseResult]]' || d.name === '[[WeakRefTarget]]') { if (d.value?.type === 'string') members.push(d.value.value); await walk(d.value, depth + 1); continue; }
       if (d.name !== '[[Entries]]' || !d.value?.objectId) continue;
       for (const e of (await props(d.value.objectId)).result ?? []) {
         if (!e.value?.objectId) continue;
@@ -929,18 +938,19 @@ test('nothing typed is kept in page memory after it is sent', { skip, timeout: 1
     assert.deepEqual((await p.send('Runtime.globalLexicalScopeNames', {})).names, [], 'no top-level let, const or class');
     const strings = await pageMemory(p);
     assert.ok(strings.length > 0, 'the walk read something');
+    assert.deepEqual(srv.conns.flatMap((k) => k.got.filter((m) => m.t === 'key' && /Ю/.test(`${m.key}${m.text ?? ''}`))), [], 'the key typed while down reached no socket, after all later input');
     const kept = strings.filter((x) => /[ЖЩЮ]/.test(x) || x.startsWith('a kept '));
     assert.deepEqual(kept, [], 'no marker, and no event, in any variable, closure, Set, Map or array the page\'s listeners reach');
     // nor on the window or any element, as a property of its own
     assert.deepEqual(await p.ev(`[window, ...document.querySelectorAll('*')].flatMap((o) => Object.keys(o).map((k) => {
       try { const v = o[k]; return typeof v === 'string' ? v : v && typeof v === 'object' && !(v instanceof Node) && v !== window ? JSON.stringify(v) : ''; } catch { return ''; }
-    })).filter((v) => /[ЖЩЮ]/.test(v))`), [], 'no marker on the window or an element');
+    })).concat(JSON.stringify(history.state) ?? '', location.hash).filter((v) => /[ЖЩЮ]/.test(v))`), [], 'no marker on the window, an element, history.state or the URL');
   } finally { await shut(p); await srv.close(); }
 });
 
 test('nothing on the page is reachable from another origin', { skip, timeout: 60000 }, async () => {
   const html = fs.readFileSync(PAGE, 'utf8');
-  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain']) assert.ok(!html.includes(word), `the page never uses ${word}`);
+  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain', 'history.', 'location.hash']) assert.ok(!html.includes(word), `the page never uses ${word}`);
   const srv = await startServer();
   const framer = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(`<!doctype html><iframe src="${srv.origin}/"></iframe>`); });
   await new Promise((r) => framer.listen(0, '127.0.0.1', r));
@@ -960,4 +970,37 @@ test('nothing on the page is reachable from another origin', { skip, timeout: 60
     await srv.waitConn(2);
     assert.equal(await p.ev(`(() => { try { frames[0].document; return 'read'; } catch (e) { return e.name; } })()`), 'SecurityError', 'another origin that frames the page can\'t read it');
   } finally { await shut(p); framer.close(); await srv.close(); }
+});
+
+// Ruling on final review F2: Sign out never fails silently. With no open socket the button is
+// off; pressed in a race (the socket drops with the confirm open), the page says nothing was done.
+test('Sign out of everything is off while there is no socket, and a confirm that races a drop says nothing was signed out', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  const disabled = () => p.ev(`document.getElementById('signout').disabled`);
+  try {
+    assert.equal(await disabled(), false, 'on while connected');
+    srv.refuse(true);
+    c.close();
+    await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'Reconnecting…');
+    assert.equal(await disabled(), true, 'off while reconnecting');
+    srv.refuse(false);
+    await srv.waitConn(2, 8000);
+    await until(async () => (await disabled()) === false, 'on again once connected');
+    await p.click('#signout');
+    assert.equal(await p.ev(`document.getElementById('confirm').open`), true);
+    srv.refuse(true);
+    srv.last().close();
+    await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'the drop, with the confirm still open');
+    await p.click('#forget');
+    await sleep(300);
+    assert.deepEqual(srv.conns.flatMap((k) => k.got.filter((m) => m.t === 'forget')), [], 'no forget anywhere');
+    assert.equal(await text(p, 'note'), 'Not connected: nothing was signed out.');
+    assert.equal(await p.ev(`document.getElementById('confirm').open`), false);
+    srv.refuse(false);
+    await srv.waitConn(3, 8000);
+    srv.last().send({ t: 'bye', why: 'The supervisor has the browser again.' });
+    await until(async () => !(await p.ev(`document.getElementById('bye').hidden`)), 'bye');
+    await until(async () => (await disabled()) === true, 'off after bye');
+  } finally { await shut(p); await srv.close(); }
 });

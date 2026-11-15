@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-HBuAxLnf+sD9cqBvPcxM1gWAgPs/BJWqlqqMmZq/uMI='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wDlmAcsFMh1QAW5okBrU0jK8xA5eXB8DOi97lMN9D20='; style-src 'sha256-eMRLDEIQtqogj+nLtYtvjAkVL+Ezm1jRvm5T/aXLPug='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -19,6 +19,7 @@
   .btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap; }
   .btn:focus-visible, .bar input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
   .btn.danger { color: var(--red); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
   .note { margin: 0; min-height: 0; max-width: var(--text); color: var(--red); font-size: 13px; }
   .note:empty { display: none; }
   .area { position: relative; display: flex; justify-content: center; align-items: flex-start; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
@@ -49,7 +50,7 @@
   <form class="bar" id="go" autocomplete="off">
     <button type="button" class="btn" id="back" aria-label="Back" title="Back">←</button>
     <input id="addr" aria-label="Address" autocomplete="off" autocapitalize="off" spellcheck="false">
-    <button type="button" class="btn danger" id="signout">Sign out of everything</button>
+    <button type="button" class="btn danger" id="signout" disabled>Sign out of everything</button>
   </form>
   <p class="note" id="note" role="status"></p>
   <div class="area down" id="area">
@@ -172,11 +173,13 @@
     // nothing held down on an earlier socket gets its up on this one
     press = null;
     held.clear();
-    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; opened = true; chip('Live'); area.classList.remove('down'); });
+    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; opened = true; $('signout').disabled = false; chip('Live'); area.classList.remove('down'); });
     s.addEventListener('message', (e) => { if (s === socket && typeof e.data === 'string') onMessage(e.data, s); });
     s.addEventListener('close', () => {
       if (s !== socket) return;
       socket = null;
+      // with no socket, Sign out could only fail: it is off until one opens
+      $('signout').disabled = true;
       // what was held down went with that socket: its up must not go to the next one
       press = null;
       held.clear();
@@ -352,7 +355,12 @@
   const confirm = $('confirm');
   $('signout').addEventListener('click', () => confirm.showModal());
   $('cancel').addEventListener('click', () => confirm.close());
-  $('forget').addEventListener('click', () => { confirm.close(); send({ t: 'forget' }); });
+  $('forget').addEventListener('click', () => {
+    confirm.close();
+    // the socket dropped with the confirm open: say so, never sign out silently into nothing
+    if (!socket || socket.readyState !== 1) return note('Not connected: nothing was signed out.');
+    send({ t: 'forget' });
+  });
 
   connect();
 })();
