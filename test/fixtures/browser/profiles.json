@@ -1,0 +1,17 @@
+{
+  "browser": 1,
+  "profiles": [
+    {
+      "key": "acme-shop-3f9c2a71b0de",
+      "root": "/data/home/code/acme-shop",
+      "root_gone": false,
+      "current": true
+    },
+    {
+      "key": "old-site-0a1b2c3d4e5f",
+      "root": "/data/home/code/old-site",
+      "root_gone": true,
+      "current": false
+    }
+  ]
+}
