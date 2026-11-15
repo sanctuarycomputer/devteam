@@ -18,7 +18,8 @@
 #   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
 #   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
-#   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
+#   accepting only v* tags, with no approval step: every release deploys by itself, the owner's
+#   choice; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
 #   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
 #   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
@@ -144,8 +145,8 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-# The kit, whole (it reads its schema beside it), as of the last release that changed this image:
-# box-deploy.yml deploys only then, so a repo's kit can be newer than this one, or older. The box's
+# The kit, whole (it reads its schema beside it), as of the release this image was built for:
+# box-deploy.yml deploys every release, so a repo's kit can be newer than this one, or older. The box's
 # own commands (box-status, box-tell, box-alert, box-thread, box-recover) run it against every repo, and need it
 # to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
 # questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
@@ -389,6 +390,19 @@ if ! tmux has-session -t home 2>/dev/null; then
   tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
   tmux send-keys -t home:operator Enter
 fi
+# The machine's hub, from the image's kit (devteam.mjs hub), in window home:hub: started here, so it
+# is up by the time the dashboards start (each steps back from the port: DEVTEAM_IMAGE_HUB), and
+# brought back by the minute loop below. Its cwd is $HOME and its kit has no repo, so nothing it
+# starts takes a writer from a checkout's branch. The command is made here, not by the pane's shell:
+# a pane gets the tmux server's environment, which anything on the box can change, so the release is
+# expanded from the image's own (and only when it is plainly vN.N.N; hub serves with none and says
+# so otherwise), and env drops what would load other code into node or point the hub at another
+# home or port, and sets HOME to dev's own. -t '=home:' with the colon: a bare =home is first a window named home in the
+# current session. Started only if home has no hub window yet (devteam-dev run again by hand), as
+# the minute loop does. hub_wait gives it ${DEVTEAM_HUB_WAIT_SECONDS:-15}s to answer, then goes on.
+hub_window() { case $DEVTEAM_KIT_RELEASE in *[!v0-9.]*) hub_rel= ;; *) hub_rel=$(printf '%s\n' "$DEVTEAM_KIT_RELEASE" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+') ;; esac; hub_cmd="while :; do /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE -u DEVTEAM_HOME -u DEVTEAM_RUN -u DEVTEAM_PROJECT -u DEVTEAM_HUB_PORT HOME='$HOME' PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release '$hub_rel'; sleep 1; done"; if timeout 20 tmux has-session -t =home 2>/dev/null; then timeout 20 tmux new-window -d -t '=home:' -n hub -c "$HOME" "$hub_cmd"; else timeout 20 tmux new-session -d -s home -n hub -c "$HOME" "$hub_cmd"; fi; }
+hub_wait() { hub_w=${DEVTEAM_HUB_WAIT_SECONDS:-15}; case $hub_w in ''|*[!0-9]*|0?*) hub_w=15 ;; esac; hub_end=$(( $(date +%s) + hub_w )); while :; do curl -fsS --max-time 1 "http://127.0.0.1:$DEVTEAM_IMAGE_HUB/instances.json" 2>/dev/null | grep -q '"hub":1[,}]' && return 0; [ "$(date +%s)" -lt "$hub_end" ] || { note "hub: nothing answered hub 1 on 127.0.0.1:$DEVTEAM_IMAGE_HUB after ${hub_w}s; going on (see ~/.devteam/hub-$DEVTEAM_IMAGE_HUB.log)"; return 1; }; sleep 1; done; }
+timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
 # The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
 # dialog (Enter would answer it), a usage limit, or into whatever else has the pane (a shell, vim, psql:
 # the kit's machine pane-state says which). Held back, it tries again each minute for 10 minutes, then
@@ -466,6 +480,7 @@ box-pg 17                  # the default Postgres, port 5432
 # redis-server --daemonize yes --bind 127.0.0.1 --dir "$HOME/.box"
 BOOT
 timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): see box.log"
+hub_wait || :
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
@@ -492,9 +507,14 @@ done
 mkdir -p "$HOME/.box"; ( /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) &
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
-# tmux not answering (the box stopping) leaves the list as it was.
+# tmux not answering (the box stopping) leaves the list as it was. First, the hub's window comes back
+# if it is gone (closed, or the whole home session with it). With the tmux server gone too, that
+# starts a new one holding only the hub, even in a stop's last seconds, which is harmless: the
+# container is exiting. A list-windows that fails for a moment can add a second hub window; it only
+# retries the port.
 while :; do
   sleep 60
+  timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
   panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     r=${k%/docs/devteam/scripts/devteam.mjs}
@@ -512,6 +532,10 @@ while :; do
 done &
 while :; do ttyd -d 3 -i lo -p 7681 -W -t macOptionClickForcesSelection=true -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
+# The port this image serves the machine's hub on, from its own kit (devteam-dev, above): a
+# dashboard whose hub port it names leaves that port alone. It comes with the boot that starts the
+# hub, so no image tells dashboards to step back without serving the hub itself.
+ENV DEVTEAM_IMAGE_HUB=4320
 
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
