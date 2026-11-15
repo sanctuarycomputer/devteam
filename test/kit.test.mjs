@@ -1074,3 +1074,60 @@ test('merge covered_by: when coverage fails, the gate runs as today', async (t) 
     });
   } finally { C.F.done(); }
 });
+
+// covered_by is the owner's: a change to a gate is gate-change, and a gate the supervisor adds alone can't carry it
+function covChore(F, slug, gates) {
+  const { old, g } = F;
+  const w = path.join(old, '.worktrees', `chore-${slug}`);
+  g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+  const f = path.join(w, 'docs/devteam/project/settings.md');
+  const txt = fs.readFileSync(f, 'utf8');
+  const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const j = JSON.parse(m[1]);
+  j.gates = gates;
+  fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
+  g(['commit', '-qam', slug], w);
+  g(['push', '-q', 'origin', `chore-${slug}`], w);
+  g(['worktree', 'remove', '--force', w], old);
+  write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+}
+function covMainGates(F, gates) {
+  const { old, g } = F;
+  const f = path.join(old, 'docs/devteam/project/settings.md');
+  const txt = fs.readFileSync(f, 'utf8');
+  const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const j = JSON.parse(m[1]);
+  j.gates = gates;
+  fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
+  g(['commit', '-qam', 'gates'], old);
+  g(['push', '-q', 'origin', 'main'], old);
+}
+
+test('covered_by on an existing gate is the owner\'s gate-change', () => {
+  const F = fleetFixture('cov-owner');
+  const { old, ok, run } = F;
+  try {
+    covMainGates(F, { test: 'true' });
+    covChore(F, 'cover', { test: { cmd: 'true', covered_by: 'ci' } });
+    const merge = (...extra) => { const r = run(old, ['merge', '--chore', 'cover', '--dry-run', ...extra], COV_SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+    const none = merge();
+    assert.notEqual(none.status, 0, none.text);
+    assert.match(none.text, /changes owner settings: gates \(gate-change\)/);
+    const q = ok(old, ['ask', '--question', 'Let merge trust CI for the test gate?', '--recommendation', 'yes', '--class', 'gate-change', '--reasons', 'owner-only'], COV_SUP);
+    ok(old, ['answer', q, 'yes']);
+    const r = merge('--approved', q);
+    assert.equal(r.status, 0, r.text);
+  } finally { F.done(); }
+});
+
+test('covered_by on a new gate is not the supervisor\'s to add', () => {
+  const F = fleetFixture('cov-add');
+  const { old, run } = F;
+  try {
+    covMainGates(F, { test: 'true' });
+    covChore(F, 'lint', { test: 'true', lint: { cmd: 'true', covered_by: 'ci' } });
+    const r = run(old, ['merge', '--chore', 'lint', '--dry-run'], COV_SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(`${r.out}\n${r.err}`, /it sets covered_by; a new gate the owner hasn't approved has only cmd, paths, junit, mode/);
+  } finally { F.done(); }
+});
