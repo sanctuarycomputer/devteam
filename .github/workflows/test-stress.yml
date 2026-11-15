@@ -59,14 +59,16 @@ jobs:
         run: |
           set -euo pipefail
           # --- inputs ---
-          case "$REPEAT" in [1-5]) ;; *) echo "::error::repeat must be one of 1 to 5, not '$REPEAT'"; exit 2 ;; esac
-          case "$LOAD" in [0-8]) ;; *) echo "::error::load must be one of 0 to 8, not '$LOAD'"; exit 2 ;; esac
+          case "$REPEAT" in [1-5]) ;; *) echo "::error::repeat must be one of 1 to 5"; exit 2 ;; esac
+          case "$LOAD" in [0-8]) ;; *) echo "::error::load must be one of 0 to 8"; exit 2 ;; esac
           case "$FILES" in *$'\n'* | *$'\t'* | *$'\r'*) echo "::error::files is one line of space-separated paths"; exit 2 ;; esac
           SEL=()
           if [ -z "${FILES// /}" ]; then
             SEL=(--group 'chrome,rest')
           else
+            set -f
             read -ra WORDS <<< "$FILES"
+            set +f
             for w in "${WORDS[@]}"; do
               # a path, never an option for run.mjs
               if [[ ! "$w" =~ ^[A-Za-z0-9._/-]+$ || "$w" == -* ]]; then echo "::error::not a test file path: '$w'"; exit 2; fi
@@ -140,7 +142,7 @@ jobs:
           # kills only the burners started here, by pid; never fails, so it never sets the step's status
           stop_burners() {
             local p
-            for p in "${BURNERS[@]}"; do kill "$p" 2>/dev/null || true; done
+            for p in "${BURNERS[@]}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
             BURNERS=()
             return 0
           }

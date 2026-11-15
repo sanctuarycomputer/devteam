@@ -52,7 +52,7 @@ w('signal.log', [
 ].join('\n'));
 
 w('twosummary.log', [
-  '# test/a.test.mjs (run 1)', 'summary: 9 files, concurrency 1', 'test/fake.test.mjs  1.0  failed (exit 1) (run 1)',
+  '# test/a.test.mjs', 'summary: 9 files, concurrency 1', 'test/fake.test.mjs  1.0  failed (exit 1)',
   '', 'summary: 1 file, concurrency 4',
-  'test/a.test.mjs  1.0  ok (run 1)', '',
+  'test/a.test.mjs  1.0  ok', '',
 ].join('\n'));
