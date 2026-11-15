@@ -2073,7 +2073,9 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   const soonView = soonIn(p, 37000);
   // two of the page's own checks (reads of `prefix`) started after now and landed: a reload the first
   // one set off has had a whole tick to load its frame and say ready
-  const checksFrom = async (prefix, wait) => { const n0 = await p.ev('window.__reads2.length'); await wait(`window.__reads2.filter((x) => x.n >= ${n0} && x.landed && x.u.startsWith(${JSON.stringify(prefix)})).length >= 2`, `two ${prefix} checks landed`); };
+  // two of them, each a 10 s tick and a read that can take DATA_WAIT_MS (20 s) on a slow server: 90 s
+  const soonChecks = soonIn(p, 90000);
+  const checksFrom = async (prefix) => { const n0 = await p.ev('window.__reads2.length'); await soonChecks(`window.__reads2.filter((x) => x.n >= ${n0} && x.landed && x.u.startsWith(${JSON.stringify(prefix)})).length >= 2`, `two ${prefix} checks landed`); };
   const said = (title) => p.ev(`window.__titles.filter((x) => x === ${JSON.stringify(title)}).length`);
   const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle }; })()`);
   // the warning token as this scheme resolves it
@@ -2104,7 +2106,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     assert.equal((await button()).color, dark, 'the warning colour, dark');
     await scheme('light');
     // and two of the page's checks on, still the old version: only the press loads it
-    await checksFrom('/api/data', (e, w) => soonData(e, w));
+    await checksFrom('/api/data');
     assert.equal(await said('v2'), 0, 'still nothing reloaded by itself');
     await p.click('#av-reload');
     await soon(`__titles.includes('v2')`, 'the new version in the frame');
@@ -2127,7 +2129,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
     assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
-    await checksFrom('/api/view?', (e, w) => soonView(e, w));
+    await checksFrom('/api/view?');
     assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
     await p.click('#av-reload');
     await soon(`__titles.includes('v3')`, 'the new version in the frame');
