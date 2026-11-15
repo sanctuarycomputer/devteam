@@ -7,6 +7,6 @@ The fix in dae4e6e is correct and complete. `questionView` now adds `order` only
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F5-1 | Minor | quality.md §3 (evidence is accurate) | verification.md, Gate paragraph | The list of failed CI runs is accurate but leaves some out. The runs at b51b24a (43733265043), 22fa164 (43733527174) and 1da56fd (43734327165) also failed on the same G1 test, and the commit subject says "G1 failed every run". Adding them, or writing "every run from 29fd4ad to 6d64a6c", would make the record complete. Nothing that is claimed is false. | |
+| F5-1 | Minor | quality.md §3 (evidence is accurate) | verification.md, Gate paragraph | The list of failed CI runs is accurate but leaves some out. The runs at b51b24a (43733265043), 22fa164 (43733527174) and 1da56fd (43734327165) also failed on the same G1 test, and the commit subject says "G1 failed every run". Adding them, or writing "every run from 29fd4ad to 6d64a6c", would make the record complete. Nothing that is claimed is false. | wont-fix: the list names the runs the earlier text wrongly called green; every run, those three included, is in the PR's checks, and editing verification.md now would void this verdict |
 
 Verdict: APPROVE 59ba1e889548f5243db34d78cf4413ce3c79b243
