@@ -216,23 +216,33 @@ export function ensureShim(shared, PATH) {
 }
 
 // Every socket under dir, by a walk that never follows a symlink (a Dirent's type is the link's
-// own), whose real path is still under dir and that has no other name (a hard link from outside):
-// nothing outside a file's scratch folder is touched. A dir that is itself a symlink isn't walked.
+// own), whose real path is still under dir and all of whose names (hard links) are under dir too: a
+// socket hard-linked in from outside has a name elsewhere, and is left alone. Nothing outside a
+// file's scratch folder is touched. A dir that is itself a symlink isn't walked.
 export function socketsUnder(dir) {
   let base;
   try { if (fs.lstatSync(dir).isSymbolicLink()) return []; base = fs.realpathSync(dir); } catch { return []; }
-  const out = [];
+  const byInode = new Map();
   const walk = (d) => {
     let entries;
     try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
       const p = path.join(d, e.name);
       if (e.isDirectory()) walk(p);
-      else if (e.isSocket()) { try { const r = fs.realpathSync(p); if (r.startsWith(base + path.sep) && fs.lstatSync(p).nlink === 1) out.push(r); } catch {} }
+      else if (e.isSocket()) {
+        try {
+          const r = fs.realpathSync(p);
+          if (!r.startsWith(base + path.sep)) continue;
+          const st = fs.lstatSync(p);
+          const k = `${st.dev}:${st.ino}`;
+          if (!byInode.has(k)) byInode.set(k, { nlink: st.nlink, names: [] });
+          byInode.get(k).names.push(r);
+        } catch {}
+      }
     }
   };
   walk(base);
-  return out;
+  return [...byInode.values()].filter((v) => v.names.length === v.nlink).flatMap((v) => v.names);
 }
 
 // A stream's end, or ms, whichever comes first: something else holding the pipe can't hold a file.
@@ -370,7 +380,10 @@ export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   return { stopped, killed, resumed, unstopped, error };
 }
 
-const say = (text) => process.stdout.write(text);
+// stdout may be a pipe whose reader went away (`| head`): a write then fails with EPIPE, which
+// runFiles treats as an interrupt. Until then, and after, writing never throws.
+let outClosed = false;
+const say = (text) => { if (outClosed) return; try { process.stdout.write(text); } catch { outClosed = true; } };
 
 // Stops and kills a running file's tree (steps 2 and 3 follow when its child's exit fires).
 function cleanup(entry) {
@@ -471,18 +484,20 @@ async function runAll(opts, plan) {
 async function runFiles(opts, plan, ctx) {
   // Children have process groups of their own, so a terminal's Ctrl-C reaches only this process,
   // and a dropped session's SIGHUP too: each running file is cleaned up before it exits.
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(sig, async () => {
-      if (ctx.stopping) return;
-      ctx.stopping = true;
-      const running = [...ctx.running];
-      // a file the watchdog already timed out stays `timed out`
-      for (const e of running) { e.result ??= 'interrupted'; cleanup(e); }
-      await Promise.all(running.map((e) => e.done));
-      say('interrupted\n');
-      process.exit(128 + os.constants.signals[sig]);
-    });
-  }
+  const stopAll = async (code) => {
+    if (ctx.stopping) return;
+    ctx.stopping = true;
+    const running = [...ctx.running];
+    // a file the watchdog already timed out stays `timed out`
+    for (const e of running) { e.result ??= 'interrupted'; cleanup(e); }
+    await Promise.all(running.map((e) => e.done));
+    say('interrupted\n');
+    process.stderr.write(`run.mjs: interrupted (${code === 141 ? 'its output closed' : `signal ${code - 128}`})\n`);
+    process.exit(code);
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => stopAll(128 + os.constants.signals[sig]));
+  // the reader of our output went away: stop as SIGPIPE would (128 + 13), cleaning up first
+  process.stdout.on('error', (e) => { outClosed = true; if (e.code === 'EPIPE') stopAll(128 + os.constants.signals.SIGPIPE); });
   const results = [];
   for (let run = 1; run <= opts.repeat && !ctx.stopping; run++) {
     for (const st of schedule(plan, opts.concurrency)) results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx));

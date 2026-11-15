@@ -318,14 +318,19 @@ test('socketsUnder finds the sockets inside a folder, never through a symlink', 
   await listen(path.join(d, 's1'));
   await listen(path.join(d, 'a', 'b', 's2'));
   await listen(path.join(outside, 's3'));
+  // s4 has one name: only the symlinked-dir rule keeps it out
+  await listen(path.join(outside, 's4'));
   fs.writeFileSync(path.join(d, 'plain'), '');
   fs.symlinkSync(outside, path.join(d, 'to-outside'));
   fs.symlinkSync(path.join(outside, 's3'), path.join(d, 'link-to-s3'));
-  // a socket hard-linked in from outside: the same socket as s3, so not this folder's
+  // a socket hard-linked in from outside: the same socket as s3, whose other name isn't here
   let hard = true;
   try { fs.linkSync(path.join(outside, 's3'), path.join(d, 'hard-s3')); } catch { hard = false; }
+  // a socket of this folder's with a second name in it too: still this folder's
+  if (hard) fs.linkSync(path.join(d, 's1'), path.join(d, 'a', 's1-again'));
   const real = fs.realpathSync(d);
-  assert.deepEqual(R.socketsUnder(d).sort(), [path.join(real, 'a', 'b', 's2'), path.join(real, 's1')], hard ? 'no hard-linked socket' : 'no link(2) for sockets here');
+  const mine = [path.join(real, 'a', 'b', 's2'), path.join(real, 's1'), ...(hard ? [path.join(real, 'a', 's1-again')] : [])].sort();
+  assert.deepEqual(R.socketsUnder(d).sort(), mine, hard ? 'no hard-linked socket from outside' : 'no link(2) for sockets here');
   assert.deepEqual(R.socketsUnder(path.join(d, 'no-such')), []);
   // a folder that is itself a symlink (a test replaced its TMPDIR with one) is walked not at all
   assert.deepEqual(R.socketsUnder(path.join(d, 'to-outside')), []);
@@ -624,6 +629,16 @@ test('a hung file is killed with its tree, and a survivor is refused tmux', asyn
   const s = readJson(path.join(out, 'survivor.json'));
   assert.equal(s.status, 1);
   assert.match(s.stderr, /tmux refused/);
+});
+
+test('an output pipe that closes stops the run and cleans up every running file', async (t) => {
+  const { out, env, S } = hangEnv(t);
+  // our end of the runner's stdout goes at once: its next write (when slow-once ends) hits EPIPE
+  const run = runRunner(['--concurrency', '2', fx('hang.mjs'), fx('slow-once.mjs')], { env, deadline: 45000 });
+  run.child.stdout.destroy();
+  const r = await run;
+  assert.equal(r.code, 141, r.stderr);
+  await allDead(readJson(path.join(out, 'pids.json')), S);
 });
 
 for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTERM', 'the runner', 143]]) {
