@@ -469,7 +469,7 @@
             ]
           },
           "risk": {
-            "description": "high gets two reviewers and a full plan read; normal is approved from its TL;DR and plan review.",
+            "description": "high gets two reviewers and a full plan read; normal is approved from its TL;DR and plan review (or, on the lighter review depth's trial, the supervisor's own full read of the plan: quality.md §3).",
             "enum": [
               "normal",
               "high"
