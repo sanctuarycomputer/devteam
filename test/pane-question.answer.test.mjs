@@ -137,25 +137,57 @@ test("one click is one answer: the same question asked again at once (a retry, t
   assert.match(pane.shows(), /❯ 1\. Yes/);
 });
 
+// A tmux for one dashboard (on its PATH, ahead of the real one) that holds the first digit it is
+// asked to type, between the dashboard's last look at the pane and the key, until the test says go:
+// the moment a question can go, made as long as the test needs. Every other call goes straight through.
+function tmuxGate(F) {
+  const dir = path.join(F.base, `gate-${crypto.randomBytes(4).toString('hex')}`);
+  fs.mkdirSync(dir);
+  const real = spawnSync('sh', ['-c', 'command -v tmux'], { env: F.env(), encoding: 'utf8' }).stdout.trim();
+  assert.ok(real, 'a tmux to pass the calls to');
+  // waits under 8 s: the dashboard gives a tmux call 10 s; a gate that gives up says so in gave-up
+  fs.writeFileSync(path.join(dir, 'tmux'), `#!/bin/sh
+keys=0; lit=0
+for a in "$@"; do [ "$a" = send-keys ] && keys=1; [ "$a" = -l ] && lit=1; done
+if [ $keys = 1 ] && [ $lit = 1 ] && rm "$GATE/armed" 2>/dev/null; then
+  : > "$GATE/waiting"
+  i=0
+  while [ ! -e "$GATE/go" ]; do
+    i=$((i + 1)); if [ $i -gt 160 ]; then : > "$GATE/gave-up"; break; fi
+    sleep 0.05
+  done
+fi
+exec "$REAL" "$@"
+`, { mode: 0o755 });
+  fs.writeFileSync(path.join(dir, 'armed'), '');
+  const at = (f) => fs.existsSync(path.join(dir, f));
+  return { env: { PATH: `${dir}${path.delimiter}${F.env().PATH}`, GATE: dir, REAL: real }, held: () => at('waiting'), gaveUp: () => at('gave-up'), go: () => fs.writeFileSync(path.join(dir, 'go'), '') };
+}
+
 test('a question that goes as the key is sent: the digit in the input box is not an answer; it is logged as one that may not have landed, and nothing held is typed', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-vanish');
   const later = cleanup(t);
   later(() => F.done());
   const pane = menuPane(F);
-  const D = await dash(later, F, pane, { DEVTEAM_PANE_ANSWER_DELAY_MS: '2500' });
+  const gate = tmuxGate(F);
+  later(() => gate.go()); // never left holding a call
+  const D = await dash(later, F, pane, gate.env);
   const q = await D.question();
   F.run(F.old, ['send', 'supervisor', 'held meanwhile', '--owner'], { DEVTEAM_SUPERVISOR: pane.target });
   const answering = D.post({ digest: q.digest, option: 1, token: q.token });
+  // held between its last look and the key
+  await until(() => gate.held(), 'the answer at the key');
   // a second click while that one is on its way is refused, not sent after it
-  await new Promise((w) => setTimeout(w, 300));
   const second = await D.post({ digest: q.digest, option: 2, token: q.token });
   assert.equal(second.status, 409);
   assert.match((await second.json()).error, /another answer is on its way/);
-  // both looks have passed; someone at the terminal dismisses it before the key
-  await new Promise((w) => setTimeout(w, 900));
+  // someone at the terminal dismisses it before the key
   assert.equal(pane.typed(), '', 'the key is still to come');
   pane.press('Escape');
+  await until(() => /\? for shortcuts/.test(pane.shows()), 'the question gone, the input box showing');
+  gate.go();
   const r = await answering;
+  assert.equal(gate.gaveUp(), false, 'the gate gave up before the test let the key go');
   assert.equal(r.status, 409, await r.clone().text());
   assert.match((await r.json()).error, /may not have landed: the question went as the key was sent, and "1" is now in the terminal's input box/);
   assert.equal(pane.typed(), '\x1b1', 'the digit went into the input box, with no Enter');
