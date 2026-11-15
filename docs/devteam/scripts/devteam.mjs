@@ -6522,6 +6522,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
+// owner's move), else waiting (on the supervisor).
+function threadCounts() {
+  const r = { you: 0, waiting: 0, ready: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  return r;
+}
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
@@ -12162,6 +12169,7 @@ function dashboardData() {
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
+    threads: threadCounts(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
     sensors: sensorStatus(),
@@ -19144,7 +19152,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();

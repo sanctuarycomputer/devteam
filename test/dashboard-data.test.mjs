@@ -213,3 +213,29 @@ test('each blocked item names the question holding it', { timeout: 300000 }, asy
   F.owner(['goal', 'hold', g3, 'park', '--owner']);
   assert.deepEqual(bwq('plan-hb-plan'), [], 'its goal parked, the planner waits by choice');
 });
+
+test('threads by state, in the hello and the data', { timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('thread-counts');
+  undo.push(() => F.done());
+  const open = (text) => firstId(F.owner(['thread', 'new', text]));
+  // T1: the owner's turn, then the supervisor's reply: the owner's move
+  const t1 = open('first question');
+  F.sup(['thread', 'reply', t1, 'an answer']);
+  // T2: the owner's turn only: it waits on the supervisor
+  open('second question');
+  // T3: replied, then proposed as ready
+  const t3 = open('third question');
+  F.sup(['thread', 'reply', t3, 'an answer']);
+  F.sup(['thread', 'ready', t3, '--outcome', 'done']);
+  // T4: resolved by the owner, so it counts nowhere
+  const t4 = open('fourth question');
+  F.owner(['thread', 'resolve', t4]);
+
+  const before = logBytes(F);
+  const want = { you: 1, waiting: 1, ready: 1 };
+  assert.deepEqual(json(F.ok(F.old, ['hello', '--json'])).threads, want);
+  assert.deepEqual(data(F).threads, want);
+  assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
+});
