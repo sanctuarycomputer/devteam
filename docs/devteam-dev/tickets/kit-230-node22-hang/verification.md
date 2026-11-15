@@ -6,7 +6,7 @@ Code at **0c3d2148d0e4f525815c7329b082fb88c16e0e4c**: Task 1 at b355604, Task 2 
 |---|---|---|
 | 1. test.yml's kit jobs pass `--test-timeout`, so a hung test fails in minutes with its name in the log | Read `.github/workflows/test.yml`; probes A and B below; CI rows below | `--test-timeout=600000` on Node 20, 22 and 24 through `matrix.test_timeout`; nothing on 18, which rejects it (probe A). `timeout-minutes: 12` on all three test steps. An `if: failure()` step runs `ps -eww -o pid,ppid,etimes,args`, which shows the hung file's own process after a step-style kill (probe B). The job names are unchanged (8 jobs, `kit (18, chain)` … `kit (24, rest)`). |
 | 2. The hanging test is found from the log and fixed, with the cause in the PR | Probes C, D and E below; `node $D gate test -- mise exec node@22.23.4 -- node --test --test-concurrency=2 test/hub-overview.test.mjs`, and the same with `node@24.14.1` | Found: `test/hub-overview.test.mjs`, "the Overview in Chrome" (probe C). Fixed: the gate passed 19/19 on 22 (40.6 s) and 24 (41.2 s) at b355604. With the old failure injected, the file exits and leaves nothing (probe D). The real test passed 10 of 10 runs on 22 (probe E). The cause is in PR #248's body. |
-| 3. Three consecutive runs of the job on the PR pass; no other job slows | `node $D gate ci -- gh run watch <id> -R sanctuarycomputer/devteam --exit-status --interval 60`, per run | See "CI on the PR" below. |
+| 3. Three consecutive runs of the job on the PR pass; no other job slows | `node $D gate ci -- gh run watch <id> -R sanctuarycomputer/devteam --exit-status --interval 60`, per run | Three consecutive runs, 8/8 jobs green each: 43682089828 (0c3d214), 43682576720 (b3402a7), 43683128889 (c1cd0f1). Every job's 3-run mean is within its main range. Three single runs went over a main max, each a different job and back under in its other two runs (below). |
 | 4. No file is added outside test/ and the workflow | `git diff --name-only origin/main...HEAD` | See "Files changed" below. |
 
 `$D` is `/data/home/code/devteam-dev/docs/devteam/scripts/devteam.mjs`.
@@ -94,19 +94,35 @@ On Node 22.23.4 at f0763b6, the Chrome test ran 10 times, each bounded at 280 s:
 
 Job durations (s) are compared with the last 10 green push-to-main runs:
 
-| Job | main median | main max | run 1 (43682089828, 0c3d214) | run 2 | run 3 |
-|---|---|---|---|---|---|
-| kit (18, chain) | 190 | 233 | 251 | | |
-| kit (18, rest) | 286 | 380 | 278 | | |
-| kit (20, chain) | 182 | 225 | 172 | | |
-| kit (20, rest) | 252 | 335 | 266 | | |
-| kit (22, chain) | 172 | 214 | 156 | | |
-| kit (22, rest) | 336 | 398 | 337 | | |
-| kit (24, chain) | 208 | 222 | 161 | | |
-| kit (24, rest) | 333 | 434 | 349 | | |
+| Job | main median | main max | run 1 (43682089828, 0c3d214) | run 2 (43682576720, b3402a7) | run 3 (43683128889, c1cd0f1) | PR mean |
+|---|---|---|---|---|---|---|
+| kit (18, chain) | 190 | 233 | 251 | 164 | 189 | 201 |
+| kit (18, rest) | 286 | 380 | 278 | 276 | 356 | 303 |
+| kit (20, chain) | 182 | 225 | 172 | 183 | 178 | 178 |
+| kit (20, rest) | 252 | 335 | 266 | 234 | 340 | 280 |
+| kit (22, chain) | 172 | 214 | 156 | 152 | 212 | 173 |
+| kit (22, rest) | 336 | 398 | 337 | 341 | 337 | 338 |
+| kit (24, chain) | 208 | 222 | 161 | 179 | 182 | 174 |
+| kit (24, rest) | 333 | 434 | 349 | 446 | 335 | 377 |
 
-Run 1: 8/8 success (`gate ci passed in 373.3s`).
+- Every run was 8/8 success. `gate ci` passed in 373.3 s, 433.8 s and 372.7 s.
+- `kit (22, rest)` passed on all three runs, at 337 to 341 s, against a main median of 336 s.
+- Three single runs went over the main max, each a different job, each back under in its other two runs:
+  - `kit (18, chain)`, run 1, 251 s (18 s over 233), then 164 and 189;
+  - `kit (24, rest)`, run 2, 446 s (12 s over 434), then 335;
+  - `kit (20, rest)`, run 3, 340 s (5 s over 335).
+- The sum of the eight PR means is 2025 s, against 1959 s for the main medians (+3%).
+- Nothing in the change adds work to a healthy run. Node 18's commands are unchanged apart from an empty value. On 20, 22 and 24, `--test-timeout` only arms a timer. The listing step runs only on failure (skipped in all 24 jobs).
+- I read this as runner variance, not a slowdown. A reviewer who disagrees can ask for more runs.
 
 ## Files changed
 
-Filled in at the final head.
+`git diff --name-only origin/main...HEAD` at c1cd0f1 (main at bdc18bb, merged in at 83c4eab):
+
+```
+.github/workflows/test.yml
+test/hub-overview.test.mjs
+docs/devteam-dev/tickets/kit-230-node22-hang/  (spec, plan, verification, reviews/*)
+```
+
+No other file is added or changed.
