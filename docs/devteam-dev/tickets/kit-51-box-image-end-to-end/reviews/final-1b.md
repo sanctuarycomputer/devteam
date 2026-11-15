@@ -5,8 +5,8 @@
 
 | Id | Severity | Rule cited | Where | Finding | Disposition |
 |----|----------|------------|-------|---------|-------------|
-| B1 | Minor | spec DW4 (green at the PR's head) | PR 247 checks | At review time the box-image run 43682851074 and test run 43682851096 on 47fff63 were still in progress (pending). The commits since e430783 add only records, and the runs at e430783 (43682276306, 43682276230) are green, so this is not a defect. The merge needs both green at the head. | |
-| B2 | Minor | spec step 6 | box-image.yml "what the box said" | The failure dump was not exercised by this green run, so its output was not seen. The paths it reads were checked against the kit and Dockerfile (`~/.devteam/hub-<port>.log`, `~/box.log`) and each command ends `|| true`. | |
+| B1 | Minor | spec DW4 (green at the PR's head) | PR 247 checks | At review time the box-image run 43682851074 and test run 43682851096 on 47fff63 were still in progress (pending). The commits since e430783 add only records, and the runs at e430783 (43682276306, 43682276230) are green, so this is not a defect. The merge needs both green at the head. | wont-fix deferred (Minor, per supervisor m-20261115-055425612) |
+| B2 | Minor | spec step 6 | box-image.yml "what the box said" | The failure dump was not exercised by this green run, so its output was not seen. The paths it reads were checked against the kit and Dockerfile (`~/.devteam/hub-<port>.log`, `~/box.log`) and each command ends `|| true`. | wont-fix deferred (Minor, per supervisor m-20261115-055425612) |
 
 No Critical or Important finding.
 
