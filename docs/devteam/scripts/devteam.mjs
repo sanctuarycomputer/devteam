@@ -2778,6 +2778,19 @@ function workerState(id) {
   };
 }
 const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id); };
+// A launch stopped before its agent ran: its last phase is 'starting', and neither its worktree
+// (home's .worktrees/<id>, for a linked repo's ticket too) nor its tmux window is here. Stopped on
+// purpose, removed with worker --remove --force, or a fleet moved here: nothing of it runs on this
+// machine. A launch in progress always has its worktree before its window and its 'starting' line,
+// so it never reads as stopped. Cheapest first: tmux is asked only when the other two agree.
+function stoppedLaunch(id) {
+  if (lastPhaseOf(id)?.to !== 'starting') return false;
+  if (fs.existsSync(path.join(mainRoot, '.worktrees', id))) return false;
+  return /^no tmux (session|window)/.test(resolvePane(tmuxTarget(id)).problem ?? '');
+}
+// A worker that counts toward max_active_tickets, max_active_per_component and "active workers":
+// active, not held on purpose, and not a stopped launch.
+const countsAsWorker = (t) => activeWorker(t.id) && !isHeld(t) && !stoppedLaunch(t.id);
 
 // What a worker's pane is stuck on, if anything: a question the agent CLI put up (a permission or
 // trust prompt, a y/n) or a usage-limit banner. The log can't show these (the worker is frozen
@@ -3324,6 +3337,8 @@ function deriveStatus() {
       stage, merge_sha: mergeSha, branch, deps_merged: depsMerged, held: isHeld(t) ? t.held : null,
       phase: w?.phase ?? null, task: w?.task ?? null, note: w?.note ?? null, minutes_silent: w?.minutes_silent ?? null, usd: w?.usd ?? null,
       waiting: paneWaiting(t.id),
+      // a launch stopped before it ran (stoppedLaunch): the key only on its row
+      ...(w?.phase === 'starting' && stoppedLaunch(t.id) ? { not_started: true } : {}),
     };
   });
 }
@@ -3797,7 +3812,8 @@ function cmdReady() {
   const held = [];
   const waiting = [];
   for (const t of ts.values()) {
-    if (!isActive(t) || mergeShaFor(t.id) || activeWorker(t.id)) continue;
+    // a held ticket goes on to the held list, and a stopped launch is ready again (countsAsWorker)
+    if (!isActive(t) || mergeShaFor(t.id) || countsAsWorker(t)) continue;
     const why = notSchedulable(t);
     if (why) { waiting.push({ id: t.id, why }); continue; }
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
@@ -3813,7 +3829,7 @@ function cmdReady() {
   // max_active_tickets
   rows.sort((a, b) => (b.kind === 'fix') - (a.kind === 'fix') || (b.severity ?? 0) - (a.severity ?? 0));
   const s = loadSettings();
-  const active = [...ts.keys()].filter(activeWorker);
+  const active = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
@@ -3844,8 +3860,12 @@ function cmdStatus() {
   const stale = loadSettings().stale_after_minutes;
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
-    const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha;
-    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : ''}]` : ''}`);
+    // held on purpose or stopped before it ran: never stale (a held one shows its hold, which wins)
+    const held = r.held && r.phase !== 'done' && !r.merge_sha ? r.held : null;
+    const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
+    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
+    const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
+    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}`);
   }
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
@@ -11431,13 +11451,14 @@ function collectMetrics(since) {
     const w = workerState(id);
     const wait = paneWaiting(id);
     if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree`);
+    // held on purpose, or a launch stopped before it ran (stoppedLaunch), is not stale either.
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
     const waitingOnSupervisor = openMsgs.some((m) => m.created_by === id);
     const exited = w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id) ? agentExited(id) : null;
     if (exited) add('high', 'agent-exited', id, exited.replace(/; resume it first$/, ''), `resume it: worker ${id} --resume (supervisor.md, recovery)`);
-    else if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleOnApiError(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), stopped on an API or network error`, `nudge it: send ${id} "the network dropped; carry on from where you were"`] : idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
+    else if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes && !isHeld(ts.get(id)) && !stoppedLaunch(id)) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleOnApiError(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), stopped on an API or network error`, `nudge it: send ${id} "the network dropped; carry on from where you were"`] : idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;
@@ -11475,7 +11496,7 @@ function collectMetrics(since) {
   // over the machine's memory ceiling, no finding suggests starting a session; memory-full says why
   const memFull = memoryFull(settings);
   let idlePlanning = 0;
-  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
+  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !(activeWorker(t.id) && !stoppedLaunch(t.id)) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
   // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
   {
@@ -11521,7 +11542,7 @@ function collectMetrics(since) {
       if (left.length) add('medium', 'settled-not-withdrawn', q.id, `the owner answered "${String(q.answer).slice(0, 60)}", which settles ${left.join(', ')}; ${left.length > 1 ? 'they are' : 'it is'} still in the Inbox`, `withdraw ${left.length > 1 ? 'each' : 'it'}: withdraw <qid> --reason "settled by the owner's answer to ${q.id}"`);
     }
   }
-  const active = [...ts.keys()].filter(activeWorker).length;
+  const active = [...ts.values()].filter(countsAsWorker).length;
   // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
   // for approval, or a ready goal whose current milestone has unplanned preconditions, and no
   // planner in flight for it while planner slots are free.
@@ -15908,7 +15929,9 @@ function makeSession(role) {
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
   if (role === 'worker' && flags.remove) return removeWorkerWorktree(id);
   // A repo with files no line owns starts no new ticket; a ticket already started carries on.
-  if (role === 'worker' && !lastPhaseOf(id)) {
+  // A launch stopped before it ran (stoppedLaunch) never ran: starting it again is a new start.
+  const ranBefore = role === 'worker' && !!lastPhaseOf(id) && !stoppedLaunch(id);
+  if (role === 'worker' && !ranBefore) {
     const R = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
     if (coverageGap(R.name, R)) die(`${R.name}'s main has coverage gaps (${coverageGapInfo(R.name, R).words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check${R.name === 'home' ? '' : ` --repo ${R.name}`})`);
   }
@@ -15926,7 +15949,7 @@ function makeSession(role) {
   }
   const legacyDrain = draining();
   const mode = legacyDrain ? 'park' : role === 'worker' ? ticketMode(tickets().get(id)) : goalIds.length ? modeOf(goalIds.map((g) => logGet(g))) : fleetMode() ?? 'run';
-  const started = role === 'worker' ? !!lastPhaseOf(id) : !!resolveCommit(`refs/heads/plan/${id}`);
+  const started = role === 'worker' ? ranBefore : !!resolveCommit(`refs/heads/plan/${id}`);
   const refused = ['park', 'let-go'].includes(mode) || (mode === 'drain' && !started);
   if (refused && !flags.force) die(legacyDrain ? `the fleet is drained by an old drain (${legacyDrain.id}): fleet unpark first (supervisor.md §12); to start this one anyway, add --force (it is logged)` : `its goal is ${holdWords(mode)}: ${mode === 'drain' ? 'a draining goal finishes what is running and starts nothing new' : 'nothing starts for it'} (planning.md §1, holds). To start it anyway, add --force (it is logged)`);
   // The machine is shared with other fleets: a new session doesn't start while its memory is at the
