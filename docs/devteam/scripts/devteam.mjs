@@ -1343,6 +1343,8 @@ function fold(all) {
     }
     const rank = RANK[writerClass(by)];
     objects.set(l.id, { ...body, created_at: at, created_by: by, updates: [], __rank: Object.fromEntries(Object.keys(body).map((k) => [k, rank])) });
+    // a goal's title as made, for its title at a given time (goalTitleAt); not copied into views or JSON
+    if (body.type === 'goal') Object.defineProperty(objects.get(l.id), '__bornTitle', { value: body.title });
   }
   for (const l of lines) {
     if (l.op !== 'set') continue;
@@ -1953,7 +1955,7 @@ function goalOrderProblem(q, obj, l, plans, objects, appliedAt) {
   if (v.class !== 'goal-change' || !v.order || v.order.length < 2) return `${v.id} proposes no goal order`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation ("${v.recommendation}")`;
-  const shown = orderContextProblem(v);
+  const shown = orderContextProblem(v, [...objects.values()].filter((o) => o.type === 'goal'));
   if (shown) return shown;
   // the answer is used once its act is written: a line after that is not part of applying it
   if (appliedAt.has(v.id) && appliedAt.get(v.id) < l.at) return `${v.id} was applied already`;
@@ -1974,20 +1976,20 @@ function goalOrderProblem(q, obj, l, plans, objects, appliedAt) {
   return null;
 }
 // Why order question v doesn't show the owner the order it proposes (null when it does): its context
-// ends with the kit's list (goalOrderText), "The order proposed:" then "<n>. <title> (<g-id>)" per
-// goal, and those ids are exactly change.order. The owner's Yes is to what they read; a question whose
-// list and order differ (a line written by hand) approves nothing.
-function orderContextProblem(v) {
-  const lines = String(v.context ?? '').split('\n');
-  const at = lines.lastIndexOf('The order proposed:');
-  if (at < 0) return `${v.id}'s context doesn't show the order it proposes (the kit's "The order proposed:" list)`;
-  const ids = [];
-  for (const ln of lines.slice(at + 1)) {
-    const m = /^(\d+)\. .*\((g-[^()\s]+)\)$/.exec(ln);
-    if (!m || Number(m[1]) !== ids.length + 1) break;
-    ids.push(m[2]);
-  }
-  return canonical(ids) === canonical(v.order) ? null : `${v.id}'s context lists ${ids.join(' ') || 'no goals'}, not the order it proposes (${v.order.join(' ')})`;
+// ends with exactly the list the kit writes for change.order (goalOrderText), each goal titled as it
+// was when the question was asked. The owner's Yes is to what they read; a question whose list and
+// order differ in an id, a title, a line or a word after it (a line written by hand) approves nothing.
+function orderContextProblem(v, goals) {
+  const byId = new Map(goals.map((g) => [g.id, g]));
+  const shown = goalOrderText(v.order, (id) => goalTitleAt(byId.get(id), v.asked_at) ?? id);
+  const ctx = String(v.context ?? '');
+  return ctx === shown || ctx.endsWith(`\n\n${shown}`) ? null : `${v.id}'s context doesn't end with the kit's list of the order it proposes (${v.order.join(' ')}), titled as the goals were when it was asked`;
+}
+// A goal's title at time at: its latest title set by then, else the title it was made with.
+function goalTitleAt(g, at) {
+  if (!g) return null;
+  const u = g.updates.filter((x) => x.title !== undefined && x.at <= at).pop();
+  return u ? u.title : (g.__bornTitle ?? g.title);
 }
 // The supervisor applying the owner's answer to a goal-change --order question: exactly the order
 // it proposed (ids, when given, must be it), once, on goals still live.
@@ -1999,7 +2001,7 @@ function goalOrderApproved(qid, ids) {
   if (v.class !== 'goal-change' || !v.order || v.order.length < 2) die(`goal order --approved: ${qid} proposes no order (a one-goal change is goal set <g-id> --approved ${qid})`);
   if (v.status !== 'answered') die(`goal order --approved: ${qid} is not answered by the owner (${v.status})`);
   if (!v.matched) die(`goal order --approved: ${qid} was answered "${v.answer}", not its recommendation ("${v.recommendation}"); ask again for the order the owner wants`);
-  const shown = orderContextProblem(v);
+  const shown = orderContextProblem(v, readLog().byType.get('goal') ?? []);
   if (shown) die(`goal order --approved: ${shown}; ask again`);
   if ((readLog().byType.get('goal') ?? []).some((g) => g.updates.some((u) => u.approved === qid)) || calls().some((a) => a.approved_by === qid)) die(`goal order --approved: ${qid} already authorised a change; ask again for another`);
   if (ids.length && canonical(ids) !== canonical(v.order)) die(`goal order --approved: ${ids.join(' ')} is not the order ${qid} proposed (${v.order.join(' ')}); give none to apply it`);
@@ -2297,8 +2299,8 @@ function cmdLogCheck() {
   for (const u of newer) out(`a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
-  // an order question shows the owner its order: its context's list is exactly change.order
-  for (const q of logObjects('question')) { const v = questionView(q); const p = v.order ? orderContextProblem(v) : null; if (p) fails.push(p); }
+  // an answered order question showed the owner its order: its context ends with the kit's list of change.order
+  for (const q of logObjects('question')) { const v = questionView(q); const p = v.order && v.status === 'answered' ? orderContextProblem(v, readLog().byType.get('goal') ?? []) : null; if (p) fails.push(p); }
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
   // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
@@ -5370,7 +5372,7 @@ function goalOrderFlag(cls) {
   return o;
 }
 // The order in the owner's words, written into the question's context (which its hash covers).
-const goalOrderText = (ids) => ['The order proposed:', ...ids.map((id, i) => `${i + 1}. ${logGet(id)?.title ?? id} (${id})`), 'Goals left out keep their order after these.'].join('\n');
+const goalOrderText = (ids, titleOf = (id) => logGet(id)?.title ?? id) => ['The order proposed:', ...ids.map((id, i) => `${i + 1}. ${titleOf(id)} (${id})`), 'Goals left out keep their order after these.'].join('\n');
 // --stake and --urgency on ask and rate: 1, 2 or 3 each; undefined when not given.
 function ratingFlags() {
   const r = {};

@@ -317,17 +317,38 @@ test('an order counts only as the owner read it: the context, live goals, once',
     assert.equal(prio(F, D), 7);
     assert.match(ignored(), new RegExp(`${QA} was applied already`));
 
-    // a question whose list says one order and whose change.order another approves nothing, and log-check says so
-    const at = new Date().toISOString();
-    const QX = `q-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-supervisor`;
-    fs.appendFileSync(supLog(F), line({ id: QX, type: 'question', op: 'new', at, by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Put the goals in this order?', context: `The order proposed:\n1. Alpha (${A})\n2. Delta (${D})\nGoals left out keep their order after these.`, recommendation: 'Yes, this order', change: { order: [D, A] } }));
-    yes(QX);
+    // the list is the kit's, titled as the goals were when asked: a goal renamed since keeps the question good
+    const QR = asked([D, A]);
+    ok(old, ['goal', 'set', D, '--title', 'Delta renamed', '--owner']);
+    yes(QR);
+    ok(old, ['goal', 'order', '--approved', QR], SUP);
+    assert.deepEqual(prios(F, [D, A]), [1, 2]);
+
+    // a question whose list differs from its change.order in an id, a title, a line or a word after it
+    // approves nothing, and log-check names it once answered
+    const good = `The order proposed:\n1. Alpha (${A})\n2. Delta renamed (${D})\nGoals left out keep their order after these.`;
+    const bad = [
+      `The order proposed:\n1. Delta renamed (${D})\n2. Alpha (${A})\nGoals left out keep their order after these.`,
+      `The order proposed:\n1. Delta renamed (${A})\n2. Alpha (${D})\nGoals left out keep their order after these.`,
+      `The order proposed:\n1. Delta renamed (${D}) (${A})\n2. Alpha (${D})\nGoals left out keep their order after these.`,
+      `${good}\nRead it reversed.`,
+      good.replace('\nGoals left out', `\n  3. Bravo (${B})\nGoals left out`),
+    ];
+    const lc0 = run(old, ['log-check']);
+    assert.equal(lc0.status, 0, lc0.out);
+    const qxs = bad.map((context, k) => {
+      const t = new Date(Date.now() + 10 * k);
+      const QX = `q-${t.toISOString().slice(0, 10).replace(/-/g, '')}-${t.toISOString().slice(11, 23).replace(/[:.]/g, '')}-supervisor`;
+      fs.appendFileSync(supLog(F), line({ id: QX, type: 'question', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Put the goals in this order?', context, recommendation: 'Yes, this order', change: { order: [A, D] } }));
+      yes(QX);
+      assert.match(run(old, ['goal', 'order', '--approved', QX], SUP).err, /doesn't end with the kit's list/, context);
+      hand([{ id: A, priority: 1, approved: QX }, { id: D, priority: 2, approved: QX }]); // its places, were it good
+      return QX;
+    });
+    assert.deepEqual(prios(F, [D, A]), [1, 2], 'nothing applied');
     const lc = run(old, ['log-check']);
     assert.equal(lc.status, 1);
-    assert.match(lc.out, new RegExp(`${QX}'s context lists ${A} ${D}, not the order it proposes \\(${D} ${A}\\)`));
-    assert.match(run(old, ['goal', 'order', '--approved', QX], SUP).err, /context lists/);
-    hand([{ id: D, priority: 1, approved: QX }]);
-    assert.equal(prio(F, D), 7, 'nothing applied');
+    for (const QX of qxs) assert.match(lc.out, new RegExp(`${QX}'s context doesn't end with the kit's list`));
   } finally { F.done(); }
 });
 
