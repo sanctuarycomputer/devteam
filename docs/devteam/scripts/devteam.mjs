@@ -2882,9 +2882,9 @@ function paneWaitingIn(window) {
 // another, up to LOST_ENTER_TRIES in all, but only while the body is as it was at the last press: a
 // lost Enter on an idle pane changes nothing there (the footer, the agent list and shell counts
 // change on their own, so they're left out), while a reply, a submission or someone typing does.
-// The text is never retyped. The record
-// is claimed (moved aside) and read again before each key, so however many passes or processes look,
-// and however stale their first read, one press happens per claim, and they stop once the text is gone.
+// The text is never retyped. The record is claimed (moved aside) and read again before each key, so
+// however many passes or processes look, and however stale their first read, one press happens per
+// claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
 const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;

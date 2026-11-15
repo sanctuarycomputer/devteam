@@ -208,6 +208,9 @@ test("the supervisor's own pane: a lost Enter is pressed again while only the ha
     await step(['⏺ Earlier output', `> ${text}`, '1 shell running', '◯ agent  12s · ↓ 3.1k tokens'], 1);
     await step(['⏺ Earlier output', `> ${text}`, '2 shells running', '◯ agent  40s · ↓ 9.8k tokens'], 2);
     await step(['⏺ Earlier output', `> ${text}`, '◯ agent  1m 2s · ↓ 1.2M tokens'], 3);
+    // a rule in the output with the text below it: no input box there, so nothing is cut as a footer
+    deliver(3600);
+    await step(['⏺ Summary', R, `> ${text}`, '1 shell running'], 1);
     // never into a busy pane: busy only in the footer, or a spinner above a long agent list
     const agents = [1, 2, 3, 4, 5, 6, 7].map((n) => `◯ agent${n}  ${n}s · ↓ ${n}.1k tokens`);
     for (const [why, shown] of [['busy in the footer', [...A.slice(0, 5), '⏵⏵ bypass permissions on · 1 shell · esc to interrupt']], ['a spinner above a long agent list', ['⏺ work', '✻ Cogitating… (12s · ↓ 1.2k tokens · esc to interrupt)', R, `❯ ${text}`, R, '⏵⏵ bypass permissions on · 1 shell', ...agents]]]) {
@@ -217,6 +220,7 @@ test("the supervisor's own pane: a lost Enter is pressed again while only the ha
       deliver(3600);
       F.tick();
       assert.equal(s.keys(), '', `left alone: ${why}`);
+      assert.ok(fs.existsSync(sent), `the text is still there, so the record is kept: ${why}`);
     }
   } finally { F.done(); }
 });
