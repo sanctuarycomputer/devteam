@@ -5,10 +5,7 @@
 - One new file, `.github/workflows/test-stress.yml`: one job that runs `test/run.mjs` daily on main (`--group chrome,rest --repeat 3 --concurrency 4`) and on dispatch (`files`, `repeat`, `load`).
 - Inputs reach the shell only through `env:`. The script checks them before anything runs: repeat `^[1-5]$`, load `^[0-8]$`, no newline or tab in files, and file words `^[A-Za-z0-9._/-]+$` that don't start with `-`.
 - The job summary is built by a small Node script written from a quoted heredoc inside the step. It shows one row per file and one column per repeat. A cell is ok only if it is exactly `ok` once a trailing `, near timeout` is dropped. The step is red on any non-ok cell, a missing header, or a non-zero run.mjs exit. Burner cleanup (`kill … || true`, `return 0`) can never change the status.
-- Three tasks:
-  - T1: the workflow with a temporary push trigger, plus local checks of the summary script, the input checks and the step's exit and cleanup. These use crafted logs and `sleep` stand-ins; no tests and no load run on the box.
-  - T2: push, get one green GitHub run with files=test/search.test.mjs, repeat=2, load=2, and quote its summary.
-  - T3: commit verification.md, then remove the trigger as the last non-record commit, and run actionlint and shellcheck (both pinned and sha256-checked).
+- Three tasks, detailed below: T1 the workflow with a temporary push trigger, checked locally with crafted logs and `sleep` stand-ins (no tests, no load on the box); T2 one green GitHub run (files=test/search.test.mjs, repeat=2, load=2); T3 verification.md, the trigger removed as the last non-record commit, then actionlint and shellcheck (pinned, sha256-checked).
 - No kit test file changes, so no kit test runs on the box (ruling m-20261115-171703191-supervisor). GitHub CI (`test.yml`) stays the gate for the PR.
 - Executed inline (executing-plans), with a fresh-subagent review per task. Two final reviews come from other sessions (risk high).
 
@@ -25,6 +22,9 @@
 ## Rulings
 
 - m-20261115-171703191-supervisor: spec and plan go to one combined review; approve-spec and approve-plan are asked for together. Lessons k-20261115-080753394 and k-20261115-164245020 apply: judge every check by its exit code, never by piped output. Multi-step shell goes in script files. No `rm -rf` of a path from a file or a command substitution. Only the test files touched run, at `--test-concurrency=2` (none here).
+- m-20261115-174531437-supervisor: approve-spec at 074d1c8. Condition on test-stress.yml: top-level `permissions: contents: read`, no secrets and no `environment`, a `concurrency` group, and `timeout-minutes` on every job. It runs on schedule and workflow_dispatch only, never on pull_request; the final reviewers check this. The temporary push trigger (done-when 4) exists only until T3 removes it, so the final file meets the condition.
+- m-20261115-174537048-supervisor: approve-plan was refused because the TL;DR had more than 7 bullets (quality.md §6). The three-task bullet is folded into one; the task detail lives in the task sections.
+- m-20261115-174456484-supervisor and lesson k-20261115-174344487: every reviewer brief also says no /dev/zero or /dev/urandom input, no interactive client in the background, and every probe under `timeout` with a memory cap.
 
 ## Global Constraints
 
