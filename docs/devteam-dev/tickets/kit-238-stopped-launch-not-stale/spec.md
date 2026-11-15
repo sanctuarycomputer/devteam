@@ -25,38 +25,54 @@ All three read "is this ticket's worker active" as "its last phase isn't done or
 
 ## Acceptance checks (the done-whens)
 
-All in `test/kit.test.mjs`, one new tmux-gated test against a `threadsFixture`, three tickets in
-one component, each silent 2 hours (hand-written phase lines), default `stale_after_minutes` (30):
+All in `test/kit.test.mjs`, one new test against a `threadsFixture`, four tickets in one
+component, each silent 2 hours (hand-written phase lines), default `stale_after_minutes` (30).
+The no-tmux-session checks (2, 4) run before any tmux session exists and whether tmux is installed
+or not; the parts that need windows run only with tmux:
 
 1. **Held** (`held` set, last phase `starting`, a window running, so it is held, not stopped):
    - `metrics --json` has no `stale-worker` for it;
    - `status` shows no `STALE` on its row and shows `HELD: <reason>`;
-   - `ready --json`: not in `active`, not in `active_per_component`; `active workers: N/…` in the
-     text output does not count it.
+   - `ready --json`: not in `active`, not in `active_per_component`, listed under `held`;
+     `active workers: N/…` in the text output does not count it.
 2. **Stopped launch** (last phase `starting`, no window, no worktree, not held):
    - `status` shows `not started` on its row (no `STALE`); `status --json` row has `not_started: true`;
    - no `stale-worker` for it;
    - not counted in `ready`'s `active` / `active_per_component`; it is listed in `ready` again;
-   - `worker <id>` starts it as a fresh launch: exit 0, prints `made worker <id>`, writes a new
-     `starting` phase line, makes its worktree; afterwards status no longer says `not started`.
+   - `worker <id>` treats it as a new start, not one that ran: with its goal draining
+     (`goal hold <g> drain`) it is refused without `--force` (drain starts nothing new); with the
+     goal running again, it starts: exit 0, prints `made worker <id>`, writes a new `starting`
+     phase line, makes its worktree; afterwards status no longer says `not started`.
 3. **Real stuck worker** (last phase `build`, its window present, silent 2 h): `stale-worker` high
    as today, `STALE` in status, counted in `active` and `active_per_component`.
+4. **Held and stopped** (kit-211's own shape: held, last phase `starting`, no window, no
+   worktree): no `stale-worker`; status shows `HELD: <reason>` (the hold wins over `not started`
+   on the line, no `STALE`), and its JSON row still has `not_started: true`; not in `active`,
+   listed under `ready`'s `held`.
 
 CI's `kit` job runs this file; the gate is CI green at the head.
 
 ## Behaviour changes (devteam.mjs)
 
-- New helper `stoppedLaunch(id)`, beside `activeWorker`.
+- New helper `stoppedLaunch(id)`, beside `activeWorker`. It checks the cheap things first (last
+  phase `starting`, then no worktree) and asks tmux last, so tickets without a `starting` phase
+  (all of G1's) never call tmux.
 - New helper `countsAsWorker(t)`: `activeWorker(t.id) && !isHeld(t) && !stoppedLaunch(t.id)`.
   Used for `ready`'s `active` (so `active workers` and `active_per_component`) and for
   `observe-metrics`' `active` count (idle-capacity, memory-full wording).
-- `ready` and the metrics' `ready` list skip a ticket with a worker only when that worker isn't a
-  stopped launch: a stopped launch is listed again (or under `held` if held), so idle-capacity
-  can suggest starting it.
+- `ready` skips a ticket because it has a worker only when `countsAsWorker` holds: a held ticket
+  (with or without a live window) is listed under `held`, and a stopped launch that isn't held is
+  listed again as ready. The metrics' `ready` list (idle-capacity) skips one only when its worker
+  is active and not a stopped launch (held tickets are already left out there).
 - `stale-worker` skips a held ticket and a stopped launch.
+- `makeSession` (`worker <id>`): a stopped launch is a new start, not a session that ran.
+  `started` and `ran` become `lastPhaseOf(id) && !stoppedLaunch(id)`, and the coverage-gap guard
+  runs for it too. So a draining goal refuses it without `--force`, a repo with coverage gaps
+  refuses it, and `--resume` doesn't skip the memory ceiling.
 - `deriveStatus` adds `not_started: true` to a stopped launch's row only (no new key on other
-  rows, so the G1 goldens are unchanged). `status` prints `[not started: no window or worktree]`
-  for it, and for a held ticket with a phase prints `HELD: <reason>` where `STALE` would go.
+  rows, so the G1 goldens are unchanged). `status` prints, in order of precedence: a pane
+  waiting on a prompt (unchanged), then `HELD: <reason>` for a held ticket with a phase (never
+  `STALE`), then `[not started: no window or worktree]` for a stopped launch, then STALE as today.
 
 ## Contracts
 
@@ -72,11 +88,21 @@ gain the optional `not_started` key on a stopped launch's row.
 - A launch in progress always has a worktree, so it is never a stopped launch.
 - `agent-exited` already needs a window, so it never fires for a stopped launch (unchanged).
 - Planners: out of scope (`stale-planner` already skips parked planners).
+- Moved fleet: a ticket whose log says `starting` reaches a new machine with no worktree or window
+  there. It reads as `not started`, leaves the caps and stale-worker, and `worker <id>` (a new
+  start) continues from `origin/ticket/<id>`, as `makeSession` already does. That is intended:
+  nothing of it runs on this machine.
+- A ticket in a linked repo: its worktree is still `<home>/.worktrees/<id>` (`makeSession`
+  makes it there), so the definition checks that path, not the linked repo's root.
 
 ## Out of scope
 
 - The dashboard's rendering (`dashboard/index.html`, not in touches); it reads the same rows.
-- `liveSessions` and park rulings.
+- `liveSessions` (park rulings, drain, fleet move). Known residual: a stopped launch still counts
+  as a live session there, so a draining goal holding one doesn't read `drained`, and `fleet
+  move` and the fleet-drain check still list it. "Not started" here means it is out of the caps,
+  stale-worker and STALE, not out of every session list. A follow-up ticket can carry it; I'll
+  raise it with the supervisor as an observation.
 
 ## Rulings
 
