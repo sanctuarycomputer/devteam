@@ -269,6 +269,9 @@ test("Upkeep's last 14 days, from a log with known answers", { timeout: 300000 }
   // an act with no refs (an older line): skipped, never a throw
   act('merge-chore', [], Date.now() - dayAt(7));
   chore('old', 15);
+  // the window's edges: the oldest day is in, the day before it is out (T4-1)
+  chore('edge-in', 13);
+  chore('edge-out', 14);
 
   const before = logBytes(F);
   const days = data(F).upkeep_days;
@@ -285,6 +288,8 @@ test("Upkeep's last 14 days, from a log with known answers", { timeout: 300000 }
   assert.deepEqual(items(6), [['chore', 'ch-01-tidy-docs', 'Merged Tidy the docs']]);
   assert.deepEqual(day(7).items, [], 'a quiet day');
   assert.ok(days.flatMap((x) => x.items).every((i) => i.ref !== 'chore-old'), 'the old line is out of range');
+  assert.deepEqual(days[0].items.map((i) => [i.kind, i.ref, i.words]), [['chore', 'chore-edge-in', 'Merged chore edge-in']], 'the oldest day, day 13, is in');
+  assert.ok(days.flatMap((x) => x.items).every((i) => i.ref !== 'chore-edge-out'), 'day 14 is out of range');
   for (const x of days) assert.deepEqual(x.items.map((i) => i.at), x.items.map((i) => i.at).sort(), 'each day in at order');
   assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
 });
