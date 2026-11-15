@@ -41,7 +41,7 @@
 ## Review Focus
 
 1. **Half-typed words in an Inbox note while the 10-second redraw and the threads poll run.** Expected: words, caret and focus kept. Test: T5 step 1.
-2. **A question answered elsewhere while a thread on it is open.** Expected: the card leaves `#questions`, the thread is no longer Inbox-home (the Answered copy is never a home), and no stale pin is left in the panel. Test: T4 step 1, last bullet.
+2. **A question answered elsewhere while a thread on it is open.** Expected: the card leaves `#questions`, the thread is no longer Inbox-home (the Answered copy is never a home), and no stale pin is left in the panel. Test: T5 step 1, right after `q1`'s Answer (the same removal path).
 3. **An Inbox link clicked inside a peek.** Expected: the peek stays open, and the panel opens beside it with `history.state.page` carrying `th=inbox`. Test: T3 step 1.
 4. **A cold `#talk/<Q>` or `#q/<id>` before `/api/data` lands.** Expected: no throw and no scroll to a missing card; it scrolls once the card exists. Test: T3 step 1 (cold `#q`), T4 step 1 (cold `#talk`).
 5. **390px wide: a long choice detail, secret name or link in a card.** Expected: nothing sticks out of the column. Test: T6 measure entry at 390x844 with the fixture's longest strings.
@@ -179,10 +179,9 @@
 
 - [ ] **Step 1: Failing subtest** "a thread on a question". It asserts AC3's `P` bullet and AC4 exactly, at the sizes named, plus:
   - a cold `#talk/<Q>` in a new tab throws nothing;
-  - `Q`'s pin is still inside `q1`'s card (±1px) after `window.scrollTo(0, 400)` (Goals, made tall by the fixture) and after `$('th-body').scrollTop += 100`, and it is hidden once `q1`'s card is scrolled out of `#th-body`'s box;
+  - `Q`'s pin is still inside `q1`'s card (±1px) after appending a 3000px spacer to Goals' section, `window.scrollTo(0, 400)` and asserting `scrollY === 400`, and after `$('th-body').scrollTop += 100`, and it is hidden once `q1`'s card is scrolled out of `#th-body`'s box;
   - at 720x800 on Goals with the panel on Inbox, `elementFromPoint` at `G`'s pin's centre is inside `#threads`;
-  - `P` opened by its row stays on `th=inbox` (no rewrite to `open`) and draws no pin;
-  - after `q1` is answered through the API and a redraw passes, no pin is drawn inside `#th-inbox`, and `tlInboxHome(Q)` is `false`.
+  - `P` opened by its row stays on `th=inbox` (no rewrite to `open`) and draws no pin.
 - [ ] **Step 2:** Run. Expected: FAIL.
 - [ ] **Step 3: Implement** spec §2.6:
   - `tlHome` looks in `#th-inbox #questions` for `T_HOME[k] === 'inbox'`, never in `#answered`;
@@ -211,7 +210,7 @@
 - Produces: `layerField(el)`, which is `!!el?.closest('#tl, #threads') && !inInbox(el)`. It is used by `holding()` and by the draft filters (`!layerField(el)`, replacing kit-89's `!el.closest('#tl, #threads')`).
 
 - [ ] **Step 1: Failing subtest** "every control from the panel": AC5 in full, each control on its own fixture question.
-  - Its controls are, in order: `q1` choice + rule box + Answer; `q2` note Send; `q3` Done; `q4` Post; `q5` Reply; `q6` Can't right now; the defaulted question's Overrule; `L1` with a note, Keep it; `L2` Retire it; the terminal card's option 1.
+  - Its controls are, in order: `q1` choice + rule box + Answer, then (after one redraw) no pin inside `#th-inbox` and `tlInboxHome(Q) === false`; `q2` note Send; `q3` Done; `q4` Post; `q5` Reply; `q6` Can't right now; the defaulted question's Overrule; `L1` with a note, Keep it; `L2` Retire it; the terminal card's option 1.
   - It intercepts `/api/answer`, `/api/knowledge` and the secrets post as `dashboard-owner-action.test.mjs` does (`Fetch.enable` or the server's log), and asserts each request's body: the rule box `rule: true` and the note text.
   - The typing check: type "half a thought" into `q2`'s `textarea[data-q]`, place the caret at 4, then wait until a redraw has arrived and been held (`HELD !== null`, up to 15 s) and one threads poll has landed. Assert `document.activeElement` is the same textarea, its value is unchanged and `selectionStart === 4`. Escape there leaves the panel open. Then blur, wait for `HELD === null`, and assert the redrawn textarea still holds "half a thought".
   - The review: click `[data-open-review]`; the hash is `#review/<id>`; `#review-view`'s width is greater than `#threads`' width; then close it, and the panel is on Inbox.

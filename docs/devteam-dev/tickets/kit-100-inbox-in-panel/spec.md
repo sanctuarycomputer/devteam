@@ -152,7 +152,7 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
 - one review-page question `r` (`ask --kind review`, with a page and data checked in);
 - two lessons for the owner, `L1` and `L2`;
 - one answered question, one defaulted question and one withdrawn question;
-- a goal;
+- two goals, `goal` and `goal2`, and a thread `G` on `goal`'s card (`goal2` has none);
 - a thread `Q` pinned to the first open question (subject `question:<id>`);
 - a thread `P` with a page subject on `#inbox` (an old Inbox spot, written to the thread store as an old dashboard wrote it);
 - a subjectless thread `S`;
@@ -181,7 +181,7 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
    - Thread `P` is listed under Threads, with "Inbox" as its subject line. Clicking its row opens the Inbox tab (`th=inbox&t=<P>`) with `P`'s card open and no `[data-tl-pin="<P>"]` drawn.
 4. **A thread on a question** (done-when 4). `T_HOME.question` and `tlHome` are checked in `vm` and in the page: `tlHome({ kind: 'item', ref: 'question:<id>' })` is inside `#th-inbox`.
    - At 1440x900, on Overview with the panel on Inbox, `Q`'s pin is drawn and its centre lies inside `q1`'s card. The element at the pin's centre is the pin, so it is above the panel.
-   - Still inside `q1`'s card (±1px) after `window.scrollTo(0, 400)` on a page tall enough to scroll, and after `#th-body` is scrolled by 100px. Hidden once `#th-body` scrolls `q1`'s card out of its visible box.
+   - Still inside `q1`'s card (±1px) after `window.scrollTo(0, 400)`, with the test first making the page tall (a 3000px spacer appended to the page's section) and asserting `scrollY === 400`, and after `#th-body` is scrolled by 100px. Hidden once `#th-body` scrolls `q1`'s card out of its visible box.
    - Clicking the pin opens `Q`'s card. Its right edge is at most the panel's left edge, and its top is within the window.
    - From `#goals?th=open`, clicking `Q`'s row gives `#goals?th=inbox&t=<Q>`: the panel is on Inbox, the card is in view and the floating card is open beside it.
    - A cold load of `#talk/<Q>` opens `#overview?th=inbox&t=<Q>` with the card open beside the question's card.
@@ -189,9 +189,8 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
    - Shift+click on the second open question's card in the Inbox tab starts a draft card beside it. Sending words makes a thread listed with subject `question:<id>`.
    - Shift held over the Inbox tab's tab bar shows no pin.
    - At 720x800 on Goals with `G`, a thread on the goal's card, and the panel open on Inbox: the element at `G`'s pin's former centre is inside `#threads`, so the page's pins stay under the panel.
-   - Once `q1` is answered (by the API, then one redraw), no pin is drawn inside `#th-inbox`, and `tlInboxHome(Q)` is false.
 5. **Every control works from the panel** (done-when 5), each on a fresh question of the fixture where it posts:
-   - pick a choice and Answer (its `POST /api/answer` lands, and the card leaves);
+   - pick a choice on `q1` and Answer (its `POST /api/answer` lands, and the card leaves). Right after, once one redraw has passed, no pin is drawn inside `#th-inbox` and `tlInboxHome(Q)` is false (§4, a question answered elsewhere: the same path);
    - type a note and Send;
    - Done on the owner-action `q3`;
    - Post on `q4`'s secret, Reply on `q5`'s and Can't right now on `q6`'s;
