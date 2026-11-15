@@ -8,24 +8,24 @@ kit-49 made the box's boot start the machine's hub from the image's own kit (tmu
 
 ## What changes
 
-`box-image.yml`'s `build` job keeps its build and its no-boot smoke check, and gains steps after them, in the same job, that boot the image and check it from inside. Every shell step runs under `bash -euo pipefail`. The helpers the steps share (run as dev, read the list, find the port's holder, wait for a condition) are written once by the first new step to `$RUNNER_TEMP/box.sh` and sourced by the rest. The steps:
+`box-image.yml`'s `build` job keeps its build and its no-boot smoke check, and gains steps after them, in the same job, that boot the image and check it from inside. Every shell step runs under `bash -euo pipefail`; so a reader that stops early (`grep -q`) never fails its writer, every check captures a command's whole output into a variable first and then greps that. The helpers the steps share (run as dev, read the list, find the port's holder, wait for a condition) are written once by the first new step to `$RUNNER_TEMP/box.sh` and sourced by the rest. The steps:
 
 1. **Boot.** `docker run -d --name box` with the image's real entrypoint (none overridden), `-e DEVTEAM_PUBLIC_URL=https://box.test` (a name, https: the gateway refuses an IP or plain http), `-v <a fresh named volume>:/data`, and `-p 127.0.0.1:8080:8080`. Wait up to 120 s for `curl -fsS http://127.0.0.1:8080/healthz` from the runner, failing early if the container exits. Read `REL=$DEVTEAM_KIT_RELEASE` and `TOOLS=$DEVTEAM_BOX_TOOLS` from the container (`docker exec box printenv`), and require REL to be `vX.Y.Z` and TOOLS to be non-empty, so no check below passes against an empty value.
 2. **The image's hub (DW1).** Waiting up to 60 s (dev's side starts after the gateway answers), as dev (`docker exec -u dev -e HOME=/data/home box …`):
    - `curl -fsS http://127.0.0.1:4320/instances.json` parsed with the image's node: `hub === 1`, `kit === REL`, `image === true`;
    - `tmux list-windows -t =home -F '#{window_name}'` has a line `hub`;
    - `lsof -nP -iTCP:4320 -sTCP:LISTEN -t` gives one pid, and that pid's `/proc/<pid>/cmdline` has argv[1] `/opt/devteam/kit/scripts/devteam.mjs` and argv[2] `hub` (the `-t` only trims lsof's output to the pid).
-3. **A current dashboard leaves the port alone (DW2).** As dev, a throwaway repo `~/code/e2e`: `git init -b main`, `cp -R /opt/devteam/kit docs/devteam` (the image's own kit), `node docs/devteam/scripts/devteam.mjs init --name e2e`, a first commit (identity given with `-c`). Its dashboard starts the way the boot starts one: `tmux new-window -d -t '=home:' -n e2e-dash -c ~/code/e2e "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"`, so it has the tmux server's environment, which carries the image's ENV. Waiting up to 60 s for `docs/devteam/run/dashboard.log` to say `started on`, then:
-   - the log has the line `hub: left to the image (DEVTEAM_IMAGE_HUB=4320)` (fixed string match);
+3. **A current dashboard leaves the port alone (DW2).** As dev, a throwaway repo `/data/home/code/e2e` (absolute: the steps are written on the runner, where `~` is the runner's): `git init -b main`, `mkdir -p docs`, `cp -R /opt/devteam/kit docs/devteam` (the image's own kit), `node docs/devteam/scripts/devteam.mjs init --name e2e`, a first commit (identity given with `-c`). Its dashboard starts the way the boot starts one: `tmux new-window -d -t '=home:' -n e2e-dash -c /data/home/code/e2e "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"`, so it has the tmux server's environment, which carries the image's ENV. Waiting up to 60 s for `docs/devteam/run/dashboard.log` to say `started on`, then:
+   - the log has a line ending in `hub: left to the image (DEVTEAM_IMAGE_HUB=4320)` (fixed string, after the log's own `<time> [<pid>] ` prefix: `grep -F` on the text, then the line's tail compared exactly);
    - 4320's holder passes step 2's lsof/cmdline check, with the same pid as before the dashboard started;
    - within 15 s, `/instances.json`'s `instances` has an entry whose `root` is `/data/home/code/e2e`.
 4. **The versions show (DW3).**
    - `docker logs box` has the line `image: $REL` (whole line, `grep -qxF`);
    - `box-status`, as dev, prints the line `machine: hub 4320 up, kit $REL (image)` (whole line), and the line `machine: box $REL: <n1> <v1>, <n2> <v2>, …` built from TOOLS in its order (whole line, so every tool is in it).
 5. **The hub comes back (DW4).**
-   - Kill the hub's pid (as dev, `kill`). Within 5 s (polled every 0.2 s): `/instances.json` answers hub 1 with kit REL and image true, and 4320's holder passes the lsof/cmdline check with a pid that is not the killed one.
+   - Kill the hub's pid (as dev, `kill`), and poll inside that same `docker exec` (so the budget times the hub, not docker): within 5 s (every 0.2 s), `/instances.json` answers hub 1 with kit REL and image true, and 4320's holder passes the lsof/cmdline check with a pid that is not the killed one.
    - `tmux kill-window -t '=home:hub'`; check the window is gone; within 90 s (the minute loop sleeps 60 s) the window `hub` is back, and then within 15 s `/instances.json` answers as above and the holder check passes.
-6. **On failure** (`if: failure()`): print `docker logs box`, and as root inside the container `~/box.log`, `~/.devteam/hub-4320.log`, the e2e dashboard log, and `tmux list-windows -a`, so a red run says where it stopped. **Always**: `docker rm -f box` and remove the volume.
+6. **On failure** (`if: failure()`): print `docker logs box`, and from inside the container `/data/home/box.log`, `/data/home/.devteam/hub-4320.log`, `/data/home/code/e2e/docs/devteam/run/dashboard.log`, and `tmux list-windows -a` run as dev (dev's tmux server, not root's), so a red run says where it stopped. **Always**: `docker rm -f box` and remove the volume. Both steps stand alone (no `box.sh`) and never fail themselves (`|| true` on each command).
 
 The `on.pull_request.paths` filter already lists `.github/workflows/box-image.yml`, so this PR runs it.
 
@@ -47,12 +47,12 @@ Nothing is provided.
 
 ## Edge cases
 
-- **dev's side starts after /healthz.** The gateway answers first; the hub comes up later (after the operator block, boot.sh's `box-pg 17`, and `mise install` in the background). Hence the 60 s wait for the list rather than one read.
+- **dev's side starts after /healthz.** The gateway answers first; devteam-dev then starts the operator window and the hub's window (before `mise install` and boot.sh, which only the hub wait and the dashboards come after), and the hub takes a moment to bind. Hence the 60 s wait for the list rather than one read.
 - **The operator window runs `claude` with no login.** It sits at a login prompt; nothing here reads it.
 - **`mise install` reaches the network in the background.** It is not waited on, and nothing here needs its tools (the steps use `/usr/local/bin/node`).
 - **The list caches its scan 2 s,** so the instance check waits up to 15 s rather than reading once.
 - **Killing the hub's window** sends the pane a hangup; if the old node lingered on the port, the new hub's retry would fail the "holder" part. The check asserts the holder after the window is back, so a lingering process that isn't the image's hub fails it; a lingering image hub still answers correctly, which is all DW4 asks of the window.
-- **No assertion passes on an empty value:** REL and TOOLS are required non-empty first, and every match is whole-line, fixed-string.
+- **No assertion passes on an empty value:** REL and TOOLS are required non-empty first, and every match is fixed-string and whole-line, except the dashboard log's line, whose tail after its `<time> [<pid>] ` prefix is compared exactly.
 
 ## Out of scope
 
