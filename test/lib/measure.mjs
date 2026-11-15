@@ -106,7 +106,8 @@ export function measureInPage(o) {
   return out;
 }
 
-const opts = (o = {}) => ({ ...DEFAULTS, ...o });
+// a page's prose and ignore add to the defaults; its view, bar, title and inbox replace them
+const opts = (o = {}) => ({ ...DEFAULTS, ...o, prose: [DEFAULTS.prose, o.prose].filter(Boolean).join(', '), ignore: [DEFAULTS.ignore, o.ignore].filter(Boolean).join(', ') });
 
 // What breaks in the page as it is now. p is a page from test/lib/chrome.mjs's newPage().
 export async function measure(p, o = {}) {

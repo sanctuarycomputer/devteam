@@ -122,11 +122,12 @@ test("today's pages can't change: every layout rule is scoped to .shell, and nei
   const B = ':not(:where(.no-shell, .no-shell *))';
   for (const s of sels) assert.ok(s === ':root' || (/^:where\(\.shell\)(\.peek-open|\.threads-open)?[ :]/.test(s) && /:not\(:where\(\.no-shell, \.no-shell \*\)\)(::[\w-]+)?$/.test(s)), `scoped and fenced: ${s}`);
   assert.ok(sels.filter((s) => s.includes(B)).length === sels.filter((s) => s !== ':root').length);
-  assert.match(LAYOUT, /@keyframes shell-ring/, 'its one animation has a name of its own');
+  const frames = [...LAYOUT.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]);
+  assert.deepEqual(frames, ['shell-ring'], 'its one animation has a name of its own');
   for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
     const rest = without(src, 'devteam-layout', 'devteam-shell-js');
     assert.doesNotMatch(rest, /class="[^"]*\bshell\b|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*\bshell\b/, `${name} has no .shell yet`);
-    assert.doesNotMatch(rest, /@keyframes shell-ring/, `${name} has no animation of the block's name`);
+    for (const f of frames) assert.doesNotMatch(rest, new RegExp(`@keyframes\\s+${f}\\b|animation(-name)?:[^;]*\\b${f}\\b`), `${name} has no animation of the block's name ${f}`);
   }
   // index's own --measure (78ch) still comes after the block, so it still wins there
   assert.ok(INDEX.indexOf('--measure: 78ch') > INDEX.indexOf('/* devteam-layout end */'), "index's --measure still wins on index");
@@ -170,6 +171,8 @@ test('tabBar: counts, disabled tabs, roving tabindex; arrows, Home and End skip 
   assert.equal(S.tabStep([{ id: 'x', disabled: true }, ...tabs.slice(0, 2)], 'a', 'Home'), 'a', 'Home skips a disabled first tab');
   assert.equal(S.tabStep(tabs, 'a', 'End'), 'd');
   assert.equal(S.tabStep(tabs, 'a', 'Enter'), null);
+  assert.equal(S.tabStep(tabs, 'gone', 'ArrowRight'), 'a', 'from a tab that is gone, Right goes to the first');
+  assert.equal(S.tabStep(tabs, 'gone', 'ArrowLeft'), 'd', 'and Left to the last');
   // bound: keys and clicks select through onSelect, focus the tab again after a redraw, never a disabled one
   const root = rootWith(html);
   let sel = 'c';
@@ -235,6 +238,28 @@ test('dbTable: numeric sort, a second press reverses, None when empty; onOpen ge
   root.innerHTML = S.dbTable(['Id'], [['<a href="#x">x</a>']]);
   fire(root, 'click', root.querySelectorAll('a')[0]);
   assert.deepEqual(opened, [1, 2, 0], "a link in a row is the link's");
+  root.innerHTML = S.dbTable(['Id'], [['<button type="button">b</button>'], ['<label><input type="checkbox"> l</label>']]);
+  fire(root, 'click', root.querySelectorAll('td button')[0]);
+  fire(root, 'click', root.querySelectorAll('td label')[0]);
+  fire(root, 'keydown', root.querySelectorAll('td button')[0], { key: 'Enter' });
+  assert.deepEqual(opened, [1, 2, 0], "a button, a label or Enter on a control in a row is the control's");
+  // numbers as numbers: decimals and negatives; a null sort key as empty
+  const nums = [{ cells: ['a'], sort: ['1.5'] }, { cells: ['b'], sort: ['1.25'] }, { cells: ['c'], sort: ['-2'] }, { cells: ['d'], sort: [null] }, { cells: ['e'], sort: ['10'] }];
+  assert.deepEqual(S.sortRows(nums, { col: 0, dir: 1 }).map(([i]) => i), [3, 2, 1, 0, 4], 'empty, -2, 1.25, 1.5, 10');
+});
+
+test('every builder escapes the text it is given, in attributes too', () => {
+  const evil = `x"&<y>'z`;
+  const esc = 'x&quot;&amp;&lt;y&gt;&#39;z';
+  assert.equal(S.escHtml(evil), esc);
+  const has = (html, what) => { assert.ok(html.includes(esc), `${what} escapes all five`); assert.ok(!html.includes(evil) && !html.includes('x"'), `${what} lets nothing raw through`); };
+  has(S.tabBar({ tabs: [{ id: evil, label: evil, count: evil }], selected: evil }), 'tabBar (id, label, count)');
+  has(S.dbTable([evil], []), 'dbTable (a column)');
+  has(S.props([[evil, 'v', evil]]), 'props (a key and its tip)');
+  has(S.goalSteps({ step: 3, built: { frac: 0.5, text: evil, title: evil } }), 'goalSteps (text and title)');
+  has(S.heartbeat([{ day: '2026-11-02', items: [evil], failed: false }]), 'heartbeat (an item, in its title)');
+  has(S.fleetSwitch({ scope: evil, mode: 'run', busy: evil }), 'fleetSwitch (scope and busy)');
+  has(S.fleetSwitch({ mode: 'run', error: evil }), 'fleetSwitch (error)');
 });
 
 test('props, goalSteps and heartbeat render their fixtures', () => {
@@ -307,7 +332,8 @@ test('fleetSwitch: each mode, mixed, the confirm, busy and error; its binder cal
   assert.match(mixed, /Mixed: 3 running, 1 draining, 2 parked/);
   assert.match(S.fleetSwitch({ scope: 'machine', mode: 'run' }), />Every fleet</);
   assert.match(S.fleetSwitch({ scope: 'project', mode: 'run', confirming: true }), /data-fleet="park" class="confirm" data-confirm="1"[^>]*>Confirm park</);
-  assert.match(S.fleetSwitch({ scope: 'machine', mode: 'run', confirming: true, counts: { running: 4, parked: 1 } }), />Park 5 projects\?</);
+  assert.match(S.fleetSwitch({ scope: 'machine', mode: 'mixed', confirming: true, counts: { running: 3, draining: 1, parked: 1 } }), />Park 4 projects\?</, 'the projects it would park');
+  assert.match(S.fleetSwitch({ scope: 'machine', mode: 'mixed', confirming: true, counts: { running: 1, parked: 4 } }), />Park 1 project\?</);
   const busy = S.fleetSwitch({ mode: 'run', busy: 'parking…', error: 'refused <b>' });
   assert.equal((busy.match(/ disabled>/g) || []).length, 3);
   assert.match(busy, /<span class="msg">parking…<\/span><span class="err">refused &lt;b&gt;<\/span>/);
@@ -382,6 +408,9 @@ test('parseHead and headFor round-trip every page head and link head', () => {
   for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
   heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');
   for (const h of heads) assert.equal(S.headFor(S.parseHead(h, R)), h, h);
+  // parseHead keeps only the page's own keys; headFor writes them in STATE_KEYS order, whatever order it is given
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#goals?goal=g&gt=met&lt=act', R))), { page: 'goals', state: { gt: 'met' } });
+  assert.equal(S.headFor({ page: 'board', state: { t: 'x', att: '1', goal: 'g' } }), '#board?goal=g&att=1&t=x');
   // only the page's own keys survive, in canonical order
   assert.equal(S.headFor(S.parseHead('#board?t=x&repo=r&gt=met&goal=g', R)), '#board?goal=g&repo=r&t=x');
   assert.equal(S.headFor({ page: 'board', state: { goal: 'a b&c' } }), '#board?goal=a+b%26c');
@@ -465,6 +494,19 @@ const BREAK = {
   'tab-motion': "const s = document.createElement('style'); s.textContent = '.shell .tabbar [role=tab]::after { transition: visibility .2s; }'; document.head.append(s);",
 };
 
+const EXTRA = [
+  ['overflow', "document.querySelector('#small p').style.marginLeft = '-60px';"],
+  ['header-pad', "document.querySelector('.pagebar').style.paddingRight = '24px';"],
+];
+// a page's own prose and ignore add to the defaults
+test('measure options: a page adds to prose and ignore', async () => {
+  let got = null;
+  await measure({ ev: async (x) => { got = x; return []; } }, { prose: '.turn .tx', ignore: '.mine' });
+  const o = JSON.parse(got.slice(got.lastIndexOf(')(') + 2, -1));
+  assert.match(o.prose, /^p, \.ctx, .*, \.turn \.tx$/);
+  assert.match(o.ignore, /\.no-shell, \.mine$/);
+});
+
 test('the measure: every check passes on the fixture at three sizes and fails on a broken copy', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   assert.deepEqual(Object.keys(BREAK).sort(), [...CHECKS].sort(), 'a break for every check');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shell-'));
@@ -492,8 +534,15 @@ test('the measure: every check passes on the fixture at three sizes and fails on
   const fenced = await p.ev("(() => { const cs = (s, pe) => getComputedStyle(document.querySelector(s), pe); return { card: cs('#fenced .card').borderTopStyle, head: cs('#fenced .card-head').height, headLine: cs('#fenced .card-head').borderBottomStyle, pill: cs('#fenced .pill').display, dot: cs('#fenced .pill', '::before').content, seg: cs('#fenced .seg').display, shellHead: cs('#small .card-head').height, shellPill: cs('#peek .pill').display }; })()");
   assert.deepEqual(fenced, { card: 'none', head: fenced.head, headLine: 'none', pill: 'inline', dot: 'none', seg: 'inline', shellHead: '41px', shellPill: 'inline-flex' });
   assert.notEqual(fenced.head, '41px');
-  // each check fails, by its name, on a broken copy
-  for (const [check, script] of Object.entries(BREAK)) {
+  // reduced motion: the red dot stops pulsing
+  const pulse = () => p.ev("getComputedStyle(document.querySelector('#peek .dot.red.pulse')).animationName");
+  assert.equal(await pulse(), 'shell-ring', 'the red dot pulses');
+  await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  assert.equal(await pulse(), 'none', 'and stops under reduced motion');
+  assert.equal(await p.ev("getComputedStyle(document.documentElement).getPropertyValue('--dur').trim()"), '0ms');
+  await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  // each check fails, by its name, on a broken copy (two for overflow and header-pad: either side)
+  for (const [check, script] of [...Object.entries(BREAK), ...EXTRA]) {
     await p.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await p.send('Page.navigate', { url });
     await soon('window.__ready === true');

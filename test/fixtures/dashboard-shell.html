@@ -41,7 +41,7 @@ document.getElementById('view').innerHTML = `${tabBar({ tabs: TABS, selected: 'a
   <div class="c12 card flush" id="table-card">${head('Tickets', `<span class="end">${ROWS.length}</span>`)}${dbTable(['Ticket', 'Title', 'Points'], ROWS, { sort: { col: 2, dir: 1 } })}</div>
 </div>
 <div class="no-shell" id="fenced"><div class="card"><div class="card-head">Not yet ported</div><span class="pill">a pill</span> <span class="seg"><button type="button">a</button></span></div></div>`;
-document.getElementById('peek').innerHTML = `${props([['ID', '<code>kit-1</code>'], ['Status', statusPill('building')], ['Fleet', fleetSwitch({ scope: 'project', mode: 'run' })]])}<div class="card">${head('History')}<p>Opened, then planned.</p></div>`;
+document.getElementById('peek').innerHTML = `${props([['ID', '<code>kit-1</code>'], ['Status', statusPill('building')], ['Fleet', fleetSwitch({ scope: 'project', mode: 'run' })], ['Pulse', '<span class="dot red pulse"></span> blocked']])}<div class="card">${head('History')}<p>Opened, then planned.</p></div>`;
 window.__ready = true;
 </script>
 </body>

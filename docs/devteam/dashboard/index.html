@@ -54,7 +54,6 @@ try {
     --measure: calc((var(--page-max) - 2 * var(--page-pad) - 11 * var(--gap)) / 2 + 5 * var(--gap));
   }
   @media (max-width: 900px) { :root { --threads-w: 100vw; } }
-  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } :where(.shell) .dot.pulse:not(:where(.no-shell, .no-shell *)) { animation: none; } }
   /* the page bar: the full window wide, the title --header-pad from the left, the Inbox button (.tt) as far from the right */
   :where(.shell) .pagebar:not(:where(.no-shell, .no-shell *)) { position: sticky; top: 0; z-index: 4; height: var(--bar-h); box-sizing: border-box; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 var(--header-pad); }
   :where(.shell) .pagebar h1:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
@@ -202,6 +201,8 @@ try {
   :where(.shell) .thread-list > * + *:not(:where(.no-shell, .no-shell *)) { border-top: 1px solid var(--line-2); }
   /* running text: never wider than half the grid at full desktop width */
   :where(.shell) p:not(:where(.no-shell, .no-shell *)), :where(.shell) .ctx:not(:where(.no-shell, .no-shell *)) { max-width: var(--measure); }
+  /* reduced motion: nothing slides, and the red dot doesn't pulse (last, and as specific as the pulse) */
+  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { animation: none; } }
   /* devteam-layout end */
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; background: var(--bg); touch-action: manipulation; }
@@ -1001,6 +1002,7 @@ function tabStep(tabs, fromId, key) {
   if (key === 'End') return on[on.length - 1].id;
   const all = tabs.map((t) => t.id);
   let i = all.indexOf(fromId);
+  if (i < 0) return key === 'ArrowRight' ? on[0].id : on[on.length - 1].id;
   for (let n = 0; n < all.length; n++) {
     i = (i + (key === 'ArrowRight' ? 1 : -1) + all.length) % all.length;
     if (!tabs[i].disabled) return tabs[i].id;
@@ -1034,13 +1036,16 @@ function bindTabBar(root, { onSelect }) {
 // ---- the record table: one row per record, sortable headers, every row opens its record ----
 const shellCols = (cols) => cols.map((c) => (typeof c === 'string' ? { label: c } : c));
 const shellCells = (r) => (Array.isArray(r) ? r : r.cells);
-const shellKey = (r, i) => { const k = Array.isArray(r) ? undefined : r.sort?.[i]; return k === undefined ? shellText(shellCells(r)[i]) : String(k); };
+const shellKey = (r, i) => { const k = Array.isArray(r) ? undefined : r.sort?.[i]; return k === undefined ? shellText(shellCells(r)[i]) : k === null ? '' : String(k); };
+const shellNum = (k) => (/^\s*-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?\s*$/i.test(k) ? Number(k) : null);
+// numbers as numbers (1.25 before 1.5, -2 before 1), else text with its digit runs as numbers (kit-2 before kit-10)
+const shellCmp = (a, b) => { const x = shellNum(a), y = shellNum(b); return x !== null && y !== null ? x - y : a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }); };
 // the rows in display order, as [index in rows as passed, row]: numeric-aware, stable
 function sortRows(rows, sort) {
   const out = rows.map((r, i) => [i, r]);
   if (!sort || sort.col === null || sort.col === undefined) return out;
   const dir = sort.dir === -1 ? -1 : 1;
-  return out.sort((a, b) => shellKey(a[1], sort.col).localeCompare(shellKey(b[1], sort.col), undefined, { numeric: true, sensitivity: 'base' }) * dir || a[0] - b[0]);
+  return out.sort((a, b) => shellCmp(shellKey(a[1], sort.col), shellKey(b[1], sort.col)) * dir || a[0] - b[0]);
 }
 const nextSort = (sort, col) => (sort && sort.col === col ? { col, dir: sort.dir === -1 ? 1 : -1 } : { col, dir: 1 });
 function dbTable(cols, rows, { sort = null } = {}) {
@@ -1060,7 +1065,7 @@ function bindDbTable(root, { onSort, onOpen }) {
     if (s && root.contains(s)) { if (onSort) onSort(Number(s.dataset.col)); return; }
     const tr = e.target.closest('tr[data-row]');
     // a link or button inside a row is its own; the row opens on any other click
-    if (tr && root.contains(tr) && !e.target.closest('a, button, input, select, textarea, summary') && onOpen) onOpen(Number(tr.dataset.row));
+    if (tr && root.contains(tr) && !e.target.closest('a, button, input, select, textarea, summary, label') && onOpen) onOpen(Number(tr.dataset.row));
   });
   root.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;
@@ -1116,12 +1121,13 @@ const statusPill = (state) => { const s = PULSE_STATES[Object.hasOwn(PULSE_STATE
 const FLEET_MODES = [['run', 'Run', 'Workers start and continue tickets'], ['drain', 'Drain', 'Workers finish what they have; nothing new starts'], ['park', 'Park', 'Every session stops where it is']];
 function fleetSwitch({ scope = 'project', mode = 'run', counts = {}, confirming = false, busy = null, error = null } = {}) {
   const c = { running: 0, draining: 0, parked: 0, ...counts };
-  const total = c.running + c.draining + c.parked;
+  // the machine's Park asks about the projects it would park: those not parked already
+  const toPark = c.running + c.draining;
   const dot = { run: 'green', drain: 'amber', park: '', mixed: 'amber' }[mode] ?? '';
   const label = scope === 'row' ? '' : mode === 'mixed' ? `Mixed: ${c.running} running, ${c.draining} draining, ${c.parked} parked` : scope === 'machine' ? 'Every fleet' : 'Fleet';
   const btns = FLEET_MODES.map(([m, word, why]) => {
     const conf = m === 'park' && confirming;
-    const text = conf ? (scope === 'machine' ? `Park ${total} project${total === 1 ? '' : 's'}?` : 'Confirm park') : word;
+    const text = conf ? (scope === 'machine' ? `Park ${toPark} project${toPark === 1 ? '' : 's'}?` : 'Confirm park') : word;
     return `<button type="button" data-fleet="${m}"${conf ? ' class="confirm" data-confirm="1"' : ''} title="${escHtml(why)}" aria-pressed="${mode === m}"${busy ? ' disabled' : ''}>${escHtml(text)}</button>`;
   }).join('');
   return `<div class="fleet-switch" data-scope="${escHtml(scope)}" data-mode="${escHtml(mode)}"${confirming ? ' data-confirming="1"' : ''}><span class="k"><span class="dot ${dot}"></span>${escHtml(label)}</span><span class="seg" role="group" aria-label="${scope === 'machine' ? 'Every fleet on this machine' : scope === 'row' ? 'This project' : 'The whole fleet'}: run, drain or park">${btns}</span>${busy ? `<span class="msg">${escHtml(busy)}</span>` : ''}${error ? `<span class="err">${escHtml(error)}</span>` : ''}</div>`;
