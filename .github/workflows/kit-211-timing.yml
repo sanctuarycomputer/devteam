@@ -1,0 +1,25 @@
+# TEMPORARY (kit-211, ruling m-20261115-165039090): each of kit-211's 18 split test files alone on a
+# CI runner, one at a time, for done-whens 2-3. Deleted before kit-211's final review.
+name: kit-211-timing
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  alone:
+    # only kit-211's own PR (a pull_request branches filter matches the base branch, not the head)
+    if: github.head_ref == 'ticket/kit-211-slow-files-split'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEVTEAM_CGROUP: /nonexistent/devteam-cgroup
+      DEVTEAM_MEMINFO: /nonexistent/devteam-meminfo
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
+      - run: node test/run.mjs --concurrency 1 --timings /tmp/kit-211-timings.json test/machine.*.test.mjs test/next-step.*.test.mjs test/recovery.*.test.mjs test/pane-question.*.test.mjs test/operator-threads.*.test.mjs
+      - if: always()
+        run: cat /tmp/kit-211-timings.json || true
