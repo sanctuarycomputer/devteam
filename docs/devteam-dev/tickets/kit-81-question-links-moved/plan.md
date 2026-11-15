@@ -78,4 +78,4 @@
 
 ## Rulings
 
-None yet.
+- m-20261115-060510348-supervisor: `test/fixtures/g1/dashboard-data.txt` is in touches. CI's G1 golden (`test/components.test.mjs`) records `/api/data`'s shape; re-recorded with `DEVTEAM_G1_RECORD=1`, it gains one line, `"links_moved": null,`.
