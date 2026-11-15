@@ -12,7 +12,7 @@
 
 ## Rulings
 
-See spec.md § Rulings (m-20261115-181143331, m-20261115-181403894, m-20261115-185043423, m-20261115-182700815). All are folded into the tasks below. Review spec-1 and plan-1 findings are folded in, each marked with its id.
+See spec.md § Rulings (m-20261115-181143331, m-20261115-181403894, m-20261115-185043423, m-20261115-182700815). All are folded into the tasks below. m-20261115-190722613-supervisor: approve-spec and approve-plan at cf1afba; Task 1, drafted before the word, is reviewed as fresh work; quote main's failure with CI's exact error in verification.md. Review spec-1 and plan-1 findings are folded in, each marked with its id.
 
 ## Global constraints
 
