@@ -106,7 +106,7 @@ test('shards cover each file once and balance', () => {
 });
 
 test('parseArgs', () => {
-  for (const bad of [['--shard', '0/2'], ['--shard', '3/2'], ['--shard', '1/5'], ['--group', 'nope'], ['--concurrency', '0'], ['--bogus'], ['test/no-such.test.mjs']]) {
+  for (const bad of [['--file-timeout', '99999999'], ['--shard', '0/2'], ['--shard', '3/2'], ['--shard', '1/5'], ['--group', 'nope'], ['--concurrency', '0'], ['--bogus'], ['test/no-such.test.mjs']]) {
     assert.throws(() => R.parseArgs(bad, {}, root), R.UsageError, bad.join(' '));
   }
   assert.deepEqual(R.parseArgs(['--group', 'chain,alone'], {}, root).groups, ['chain', 'alone']);
@@ -225,18 +225,16 @@ const fixtureEnv = (t, extra = {}, teardown = null) => {
   return { out, env: { DTR_FIXTURE_OUT: out, ...extra } };
 };
 
-// The one slow run (all of search.test.mjs, done-when 1) starts now and overlaps the tests below.
-const searchRun = runRunner(['test/search.test.mjs'], { deadline: 120000 });
-searchRun.catch(() => {});
-
+// A real kit test file, the quickest one (done-when 1 names search.test.mjs, which takes 25 to 45 s:
+// its run is a verification row, kept out of this file's budget).
 test('a passing file', async () => {
-  const r = await searchRun;
+  const r = await runRunner(['test/browser-contract.test.mjs']);
   assert.equal(r.code, 0, r.stdout + r.stderr);
-  assert.match(r.stdout, /^# test\/search\.test\.mjs\n(TAP version 13\n)?/m);
+  assert.match(r.stdout, /^# test\/browser-contract\.test\.mjs\n(TAP version 13\n)?/m);
   assert.match(r.stdout, /^summary: 1 file, concurrency 2$/m);
   assert.match(r.stdout, /^ok \d+ - \S/m, 'its tests ran');
   assert.doesNotMatch(r.stdout, /called recursively/);
-  assert.match(r.stdout, /^test\/search\.test\.mjs {2}\d+\.\d {2}ok$/m);
+  assert.match(r.stdout, /^test\/browser-contract\.test\.mjs {2}\d+\.\d {2}ok$/m);
 });
 
 test('exit codes', async (t) => {
@@ -489,8 +487,53 @@ test('stopTree with scripted snapshots', () => {
   assert.deepEqual(r2.killed, [Rt]);
   assert.deepEqual(r2.unstopped, [Y]);
   assert.ok(!log2.includes(`SIGKILL ${Q}`) && !log2.includes(`SIGKILL ${Y}`) && !log2.includes(`SIGKILL ${Z}`));
+  // nothing the walk stopped is left stopped: what it didn't kill, it resumes (Q has exited)
+  assert.deepEqual(log2.filter((l) => l.startsWith('SIGCONT')), [`SIGCONT ${Y}`, `SIGCONT ${Z}`]);
   assert.ok(Date.now() - t0 < 4000, 'bounded');
   assert.throws(() => R.stopTree(1, { snapshot: () => new Map() }), /together/);
+});
+
+// a clock the test moves: each call is 100 ms later, so the walk's 2 s bound passes at once
+const fakeClock = () => { let t = 0; return () => (t += 100); };
+const scripted = (rows, opts = {}) => {
+  const snap = (r) => new Map(r.map(([pid, ppid, stat]) => [pid, { ppid, stat }]));
+  let k = 0;
+  const log = [];
+  const r = R.stopTree(rows.root, { snapshot: () => { const x = rows.snaps[Math.min(k++, rows.snaps.length - 1)]; if (x instanceof Error) throw x; return snap(x); }, signal: (pid, sig) => log.push(`${sig} ${pid}`), now: fakeClock(), sleep: () => {}, ...opts });
+  return { r, log };
+};
+
+test('stopTree kills a stopped child whose parent died during the walk', () => {
+  const [Rt, A, B, C, D] = [9000011, 9000012, 9000013, 9000014, 9000015];
+  // A dies (a zombie) and B, its stopped child, moves to pid 1; C's parent D is gone altogether
+  const { r } = scripted({ root: Rt, snaps: [
+    [[Rt, 1, 'S'], [A, Rt, 'S'], [D, Rt, 'S']],
+    [[Rt, 1, 'T'], [A, Rt, 'T'], [B, A, 'S'], [D, Rt, 'T'], [C, D, 'S']],
+    [[Rt, 1, 'T'], [A, Rt, 'Z'], [B, 1, 'T'], [C, 1, 'T']],
+  ] });
+  assert.deepEqual(r.killed, [C, B, Rt]);
+});
+
+test('stopTree, when ps fails mid-walk, kills what the last snapshot showed under its parent', () => {
+  const [Rt, A, X] = [9000021, 9000022, 9000023];
+  const { r, log } = scripted({ root: Rt, snaps: [[[Rt, 1, 'S'], [A, Rt, 'S'], [X, 1, 'S']], new Error('ps failed')] });
+  assert.deepEqual(log, [`SIGSTOP ${Rt}`, `SIGSTOP ${A}`, `SIGKILL ${A}`, `SIGKILL ${Rt}`]);
+  assert.match(r.error, /ps failed/);
+  // no snapshot at all: the root alone, then the error
+  const none = scripted({ root: Rt, snaps: [new Error('no ps')] });
+  assert.deepEqual(none.log, [`SIGSTOP ${Rt}`, `SIGKILL ${Rt}`]);
+  assert.match(none.r.error, /no ps/);
+});
+
+test('stopTree always kills the root, its own unreaped child, and never waits on a zombie', () => {
+  const [Rt, Q] = [9000031, 9000032];
+  // the root never shows stopped within the bound
+  const { r } = scripted({ root: Rt, snaps: [[[Rt, 1, 'R']]] });
+  assert.deepEqual(r.killed, [Rt]);
+  // a zombie child settles the walk at once: no 20 ms sleeps
+  let sleeps = 0;
+  scripted({ root: Rt, snaps: [[[Rt, 1, 'S'], [Q, Rt, 'S']], [[Rt, 1, 'T'], [Q, Rt, 'Z']]] }, { sleep: () => { sleeps++; } });
+  assert.equal(sleeps, 0);
 });
 
 test('a hung file is killed with its tree, and a survivor is refused tmux', async (t) => {

@@ -49,8 +49,8 @@ export const LONG = { 'test/dashboard.test.mjs': 600 };
 export const GROUPS = ['chain', 'alone', 'chrome', 'rest'];
 export class UsageError extends Error {}
 
-const posInt = (flag, v, min = 1) => {
-  if (!/^\d+$/.test(v ?? '') || Number(v) < min) throw new UsageError(`${flag} wants a whole number ${min} or more, not ${JSON.stringify(v ?? '')}`);
+const posInt = (flag, v, min = 1, max = Number.MAX_SAFE_INTEGER) => {
+  if (!/^\d+$/.test(v ?? '') || Number(v) < min || Number(v) > max) throw new UsageError(`${flag} wants a whole number from ${min}${max < Number.MAX_SAFE_INTEGER ? ` to ${max}` : ' up'}, not ${JSON.stringify(v ?? '')}`);
   return Number(v);
 };
 const relOf = (root, abs) => {
@@ -65,7 +65,8 @@ export function parseArgs(argv, env, root = ROOT) {
     const val = () => { if (k + 1 >= argv.length) throw new UsageError(`${a} wants a value`); return argv[++k]; };
     if (a === '--list') o.list = true;
     else if (a === '--concurrency') o.concurrency = posInt(a, val());
-    else if (a === '--file-timeout') o.fileTimeout = posInt(a, val());
+    // a day at most: setTimeout can't count past about 24.8 days, and no file needs a day
+    else if (a === '--file-timeout') o.fileTimeout = posInt(a, val(), 1, 86400);
     else if (a === '--repeat') o.repeat = posInt(a, val());
     else if (a === '--timings') o.timings = val();
     else if (a === '--group') {
@@ -271,40 +272,53 @@ const SETTLED = /^[TZ]/;
 // Step 1 of a file's cleanup. The root is stopped first; then each snapshot stops every pid whose
 // parent this walk stopped (that reaches children in process groups of their own), until a
 // snapshot finds no new pid and every stopped pid shows stopped (signals land asynchronously) or
-// has already exited (a zombie), for at most 2 s. Then SIGKILL, in reverse stop order (children
-// before parents, the root last), goes only to stopped pids that the final snapshot still shows
-// stopped, under the parent they had when stopped, or orphaned from a parent that is gone: a
-// stopped process can't exit, so its pid can't have been reused. Nothing else is ever signalled.
-export function stopTree(root, { snapshot: snap, signal, sleep } = {}) {
+// has already exited (a zombie), for at most 2 s. Then SIGKILL goes, in reverse stop order
+// (children before parents, the root last), to:
+// - the root: the runner's own child, not yet reaped, so its pid is still its own;
+// - every other pid this walk stopped that the final snapshot still shows stopped, under the parent
+//   it had when stopped, or orphaned from a parent that has since exited (gone, or a zombie): a
+//   stopped process can't exit, so its pid can't have been reused.
+// If ps fails partway, the last good snapshot can't show a stop landing: what it showed under its
+// recorded parent is killed. Whatever the walk stopped and didn't kill, and that hasn't exited, is
+// sent SIGCONT, so nothing is left stopped. No other pid is ever signalled.
+export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   if (!snap !== !signal) throw new Error('stopTree: snapshot and signal go together');
   snap ??= snapshot;
   signal ??= sendSignal;
   sleep ??= sleepSync;
+  now ??= Date.now;
   const parentAt = new Map([[root, null]]);
   const stopped = [root];
   signal(root, 'SIGSTOP');
-  let final;
+  let final = null;
+  let error = null;
   let quietSince = null;
   for (let round = 0; round < 1000; round++) {
-    final = snap();
+    try { final = snap(); } catch (e) { error = e.message; break; }
     const fresh = [];
-    for (const [pid, { ppid }] of final) if (!parentAt.has(pid) && stopped.includes(ppid)) fresh.push([pid, ppid]);
+    for (const [pid, { ppid }] of final) if (!parentAt.has(pid) && parentAt.has(ppid)) fresh.push([pid, ppid]);
     for (const [pid, ppid] of fresh) { signal(pid, 'SIGSTOP'); stopped.push(pid); parentAt.set(pid, ppid); }
     if (fresh.length) { quietSince = null; continue; }
     if (stopped.every((p) => !final.has(p) || SETTLED.test(final.get(p).stat))) break;
-    quietSince ??= Date.now();
-    if (Date.now() - quietSince > 2000) break;
+    quietSince ??= now();
+    if (now() - quietSince > 2000) break;
     sleep(20);
   }
+  final ??= new Map();
+  const exited = (p) => !final.has(p) || /^Z/.test(final.get(p).stat);
   const ours = (p) => {
-    const now = final.get(p);
-    if (!now || !STOPPED.test(now.stat)) return false;
-    return p === root || now.ppid === parentAt.get(p) || !final.has(parentAt.get(p));
+    if (p === root) return true;
+    const cur = final.get(p);
+    if (!cur) return false;
+    if (error) return cur.ppid === parentAt.get(p);
+    return STOPPED.test(cur.stat) && (cur.ppid === parentAt.get(p) || exited(parentAt.get(p)));
   };
   const killed = [...stopped].reverse().filter(ours);
   for (const p of killed) signal(p, 'SIGKILL');
-  const unstopped = stopped.filter((p) => final.has(p) && !SETTLED.test(final.get(p).stat));
-  return { stopped, killed, unstopped };
+  const resumed = stopped.filter((p) => !killed.includes(p) && !exited(p));
+  for (const p of resumed) signal(p, 'SIGCONT');
+  const unstopped = error ? [] : stopped.filter((p) => final.has(p) && !SETTLED.test(final.get(p).stat));
+  return { stopped, killed, resumed, unstopped, error };
 }
 
 const say = (text) => process.stdout.write(text);
@@ -314,7 +328,8 @@ function cleanup(entry) {
   if (entry.exited) return;
   try {
     const r = stopTree(entry.child.pid);
-    if (r.unstopped.length) entry.out.push(Buffer.from(`# run.mjs: pids that never showed stopped, left alone: ${r.unstopped.join(' ')}\n`));
+    if (r.error) entry.out.push(Buffer.from(`# run.mjs: the tree walk stopped early (${r.error}); killed what its last look showed\n`));
+    if (r.resumed.length) entry.out.push(Buffer.from(`# run.mjs: stopped but not killed, so resumed: ${r.resumed.join(' ')}\n`));
   } catch (e) {
     sendSignal(entry.child.pid, 'SIGKILL');
     entry.out.push(Buffer.from(`# run.mjs: tree walk failed: ${e.message}; killed the file's own process only\n`));
@@ -391,7 +406,8 @@ async function runAll(opts, plan) {
       if (ctx.stopping) return;
       ctx.stopping = true;
       const running = [...ctx.running];
-      for (const e of running) { e.result = 'interrupted'; cleanup(e); }
+      // a file the watchdog already timed out stays `timed out`
+      for (const e of running) { e.result ??= 'interrupted'; cleanup(e); }
       await Promise.all(running.map((e) => e.done));
       say('interrupted\n');
       process.exit(128 + os.constants.signals[sig]);
