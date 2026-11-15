@@ -102,6 +102,7 @@ jobs:
         env:
           DEVTEAM_TEST_GITLEAKS: ${{ matrix.gitleaks && '1' || '' }}
         run: |
+          if [ "${{ matrix.node }}" = 18 ] && [ "${{ matrix.part }}" = chain ]; then echo "kit-215: deliberate failure"; exit 1; fi
           # shellcheck disable=SC2086 # RUN_ARGS is several words
           node test/run.mjs --concurrency "$(nproc)" $RUN_ARGS
       # run.mjs names a hung file itself. This lists what is still running when a step's or the
