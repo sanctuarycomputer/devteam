@@ -13,7 +13,7 @@ scope) and was judged by its exit code. The full suite is CI's.
 | 3. A real stuck worker (window present, silent past `stale_after_minutes`) still raises stale-worker | same run (w-03-stuck, `build`, silent 2 h, window running): stale-worker high, `[build, …m STALE]`, in `active` and `active_per_component.web === 1` | pass, exit 0 |
 | `makeSession`'s `started`/`ran` paths unchanged for sessions that ran | `node --test --test-concurrency=2 test/memory-ceiling.test.mjs`; `… test/multirepo-tickets.test.mjs` | pass 1 / fail 0, exit 0; pass 8 / fail 0, exit 0 |
 | G1 goldens unchanged (`status`, `ready`, `dashboard-data`, `metrics`) | `node --test --test-concurrency=2 test/components.test.mjs` | pass 7 / fail 0, exit 0 |
-| CI, every job green at the head | GitHub Actions `test.yml` on the PR | pending: filled in from `gh run view` once the PR runs |
+| CI, every job green at the head | GitHub Actions `test.yml` on PR #270, recorded through `devteam.mjs gate ci -- gh run watch <id> --exit-status`, conclusion read with `gh run view <id> --json conclusion,jobs` | success at `0d49921` (run 43744611781) and at `d49e146` (run 43744899079), 8/8 kit jobs each; both gate ci passed. Since then, records only. Details in `verification-ci.md`. The final head's run is confirmed in the merge request. |
 
 ## The liveSessions residual (out of scope, ruling m-20261115-175404088-supervisor)
 
