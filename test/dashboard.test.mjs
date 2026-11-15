@@ -3102,11 +3102,11 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
-  // unless the page cancels the key. It can be sent with Shift, with Ctrl, as a key repeat, or as 229
+  // unless the page cancels the key. It can be sent with Shift, Ctrl, Alt or Meta, as a key repeat, or as 229
   // (the Enter that ends an IME's composition). Each arrives in window.__keys, so a check knows the
   // key it meant reached the page.
-  const enter = async ({ shift = false, ctrl = false, repeat = false, code = 13 } = {}) => {
-    const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: code, modifiers: (shift ? 8 : 0) | (ctrl ? 2 : 0) };
+  const enter = async ({ shift = false, ctrl = false, alt = false, meta = false, repeat = false, code = 13 } = {}) => {
+    const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: code, modifiers: (shift ? 8 : 0) | (meta ? 4 : 0) | (ctrl ? 2 : 0) | (alt ? 1 : 0) };
     await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', autoRepeat: repeat });
     await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
   };
@@ -3262,7 +3262,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('Shift+Enter in the thread box sends once; Enter, a repeat, composition and Ctrl+Shift+Enter add nothing', async () => {
-    await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, keyCode, isComposing, repeat }); }, true); })()`);
+    await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, altKey, metaKey, keyCode, isComposing, repeat }); }, true); })()`);
     const box = () => p.ev(`document.getElementById('tl-c-text').value`);
     const turns = () => threads().find((x) => x.id === T).turns.length;
     const n = turns(), sent = await posts();
@@ -3279,8 +3279,10 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal((await lastKey()).keyCode, 229);
     // left alone, that key may have put its own line in: back to the words as they were
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'kept line one\\n'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-    await enter({ shift: true, ctrl: true });
-    assert.equal((await lastKey()).ctrlKey, true);
+    for (const held of ['ctrl', 'alt', 'meta']) {
+      await enter({ shift: true, [held]: true });
+      assert.equal((await lastKey())[`${held}Key`], true, `${held} held`);
+    }
     await settle();
     assert.deepEqual([turns(), await posts()], [n, sent], 'nothing sent');
     await enter({ shift: true });
@@ -3461,6 +3463,11 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await enter({ shift: true, code: 229 });
     assert.equal((await lastKey()).keyCode, 229);
     await none('229');
+    for (const held of ['ctrl', 'alt', 'meta']) {
+      await enter({ shift: true, [held]: true });
+      assert.equal((await lastKey())[`${held}Key`], true, `${held} held`);
+      await none(`${held} held`);
+    }
     await settle();
     assert.equal(qOf(Qa).status, 'open', 'still open');
     await none('after a while');

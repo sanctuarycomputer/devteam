@@ -92,3 +92,4 @@
 ## Rulings
 
 - m-20261115-033958803-supervisor (re m-20261115-033938006): spec approved as written. Shift+Enter submits and Enter is a newline in every box, the thread box included (one rule everywhere); the supervisor tells the owner, who may object. The hub.html operator-box follow-up is a note in the PR body; the supervisor files it as a chore.
+- m-20261115-041857004-supervisor (re m-20261115-041843198, final-1 F1): `test/browser/dev-links.mjs` added to touches; its `enter()` sends Shift+Enter (`modifiers: 8`), since its three sends are from `#tl-c-text`.
