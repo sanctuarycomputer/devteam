@@ -426,8 +426,156 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   const get = async (route) => { const r = await fetch(`http://127.0.0.1:${port}${route}`); assert.equal(r.status, 200, route); return r.json(); };
   assert.deepEqual(await get('/api/governance'), cli);
   const d = await get('/api/data');
-  for (const k of ['class_words', 'threads', 'upkeep_days']) assert.ok(k in d, `/api/data has ${k}`);
+  for (const k of ['class_words', 'threads', 'upkeep_days', 'settings_all']) assert.ok(k in d, `/api/data has ${k}`);
   const h = await get('/api/hello');
   for (const k of ['you', 'waiting', 'ready']) assert.equal(typeof h.threads?.[k], 'number', `/api/hello's threads.${k}`);
   assert.deepEqual(logAt(A.root), before, 'the dashboard\'s reads wrote nothing to the log');
+});
+
+// The settings groups, in the page's order
+const SETTING_GROUPS = ['Fleet and capacity', 'Agents and sessions', 'Merging and checks', 'Questions and findings', 'Upstream and releases', 'Production', 'Rhythm', 'Project and links'];
+const SETTINGS_BLOCK_RE = /```json devteam\s*\n([\s\S]*?)\n```/;
+// a const's object literal in the kit's source, from its opening line to the next `};`
+const sourceBlock = (src, start) => { const i = src.indexOf(start); assert.ok(i >= 0, `${start} in the kit`); const rest = src.slice(i); return rest.slice(0, rest.search(/^}\)?;/m) + 2); };
+// an entry the words check rejects: no name, no description, or a description longer than one short line
+const badWords = (all) => all.filter((e) => !e.name || e.name.startsWith('Unnamed setting') || !e.description || e.description.length > 140 || /\n/.test(e.description)).map((e) => e.key);
+
+test('every kit setting, grouped, named, with no secret shown', { timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = fleetFixture('settings-all');
+  undo.push(() => F.done());
+
+  // The keys, from the source by regex: SETTINGS_DEFAULTS', OWNER_SETTINGS' and sensor_scrub
+  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const defaultsText = sourceBlock(src, 'const SETTINGS_DEFAULTS = {');
+  const union = new Set([
+    ...[...defaultsText.matchAll(/^  ([a-z_]+):/gm)].map((m) => m[1]),
+    ...[...sourceBlock(src, 'const OWNER_SETTINGS = {').matchAll(/\b([a-z_]+): '/g)].map((m) => m[1]),
+    'sensor_scrub',
+  ]);
+  assert.equal(union.size, 44, 'every setting the kit reads, 44 today');
+  // every direct read names a key in the union (spec §6, F3-3: its reach)
+  const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
+  assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
+  assert.deepEqual([...new Set(reads.filter((k) => !union.has(k)))], [], 'a key read in the code and missing from the union');
+  // no stale name: every SETTINGS_WORDS key is one the kit reads
+  assert.deepEqual([...sourceBlock(src, 'const SETTINGS_WORDS = ').matchAll(/^  ([a-z_]+):/gm)].map((m) => m[1]).filter((k) => !union.has(k)), [], 'a SETTINGS_WORDS key the kit doesn\'t read');
+  // the kit's defaults, evaluated from the same block (upstream_repo's default is KIT_UPSTREAM)
+  const DEFAULTS = new Function('KIT_UPSTREAM', `return ${defaultsText.slice(defaultsText.indexOf('{'), -1)}`)(src.match(/^const KIT_UPSTREAM = '([^']+)';/m)[1]);
+
+  // main's settings: credentials planted wherever one could live
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  const block = (text) => JSON.parse(text.match(SETTINGS_BLOCK_RE)[1]);
+  const withBlock = (text, o) => text.replace(SETTINGS_BLOCK_RE, () => `\`\`\`json devteam\n${JSON.stringify(o, null, 2)}\n\`\`\``);
+  const init = fs.readFileSync(sf, 'utf8');
+  const cmd = 'claude --token ghp_PLANTED1';
+  const TOKEN = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
+  const planted = {
+    ...block(init),
+    max_active_tickets: 3,
+    agent_command: cmd, resume_command: cmd, agent_trust_command: cmd, usage_command: cmd, worktree_setup: cmd,
+    gates: { test: { cmd: 'TOKEN=PLANTED2 npm test' } },
+    upstream_repo: 'https://user:PLANTED3@example.com/PLANTED4/kit.git',
+    links: { ...block(init).links, site: { kind: 'url', title: 'Site', url: 'https://example.com/?key=PLANTED5' } },
+    sensors: { web: { kind: 'http', url: 'https://example.com/PLANTED6' } },
+    sensor_defaults: { params: { token: 'PLANTED7' } },
+    remediations: { restart: { script: 'x.mjs', params: { key: 'PLANTED8' } } },
+    sensor_scrub: ['PLANTED9'],
+    release: { branch: 'production', token: 'PLANTED11' },
+    tmux_session: TOKEN,
+    secret_commands: ['gh secret set PLANTED10'],
+  };
+  assert.equal(TOKEN.length, 4 + 36, 'ghp_ and 36 characters');
+  const onMain = withBlock(init, planted);
+  fs.writeFileSync(sf, onMain);
+  F.g(['add', '-A'], F.old);
+  F.g(['commit', '-qm', 'settings with credentials in them'], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+  const mainKeys = new Set(Object.keys(block(F.g(['show', 'main:docs/devteam/project/settings.md'], F.old))));
+  // a working-tree edit, put back after its read
+  undo.push(() => fs.writeFileSync(sf, onMain));
+  const edited = (o) => { fs.writeFileSync(sf, withBlock(onMain, { ...planted, ...o })); try { return data(F).settings_all; } finally { fs.writeFileSync(sf, onMain); } };
+  const entry = (all, k) => { const e = all.find((x) => x.key === k); assert.ok(e, `an entry for ${k}`); return e; };
+  const noCredential = (all, label) => {
+    const s = JSON.stringify(all);
+    for (let i = 1; i <= 11; i++) assert.ok(!s.includes(`PLANTED${i}`), `${label}: PLANTED${i} shows`);
+    assert.ok(!s.includes(TOKEN) && !s.includes('ghp_'), `${label}: the ghp_ token shows`);
+  };
+
+  // the fixture has no log until something writes one: a read must not make it
+  const logNow = () => (fs.existsSync(path.join(F.old, 'docs/devteam/run/log')) ? logBytes(F) : 'no log');
+  const before = logNow();
+  const all = data(F).settings_all;
+  assert.ok(Array.isArray(all), 'settings_all');
+  // keys
+  assert.equal(all.length, 44);
+  assert.deepEqual(new Set(all.map((e) => e.key)), union);
+  // order: each group once, in the page's order
+  const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
+  assert.deepEqual(groups, SETTING_GROUPS);
+  // the show kinds (F3-4)
+  const kinds = {};
+  for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
+  assert.deepEqual(kinds, { value: 29, hidden: 6, names: 7, count: 2 });
+  for (const e of all) {
+    for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
+    assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);
+    assert.ok(!('local' in e) && !('source' in e), `${e.key}: the working tree is main's, and main is read`);
+    if (e.shown === 'value') assert.deepEqual(e.default, DEFAULTS[e.key], `${e.key}: its kit default passes its shape`);
+    if (e.shown === 'value' && !mainKeys.has(e.key)) {
+      assert.ok(!e.withheld, `${e.key}: a default is never withheld`);
+      assert.deepEqual(e.value, DEFAULTS[e.key], `${e.key}: unset shows the kit default`);
+    }
+    if (e.shown === 'hidden') assert.equal(e.value, null, `${e.key}: hidden`);
+  }
+  // words
+  assert.deepEqual(badWords(all), [], 'each entry named, with a one-line description');
+  // values
+  assert.deepEqual(entry(all, 'gates'), { ...entry(all, 'gates'), owner_only: 'gate-change', value: ['test'] });
+  assert.equal(entry(all, 'sensor_scrub').value, 1);
+  assert.equal(entry(all, 'secret_commands').value, 1);
+  assert.deepEqual(entry(all, 'sensor_defaults').value, ['params']);
+  const ac = entry(all, 'agent_command');
+  assert.deepEqual([ac.value, ac.set, ac.default, ac.owner_only], [null, true, 'claude --dangerously-skip-permissions', 'governance-edit']);
+  assert.equal(entry(all, 'upstream_repo').default, null);
+  for (const k of ['release', 'tmux_session']) assert.deepEqual([entry(all, k).withheld, entry(all, k).value], [true, null], `${k} withheld`);
+  noCredential(all, 'main');
+
+  // (a) a working-tree edit shows in local, not in value
+  let a = edited({ max_active_tickets: 4 });
+  const max = entry(a, 'max_active_tickets');
+  assert.deepEqual({ value: max.value, set: max.set, local: max.local, default: max.default, owner_only: max.owner_only }, { value: 3, set: true, local: 4, default: 5, owner_only: null });
+  noCredential(a, '(a)');
+  // (b) values of the wrong type: withheld, never raw, never a throw (Review Focus 5)
+  a = edited({ agent_command: 42, max_active_tickets: 'lots' });
+  assert.equal(entry(a, 'agent_command').local ?? null, null);
+  assert.ok(!JSON.stringify(entry(a, 'agent_command')).includes('42'), 'no 42 under agent_command');
+  assert.deepEqual([entry(a, 'max_active_tickets').local, entry(a, 'max_active_tickets').local_withheld], [null, true]);
+  assert.ok(!JSON.stringify(a).includes('"lots"'), 'no raw "lots" anywhere');
+  noCredential(a, '(b)');
+  // (c) a bidi override in a shape releaseProblem accepts
+  a = edited({ release: { branch: 'main‮' } });
+  assert.deepEqual([entry(a, 'release').local, entry(a, 'release').local_withheld], [null, true]);
+  assert.ok(!JSON.stringify(a).includes('‮'));
+  noCredential(a, '(c)');
+
+  // the self-test: a key whose words are taken out is caught, and its value hidden
+  const copy = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
+  const text = fs.readFileSync(copy, 'utf8');
+  undo.push(() => fs.writeFileSync(copy, text));
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('const SETTINGS_WORDS = '));
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('});'));
+  const at = lines.findIndex((l, i) => i > start && i < end && /^\s*tick_minutes: /.test(l));
+  assert.ok(start >= 0 && at > start, 'a tick_minutes: line in SETTINGS_WORDS');
+  fs.writeFileSync(copy, lines.filter((_, i) => i !== at).join('\n'));
+  const cut = data(F).settings_all;
+  fs.writeFileSync(copy, text);
+  const tick = entry(cut, 'tick_minutes');
+  assert.deepEqual({ group: tick.group, name: tick.name, shown: tick.shown, value: tick.value, default: tick.default }, { group: 'Other', name: 'Unnamed setting (tick_minutes)', shown: 'hidden', value: null, default: null });
+  assert.equal(cut.at(-1).key, 'tick_minutes', 'an unnamed key comes last');
+  assert.deepEqual(badWords(cut), ['tick_minutes']);
+
+  assert.deepEqual(logNow(), before, 'the reads wrote nothing to the log');
 });

@@ -604,6 +604,131 @@ const OWNER_SETTINGS = {
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
+// Every setting the kit reads, for the Settings page (dashboardData's settings_all): the defaults'
+// keys, the owner's, and the few read with neither (sensor_scrub: scrubExtra's patterns, checked by
+// merge). A key added to either map shows up with no other edit.
+const SETTINGS_READ_ONLY_HERE = ['sensor_scrub'];
+const SETTINGS_KEYS = Object.freeze([...new Set([...Object.keys(SETTINGS_DEFAULTS), ...Object.keys(OWNER_SETTINGS), ...SETTINGS_READ_ONLY_HERE])]);
+// Each setting in words: [group, name, description, show], in the page's order. show is what of the
+// value the page gets, never a credential by construction: 'value' (a narrow shape, SETTING_SHAPES,
+// with no string the scrubber would change), 'names' (an object's own keys), 'count' (how many
+// entries) or 'hidden' (nothing: a free-text command or a locator can carry a token anywhere).
+// A key with no words here reads as unnamed and hidden.
+const SETTINGS_WORDS = Object.freeze({
+  max_active_tickets: ['Fleet and capacity', 'Workers at once, in all', 'the most tickets with a worker running at the same time', 'value'],
+  max_active_per_component: ['Fleet and capacity', 'Workers at once, per component', 'the most workers at the same time within one component', 'value'],
+  max_active_planners: ['Fleet and capacity', 'Planners at once', 'the most planners running together; none means no cap', 'value'],
+  machine_memory_ceiling: ['Fleet and capacity', 'Memory ceiling', "share of the machine's memory at or above which a new worker or planner waits", 'value'],
+  tick_minutes: ['Fleet and capacity', 'Supervisor tick', 'how often the supervisor looks over everything when nothing wakes it', 'value'],
+  stale_after_minutes: ['Fleet and capacity', 'Silent session after', 'minutes without a sign of life before a worker counts as stuck', 'value'],
+  tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
+  dashboard_port: ['Fleet and capacity', 'Dashboard port', "where this dashboard listens; none means a free port in the hub's range", 'value'],
+  agent_command: ['Agents and sessions', 'Agent command', 'what starts each worker, planner and the supervisor', 'hidden'],
+  resume_command: ['Agents and sessions', 'Resume command', 'what brings a stopped session back on its own conversation', 'hidden'],
+  agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
+  worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
+  worktree_setup: ['Agents and sessions', 'Worktree setup', "a command run in each new worktree after its files are copied", 'hidden'],
+  worktree_files: ['Agents and sessions', 'Files copied into worktrees', 'untracked files each worktree needs, copied from the main checkout', 'value'],
+  usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
+  usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
+  model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
+  gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
+  ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
+  slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
+  main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
+  merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
+  merge_admin: ['Merging and checks', 'Merge past branch protection', "whether merge uses admin rights where the forge requires a review the author can't give", 'value'],
+  forge: ['Merging and checks', 'Forge', 'where PRs live: GitHub, or plain git', 'value'],
+  autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
+  hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
+  question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
+  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes', 'value'],
+  upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
+  upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
+  upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
+  upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
+  sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
+  sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
+  sensor_scrub: ['Production', 'Sensor scrub patterns', 'extra patterns scrubbed from what sensors bring back', 'count'],
+  remediations: ['Production', 'Remediations', 'the reviewed scripts that may restart, scale or roll back production', 'names'],
+  incident_slots: ['Production', 'Incident fixes past the cap', 'fix tickets that may run beyond the worker cap, so an incident never waits', 'value'],
+  secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
+  retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
+  research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
+  components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
+  links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
+});
+// The shape each 'value' setting may have to be shown; null wherever its default is null.
+const settingNum = (v) => v === null || Number.isFinite(v);
+const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
+const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
+const SETTING_SHAPES = Object.freeze({
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  merge_admin: (v) => typeof v === 'boolean',
+  forge: (v) => ['github', 'git'].includes(v),
+  merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
+  upstream_sync: (v) => ['adopt', 'ask'].includes(v),
+  release: (v) => v !== undefined && releaseProblem(v) === null,
+  upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
+  main_branch: settingName, tmux_session: settingName, project: settingName,
+  usage_sources: settingLines, ignored_checks: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
+  autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
+});
+// The hidden settings whose kit default is the kit's own constant, so the page may show it.
+const COMMAND_SETTINGS = ['agent_command', 'resume_command', 'agent_trust_command', 'usage_command', 'worktree_setup'];
+const WITHHELD = Symbol('withheld');
+// a string the page may show as it is: printable, and nothing the scrubber would change
+const plainSettingText = (s) => !UNSAFE_TEXT.test(s) && scrubText(s) === s;
+// every string in a value, an object's keys included
+const settingStrings = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(settingStrings) : isObj(v) ? Object.entries(v).flatMap(([k, x]) => [k, ...settingStrings(x)]) : []);
+// What of a setting's value the page gets, by its show kind; WITHHELD for a value off its shape.
+function shownAs(key, kind, v) {
+  if (kind === 'value') return SETTING_SHAPES[key]?.(v) && settingStrings(v).every(plainSettingText) ? v : WITHHELD;
+  if (kind === 'names') return isObj(v) ? Object.keys(v).map((k) => (plainSettingText(k) ? k : '[withheld]')) : [];
+  if (kind === 'count') return Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : 0;
+  return null;
+}
+// Every setting, in words, as main has it (the working tree's own, in local, where it differs):
+// settingsAt's block from main, else loadSettings() with source 'working tree'. Never throws on a
+// value of the wrong type: it is withheld.
+function settingsAll() {
+  const ref = mainRef();
+  const m = ref ? settingsAt(ref, { orNull: true }) : null;
+  // a settings file's own block, as written (settingsAt's regex): {} with none, null when it doesn't parse
+  const own = (text) => {
+    const b = text?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+    if (b == null) return {};
+    try { const o = JSON.parse(b); return isObj(o) ? o : {}; } catch { return null; }
+  };
+  const working = own(readText(path.join(projectDir, 'settings.md')));
+  const raw = (m ? own(git(['show', `${ref}:${projectRel}/settings.md`])) : working) ?? {};
+  const now = m ?? loadSettings();
+  const local = m && working ? { ...SETTINGS_DEFAULTS, ...working } : null;
+  // shown values compared; two withheld ones are the same only when what is under them is
+  const same = (w, raw) => (w === WITHHELD ? `withheld ${canonical(raw)}` : canonical(w));
+  const words = Object.keys(SETTINGS_WORDS);
+  const at = (k) => (words.includes(k) ? words.indexOf(k) : Infinity);
+  return [...SETTINGS_KEYS].sort((a, b) => at(a) - at(b)).map((key) => {
+    const named = SETTINGS_WORDS[key];
+    const [group, name, description, kind] = named ?? ['Other', `Unnamed setting (${key})`, '', 'hidden'];
+    const e = { key, group, name, description, shown: kind };
+    const v = shownAs(key, kind, now[key]);
+    Object.assign(e, v === WITHHELD ? { value: null, withheld: true } : { value: v });
+    if (local) {
+      const l = shownAs(key, kind, local[key]);
+      if (same(l, local[key]) !== same(v, now[key])) Object.assign(e, l === WITHHELD ? { local: null, local_withheld: true } : { local: l });
+    }
+    e.set = Object.hasOwn(raw, key);
+    if (!named) e.default = null;
+    else if (kind === 'hidden') e.default = COMMAND_SETTINGS.includes(key) ? SETTINGS_DEFAULTS[key] : null;
+    else { const d = shownAs(key, kind, SETTINGS_DEFAULTS[key] ?? (kind === 'value' ? null : {})); e.default = d === WITHHELD ? null : d; }
+    e.owner_only = OWNER_SETTINGS[key] ?? null;
+    if (!m) e.source = 'working tree';
+    return e;
+  });
+}
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -12272,6 +12397,8 @@ function dashboardData() {
     ooda: collectOoda(),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
+    // every kit setting, in words; never a credential (settingsAll)
+    settings_all: settingsAll(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
     sensors: sensorStatus(),
