@@ -65,6 +65,7 @@ test('every kind of decision has a plain name, and no class id shows', { timeout
   undo.push(() => F.done());
   F.sup(['decide', '--class', 'rename-column', '--', 'renamed a column']);
   F.sup(['decide', '--class', 'Rollback2', '--', 'rolled back']);
+  F.sup(['decide', '--class', 'Add-Ticket', '--', 'added y']);
   F.sup(['ask', '--class', 'goal-change', '--goal', F.goal, '--change', JSON.stringify({ title: 'Launch the checkout' }), '--question', 'Rename the checkout goal?', '--recommendation', 'Yes', '--stake', '1', '--urgency', '1']);
   F.sup(['act', '--class', 'add-ticket', '--refs', 'x', '--', 'added x']);
   // a rung change: the owner moves new-feature to rung 3
@@ -102,6 +103,8 @@ test('every kind of decision has a plain name, and no class id shows', { timeout
   const made = (c) => d.ooda.decisions.find((r) => r.class === c);
   assert.equal(made('rename-column')?.class_name, 'Unnamed kind (rename column)');
   assert.equal(made('Rollback2')?.class_name, 'Unnamed kind (rollback2)');
+  // a known id in another case reads as the known class, never as its own words (T1-1)
+  assert.equal(made('Add-Ticket')?.class_name, d.class_words['add-ticket']);
   const rule = d.ooda.decisions.find((r) => r.kind === 'rule');
   assert.ok(rule, 'a rule row');
   assert.equal(rule.class_name, null);

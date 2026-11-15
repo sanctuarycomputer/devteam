@@ -1188,7 +1188,12 @@ const CLASS_WORDS = Object.freeze({
 });
 // A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
 // in its own words, so the gap is visible and the bare id never is. No class, no name.
-const className = (c) => (c == null ? null : Object.hasOwn(CLASS_WORDS, c) ? CLASS_WORDS[c] : `Unnamed kind (${String(c).toLowerCase().replace(/-/g, ' ')})`);
+// A known id in another case (decide --class DRAIN) reads as the known class.
+const className = (c) => {
+  if (c == null) return null;
+  const k = String(c).toLowerCase();
+  return Object.hasOwn(CLASS_WORDS, k) ? CLASS_WORDS[k] : `Unnamed kind (${k.replace(/-/g, ' ')})`;
+};
 const withClassName = (row) => ({ ...row, class_name: className(row.class) });
 
 // ===== 3. the schema and the log =====
