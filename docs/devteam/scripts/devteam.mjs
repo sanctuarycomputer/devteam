@@ -11062,6 +11062,43 @@ const isHarnessRuntime = (f) => RUNTIME_RES.some(([, re]) => re.test(f));
 // git status --porcelain, less the harness's runtime files
 const workLines = (porcelain) => (porcelain ?? '').split('\n').filter(Boolean).filter((l) => !isHarnessRuntime(l.slice(3).replace(/^"|"$/g, '').split(' -> ').pop()));
 const isRecordKeeping = (slug) => ['log', 'fleet-handoff', 'drain-handoff'].includes(slug) || /^secret-/.test(slug ?? '');
+// Upkeep's last 14 UTC days, oldest first: the chores merged, kit syncs, CI fixes (which mark the day
+// failed) and retros, each once a day. Record-keeping chores aren't upkeep; a retro-* chore's retro
+// counts as its observation. A merge act with no chore ref (an older line, a plan) is passed over.
+function upkeepDays(now = Date.now()) {
+  const DAY = 864e5;
+  const n = new Date(now);
+  const day0 = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  const days = Array.from({ length: 14 }, (_, i) => ({ starts_at: new Date(day0 - (13 - i) * DAY).toISOString(), items: [], failed: false }));
+  const seen = new Set();
+  const add = (at, kind, ref, words) => {
+    const i = Math.floor((Date.parse(at) - (day0 - 13 * DAY)) / DAY);
+    if (!(i >= 0 && i <= 13)) return;
+    const key = `${i}|${kind}|${ref}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    days[i].items.push({ kind, ref, words, at });
+    if (kind === 'ci-fix') days[i].failed = true;
+  };
+  for (const a of logObjects('act')) {
+    if (a.created_by !== 'supervisor' || !Array.isArray(a.refs)) continue;
+    const ref = a.refs[0];
+    if (a.class === 'merge-chore') {
+      const slug = typeof ref === 'string' ? ref.match(/^chore-(.+)$/)?.[1] : null;
+      if (!slug || isRecordKeeping(slug) || /^retro-/.test(slug)) continue;
+      const sync = slug.match(/^devteam-sync-(.+)$/);
+      if (sync) add(a.created_at, 'kit-sync', ref, `Kit synced to ${sync[1]}`);
+      else if (/^(ci-fix|devteam-workflow)/.test(slug)) add(a.created_at, 'ci-fix', ref, `CI fix ${slug}`);
+      else add(a.created_at, 'chore', ref, `Merged chore ${slug}`);
+    } else if (a.class === 'merge-word') {
+      const t = tickets().get(ref);
+      if (t?.feature === CHORES) add(a.created_at, 'chore', ref, `Merged ${t.title}`);
+    }
+  }
+  for (const o of logObjects('observation')) if (o.kind === 'retro' && o.created_by === 'supervisor') add(o.created_at, 'retro', o.id, 'Retro');
+  for (const d of days) d.items.sort((a, b) => a.at.localeCompare(b.at));
+  return days;
+}
 function cmdChore() {
   const [sub, slugName] = positional;
   if (sub === 'start') {
@@ -12170,6 +12207,7 @@ function dashboardData() {
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
     threads: threadCounts(),
+    upkeep_days: upkeepDays(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
     sensors: sensorStatus(),

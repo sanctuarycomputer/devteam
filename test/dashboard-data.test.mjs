@@ -245,3 +245,46 @@ test('threads by state, in the hello and the data', { timeout: 300000 }, async (
   assert.deepEqual(data(F).threads, want);
   assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
 });
+
+test("Upkeep's last 14 days, from a log with known answers", { timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('upkeep-days');
+  undo.push(() => F.done());
+  const act = (cls, refs, ago) => handLine(F, 'supervisor', { type: 'act', class: cls, what: `${cls} ${refs.join(' ')}`, refs, reversible: false }, ago);
+  const chore = (slug, d) => act('merge-chore', [`chore-${slug}`], Date.now() - dayAt(d));
+  // day 0: one dayAt, the lines 10 ms apart in write order, so their order never rests on the clock
+  const b0 = dayAt(0);
+  const t0 = Date.now();
+  act('merge-chore', ['chore-tidy'], t0 - b0);
+  act('merge-chore', ['chore-tidy'], t0 - b0 - 10);
+  act('merge-chore', ['chore-docs'], t0 - b0 - 20);
+  act('merge-chore', ['chore-log'], t0 - b0 - 30);
+  chore('devteam-sync-v0.9.0', 2);
+  chore('ci-fix-node24', 3);
+  const retro = handLine(F, 'supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'r' }, Date.now() - dayAt(5));
+  chore('retro-2026-11-10', 5);
+  F.sup(['ticket', 'add', 'ch-01-tidy-docs', '--json', JSON.stringify({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
+  act('merge-word', ['ch-01-tidy-docs'], Date.now() - dayAt(6));
+  // an act with no refs (an older line): skipped, never a throw
+  act('merge-chore', [], Date.now() - dayAt(7));
+  chore('old', 15);
+
+  const before = logBytes(F);
+  const days = data(F).upkeep_days;
+  assert.equal(days.length, 14);
+  const now = new Date();
+  assert.equal(days.at(-1).starts_at, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString());
+  const day = (d) => days[13 - d];
+  const items = (d) => day(d).items.map((i) => [i.kind, i.ref, i.words]);
+  assert.deepEqual(items(0), [['chore', 'chore-tidy', 'Merged chore tidy'], ['chore', 'chore-docs', 'Merged chore docs']], 'the duplicate tidy and the log chore are absent');
+  assert.deepEqual(items(2), [['kit-sync', 'chore-devteam-sync-v0.9.0', 'Kit synced to v0.9.0']]);
+  assert.deepEqual(items(3), [['ci-fix', 'chore-ci-fix-node24', 'CI fix ci-fix-node24']]);
+  days.forEach((x, i) => assert.equal(x.failed, i === 13 - 3, `day ${13 - i} failed`));
+  assert.deepEqual(items(5), [['retro', retro, 'Retro']], 'the retro counts once');
+  assert.deepEqual(items(6), [['chore', 'ch-01-tidy-docs', 'Merged Tidy the docs']]);
+  assert.deepEqual(day(7).items, [], 'a quiet day');
+  assert.ok(days.flatMap((x) => x.items).every((i) => i.ref !== 'chore-old'), 'the old line is out of range');
+  for (const x of days) assert.deepEqual(x.items.map((i) => i.at), x.items.map((i) => i.at).sort(), 'each day in at order');
+  assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
+});
