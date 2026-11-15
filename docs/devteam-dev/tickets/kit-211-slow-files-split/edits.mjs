@@ -46,6 +46,32 @@ const E = {
     // made after home, so it is the session tmux reads a bare name in
 `],
   ],
+  recovery: [
+    ['test/recovery.relaunch.test.mjs', `    F.ensureSession();
+    sleepMs(1100);
+    const now = new Date().toISOString();
+`, `    F.ensureSession();
+    // the launch a second after the session was made
+    const made = Number(spawnSync('tmux', ['display-message', '-p', '-t', \`=\${F.session}:\`, '#{session_created}'], { encoding: 'utf8' }).stdout.trim());
+    assert.ok(made > 0, 'the session\\'s session_created');
+    await until(() => Math.floor(Date.now() / 1000) > made, 'the second after the session was made');
+    const now = new Date().toISOString();
+`],
+    ['test/recovery.relaunch.test.mjs', `    F.killSession();
+    sleepMs(1100);
+    F.ensureSession();
+`, `    F.killSession();
+    // and a session made a second after the launch
+    await until(() => Math.floor(Date.now() / 1000) > Math.floor(Date.parse(now) / 1000), 'the second after the launch');
+    F.ensureSession();
+`],
+    ['test/recovery.relaunch.test.mjs', `    execFileSync('tmux', ['respawn-pane', '-k', '-t', \`=\${F.session}:demo-30-y\`, STUB_SHELL]);
+    sleepMs(200);
+`, `    execFileSync('tmux', ['respawn-pane', '-k', '-t', \`=\${F.session}:demo-30-y\`, STUB_SHELL]);
+    // a shell the kit knows (the stub shell execs /bin/sh -i): not node, and not the stub's own name
+    await until(() => /^-?(sh|bash|dash|zsh)$/.test((spawnSync('tmux', ['display-message', '-p', '-t', \`=\${F.session}:demo-30-y\`, '#{pane_current_command}'], { encoding: 'utf8' }).stdout ?? '').trim()), 'a shell in its pane, the agent gone');
+`],
+  ],
 };
 
 const [name] = process.argv.slice(2);

@@ -81,13 +81,15 @@ Replaced with `until()` on the state waited for:
 - machine L455, "a session's dashboard doesn't record its project": after each dashboard stops, a 1.5 s sleep let a tick child started just before the stop finish (7 dashboards, 10.5 s). It becomes `until()` no process runs `<repo>/docs/devteam/scripts/devteam.mjs accounts-tick`, read from `ps -A -ww -o args=` (Linux and macOS).
 - machine L1022, "hub_window makes home:hub…": a 1.1 s sleep so the next session is created a second after `home`. It becomes `until()` the clock's second is past `home`'s `session_created`.
 - recovery L130 and L138, "the key guard": 1.1 s sleeps so a launch and a session fall in different seconds. L130 becomes `until()` the clock's second is past the session's `session_created`. L138 becomes `until()` it is past the launch's second.
-- recovery L224, "the race": 0.2 s after `respawn-pane -k` for the agent's window to be a shell again. It becomes `until()` the pane's `pane_current_command` is no longer `node`.
+- recovery L224, "the race": 0.2 s after `respawn-pane -k` for the agent's window to be a shell again. It becomes `until()` the pane's `pane_current_command` is a shell the kit knows (`sh`, `bash`, `dash` or `zsh`, a leading `-` allowed). It is not enough that the command is no longer `node`: the stub shell's own name shows for a moment before it execs `/bin/sh -i` (spec review N1).
 
 Kept. Each of these waits to see that nothing happens (no second agent, no key, no read), and there is no state to poll for the absence of an event:
 - machine L768 and L846 (0.3 s): no second claude after recover is run again.
 - recovery L196 and L211 (0.5 s): one agent, not two. L220 (0.3 s): nothing typed into a live agent. L638 and L853 (0.3 s): no second supervisor.
 - pane-question L280 (0.5 s): nothing typed over a claim touched just now. L301 (0.3 s): nothing typed into the second prompt. L580 (0.3 s): a click while the buttons wait answers nothing.
-- operator-threads L436 and L488 (1.5 s): one agent and one window after concurrent starts. L970 (0.5 s): nothing typed into another session's pane. L944 (5 s): no thread read while a project's dashboard shows. L942 (0.8 s) lets reads already in flight land before the count is taken.
+- operator-threads L436 and L488 (1.5 s): one agent and one window after concurrent starts. L970 (0.5 s): nothing typed into another session's pane. L944 (5 s): no thread read while a project's dashboard shows.
+
+Kept, a settle with no state to poll: operator-threads L942 (0.8 s) lets reads already in flight land before the count is taken. Whether a fetch is still in flight shows nowhere the test can read.
 
 Kept, timed against an injected delay with no state to poll: pane-question L502 (0.3 s) and L507 (0.9 s), in "a question that goes as the key is sent". The dashboard holds its answer for `DEVTEAM_PANE_ANSWER_DELAY_MS=2500`. The first wait lets the first answer reach the dashboard before the second click. The second lets its looks pass before the Escape, which must land before the key. Neither moment shows outside the dashboard, except by sending another answer, which would change what the test checks.
 
