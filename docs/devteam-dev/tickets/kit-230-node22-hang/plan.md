@@ -62,7 +62,7 @@
   - Each of the three `node --test` run lines gets `${{ matrix.test_timeout }}` after `--test`, and `timeout-minutes: 12`.
   - Add a last step, `if: failure()`, with a comment naming what it is for. It runs `ps -eww -o pid,ppid,etimes,args`, unfiltered. A step timeout signals only the step's shell, so a hung file's processes are still alive here. Their tmp folders name the test, and when Node's per-file limit fired first, Node's `not ok - <file>` line names it instead (spec F3-1).
 - [ ] **Step 3: check on the box, no CI.**
-  - Check the YAML parses with `python3 -c 'import yaml,sys; yaml.safe_load(open(sys.argv[1]))' .github/workflows/test.yml`. Expected: no error.
+  - Check the YAML parses with `mise exec ruby@3.4.12 -- ruby -ryaml -e 'YAML.load_file(ARGV[0])' .github/workflows/test.yml`. Expected: no error.
   - Run the listing command once against a probe that leaks a child holding a pipe (the f.test.mjs shape, under a `timeout` like a step's). Show the probe's own file process and its child in the listing, filtered to those pids for the record.
 - [ ] **Step 4:** commit, the task review (`reviews/task-2.md`), push. Then CI three times on the PR: the first run on the push, then two re-runs with `gh run rerun <id>`, each recorded with `devteam.mjs gate ci -- gh run watch <id> --exit-status --interval 60`. Expected: every job green. Compare each test step's time against the recent maxima in the spec (429 s rest, 236 s chain).
 
