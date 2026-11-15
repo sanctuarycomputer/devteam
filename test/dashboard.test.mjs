@@ -3102,8 +3102,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
-  // unless the page cancels the key: Shift, Ctrl, a key repeat, or 229 (the Enter that ends an IME's
-  // composition). Each arrives in window.__keys, so a check knows the key it meant reached the page.
+  // unless the page cancels the key. It can be sent with Shift, with Ctrl, as a key repeat, or as 229
+  // (the Enter that ends an IME's composition). Each arrives in window.__keys, so a check knows the key it meant reached the page.
   const enter = async ({ shift = false, ctrl = false, repeat = false, code = 13 } = {}) => {
     const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: code, modifiers: (shift ? 8 : 0) | (ctrl ? 2 : 0) };
     await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', autoRepeat: repeat });
@@ -3425,6 +3425,64 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       if ((live && !live.classList.contains('done')) || turns.querySelector('[data-answer="${Q}"], a[href="#q/${Q}"]')) return false;
       return [...turns.querySelectorAll('.tl-q, .qcard.done')].some((c) => /answered/i.test(c.textContent) && /\\bYes\\b/.test(c.textContent));
     })()`, 'the thread copy answered');
+  });
+
+  await t.test("Shift+Enter in a question box presses its Answer: the which-choice step, once, in the Inbox and in the thread", async () => {
+    const qOf = (id) => JSON.parse(F.owner(['questions', '--id', id, '--json']))[0];
+    const box = (sel) => p.ev(`document.querySelector('${sel} textarea[data-q]').value`);
+    const asks = (id) => p.ev(`document.querySelectorAll('#q-${id} [data-which-for]').length`);
+    const Qa = F.sup(['ask', '--question', 'Ship on Friday?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await p.ev(`location.hash = '#inbox'`);
+    await soon(`!!document.querySelector('#q-${Qa} textarea[data-q]')`, 'its card in the Inbox');
+    const sent = await posts();
+    await p.ev(`document.querySelector('#q-${Qa} textarea[data-q]').focus()`);
+    await p.type('after the demo');
+    // words and no pick: Answer asks which choice they mean, and a second press keeps the one ask
+    await enter({ shift: true });
+    await soon(`!!document.querySelector('#q-${Qa} [data-which-for]')`, 'the which-choice ask');
+    await enter({ shift: true });
+    assert.deepEqual([await asks(Qa), qOf(Qa).status, await box(`#q-${Qa}`), await posts()], [1, 'open', 'after the demo', sent], 'asked once, nothing posted, no new line');
+    // a pick: now a Shift+Enter would post, so each key that must not post is tried on this card
+    await p.ev(`document.querySelector('#q-${Qa} input[data-pick][value="Yes"]').click()`);
+    await soon(`!document.querySelector('#q-${Qa} [data-which-for]')`, 'the ask gone with the pick');
+    await p.ev(`document.querySelector('#q-${Qa} textarea[data-q]').focus()`);
+    const none = async (what) => { assert.deepEqual([await asks(Qa), await p.ev(`document.getElementById('e-${Qa}').textContent`), await posts()], [0, '', sent], what); };
+    await enter();
+    assert.equal(await box(`#q-${Qa}`), 'after the demo\n', 'Enter is a new line');
+    await none('Enter');
+    await enter({ shift: true, repeat: true });
+    assert.deepEqual([(await lastKey()).shiftKey, (await lastKey()).repeat], [true, true]);
+    assert.equal(await box(`#q-${Qa}`), 'after the demo\n', 'a repeat adds no line');
+    await none('a repeat');
+    await composing();
+    assert.equal((await lastKey()).isComposing, true);
+    await none('composing');
+    await enter({ shift: true, code: 229 });
+    assert.equal((await lastKey()).keyCode, 229);
+    await none('229');
+    await settle();
+    assert.equal(qOf(Qa).status, 'open', 'still open');
+    await none('after a while');
+    await enter({ shift: true });
+    await enter({ shift: true, repeat: true });
+    const q = await until(() => { const x = qOf(Qa); return x.status === 'answered' && x; }, 'the answer');
+    assert.deepEqual([q.answer, q.channel], ['Yes — after the demo', 'dashboard']);
+    await settle();
+    assert.equal(await posts(), sent + 1, 'posted once');
+    // the thread's copy: back to the goal and its thread
+    await p.ev(`location.hash = '#goals'`);
+    await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
+    await click(`[data-tl-pin="${T}"]`);
+    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
+    const Qt = F.sup(['thread', 'ask', T, '--question', 'Tell the team?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.querySelector('#t-q-${Qt} textarea[data-q]')`, 'the thread copy');
+    await click(`#t-q-${Qt} input[data-pick="${Qt}"][value="No"]`);
+    await p.ev(`document.querySelector('#t-q-${Qt} textarea[data-q]').focus()`);
+    await p.type('next week');
+    await enter({ shift: true });
+    const qt = await until(() => { const x = qOf(Qt); return x.status === 'answered' && x; }, 'the thread copy\'s answer');
+    assert.equal(qt.answer, 'No — next week');
+    await p.ev('document.activeElement.blur()');
   });
 
   await t.test("answered in the Inbox, it shows answered in the thread; a hostile question and thread title are only text", async () => {

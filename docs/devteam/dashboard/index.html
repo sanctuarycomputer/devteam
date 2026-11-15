@@ -4982,7 +4982,15 @@ function tlSend() {
 document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
 // Shift+Enter submits the box being edited, Enter is a new line: the one rule in every box that has a
 // submit. A box without one is left alone, so its Shift+Enter is a new line too.
-const submitOf = (el) => (el?.id === 'tl-c-text' ? tlSend : null);
+function submitOf(el) {
+  if (el?.id === 'tl-c-text') return tlSend;
+  if (!el?.matches?.('textarea[data-q]')) return null;
+  // a question card's box presses its card's own button, so Answer still asks which choice typed
+  // words mean: a review's note is sent back, a secret card's is its Reply, a sensor's has none
+  const card = el.closest('[data-qcard]');
+  const btn = el.closest('[data-decline-form]')?.querySelector('[data-decline]') ?? card?.querySelector('[data-answer]') ?? card?.querySelector('[data-reply]');
+  return btn ? () => btn.click() : null;
+}
 document.addEventListener('keydown', (e) => {
   // 229: the Enter that ends an IME's composition, as Safari reports it after compositionend
   if (e.key !== 'Enter' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
