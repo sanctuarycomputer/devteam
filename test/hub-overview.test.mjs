@@ -7,6 +7,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { PORTS, bareProject, fleetFixture, json, kit, line, startDashboard, until } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
@@ -120,6 +121,72 @@ test('the pulse: an approved goal with nothing planned is not idle; a goal the o
     assert.equal(p.blocking, null);
     assert.notEqual(p.state, 'blocked');
   } finally { F.done(); }
+});
+
+// ----- the box line: what the box's image is, and who serves its hub ------------------------------
+// The Overview's one line on a box, built by a pure block of hub.html from /box.json's image and the
+// latest /instances.json, run here as dashboard.test.mjs runs index.html's: no Chrome needed.
+const hubHtml = () => fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
+function boxLineFn() {
+  const html = hubHtml();
+  const src = html.slice(html.indexOf('/* box-line start */'), html.indexOf('/* box-line end */'));
+  assert.ok(src.length > 200, 'the box-line block is marked in hub.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { boxLine };`, ctx);
+  return ctx.api.boxLine;
+}
+const lineText = (p) => p && [...p].map((x) => String(x.text)).join(' · ');
+const amberOf = (p) => [...p].filter((x) => x.amber).map((x) => String(x.text));
+const toolsOf = (p) => [...p].slice(2).map((x) => String(x.text));
+const IMG = { release: 'v0.52.0', tools: { 'claude-code': '2.1.310', 'claude-swap': '0.4.1', gh: '2.83.0', ttyd: '1.7.7', mise: '2025.11.3', uv: '0.9.9' } };
+
+test('the box line: the image\'s release, the hub\'s, and the tools; amber when the hub isn\'t the image\'s', () => {
+  const boxLine = boxLineFn();
+  const texts = [];
+  const run = (image, list) => { const p = boxLine(image, list); if (p) texts.push(...[...p].map((x) => x.text)); return p; };
+  let p = run(IMG, { hub: 1, kit: 'v0.52.0', image: true, instances: [] });
+  assert.equal(lineText(p), 'Box v0.52.0 · hub v0.52.0 · Claude Code 2.1.310 · claude-swap 0.4.1 · gh 2.83.0 · ttyd 1.7.7 · mise 2025.11.3 · uv 0.9.9');
+  assert.deepEqual(amberOf(p), [], 'the image\'s own hub, at its release: nothing amber');
+  // a project's kit holds the port: amber, whatever its release (even the image's)
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: 'v0.50.4', instances: [] })), ['hub served by a project\'s kit, v0.50.4']);
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, instances: [] })), ['hub served by a project\'s kit, ?']);
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: null, instances: [] })), ['hub served by a project\'s kit, ?']);
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: 'v0.52.0', instances: [] })), ['hub served by a project\'s kit, v0.52.0']);
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: 'v0.52.0', image: 'yes', instances: [] })), ['hub served by a project\'s kit, v0.52.0'], 'only image: true is the image\'s');
+  // the image's hub, at another release than the box
+  p = run({ ...IMG, release: 'v0.53.0' }, { hub: 1, kit: 'v0.52.0', image: true, instances: [] });
+  assert.deepEqual(amberOf(p), ['hub v0.52.0, box v0.53.0']);
+  assert.ok(lineText(p).startsWith('Box v0.53.0 · hub v0.52.0, box v0.53.0 · Claude Code 2.1.310'), lineText(p));
+  // no hub: the gateway's fallback, or nothing readable at all
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, instances: [], down: true })), ['hub not answering']);
+  assert.deepEqual(amberOf(run(IMG, null)), ['hub not answering']);
+  assert.deepEqual(amberOf(run(IMG, 'nope')), ['hub not answering']);
+  // something that isn't a hub on its port
+  assert.deepEqual(amberOf(run(IMG, { hub: 2, instances: [] })), ['hub port held by something that isn\'t a hub']);
+  assert.deepEqual(amberOf(run(IMG, { instances: [] })), ['hub port held by something that isn\'t a hub']);
+  // a kit that isn't a plain version is never shown, nor compared
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: '\u001b[31mx', image: true, instances: [] })), ['hub ?, box v0.52.0']);
+  assert.deepEqual(amberOf(run(IMG, { hub: 1, kit: 'v'.repeat(10240), image: true, instances: [] })), ['hub ?, box v0.52.0']);
+  // nothing at all without a readable image: a laptop (no box.json), an older image, a bad answer
+  for (const image of [null, undefined, 'v1', 7, [], { release: '<b>', tools: {} }, { tools: {} }, { release: 'v'.repeat(65) }]) assert.equal(boxLine(image, { hub: 1, kit: 'v1', image: true }), null, JSON.stringify(image));
+  // tools: in order, plain versions only
+  assert.deepEqual(toolsOf(run({ release: 'v1.0.0', tools: { gh: '2', 'x y': '1', uv: '<i>', mise: 3, ttyd: 'a'.repeat(65) } }, { hub: 1, kit: 'v1.0.0', image: true })), ['gh 2']);
+  assert.deepEqual([...run({ release: 'v1.0.0', tools: 'gh=2' }, { hub: 1, kit: 'v1.0.0', image: true })].length, 2, 'tools not an object: just the box and the hub');
+  assert.deepEqual([...run({ release: 'v1.0.0' }, { hub: 1, kit: 'v1.0.0', image: true })].length, 2);
+  // plain words and versions (R2): no markup, no links
+  assert.ok(texts.length > 20);
+  for (const s of texts) { assert.equal(typeof s, 'string'); assert.match(s, /^[\w .,'+?-]+$/, s); assert.ok(!s.includes('http') && !s.includes('<'), s); }
+});
+
+test('the Overview draws the box line from box.json and the latest list', () => {
+  const html = hubHtml();
+  const body = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); const rest = html.slice(i + start.length); const j = rest.search(/\n(async )?function /); return rest.slice(0, j < 0 ? undefined : j); };
+  assert.match(body('function paintOverview('), /boxLine\(box\?\.image \?\? null, hubSeen\)/, 'paintOverview draws it');
+  assert.match(body('async function findBox('), /image: b\.image/, 'findBox keeps the image');
+  const draw = body('async function draw(');
+  assert.match(draw, /hubSeen = data;/, 'draw keeps the list it read');
+  assert.match(draw, /catch \{ hubSeen = null; paintOverview\(\); return; \}/, 'and forgets it, and paints, when it read none');
+  assert.match(draw, /if \(!data \|\| typeof data !== 'object'\) throw/, 'JSON that is no list (null, a number) is none');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and

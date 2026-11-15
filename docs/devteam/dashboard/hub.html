@@ -108,6 +108,8 @@
   .ov-head .acts button { font: 500 12.5px/1 var(--sans); padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); cursor: pointer; }
   .ov-head .acts button:hover { background: var(--hover); }
   .ov-head .acts button.confirm { background: var(--red); border-color: var(--red); color: #fff; }
+  .ov-head .ov-box { flex-basis: 100%; order: 1; color: var(--fg-2); }
+  .ov-box .amber { color: var(--amber-fg); }
   .ov-prog { display: flex; flex-direction: column; gap: 4px; }
   .ov-prog .k { color: var(--fg-2); font-size: 12px; }
   .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
@@ -254,7 +256,8 @@ function keyOf(it) {
 // Each dashboard is on its own address: on the machine, its own port on 127.0.0.1. On a cloud box
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
 // still an origin of its own), and adds the box's terminal as the first tab.
-let box = null; // { terminal, instance } when the gateway answers box.json
+let box = null; // { terminal, instance, push, image } when the gateway answers box.json
+let hubSeen = null; // the last list instances.json gave, or null when it gave none (the box line)
 const urlOf = (x) => (box ? box.instance.replace('{port}', String(Number(x.port))) : `http://127.0.0.1:${Number(x.port)}/`);
 const TERM = '\u0000terminal';
 let term = null; // { tab, frame }
@@ -551,6 +554,27 @@ function overviewCard(it, newest) {
   if (steerable(it)) card.append(fleetControl(it));
   return card;
 }
+/* box-line start */
+// The box line, on a box only: what its image is (box.json's image: its release and its tools'
+// versions) and who serves its hub (the list's kit, and image: true only from the image's own). The
+// hub part is amber when it isn't the image's own hub at the image's release. Parts of plain words
+// and versions, each one a value of the token form or left out; null with no image to name.
+const BOX_TOKEN = /^[\w.+-]{1,64}$/;
+const TOOL_WORDS = { 'claude-code': 'Claude Code' };
+function boxLine(image, list) {
+  const tok = (v) => typeof v === 'string' && BOX_TOKEN.test(v);
+  if (!image || typeof image !== 'object' || !tok(image.release)) return null;
+  const release = image.release;
+  const kit = list && typeof list === 'object' && tok(list.kit) ? list.kit : '?';
+  const hub = !list || typeof list !== 'object' || list.down === true ? { text: 'hub not answering', amber: true }
+    : list.hub !== 1 ? { text: 'hub port held by something that isn\'t a hub', amber: true }
+    : list.image !== true ? { text: `hub served by a project's kit, ${kit}`, amber: true }
+    : kit !== release ? { text: `hub ${kit}, box ${release}`, amber: true }
+    : { text: `hub ${kit}`, amber: false };
+  const tools = image.tools && typeof image.tools === 'object' && !Array.isArray(image.tools) ? Object.entries(image.tools) : [];
+  return [{ text: `Box ${release}`, amber: false }, hub, ...tools.filter(([n, v]) => tok(n) && tok(v)).map(([n, v]) => ({ text: `${Object.hasOwn(TOOL_WORDS, n) ? TOOL_WORDS[n] : n} ${v}`, amber: false }))];
+}
+/* box-line end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
   const all = [...items.values()];
@@ -566,6 +590,9 @@ function paintOverview() {
   head.append(pinOn(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'), 'headline'));
   const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, count('parked') ? `${count('parked')} parked` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
   head.append(pinOn(el('span', 'sum', parts.join(' · ')), 'summary'));
+  // the box's image and who serves its hub, on a row of its own under the rest
+  const bl = boxLine(box?.image ?? null, hubSeen);
+  if (bl) { const d = el('div', 'ov-box'); bl.forEach((x, i) => { if (i) d.append(' · '); d.append(el('span', x.amber ? 'amber' : '', x.text)); }); head.append(d); }
   // every fleet at once: Park all (confirmed), and Resume all while any is held
   const can = all.filter(steerable);
   const acts = el('div', 'acts');
@@ -1285,7 +1312,9 @@ async function draw() {
     // behind a gateway, a session that ended: load the page again, which signs in first
     if (r.status === 401) return location.reload();
     data = await r.json();
-  } catch { return; }
+    if (!data || typeof data !== 'object') throw new Error('not a list');
+    hubSeen = data;
+  } catch { hubSeen = null; paintOverview(); return; }
   const now = Date.now();
   const seen = new Set();
   // One tab per root: if two answers claim one root (a second dashboard of one repo, or something
@@ -1390,7 +1419,7 @@ async function findBox() {
     // https, or a local gateway on http://*.localhost (a laptop testing the box chain end to end)
     const secure = (u) => { try { const x = new URL(u.replace('{port}', '1')); return x.protocol === 'https:' || (location.protocol === 'http:' && x.protocol === 'http:' && x.hostname.endsWith('.localhost')); } catch { return false; } };
     if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
-    box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null };
+    box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null, image: b.image };
     if (typeof b.previews === 'string' && secure(b.previews)) {
       const a = document.createElement('a');
       a.href = b.previews;
