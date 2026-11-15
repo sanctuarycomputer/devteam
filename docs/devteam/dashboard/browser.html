@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ohlw62yef+ntPbz+yE2xB9gXo+6FZWDSOa1OpVvKH2M='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Supervisor's browser</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --surface: #ffffff; --fg: #171717; --fg-2: #666666; --line: #ebebeb; --chip: #f2f2f2; --red: #e5484d; --green: #2e9e5b; --focus: #0070f3;
+    --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; --page: 1200px; --text: 600px; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000000; --surface: #0a0a0a; --fg: #ededed; --fg-2: #a1a1a1; --line: #1f1f1f; --chip: #161616; --red: #ff6369; --green: #4cc38a; --focus: #52a8ff; } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+  main { max-width: var(--page); margin: 0 auto; padding: 8px 12px 8px; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
+  .bar input { flex: 1; min-width: 0; font: 13px var(--mono); padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+  .btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap; }
+  .btn:focus-visible, .bar input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .btn.danger { color: var(--red); }
+  .note { margin: 0; min-height: 0; max-width: var(--text); color: var(--red); font-size: 13px; }
+  .note:empty { display: none; }
+  .area { position: relative; display: flex; justify-content: center; align-items: flex-start; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  canvas { display: block; touch-action: none; cursor: default; }
+  canvas.empty { display: none; }
+  canvas:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .area.down canvas { opacity: 0.5; }
+  .waiting { margin: 40px 16px; max-width: var(--text); color: var(--fg-2); text-align: center; }
+  .waiting[hidden] { display: none; }
+  .bye { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+  .bye[hidden] { display: none; }
+  .bye > div { max-width: var(--text); }
+  .bye p { margin: 0 0 8px; }
+  .bye .why { font-size: 15px; font-weight: 600; }
+  .bye .sub { color: var(--fg-2); }
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0 0; font-size: 13px; color: var(--fg-2); }
+  .foot span:first-child { max-width: var(--text); }
+  .chip { font: 12px var(--mono); padding: 1px 8px; border-radius: 999px; background: var(--chip); }
+  .chip.live { color: var(--green); }
+</style>
+</head>
+<body>
+<main>
+  <form class="bar" id="go" autocomplete="off">
+    <button type="button" class="btn" id="back" aria-label="Back" title="Back">←</button>
+    <input id="addr" aria-label="Address" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button type="button" class="btn danger" id="signout">Sign out of everything</button>
+  </form>
+  <p class="note" id="note" role="status"></p>
+  <div class="area down" id="area">
+    <canvas id="screen" class="empty" tabindex="0" aria-label="The supervisor's browser"></canvas>
+    <p class="waiting" id="waiting">Connecting to the supervisor's browser…</p>
+    <div class="bye" id="bye" hidden>
+      <div>
+        <p class="why" id="bye-why"></p>
+        <p class="sub">You can close this page.</p>
+        <button type="button" class="btn" id="again">Show it again</button>
+      </div>
+    </div>
+  </div>
+  <div class="foot" id="footbar"><span id="foot"></span><span class="chip" id="chip">Connecting…</span></div>
+</main>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('screen');
+  const ctx = canvas.getContext('2d');
+  const area = $('area');
+  const addr = $('addr');
+
+  // browser@1's view messages from the server (docs/devteam/schema/browser.schema.json); a message
+  // that doesn't match its shape is ignored
+  const JPEG = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/;
+  const QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+  const MASKED = /^(?:about:blank|https?:\/\/[^/?#@\s]+(?:\/(?:•••|(?=(?:[^/?#\s\d]*\d){0,3}[^/?#\s\d]*(?:[/?]|$))[^/?#\s]{0,19}(?=[/?]|$)))*(?:\?(?:(?:[^=&#\s•]+=•••|•••)(?:&(?:[^=&#\s•]+=•••|•••))*)?)?)$/;
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  const closed = (m, keys) => Object.keys(m).every((k) => keys.includes(k));
+
+  let socket = null;
+  let frame = null; // the last frame drawn: { w, h }
+  let drawnSeq = -1; // on this socket
+  let pendingUrl = null;
+  let wait = 500;
+  let timer = 0;
+
+  const chip = (s) => { $('chip').textContent = s; $('chip').classList.toggle('live', s === 'Live'); };
+
+  // The canvas shows the whole frame: as large as fits the page's width and the height under the bar,
+  // up or down, aspect kept. Its own size is the frame's, so on-screen points scale by its box alone.
+  function fit() {
+    if (!frame) return;
+    const top = area.getBoundingClientRect().top;
+    const below = $('footbar').getBoundingClientRect().height + 8 + 2;
+    const s = Math.max(0.05, Math.min(area.clientWidth / frame.w, (innerHeight - top - below) / frame.h));
+    canvas.style.width = `${Math.floor(frame.w * s)}px`;
+    canvas.style.height = `${Math.floor(frame.h * s)}px`;
+  }
+  addEventListener('resize', fit);
+
+  async function draw(m, sock) {
+    if (!closed(m, ['t', 'data', 'w', 'h', 'seq']) || !int(m.w, 1, 8192) || !int(m.h, 1, 8192) || !int(m.seq, 0, Number.MAX_SAFE_INTEGER) || typeof m.data !== 'string' || !JPEG.test(m.data)) return;
+    if (m.seq <= drawnSeq) return;
+    let bitmap;
+    try {
+      const bin = atob(m.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+    } catch { return; }
+    // a newer frame, or another socket, got there first
+    if (sock !== socket || m.seq <= drawnSeq) { bitmap.close(); return; }
+    drawnSeq = m.seq;
+    const resized = !frame || frame.w !== m.w || frame.h !== m.h;
+    if (resized) { canvas.width = m.w; canvas.height = m.h; }
+    ctx.drawImage(bitmap, 0, 0, m.w, m.h);
+    bitmap.close();
+    frame = { w: m.w, h: m.h };
+    if (resized) { canvas.classList.remove('empty'); $('waiting').hidden = true; fit(); }
+  }
+
+  function showUrl(url) {
+    if (document.activeElement === addr) pendingUrl = url;
+    else { addr.value = url; pendingUrl = null; }
+  }
+  addr.addEventListener('blur', () => { if (pendingUrl !== null) showUrl(pendingUrl); });
+
+  function onMessage(data, sock) {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return;
+    if (m.t === 'frame') draw(m, sock);
+    else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
+    else if (m.t === 'held') {
+      if (!closed(m, ['t', 'qid'])) return;
+      if (m.qid === null) $('foot').textContent = 'The supervisor has the browser. You can watch.';
+      else if (typeof m.qid === 'string' && QID.test(m.qid)) $('foot').textContent = 'When you\'re done, press Done on the card.';
+    }
+  }
+
+  function connect() {
+    clearTimeout(timer);
+    const s = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
+    socket = s;
+    drawnSeq = -1;
+    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; chip('Live'); area.classList.remove('down'); });
+    s.addEventListener('message', (e) => { if (s === socket && typeof e.data === 'string') onMessage(e.data, s); });
+    s.addEventListener('close', () => {
+      if (s !== socket) return;
+      socket = null;
+      area.classList.add('down');
+      chip('Reconnecting…');
+      timer = setTimeout(connect, wait);
+      wait = Math.min(wait * 2, 5000);
+    });
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
