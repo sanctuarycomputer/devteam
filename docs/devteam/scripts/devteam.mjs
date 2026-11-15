@@ -1835,9 +1835,11 @@ function artifactLinkNow(l) {
 // Why an answer to q can't bind to the artifacts it links (null when it can): a page that changed
 // since it was asked, or that is no longer there, is not what the owner was asked about, so the
 // owner's answer would approve something they didn't see. Checked when the owner answers and again
-// when an answer is used to approve something.
-function artifactLinksMoved(v) {
-  const now = (v.links ?? []).filter((l) => isObj(l) && l.artifact !== undefined && l.sha256).map(artifactLinkNow);
+// when an answer is used to approve something. A caller that already resolved v's links
+// (artifactLinkNow) passes them as now, so they are read once.
+const pinnedArtifact = (l) => isObj(l) && l.artifact !== undefined && l.sha256;
+function artifactLinksMoved(v, now = (v.links ?? []).filter(pinnedArtifact).map(artifactLinkNow)) {
+  now = now.filter(pinnedArtifact);
   const changed = now.filter((l) => l.changed).map((l) => l.artifact);
   const gone = now.filter((l) => l.gone).map((l) => l.artifact);
   if (changed.length) return `${v.id} links the artifact ${changed.join(', ')}, which changed since it was asked; ask again about the page as it is now`;
@@ -1845,9 +1847,10 @@ function artifactLinksMoved(v) {
   return null;
 }
 // Once per read of the log (memo): a refresh asked for every question's view dozens of times. A new
-// array each call, so a caller's sort never reorders another's.
+// array each call, so a caller's sort never reorders another's. links_moved: why answer would refuse
+// an open question (null otherwise, or when nothing moved), from the links resolved here.
 const questions = () => [...memo('questions', () => questionsNow())];
-const questionsNow = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
+const questionsNow = () => logObjects('question').map((q) => { const v = questionView(q); const links = resolveQuestionLinks(v.links, v.status === 'open'); return { ...v, links, links_moved: v.status === 'open' ? artifactLinksMoved(v, links) : null, goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
 // Where an answer from a thread was said: the cited turn's thread, which for an Inbox question is
 // none of its own, so the answered card can link the owner to the words it used.
 function turnThread(uid) {
