@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | none (taste) | docs/devteam/scripts/devteam.mjs:3864 | A held ticket in awaiting-word or blocked, silent past stale_after_minutes, now shows HELD in place of WAITING ON SUPERVISOR. This matches the spec's precedence and plan T2.3, and the unanswered-message finding still raises it, so it is only a note. | |
+| F1 | Suggestion | none (taste) | docs/devteam/scripts/devteam.mjs:3864 | A held ticket in awaiting-word or blocked, silent past stale_after_minutes, now shows HELD in place of WAITING ON SUPERVISOR. This matches the spec's precedence and plan T2.3, and the unanswered-message finding still raises it, so it is only a note. | wont-fix the spec puts HELD before WAITING ON SUPERVISOR, and the unanswered-message finding still reports the request. |
 
 Checked:
 
