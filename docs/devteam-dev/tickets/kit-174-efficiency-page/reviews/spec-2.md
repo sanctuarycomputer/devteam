@@ -7,6 +7,6 @@ I checked each spec-1 finding against the diff 29f0c14..fe918cd (spec.md is unch
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F2-1 | Suggestion | | spec The data this page reads ("at `7f41c90` on its branch") | kit-173's spec has since moved to 2bb16f6 (its spec-1 fixes). Every field this page reads is the same at both commits, so nothing in the spec is wrong, but the citation names the older text. Cite 2bb16f6, or just "kit-173's spec", since the plan rechecks the field names against the merged code anyway. | |
+| F2-1 | Suggestion |  | spec The data this page reads ("at `7f41c90` on its branch") | kit-173's spec has since moved to 2bb16f6 (its spec-1 fixes). Every field this page reads is the same at both commits, so nothing in the spec is wrong, but the citation names the older text. Cite 2bb16f6, or just "kit-173's spec", since the plan rechecks the field names against the merged code anyway. | wont-fix the plan rechecks kit-173's merged code before build; no field differs |
 
 Verdict: APPROVE 5fefef2e5f8df0a92ce4ee0197f91b15a5a339b1
