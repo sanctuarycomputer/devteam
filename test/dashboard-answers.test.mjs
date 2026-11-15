@@ -103,4 +103,22 @@ test('answers: a refusal stays on its card, and a moved link disables Answer', {
     assert.equal(await p.ev(`document.querySelectorAll('[data-qcard="${Q1}"] [data-refused]').length`), 0, 'still gone after redraws');
     assert.equal(await p.ev(`${card(Q1)}.querySelector('textarea[data-q]').value`), 'not this week', 'the note kept after dismissing');
   });
+
+  await t.test('a moved link: the card says so first, Answer is disabled, and the note still takes text', async () => {
+    const line = `${card(Q2)}.querySelector('.card-head').nextElementSibling`;
+    await soon(`${line}?.hasAttribute('data-links-moved')`, 'the moved line, straight after the card head');
+    assert.equal(await p.ev(`${line}.textContent.trim()`), `${MOVED_TITLE} changed since this was asked; the supervisor will ask again`);
+    assert.equal(await p.ev(`${card(Q2)}.querySelector('[data-answer]').disabled`), true, 'Answer disabled');
+    assert.equal(await p.ev(`${card(Q1)}.querySelector('[data-answer]').disabled`), false, 'the other card\'s Answer is live');
+    await p.click(`#questions [data-qcard="${Q2}"] textarea[data-q]`);
+    await soon(`document.activeElement === ${card(Q2)}?.querySelector('textarea[data-q]')`, 'the note focused');
+    await p.type('later');
+    await soon(`${card(Q2)}?.querySelector('textarea[data-q]')?.value === 'later'`, 'the note takes text');
+    // Shift+Enter presses the card's Answer (kit-207); disabled, it posts nothing
+    assert.equal(await answerPosts(Q2), 0);
+    await p.key('Enter', 8);
+    await polls(1);
+    assert.equal(await answerPosts(Q2), 0, 'nothing posted for the moved question');
+    assert.equal(await p.ev(`${card(Q2)}.querySelector('textarea[data-q]').value`), 'later', 'no newline added, the words kept');
+  });
 });
