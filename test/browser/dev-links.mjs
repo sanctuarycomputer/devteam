@@ -213,7 +213,8 @@ class Browser {
   }
   async shift(page, down) { await this.cdp.send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: down ? 8 : 0 }, page.sessionId); }
   async typeIn(page, text) { await this.cdp.send('Input.insertText', { text }, page.sessionId); }
-  async enter(page) { for (const type of ['keyDown', 'keyUp']) await this.cdp.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) }, page.sessionId); }
+  // Shift+Enter: what sends the dashboard's thread box (plain Enter is a new line there)
+  async enter(page) { for (const type of ['keyDown', 'keyUp']) await this.cdp.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, modifiers: 8, ...(type === 'keyDown' ? { text: '\r' } : {}) }, page.sessionId); }
   // Ask Chrome to quit, wait up to 5 s for it, then SIGKILL: a Chrome that ignores SIGTERM can't hang the cleanup.
   async kill() {
     const p = this.proc;

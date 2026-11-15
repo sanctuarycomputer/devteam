@@ -4661,7 +4661,7 @@ function tArtFpNow(s) {
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ask"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
-  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Enter sends; Shift+Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Shift+Enter sends; Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
 // The subject as one tight line (an icon, its name, where it is), opening to what was captured.
 // Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
 function tlCtx(s, title, note) {
@@ -4980,7 +4980,26 @@ function tlSend() {
   });
 }
 document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
-document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
+// Shift+Enter submits the box being edited, Enter is a new line: the one rule in every box that has a
+// submit. A box without one is left alone, so its Shift+Enter is a new line too.
+function submitOf(el) {
+  if (el?.id === 'tl-c-text') return tlSend;
+  if (!el?.matches?.('textarea[data-q]')) return null;
+  // a question card's box presses its card's own button, so Answer still asks which choice typed
+  // words mean: a review's note is sent back, a secret card's is its Reply, a sensor's has none
+  const card = el.closest('[data-qcard]');
+  const btn = el.closest('[data-decline-form]')?.querySelector('[data-decline]') ?? card?.querySelector('[data-answer]') ?? card?.querySelector('[data-reply]');
+  return btn ? () => btn.click() : null;
+}
+document.addEventListener('keydown', (e) => {
+  // 229: the Enter that ends an IME's composition, as Safari reports it after compositionend
+  if (e.key !== 'Enter' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing || e.keyCode === 229) return;
+  const go = submitOf(e.target);
+  if (!go) return;
+  e.preventDefault();
+  // held down, the key repeats: the first press submits, the rest only keep the newline out
+  if (!e.repeat) go();
+});
 document.addEventListener('click', (e) => {
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
   if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
