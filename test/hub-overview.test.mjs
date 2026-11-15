@@ -4,10 +4,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { PORTS, bareProject, fleetFixture, json, line, startDashboard, until } from './lib/kit.mjs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { PORTS, bareProject, fleetFixture, json, kit, line, startDashboard, until } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -216,4 +217,203 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   await until(() => p.evIn(`http://127.0.0.1:${P + 1}`, `location.pathname === '/' && document.readyState === 'complete' && typeof loadFleet === 'function'`).catch(() => false), "beta's dashboard under the hub");
   await p.ev(`[...document.querySelectorAll('iframe')].find((f) => f.title === 'beta').contentWindow.postMessage(${ask('aaaaaaaa05')}, 'http://127.0.0.1:${P + 1}')`);
   await until(() => mode(B) === 'park', 'beta parked by its parent, the hub');
+});
+
+// ----- the hub on its own (devteam.mjs hub), as the box's boot starts it from the image's kit ----
+// The image's kit, laid out as the box has it at /opt/devteam/kit: a copy in a folder that is no git
+// repo, so the hub's checkout is its cwd, exactly as there. A box's ENV reaches every process on it,
+// these tests included: each hub and dashboard here gets the three variables only where it means to.
+const BOX_VARS = ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS'];
+function imageKit(t) {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-image-kit-'));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  fs.cpSync(kit, d, { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+  return path.join(d, 'scripts', 'devteam.mjs');
+}
+// A machine of its own: a home, a folder to run in, and the env (hub port as given).
+function hubMachine(t, name, hubPort, extra = {}) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${name}-`));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const home = path.join(base, 'home');
+  const cwd = path.join(base, 'cwd');
+  fs.mkdirSync(home);
+  fs.mkdirSync(cwd);
+  const env = { ...process.env, HOME: home, DEVTEAM_HUB_PORT: String(hubPort), DEVTEAM_PORT_BASE: String(PORTS + 41), DEVTEAM_HUB_RETRY_MS: '200', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of [...BOX_VARS, 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  Object.assign(env, extra);
+  return { base, home, cwd, env, log: path.join(home, '.devteam', `hub-${hubPort}.log`) };
+}
+// `devteam.mjs hub`, in a process group of its own, ended (and waited for) after the test.
+function startHubCmd(t, script, cwd, env, args = []) {
+  const p = spawn(process.execPath, [script, 'hub', ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let o = '';
+  p.stdout.on('data', (b) => { o += b; });
+  p.stderr.on('data', (b) => { o += b; });
+  const alive = () => p.exitCode === null && p.signalCode === null;
+  t.after(() => (alive() ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  return { p, alive, out: () => o };
+}
+const hubList = async (port) => { try { const r = await fetch(`http://127.0.0.1:${port}/instances.json`); return r.status === 200 ? await r.json() : null; } catch { return null; } };
+const readOr = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } };
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('hub --release, from a folder that is no repo: the list with the image\'s release, and nothing written there', { timeout: 240000 }, async (t) => {
+  const HUB = PORTS + 40;
+  const M = hubMachine(t, 'hub-alone', HUB);
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(async () => (await hubList(HUB))?.kit === 'v9.9.9', `the image's hub (${h.out()})`);
+  const A = bareProject(M.base, 'alpha');
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+  const d = startDashboard(A, M.env);
+  t.after(() => d.stop());
+  const list = await until(async () => { const l = await hubList(HUB); return l?.instances?.some((x) => x.root === fs.realpathSync(A)) ? l : null; }, 'alpha listed by the image\'s hub');
+  assert.deepEqual([list.hub, list.kit, list.image], [1, 'v9.9.9', true]);
+  assert.ok(h.alive(), 'still serving');
+  assert.equal(fs.existsSync(path.join(M.cwd, 'docs')), false, 'nothing written under its cwd, no docs/devteam/run');
+  assert.deepEqual(fs.readdirSync(M.cwd), []);
+});
+
+test('hub without --release names no release, whatever DEVTEAM_KIT_RELEASE says; a bad --release serves anyway', { timeout: 120000 }, async (t) => {
+  const script = imageKit(t);
+  for (const [port, args] of [[PORTS + 36, []], [PORTS + 37, ['--release', '']], [PORTS + 38, ['--release', 'nope']]]) {
+    const M = hubMachine(t, 'hub-norel', port, { DEVTEAM_KIT_RELEASE: 'v9.9.9' });
+    const h = startHubCmd(t, script, M.cwd, M.env, args);
+    const list = await until(() => hubList(port), `the hub on ${port} (${args.join(' ')})`);
+    assert.equal(list.hub, 1);
+    assert.equal(list.kit, null, `kit null for ${JSON.stringify(args)}`);
+    assert.equal('image' in list, false, `no image field for ${JSON.stringify(args)}`);
+    await pause(1000);
+    assert.ok(h.alive(), `still up a second later (${JSON.stringify(args)}): ${h.out()}`);
+  }
+});
+
+test('a dashboard\'s hub names its project\'s kit and no image, whatever DEVTEAM_KIT_RELEASE says', { timeout: 240000 }, async (t) => {
+  const HUB = PORTS + 39;
+  const M = hubMachine(t, 'hub-dash-kit', HUB, { DEVTEAM_KIT_RELEASE: 'v9.9.9' });
+  const A = bareProject(M.base, 'alpha');
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+  const d = startDashboard(A, M.env);
+  t.after(() => d.stop());
+  const list = await until(() => hubList(HUB), "the dashboard's hub");
+  const hello = json(spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'hello', '--json'], { cwd: A, env: M.env, encoding: 'utf8' }).stdout);
+  assert.equal(typeof list.kit, 'string');
+  assert.equal(list.kit, hello.kit);
+  assert.notEqual(list.kit, 'v9.9.9');
+  assert.equal('image' in list, false);
+});
+
+test('the hub waits out another hub and a non-hub, logging the non-hub once, and takes the port', { timeout: 120000 }, async (t) => {
+  const script = imageKit(t);
+  const holder = (port, body) => new Promise((r) => { const s = http.createServer((q, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }); s.listen(port, '127.0.0.1', () => r(s)); });
+  // another hub holds it: the image's hub stays up, retrying, and takes it when that one goes
+  const A = PORTS + 30;
+  const M1 = hubMachine(t, 'hub-wait', A);
+  let s = await holder(A, JSON.stringify({ hub: 1, instances: [] }));
+  const h1 = startHubCmd(t, script, M1.cwd, M1.env, ['--release', 'v9.9.9']);
+  await pause(1500);
+  assert.ok(h1.alive(), `still up behind another hub: ${h1.out()}`);
+  assert.equal((await hubList(A)).kit, undefined, 'the holder answers, not the image\'s hub');
+  await new Promise((r) => s.close(r));
+  await until(async () => (await hubList(A))?.kit === 'v9.9.9', 'the image\'s hub on the port it waited for');
+  // something that isn't a hub: said once, however many retries, and the port taken once it frees
+  const B = PORTS + 31;
+  const M2 = hubMachine(t, 'hub-wait-other', B);
+  s = await holder(B, 'ok');
+  const h2 = startHubCmd(t, script, M2.cwd, M2.env, ['--release', 'v9.9.9']);
+  await until(() => readOr(M2.log).includes("isn't a devteam hub"), `the non-hub logged (${h2.out()})`);
+  await pause(2000);
+  assert.ok(h2.alive(), `still up behind a non-hub: ${h2.out()}`);
+  assert.equal(readOr(M2.log).split('\n').filter((l) => l.includes("isn't a devteam hub")).length, 1, 'once, not at every retry');
+  await new Promise((r) => s.close(r));
+  await until(async () => (await hubList(B))?.kit === 'v9.9.9', 'the image\'s hub once the non-hub went');
+});
+
+test('the hub\'s log stays under 1 MB and records a SIGTERM', { timeout: 120000 }, async (t) => {
+  const HUB = PORTS + 32;
+  const M = hubMachine(t, 'hub-log', HUB);
+  fs.mkdirSync(path.dirname(M.log), { recursive: true });
+  fs.writeFileSync(M.log, 'x'.repeat(1048570));
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(() => readOr(M.log).includes('hub on http://'), `the hub's start line (${h.out()})`);
+  assert.equal(fs.statSync(`${M.log}.1`).size, 1048570, 'the full log moved aside');
+  assert.ok(fs.statSync(M.log).size <= 1048576);
+  process.kill(h.p.pid, 'SIGTERM');
+  await until(() => readOr(M.log).includes('stopped by SIGTERM'), 'the signal logged');
+  assert.ok(fs.statSync(M.log).size <= 1048576);
+});
+
+test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names its own hub port', { timeout: 480000 }, async (t) => {
+  const left = (port) => `hub: left to the image (DEVTEAM_IMAGE_HUB=${port})`;
+  const listens = (port) => new Promise((r) => { const c = net.connect({ port, host: '127.0.0.1' }); c.once('connect', () => { c.destroy(); r(true); }); c.once('error', () => r(false)); });
+  // the box's own case, the image naming this dashboard's hub port: the port left alone, and said once
+  const run = async (hubPort, value) => {
+    const M = hubMachine(t, 'hub-image', hubPort, value === undefined ? {} : { DEVTEAM_IMAGE_HUB: value });
+    const A = bareProject(M.base, 'alpha');
+    execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+    const d = startDashboard(A, M.env);
+    try {
+      await until(() => /dashboard on http/.test(d.out()), 'the dashboard');
+      return { d, logOf: () => readOr(path.join(A, 'docs/devteam/run/dashboard.log')) };
+    } catch (e) { await d.stop(); throw e; }
+  };
+  const a = await run(PORTS + 26, String(PORTS + 26));
+  try {
+    await until(() => a.logOf().includes(left(PORTS + 26)), 'the line saying so');
+    await pause(1000);
+    assert.equal(await listens(PORTS + 26), false, 'nothing listens on the hub port');
+    assert.equal(a.logOf().split('\n').filter((l) => l.endsWith(left(PORTS + 26))).length, 1, 'said exactly once');
+  } finally { await a.d.stop(); }
+  // unset, the real box's 4320 while this hub is a fixture's, or a number that isn't a plain port
+  for (const [port, value] of [[PORTS + 27, undefined], [PORTS + 28, '4320'], [PORTS + 29, `0x${(PORTS + 29).toString(16)}`]]) {
+    const r = await run(port, value);
+    try {
+      await until(async () => (await hubList(port))?.hub === 1, `its hub on ${port} (DEVTEAM_IMAGE_HUB=${value})`);
+      assert.doesNotMatch(r.logOf(), /left to the image/, `served as before with DEVTEAM_IMAGE_HUB=${value}`);
+    } finally { await r.d.stop(); }
+  }
+});
+
+test('a non-hub that answers slowly now and then is still logged once', { timeout: 120000 }, async (t) => {
+  const HUB = PORTS + 33;
+  const M = hubMachine(t, 'hub-slow-other', HUB);
+  // every other answer comes after the hub's 2 s patience: other, unsure, other, …
+  let n = 0;
+  const s = http.createServer((q, res) => { const slow = n++ % 2 === 1; setTimeout(() => { if (!res.destroyed) res.end('ok'); }, slow ? 2500 : 0); });
+  await new Promise((r) => s.listen(HUB, '127.0.0.1', r));
+  t.after(() => new Promise((r) => { s.closeAllConnections?.(); s.close(r); }));
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(() => n >= 6, `six asks of the holder (${h.out()})`);
+  assert.ok(h.alive());
+  assert.equal(readOr(M.log).split('\n').filter((l) => l.includes("isn't a devteam hub")).length, 1, 'once, whatever answered slowly in between');
+});
+
+// The hub is the machine's, like machine and operator-thread: a session's DEVTEAM_RUN in its env (a
+// worker starting it by hand, say) is never refused there, and nothing is written into that run folder.
+test('the hub runs with another home\'s DEVTEAM_RUN in its env, and writes nothing there', { timeout: 120000 }, async (t) => {
+  const HUB = PORTS + 34;
+  const elsewhere = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-other-home-')), 'docs', 'devteam', 'run');
+  fs.mkdirSync(elsewhere, { recursive: true });
+  t.after(() => fs.rmSync(path.dirname(path.dirname(path.dirname(elsewhere))), { recursive: true, force: true }));
+  const M = hubMachine(t, 'hub-run', HUB, { DEVTEAM_RUN: elsewhere });
+  const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
+  await until(async () => (await hubList(HUB))?.kit === 'v9.9.9' || !h.alive(), 'the hub, or its exit');
+  assert.ok(h.alive(), `the hub was refused: ${h.out()}`);
+  assert.deepEqual(fs.readdirSync(elsewhere), [], 'nothing in that run folder');
+});
+
+// A dashboard run against a project by a kit that isn't that project's own checkout (the image's, or
+// another copy) never names the project's release as the hub's.
+test('a dashboard\'s hub run by a kit outside its project names no release', { timeout: 240000 }, async (t) => {
+  const HUB = PORTS + 35;
+  const M = hubMachine(t, 'hub-dash-foreign', HUB);
+  const A = bareProject(M.base, 'alpha');
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+  const p = spawn(process.execPath, [imageKit(t), 'dashboard'], { cwd: A, env: M.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let o = '';
+  p.stdout.on('data', (b) => { o += b; });
+  p.stderr.on('data', (b) => { o += b; });
+  t.after(() => (p.exitCode === null && p.signalCode === null ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  const list = await until(() => hubList(HUB), `the foreign kit's dashboard hub (${o})`);
+  assert.equal(list.kit, null);
+  assert.equal('image' in list, false);
 });

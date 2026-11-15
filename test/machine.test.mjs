@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { HARNESS_ENV, bareProject, hasTmux, kit, testDir, until, write } from './lib/kit.mjs';
@@ -823,4 +824,54 @@ test('a pane noted moments ago counts as the supervisor starting only if it star
     fs.utimesSync(paneFile, old, old);
     assert.match(dry(), new RegExp(`^would resume session ${SID}`), 'and only for a few minutes');
   } finally { tmuxSh(['kill-pane', '-t', elsewhere]); tmuxSh(['kill-pane', '-t', atRoot]); }
+});
+
+// The hub line names the release serving the hub, from its list: the image's own, a project kit's,
+// one too old to say, something that isn't a hub, or nothing at all. Run without blocking this
+// process, whose event loop serves the stand-in hub.
+test('status names the hub\'s kit, or says it is no hub, or down', async () => {
+  const port = Number(process.env.DEVTEAM_HUB_PORT);
+  const env = { ...baseEnv };
+  for (const k of ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS']) delete env[k];
+  const empty = fs.mkdtempSync(path.join(tmp, 'no-repos-'));
+  const hubLineOf = () => new Promise((resolve) => execFile(process.execPath, [KIT, 'machine', 'status', '--in', empty], { cwd: nowhere, encoding: 'utf8', env }, (err, stdout) => resolve(stdout.split('\n').find((l) => l.startsWith('machine: hub ')))));
+  let body = '';
+  const srv = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(req.url === '/instances.json' ? body : 'not found'); });
+  await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+  let open = true;
+  try {
+    const cases = [
+      [{ hub: 1, kit: 'v1.2.3', image: true, instances: [] }, 'up, kit v1.2.3 (image)'],
+      [{ hub: 1, kit: 'v1.2.3', instances: [] }, 'up, kit v1.2.3'],
+      [{ hub: 1, instances: [] }, 'up, kit ?'],
+      [{ hub: 1, kit: null, instances: [] }, 'up, kit ?'],
+      [{ hub: 1, kit: '\u001b[31mx', instances: [] }, 'up, kit ?'],
+      [{ hub: 1, kit: 'v'.repeat(10240), instances: [] }, 'up, kit ?'],
+      ['ok', 'up, not a hub'],
+      [{ hub: 1, kit: 'v1.2.3', instances: [], pad: 'x'.repeat(70 * 1024) }, 'up, not a hub'],
+    ];
+    for (const [b, want] of cases) {
+      body = typeof b === 'string' ? b : JSON.stringify(b);
+      assert.equal(await hubLineOf(), `machine: hub ${port} ${want}`, body.slice(0, 80));
+    }
+    // something on the port that answers and never finishes, a byte at a time: status still ends,
+    // within its 3 s, and says it isn't a hub
+    const drip = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); const i = setInterval(() => res.write(' '), 1000); res.on('close', () => clearInterval(i)); });
+    await new Promise((r) => srv.close(r));
+    await new Promise((r) => drip.listen(port, '127.0.0.1', r));
+    const started = Date.now();
+    try { assert.equal(await hubLineOf(), `machine: hub ${port} up, not a hub`); } finally { drip.closeAllConnections?.(); await new Promise((r) => drip.close(r)); }
+    assert.ok(Date.now() - started < 8000, `status waited ${Date.now() - started} ms on a server that drips`);
+    await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+    body = JSON.stringify({ hub: 1, kit: 'v1.2.3', instances: [] });
+    machine(['machine', 'alert', '--', 'look']);
+    assert.equal(await hubLineOf(), `machine: hub ${port} up, kit v1.2.3; alert: look`, 'the alert suffix as it was');
+    machine(['machine', 'alert', '--', '--clear']);
+    await new Promise((r) => srv.close(r));
+    open = false;
+    assert.equal(await hubLineOf(), `machine: hub ${port} DOWN`);
+  } finally {
+    machine(['machine', 'alert', '--', '--clear']);
+    if (open) srv.close();
+  }
 });

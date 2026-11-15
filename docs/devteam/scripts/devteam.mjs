@@ -440,7 +440,7 @@ const homeAt = (() => {
     const root = common ? path.dirname(common) : null;
     const proj = root && path.join(root, 'docs', 'devteam', 'project');
     // the machine's commands look after every project from anywhere, a folder that is no project included
-    const machineWide = ['machine', 'operator-thread'].includes(command) || (command === 'recover' && flags.machine);
+    const machineWide = ['machine', 'operator-thread', 'hub'].includes(command) || (command === 'recover' && flags.machine);
     if (proj && command && !machineWide && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
     return { common, proj: null };
   }
@@ -477,10 +477,10 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN || path.join(mainRoot, 'docs
 // DEVTEAM_RUN is home's run folder, given to each session by the kit that starts it. One that isn't
 // inside the home this kit resolved is a session's, leaked into another repo's kit (a test's fixture,
 // a sibling): refused by name, never followed into that session's live log. The machine's commands
-// run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
+// (machine, operator-thread, recover --machine, the hub) run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
 // DEVTEAM_RUN that names some other folder inside home on purpose.
 const realPathMade = (p) => { let a = p; const rest = []; while (!fs.existsSync(a) && path.dirname(a) !== a) { rest.unshift(path.basename(a)); a = path.dirname(a); } return path.join(realPath(a), ...rest); };
-if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread'].includes(command) && !(command === 'recover' && flags.machine)) {
+if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread', 'hub'].includes(command) && !(command === 'recover' && flags.machine)) {
   const r = realPathMade(runDir), root = realPath(mainRoot);
   if (r !== realPathMade(path.join(mainRoot, 'docs', 'devteam', 'run')) && r !== root && !r.startsWith(`${root}${path.sep}`)) die(`DEVTEAM_RUN=${runDir} is not inside this kit's home (${mainRoot}): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`);
 }
@@ -11750,9 +11750,9 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // as soon as the child says it is done (its reply pipe, fd 3), before it types into a pane; what it
 // says on stderr after that goes to the log. A child that exits without replying (refused, or an
 // older script) is answered from its exit.
-function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {} } = {}) {
+function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {}, cwd = mainRoot } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd: mainRoot, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
     let so = '';
     let se = '';
     let rp = '';
@@ -11788,7 +11788,9 @@ function ownerActionEnv(channel) {
   for (const k of ['TMUX_PANE', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   return env;
 }
-// The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT, and the one that gets it lists every
+// The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT (unless the box's image serves it:
+// DEVTEAM_IMAGE_HUB, cmdDashboard), and so does `devteam.mjs hub` alone (cmdHub), which the box's boot
+// starts from the image's kit. The one that gets it lists every
 // instance in the block by asking each port /api/hello: a tab per instance, with that instance's
 // own dashboard in a sandboxed frame on its own address. No proxy, its own Host only, a page that
 // fetches only from itself and frames only the block. It does nothing in any project: the page's
@@ -11799,7 +11801,13 @@ function ownerActionEnv(channel) {
 // as a dashboard takes an owner action, each run as the owner's own command, which types the turn
 // into the operator's pane. The store is beside the operator, not in this process, so the hub still
 // moves when its dashboard stops: the others retry. Something that isn't a devteam hub on the
-// port: logged once, and this dashboard stops trying.
+// port: logged once, and a dashboard stops trying; the hub alone (standalone) keeps retrying whatever
+// holds the port, and never exits for it.
+// The list, /instances.json: { hub: 1, kit, image?, instances }. kit is the release serving the hub,
+// fixed when it starts: hub --release's, with image: true (only the box's boot passes it, so no other
+// hub can claim the image's release); else the running kit's own version (kitVersion()) when it is its
+// project's own checkout, or null (no project, or a kit run against someone else's: ownKitVersion). No hub reads DEVTEAM_KIT_RELEASE: the box's ENV reaches every process there.
+// The rule for the list: an additive change keeps hub: 1; anything else bumps it.
 const HUB_BODY_MAX = 20000;
 // The hub's owner actions, each the arguments of the owner's command or null: checked here before
 // anything is spawned, and by the command again. The owner's words always go after --, so words
@@ -11816,8 +11824,12 @@ const HUB_ACTIONS = {
   'thread-reopen': (b) => (OPERATOR_THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || hubTurnOk(b.text)) ? ['operator-thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
   start: () => ['operator-thread', 'start'],
 };
-function startHub(log) {
+function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
+  // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
+  // where the image's kit is no checkout; a dashboard's run in its project
+  const actionCwd = standalone ? process.cwd() : mainRoot;
+  const listHead = { hub: 1, kit, ...(image ? { image: true } : {}) };
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
   // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
@@ -11856,7 +11868,7 @@ function startHub(log) {
   let op = { at: 0, state: { state: 'unknown', can_start: false, box: onBox() } };
   let asking = null;
   const askOperator = () => (asking ??= new Promise((resolve) => {
-    execFile(process.execPath, [fileURLToPath(import.meta.url), 'operator-thread', 'status', '--json'], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 65536 }, (err, stdout) => {
+    execFile(process.execPath, [fileURLToPath(import.meta.url), 'operator-thread', 'status', '--json'], { cwd: actionCwd, env: ownerEnv, timeout: 20000, maxBuffer: 65536 }, (err, stdout) => {
       try { const j = JSON.parse(stdout); if (!err && isObj(j) && typeof j.state === 'string') op = { at: Date.now(), state: { state: j.state, can_start: j.can_start === true, box: j.box === true, session: String(j.session ?? '') } }; } catch {}
       resolve();
     });
@@ -11900,13 +11912,14 @@ function startHub(log) {
       try { const parsed = JSON.parse(raw.toString('utf8') || '{}'); args = isObj(parsed) ? act(parsed) : null; } catch { args = null; }
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await runOwnerAction(args, { env: proof ? { ...ownerEnv, DEVTEAM_THREAD_PROOF: 'stdin' } : ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null });
+      const r = await runOwnerAction(args, { env: proof ? { ...ownerEnv, DEVTEAM_THREAD_PROOF: 'stdin' } : ownerEnv, timeout: 120000, log, input: proof ? JSON.stringify(proof) : null, cwd: actionCwd });
       // what the operator is at is asked afresh before the next read answers: a press may have
       // started it, and a read served from before the press would offer Start again
       op.at = 0;
       send(r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || r.stdout.trim() || 'failed' }));
     });
   };
+  let held = null;
   const tryListen = () => {
     const hub = http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
@@ -11923,7 +11936,7 @@ function startHub(log) {
       // anywhere, a link in a README included.
       const site = req.headers['sec-fetch-site'];
       if (req.url === '/instances.json' && site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the list is for the hub\'s own page');
-      if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ hub: 1, instances: await scan() }));
+      if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ ...listHead, instances: await scan() }));
       // The operator's threads, for the Overview's dock: a GET carries no Origin, so it is refused
       // when the browser says another site's page asks (as a dashboard's /api/threads is).
       if (req.url === '/operator/threads') {
@@ -11939,6 +11952,15 @@ function startHub(log) {
       return send(404, 'text/plain; charset=utf-8', 'not found');
     });
     hub.once('error', async (e) => {
+      if (standalone) {
+        // said once for each state, never at each retry (a slow answer, unsure, changes nothing); the
+        // timer keeps this process alive
+        const now = e.code === 'EADDRINUSE' ? await holder() : `error ${e.message}`;
+        if (now !== held && now === 'other') log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; retrying every ${retry / 1000} s`);
+        else if (now !== held && now.startsWith('error ')) log(`hub: ${e.message}; retrying every ${retry / 1000} s`);
+        if (now !== 'unsure') held = now;
+        return void setTimeout(tryListen, retry);
+      }
       if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
       if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
@@ -13560,6 +13582,29 @@ function versionBefore(a, b) {
   return false;
 }
 const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) }); return 'up'; } catch { return 'DOWN'; } };
+// What serves the hub, from its list as the hub's own page asks for it: the release serving it (the
+// image's, marked), `kit ?` from a hub too old to say, `not a hub`, or DOWN. 3 s in all, however slowly
+// the holder sends: something that answered and never finished isn't a hub. The release comes off the
+// network and goes to a terminal, so it is printed only in a release's own characters.
+const hubLine = (port) => new Promise((resolve) => {
+  let answered = false;
+  const done = (v) => { clearTimeout(timer); r.destroy(); resolve(v); };
+  const timer = setTimeout(() => done(answered ? 'up, not a hub' : 'DOWN'), 3000);
+  const r = http.get({ host: '127.0.0.1', port, path: '/instances.json', headers: { host: `127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
+    answered = true;
+    const chunks = [];
+    let size = 0;
+    res.on('data', (c) => { size += c.length; if (size > 65536) done('up, not a hub'); else chunks.push(c); });
+    res.on('end', () => {
+      let j = null;
+      try { j = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+      if (j?.hub !== 1) return done('up, not a hub');
+      done(typeof j.kit === 'string' && /^[\w.+-]{1,64}$/.test(j.kit) ? `up, kit ${j.kit}${j.image === true ? ' (image)' : ''}` : 'up, kit ?');
+    });
+    res.on('error', () => done('up, not a hub'));
+  });
+  r.on('error', () => done(answered ? 'up, not a hub' : 'DOWN'));
+});
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
 // The machine's memory in bytes, { inUse, max, source }, or null when nothing says (macOS: no cgroup
@@ -13632,7 +13677,7 @@ async function machineStatus() {
   out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
-  out(`machine: hub ${HUB_PORT} ${await portAnswers(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
+  out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
   const flagged = [];
@@ -13794,15 +13839,52 @@ function cmdAccountsTick() {
   fs.renameSync(tmp, ACCOUNTS_FILE);
 }
 
+// Why a server stopped, in its own log: a crash with its stack, or the signal that ended it.
+function processLog(log, name) {
+  process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam ${name} crashed: ${e?.stack ?? e}\n`); process.exit(1); });
+  process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam ${name} crashed: ${e?.stack ?? e}\n`); process.exit(1); });
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
+}
+// The hub alone has no run/ of its own: its log is the machine's, named for the hub port, and never
+// passes 1 MB (checked at each write, the full one moved to .1). Also on stderr, for its window.
+function hubLogger() {
+  const file = path.join(os.homedir(), '.devteam', `hub-${HUB_PORT}.log`);
+  return (msg) => {
+    const line = `${nowIso()} [${process.pid}] ${msg}\n`;
+    process.stderr.write(line);
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) + Buffer.byteLength(line) > 1024 * 1024) fs.renameSync(file, `${file}.1`);
+      fs.appendFileSync(file, line);
+    } catch {}
+  };
+}
+// The running kit's version, when it is the project's own kit; null for a kit with no project (the
+// image's), or one run against a project that isn't its checkout's (DEVTEAM_HOME, another repo's cwd).
+const ownKitVersion = () => (fs.existsSync(path.join(projectDir, 'settings.md')) && !path.relative(mainRoot, kitDir).startsWith('..') ? kitVersion() : null);
+// hub [--release vX.Y.Z]: the machine's hub and nothing else, the way the box's boot runs it from the
+// image's kit (--release is the image's, and only the boot passes it). It stays up whatever holds the
+// port, retrying, so a restart loop around it never spins; a bad --release is said and served without.
+function cmdHub() {
+  const log = hubLogger();
+  processLog(log, 'hub');
+  const rel = flagStr('release') ?? (flags.release === true ? '' : undefined);
+  const ok = rel !== undefined && /^v\d+\.\d+\.\d+$/.test(rel);
+  if (rel !== undefined && !ok) log(`hub: --release ${JSON.stringify(rel)} is not vX.Y.Z; serving with no release`);
+  startHub(log, ok ? { kit: rel, image: true, standalone: true } : { kit: ownKitVersion(), standalone: true });
+}
+
+// The port the box's image serves its own hub on (ENV DEVTEAM_IMAGE_HUB), a plain port or nothing. A
+// dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
+// take the port in the second the image's hub restarts, until it adopts this release.
+const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);
 async function cmdDashboard() {
   const picked = await pickDashboardPort();
   let port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
-  process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
-  process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
-  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
+  processLog(log, 'dashboard');
   const page = path.join(kitDir, 'dashboard', 'index.html');
   // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
@@ -14656,7 +14738,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
@@ -19105,6 +19187,7 @@ The log
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
+  hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
 `;
 
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
@@ -19124,7 +19207,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
