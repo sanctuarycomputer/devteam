@@ -13954,16 +13954,17 @@ function readPins(text) {
   // like one is a problem, so a hold meant is never ignored and bump never moves a held tool
   lines.forEach((l, i) => {
     if (!HOLD_LIKE.test(l)) return;
-    const m = /^# hold:(.*)$/.exec(l);
+    const m = /^# hold:(?: (.*))?$/.exec(l);
     if (!m) return problems.push(`line ${i + 1} looks like a hold but is not "# hold: <reason>"`);
     const p = tools.find((t) => t.versionLine === i + 1);
     if (!p) return problems.push(`the hold on line ${i + 1} is not directly above a _VERSION ARG`);
-    if (!m[1].trim()) return problems.push(`${p.tool.name}'s hold has no reason`);
+    if (!m[1]?.trim()) return problems.push(`${p.tool.name}'s hold has no reason`);
     p.hold = m[1].trim();
   });
   // no version or sum written anywhere but its ARG: a literal left in a RUN would not follow a bump
-  const excerpt = (l) => l.trim().replace(/[^\x20-\x7e]/g, '?').slice(0, 80);
-  const strays = (re, say) => lines.forEach((l, i) => { if (!pinLines.has(i) && !HOLD_LIKE.test(l) && re.test(l)) problems.push(`${say} is written outside its ARG (line ${i + 1}: ${excerpt(l)})`); });
+  // the text found, with a little of the line around it, however deep in a long RUN it sits
+  const around = (l, m) => l.slice(Math.max(0, m.index - 24), m.index + m[0].length + 24).trim().replace(/[^\x20-\x7e]/g, '?');
+  const strays = (re, say) => lines.forEach((l, i) => { const m = !pinLines.has(i) && !HOLD_LIKE.test(l) && re.exec(l); if (m) problems.push(`${say} is written outside its ARG (line ${i + 1}: ${around(l, m)})`); });
   for (const p of tools) {
     if (p.version) strays(new RegExp(`(?<![\\d.])${escapeRe(bareVersion(p.version))}(?!\\.?\\d)`), `${p.tool.name}'s version ${safe(p.version)}`);
     for (const [arch, sum] of Object.entries(p.sums)) if (sum) strays(new RegExp(`(?<![0-9a-fA-F])${escapeRe(sum)}(?![0-9a-fA-F])`), `${p.tool.name}'s ${p.tool.prefix}_SHA256_${BOX_ARCHES[arch]} sum`);
@@ -13979,7 +13980,7 @@ function readPins(text) {
       const n = pairs.filter((x) => x === want).length;
       if (n !== 1) problems.push(n ? `DEVTEAM_BOX_TOOLS names ${want} ${n} times` : `DEVTEAM_BOX_TOOLS does not name ${want}`);
     }
-    for (const x of pairs) if (!tools.some(({ tool }) => x === `${tool.name}=$${tool.prefix}_VERSION`)) problems.push(`DEVTEAM_BOX_TOOLS names ${safe(x)}, which is no tool's`);
+    for (const x of pairs) if (!tools.some(({ tool }) => x === `${tool.name}=$${tool.prefix}_VERSION`)) problems.push(`DEVTEAM_BOX_TOOLS names ${/^[\w.+=$-]{1,80}$/.test(x) ? x : '?'}, which is no tool's`);
   }
   return { lines, tools, release, releaseLine, problems };
 }
@@ -13991,7 +13992,7 @@ function pinsFile() {
 }
 const releaseFlag = () => {
   const r = flagStr('release') ?? (flags.release === true ? '' : undefined);
-  if (r !== undefined && !/^v\d+\.\d+\.\d+$/.test(r)) die(`box-pins: --release ${JSON.stringify(r)} is not vX.Y.Z`);
+  if (r !== undefined && !/^v\d+\.\d+\.\d+$/.test(r)) die(`box-pins: --release ${JSON.stringify(r)} is not vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
   return r;
 };
 // Each tool's latest release upstream: npm's latest dist-tag, PyPI's version, or the highest GitHub

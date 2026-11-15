@@ -949,6 +949,36 @@ test('verify takes a hold above the _VERSION ARG, and refuses one with no reason
   assert.equal(odd.status, 1); assert.match(odd.stdout, /line \d+ looks like a hold but is not "# hold: <reason>"/);
 });
 
+test('verify names what it found, where (task-1 review)', () => {
+  const lineOf = (f, re) => fs.readFileSync(f, 'utf8').split('\n').findIndex((l) => re.test(l)) + 1;
+  const run = (edit) => { const f = pinsCopy(edit); return { f, r: pins(['verify', '--dockerfile', f]) }; };
+  // the stray's own text is shown, even deep in a long line
+  const u = run((t) => t.replace('download/v$GH_VERSION/gh_${GH_VERSION}_linux', `download/v${FIXED.GH}/gh_${FIXED.GH}_linux`));
+  assert.match(u.r.stdout, new RegExp(`gh's version 2\\.104\\.0 is written outside its ARG \\(line ${lineOf(u.f, /download\/v2\.104\.0/)}: .*v2\\.104\\.0/gh_2\\.104\\.0`));
+  const sum = fixedSum('UV_SHA256_X86_64');
+  const s1 = run((t) => t.replace('x86_64) sum=$UV_SHA256_X86_64', `x86_64) sum=${sum}`));
+  assert.match(s1.r.stdout, new RegExp(`uv's UV_SHA256_X86_64 sum is written outside its ARG \\(line ${lineOf(s1.f, /x86_64\) sum=[0-9a-f]{64}/)}: .*${sum}`));
+  // mise's version is searched without its v
+  assert.match(run((t) => t.replace('-linux-$arch"', '-linux-$arch" # 2026.10.17')).r.stdout, /mise's version v2026\.10\.17 is written outside its ARG/);
+  // a stamp or a hold naming a version is no stray
+  assert.equal(run((t) => t.replace(/^ARG UV_VERSION=/m, '# hold: 0.13.8 breaks the build; stay on 0.13.7\n$&')).r.status, 0);
+  // exactly "# hold: <reason>", unindented, right above the ARG
+  const far = run((t) => t.replace(/^# ttyd, the web terminal$/m, '# hold: bad build\n$&'));
+  assert.match(far.r.stdout, new RegExp(`the hold on line ${lineOf(far.f, /^# hold: bad build$/)} is not directly above a _VERSION ARG`));
+  for (const bad of ['# hold:x', '  # hold: x', '#hold: x']) assert.match(run((t) => t.replace(/^ARG MISE_VERSION=/m, `${bad}\n$&`)).r.stdout, /looks like a hold but is not "# hold: <reason>"/, bad);
+  // the ARGs: given twice, or empty
+  assert.match(run((t) => t.replace(/^ARG UV_VERSION=.*$/m, '$&\n$&')).r.stdout, /uv's UV_VERSION is given 2 times/);
+  assert.match(run((t) => t.replace(/^ARG UV_VERSION=.*$/m, 'ARG UV_VERSION=')).r.stdout, /uv's UV_VERSION is empty/);
+  assert.match(run((t) => t.replace(/^ARG DEVTEAM_RELEASE=.*$/m, '')).r.stdout, /no DEVTEAM_RELEASE/);
+  // DEVTEAM_BOX_TOOLS names exactly the six pins
+  assert.match(run((t) => t.replace(' uv=$UV_VERSION', '')).r.stdout, /DEVTEAM_BOX_TOOLS does not name uv=\$UV_VERSION/);
+  assert.match(run((t) => t.replace(' uv=$UV_VERSION', ' uv=$UV_VERSION node=$NODE_VERSION')).r.stdout, /DEVTEAM_BOX_TOOLS names node=\$NODE_VERSION, which is no tool's/);
+  assert.match(run((t) => t.replace(/^\s*DEVTEAM_BOX_TOOLS=.*$/m, '    DEVTEAM_X=1')).r.stdout, /no DEVTEAM_BOX_TOOLS/);
+  // a --release that isn't vX.Y.Z is a usage error
+  const bad = pins(['verify', '--release', 'v1.2', '--dockerfile', pinsCopy()]);
+  assert.equal(bad.status, 1); assert.match(bad.stderr, /--release "v1\.2" is not vX\.Y\.Z/); assert.match(bad.stderr, /usage: box-pins verify/);
+});
+
 // npm, PyPI and GitHub in one in-process server; downloads redirect to the bytes, as GitHub's do.
 // Every tool's default latest is one release past FIXED; each asset's bytes are its own.
 const LATEST = { 'claude-code': '2.1.308', 'claude-swap': '1.0.1', gh: 'v2.105.0', ttyd: '1.7.8', mise: 'v2026.11.8', uv: '0.13.8' };
