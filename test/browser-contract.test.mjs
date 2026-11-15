@@ -114,6 +114,8 @@ test('every fixture validates against its shape', () => {
   for (const x of all) {
     if (x.text) {
       assert.match(firstLine(x.value), new RegExp(S['x-snapshot-text']), `${x.f}: the framing line`);
+      // a text snapshot prints URLs too (link targets): each one is masked
+      for (const u of x.value.match(/[a-z][a-z0-9+.-]*:\/\/\S+|about:blank/g) ?? []) assert.match(u, new RegExp(S['x-masked-url']), `${x.f}: ${u}`);
       continue;
     }
     if (x.stream) {
@@ -151,6 +153,10 @@ test('every fixture validates against its shape', () => {
   assert.ok(['special-purpose', 'own-interface', 'own-name', 'gateway'].includes(refusal.rule), 'a 403 rule');
   assert.ok(refusal.host, 'a 403 names its host');
   assert.ok(visibleText(page).includes(refusal.why), 'the page says why in words');
+  for (const f of all.filter((x) => x.html).map((x) => x.f)) {
+    const words = visibleText(read(f).replace(/<script[\s\S]*?<\/script>/g, ''));
+    assert.ok(words.includes(refusalOf(read(f)).why) && !words.includes('{'), `${f}: the page shows plain words, not JSON`);
+  }
   const body = /id="devteam-refusal">([\s\S]*?)<\/script>/.exec(page)[1];
   assert.ok(!body.includes('<'), 'no raw < inside the script');
   assert.ok(body.includes('\\u003c') && refusal.why.includes('<'), 'a < in why survives as \\u003c');
@@ -244,6 +250,8 @@ test('the refusal names the guard\'s rules and ranges; state holds no lock', () 
   assert.deepEqual(check(st, { ...json('state.json'), held: null }, 'state'), ['state.held is not a field here']);
 });
 
+// Every page body the site sent, for the check that none carries a secret.
+const bodies = [];
 // One request over plain HTTP, cookies by hand: Node 18 has no fetch getSetCookie, and the site's
 // redirects must be seen, not followed.
 function req(port, method, p, { body, cookie, type } = {}) {
@@ -255,7 +263,7 @@ function req(port, method, p, { body, cookie, type } = {}) {
       let text = '';
       res.setEncoding('utf8');
       res.on('data', (c) => { text += c; });
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, setCookies: res.headers['set-cookie'] ?? [], text }));
+      res.on('end', () => { bodies.push(text); resolve({ status: res.statusCode, headers: res.headers, setCookies: res.headers['set-cookie'] ?? [], text }); });
     });
     r.on('error', reject);
     r.setTimeout(10000, () => r.destroy(new Error(`${method} ${p}: no answer in 10 s`)));
@@ -397,6 +405,8 @@ test('the fixture site serves every page later tests browse', async (t) => {
   assert.equal((await go('GET', '/nope')).status, 404);
   assert.equal((await go('GET', '//')).status, 400, 'a request that is no URL is refused, not a crash');
   assert.equal((await go('GET', '/')).status, 200, 'still serving');
+  // kit-67 and kit-68 grep for these: no page the site serves may carry one (cookies carry sessions)
+  for (const secret of [password, code, ...site.sessions()]) assert.ok(!bodies.some((b) => b.includes(secret)), 'no page shows a password, code or session');
 });
 
 test('the fixture site runs from a shell, and says each session it issues', async (t) => {
