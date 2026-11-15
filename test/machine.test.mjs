@@ -1004,6 +1004,7 @@ async function upstream(t) {
     if (u.pathname.startsWith('/npm/') && !req.url.includes('%2f')) return json({}, 404);
     if (u.pathname.startsWith('/gh/') && (u.searchParams.get('per_page') !== '30' || req.headers.accept !== 'application/vnd.github+json')) return json({}, 400);
     if (state.hang?.(u.pathname)) return;
+    if (state.stall?.(u.pathname)) { res.writeHead(200, { 'content-length': '1000' }); return res.write('part of a body'); }
     if ((m = /^\/npm\/(.+)\/latest$/.exec(u.pathname))) { const v = state.npm[decodeURIComponent(m[1])]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ version: v }); }
     if ((m = /^\/pypi\/pypi\/([^/]+)\/json$/.exec(u.pathname))) { const v = state.pypi[m[1]]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ info: { version: v } }); }
     if ((m = /^\/gh\/repos\/([^/]+\/[^/]+)\/releases$/.exec(u.pathname))) { const v = state.releases[m[1]]; return v === undefined ? json([], 404) : v.status ? json({}, v.status) : v.raw !== undefined ? json(v.raw) : json(v); }
@@ -1248,13 +1249,13 @@ test('bump writes nothing that would not verify, says a failed download in its o
   const d = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], upEnv(u));
   assert.equal(d.status, 1);
   assert.match(d.stderr, /box-pins bump: uv: download of uv-x86_64-unknown-linux-gnu\.tar\.gz failed \(ECONNREFUSED\); nothing written/);
-  // a download whose body stalls: timed out
+  // a download whose body stalls after its headers: timed out
   u.state.releases['astral-sh/uv'] = [u.release('uv', LATEST.uv)];
-  u.state.hang = (p) => p.startsWith('/assets/astral-sh/');
+  u.state.stall = (p) => p.startsWith('/assets/astral-sh/');
   const h = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
   assert.equal(h.status, 1);
   assert.match(h.stderr, /box-pins bump: uv: download of .* failed \(timed out\); nothing written/);
-  u.state.hang = null;
+  u.state.stall = null;
   // --dockerfile a symlink: its target is bumped and the link stays a link
   const target = pinsCopy();
   const link = path.join(path.dirname(target), 'Dockerfile.link');
