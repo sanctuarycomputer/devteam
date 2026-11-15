@@ -7,6 +7,6 @@ A cold confirm, diff only. I checked each pass-1 finding against the fix, and mu
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T1-2-1 | Suggestion | quality.md §3 Severity | reviews/task-1.md | Pass 1 used High, Low and Nit, which are not on quality.md's scale (Critical, Important, Minor, Suggestion). check-ticket looks for Critical and Important findings with no disposition, so a "High" would slip past it if it were ever left open. Every row here has a disposition, so this has no effect now. | |
+| T1-2-1 | Suggestion | quality.md §3 Severity | reviews/task-1.md | Pass 1 used High, Low and Nit, which are not on quality.md's scale (Critical, Important, Minor, Suggestion). check-ticket looks for Critical and Important findings with no disposition, so a "High" would slip past it if it were ever left open. Every row here has a disposition, so this has no effect now. | wont-fix: every row of task-1 has a disposition; a record's words aren't edited after its verdict |
 
 Verdict: APPROVE b9b7712bdd48fd42d2277f625b039af62281a7b6
