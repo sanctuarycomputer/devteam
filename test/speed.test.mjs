@@ -9,6 +9,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { gitReadFns, gitFactFns, bareProject, startDashboard, freePort, until, write, fleetFixture, gitShim } from './lib/kit.mjs';
 
+// One cleanup, in order: what a test started is stopped before its folders go. Node runs after hooks
+// in the order they were added and stops at the first that throws, so the steps live in one hook (or
+// finally) and each runs whatever the one before did; the first error is thrown at the end.
+const cleanup = async (...steps) => { let err = null; for (const s of steps) { try { await s(); } catch (e) { err ??= e; } } if (err) throw err; };
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
 const tmpRepo = (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-speed-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -163,13 +169,17 @@ test('git facts: a "no" the clone\'s cut gave is asked again after a deepen that
 
 test('an answer from the dashboard: the reply comes before the supervisor is typed to', { timeout: 120000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-reply-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const release = path.join(base, 'release');
+  let dash = null;
+  // the typing let go, the dashboard and its group stopped, and only then the folder removed
+  t.after(() => cleanup(() => fs.writeFileSync(release, ''), () => dash?.stop(), () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })));
   const root = bareProject(base, 'reply');
-  // a stand-in tmux: the supervisor's pane runs an agent, and typing into it waits for a release file
+  // a stand-in tmux: the supervisor's pane runs an agent, and typing into it waits for a release
+  // file; each send-keys writes its pid first, so the test can tell one still waiting from one ended
   const fake = path.join(base, 'fake-tmux');
   const calls = path.join(base, 'tmux-calls.log');
-  const release = path.join(base, 'release');
-  write(path.join(fake, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in\n  send-keys) while [ ! -f "${release}" ]; do sleep 0.1; done ;;\n  display-message) echo "0 claude" ;;\nesac\nexit 0\n`);
+  const typing = path.join(base, 'send-keys.pids');
+  write(path.join(fake, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in\n  send-keys) echo $$ >> "${typing}"; while [ ! -f "${release}" ]; do sleep 0.1; done ;;\n  display-message) echo "0 claude" ;;\nesac\nexit 0\n`);
   fs.chmodSync(path.join(fake, 'tmux'), 0o755);
   for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(root, 'docs/devteam/run', n), '%1');
   const env = { ...process.env, PATH: `${fake}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
@@ -177,14 +187,14 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
   const dt = (args, role = {}) => execFileSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }).trim();
   const qid = dt(['ask', '--question', 'Left or right?'], { DEVTEAM_ROLE: 'supervisor' });
   const port = await freePort();
-  const dash = startDashboard(root, env, ['--port', String(port)]);
-  t.after(() => { fs.mkdirSync(base, { recursive: true }); fs.writeFileSync(release, ''); return dash.stop(); });
+  dash = startDashboard(root, env, ['--port', String(port)]);
   await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
-  const t0 = Date.now();
   const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: qid, answer: 'Left' }), signal: AbortSignal.timeout(60000) });
   const body = await r.json();
-  // well inside tmux's own 30 s limit, which would release a reply that waited for the typing
-  assert.ok(Date.now() - t0 < 15000, `replied after ${Date.now() - t0} ms`);
+  // every send-keys begun so far is still waiting: a reply that waited for the typing comes only
+  // after tmux's own 30 s limit has killed the send-keys, whose pid is then gone
+  const held = fs.existsSync(typing) ? fs.readFileSync(typing, 'utf8').split('\n').filter(Boolean).map(Number) : [];
+  assert.ok(held.every(alive), `replied with send-keys ${held.filter((p) => !alive(p)).join(', ')} already ended, of ${held.join(', ')}`);
   assert.equal(r.status, 200, JSON.stringify(body));
   assert.match(body.out, new RegExp(`answered ${qid}`));
   assert.equal(fs.existsSync(release), false, 'replied while typing into the pane was still held');
@@ -195,8 +205,9 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
 
 // A project with n tickets, each with a log file of its own, b of them on a branch with two review
 // files; then how many git processes a refresh and an answer start.
-function spawnFixture(n, b) {
+function spawnFixture(n, b, made) {
   const F = fleetFixture(`spawns-${n}`);
+  made.push(F); // cleaned up by the test even if what follows throws
   const { old, ok, g } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   for (let i = 0; i < n; i++) {
@@ -223,10 +234,11 @@ const spawns = (F, args, env = {}) => {
   return spy.calls().split('\n').filter(Boolean).length;
 };
 
-test('git processes: a refresh and an answer start as many with 24 tickets as with 12, plus two per ticket branch', { timeout: 600000 }, () => {
-  const small = spawnFixture(12, 4);
-  const big = spawnFixture(24, 8);
+test('git processes: a refresh and an answer start as many with 24 tickets as with 12, plus two per ticket branch', { timeout: 600000 }, async () => {
+  const made = [];
   try {
+    const small = spawnFixture(12, 4, made);
+    const big = spawnFixture(24, 8, made);
     const refresh = [spawns(small.F, ['dashboard-data']), spawns(big.F, ['dashboard-data'])];
     assert.ok(refresh[1] - refresh[0] <= 2 * 4, `dashboard-data: ${refresh.join(' then ')} git processes; at most two more per added ticket branch`);
     const peek = [spawns(small.F, ['peek', 'ticket', 'sp-00-t']), spawns(big.F, ['peek', 'ticket', 'sp-00-t'])];
@@ -237,7 +249,10 @@ test('git processes: a refresh and an answer start as many with 24 tickets as wi
     const a = [answer(small), answer(big)];
     assert.equal(a[0], a[1], `answer: ${a.join(' then ')} git processes`);
     assert.ok(a[0] <= 12, `answer: ${a[0]} git processes`);
-  } finally { small.F.done(); big.F.done(); }
+  } finally {
+    // each fixture's done() stops its tmux server, then removes its folder; one failing can't skip the other
+    await cleanup(...made.map((F) => () => F.done()));
+  }
 });
 
 test('git facts: at the cap, what nobody asked for longest goes first', (t) => {
