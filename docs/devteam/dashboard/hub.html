@@ -27,6 +27,167 @@
     --series-1: #52a8ff; --grid: #1f1f1f; --shadow: none;
   } }
   /* devteam-ui tokens end */
+  /* devteam-layout start */
+  /* dashboard-shell@1 (docs/devteam/dashboard/shell.md): the layout both pages share, byte-identical in
+     index.html and hub.html. Tokens on :root. Every rule styles only inside a .shell element and outside
+     any .no-shell region in it (:where(.shell) … :not(:where(.no-shell, .no-shell *))), at the specificity
+     of its bare selector: nothing changes on a page until it adopts the shell, region by region. */
+  :root {
+    --page-max: 1200px; --page-top: 42px; --page-pad: 32px; --header-pad: 16px; --panel-pad: 16px; --head-h: 41px; --bar-h: 49px;
+    --gap: 16px; --ease: cubic-bezier(.32, .72, 0, 1); --dur: 280ms; --threads-w: 380px; --backdrop: rgba(0, 0, 0, .7);
+    --measure: calc((var(--page-max) - 2 * var(--page-pad) - 11 * var(--gap)) / 2 + 5 * var(--gap));
+  }
+  @media (max-width: 900px) { :root { --threads-w: 100vw; } }
+  /* the page bar: the full window wide, the title --header-pad from the left, the Inbox button (.tt) as far from the right */
+  :where(.shell) .pagebar:not(:where(.no-shell, .no-shell *)) { position: sticky; top: 0; z-index: 4; height: var(--bar-h); box-sizing: border-box; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 var(--header-pad); }
+  :where(.shell) .pagebar h1:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.01em; white-space: nowrap; }
+  :where(.shell) .pagebar .extra:not(:where(.no-shell, .no-shell *)) { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  :where(.shell) .pagebar .tt:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+  :where(.shell) .tt .n:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-variant-numeric: tabular-nums; } :where(.shell) .tt .n.hot:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); }
+  /* the page: at most --page-max, its first content --page-top below the bar, measured to what the eye sees first */
+  :where(.shell) .page:not(:where(.no-shell, .no-shell *)) { max-width: var(--page-max); margin: 0 auto; box-sizing: border-box; padding: var(--page-top) var(--page-pad) 96px; position: relative; }
+  :where(.shell) .page > :first-child:not(:where(.no-shell, .no-shell *)) { margin-top: 0; }
+  :where(.shell) .page > .tabbar:first-child:not(:where(.no-shell, .no-shell *)) { margin-top: -8px; }
+  :where(.shell) .page > .ov-head:first-child:not(:where(.no-shell, .no-shell *)) { margin-top: -3px; }
+  @media (max-width: 900px) { :where(.shell) .page:not(:where(.no-shell, .no-shell *)) { padding-left: 16px; padding-right: 16px; } }
+  /* the grid: 12 columns, spans fold to 6 and 12 below 1100px and to one column below 560px */
+  :where(.shell) .g12:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--gap); align-items: start; }
+  :where(.shell) .c2:not(:where(.no-shell, .no-shell *)) { grid-column: span 2; } :where(.shell) .c3:not(:where(.no-shell, .no-shell *)) { grid-column: span 3; } :where(.shell) .c4:not(:where(.no-shell, .no-shell *)) { grid-column: span 4; } :where(.shell) .c5:not(:where(.no-shell, .no-shell *)) { grid-column: span 5; } :where(.shell) .c6:not(:where(.no-shell, .no-shell *)) { grid-column: span 6; } :where(.shell) .c7:not(:where(.no-shell, .no-shell *)) { grid-column: span 7; }
+  :where(.shell) .c8:not(:where(.no-shell, .no-shell *)) { grid-column: span 8; } :where(.shell) .c9:not(:where(.no-shell, .no-shell *)) { grid-column: span 9; } :where(.shell) .c10:not(:where(.no-shell, .no-shell *)) { grid-column: span 10; } :where(.shell) .c11:not(:where(.no-shell, .no-shell *)) { grid-column: span 11; } :where(.shell) .c12:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; }
+  @media (max-width: 1100px) { :where(.shell) .c2:not(:where(.no-shell, .no-shell *)), :where(.shell) .c3:not(:where(.no-shell, .no-shell *)) { grid-column: span 4; } :where(.shell) .c4:not(:where(.no-shell, .no-shell *)), :where(.shell) .c5:not(:where(.no-shell, .no-shell *)), :where(.shell) .c6:not(:where(.no-shell, .no-shell *)), :where(.shell) .c7:not(:where(.no-shell, .no-shell *)) { grid-column: span 6; } :where(.shell) .c8:not(:where(.no-shell, .no-shell *)), :where(.shell) .c9:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; } }
+  @media (max-width: 560px) { :where(.shell) .g12 > *:not(:where(.no-shell, .no-shell *)) { grid-column: span 12; } }
+  /* cards that hold running text: more cards on a wide screen, not wider ones; side by side, the same height */
+  :where(.shell) .cards:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(22rem, 100%), 1fr)); gap: var(--gap); align-items: stretch; }
+  :where(.shell) .cards > .wide:not(:where(.no-shell, .no-shell *)) { grid-column: 1 / -1; }
+  :where(.shell) .g12 > .card:not(:where(.no-shell, .no-shell *)), :where(.shell) .cards > .card:not(:where(.no-shell, .no-shell *)) { margin: 0; min-width: 0; align-self: stretch; display: flex; flex-direction: column; }
+  :where(.shell) .card > .foot:not(:where(.no-shell, .no-shell *)) { margin-top: auto; }
+  /* a card, and its thin-rule head: --head-h tall in every card, small ones too; trailing actions pin right */
+  :where(.shell) .card:not(:where(.no-shell, .no-shell *)) { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow); min-width: 0; box-sizing: border-box; }
+  :where(.shell) .card.click:not(:where(.no-shell, .no-shell *)) { cursor: pointer; } :where(.shell) .card.click:hover:not(:where(.no-shell, .no-shell *)) { background: var(--hover); }
+  :where(.shell) .card h3:not(:where(.no-shell, .no-shell *)) { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; letter-spacing: -.005em; }
+  :where(.shell) .card.small:not(:where(.no-shell, .no-shell *)) { padding: 10px 12px; }
+  :where(.shell) .card-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; height: var(--head-h); box-sizing: border-box; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  :where(.shell) .card.small > .card-head:not(:where(.no-shell, .no-shell *)) { margin: -10px -12px 8px; padding: 0 10px 0 12px; }
+  :where(.shell) .card.flush:not(:where(.no-shell, .no-shell *)) { padding: 0; overflow: hidden; } :where(.shell) .card.flush > .card-head:not(:where(.no-shell, .no-shell *)) { margin: 0; }
+  :where(.shell) .card-head i:not(:where(.no-shell, .no-shell *)) { font-size: 14px; }
+  :where(.shell) .card-head .grow:not(:where(.no-shell, .no-shell *)) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.shell) .card-head > .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; flex: none; }
+  /* a table in a card starts below the head's border, never over it */
+  :where(.shell) .card-head + .db-t:not(:where(.no-shell, .no-shell *)), :where(.shell) .card-head + .props:not(:where(.no-shell, .no-shell *)) { margin-top: 0; }
+  /* the sectioned status: a header, then ruled sections with monospace labels, rows, dots and pills */
+  :where(.shell) .ov-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+  :where(.shell) .ov-head h2:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.015em; }
+  :where(.shell) .ov-head .sum:not(:where(.no-shell, .no-shell *)) { color: var(--fg-2); }
+  :where(.shell) .ov-head .acts:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; gap: 8px; }
+  :where(.shell) .sec:not(:where(.no-shell, .no-shell *)) { border-top: 1px solid var(--line); padding: 14px 0; display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 16px; }
+  :where(.shell) .sec:last-child:not(:where(.no-shell, .no-shell *)) { border-bottom: 1px solid var(--line); }
+  @media (max-width: 560px) { :where(.shell) .sec:not(:where(.no-shell, .no-shell *)) { grid-template-columns: minmax(0, 1fr); gap: 6px; } }
+  :where(.shell) .sec .lbl:not(:where(.no-shell, .no-shell *)) { font: 500 11.5px/1.5 var(--mono); letter-spacing: .02em; text-transform: uppercase; color: var(--muted); padding-top: 2px; }
+  :where(.shell) .rows:not(:where(.no-shell, .no-shell *)) { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  :where(.shell) .rowline:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  :where(.shell) .rowline .t:not(:where(.no-shell, .no-shell *)) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  :where(.shell) .dot:not(:where(.no-shell, .no-shell *)) { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  :where(.shell) .dot.green:not(:where(.no-shell, .no-shell *)) { background: var(--green); } :where(.shell) .dot.blue:not(:where(.no-shell, .no-shell *)) { background: var(--blue); } :where(.shell) .dot.amber:not(:where(.no-shell, .no-shell *)) { background: var(--amber); } :where(.shell) .dot.red:not(:where(.no-shell, .no-shell *)) { background: var(--red); }
+  :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 50%, transparent); animation: shell-ring 2s var(--ease) infinite; }
+  @keyframes shell-ring { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 50%, transparent); } 70% { box-shadow: 0 0 0 6px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+  :where(.shell) .pill:not(:where(.no-shell, .no-shell *)) { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
+  :where(.shell) .pill:not(:where(.no-shell, .no-shell *))::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  :where(.shell) .pill.green:not(:where(.no-shell, .no-shell *)) { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); } :where(.shell) .pill.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 12%, transparent); }
+  :where(.shell) .pill.amber:not(:where(.no-shell, .no-shell *)) { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); } :where(.shell) .pill.red:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); background: color-mix(in srgb, var(--red) 12%, transparent); }
+  /* the tab bar: counts, a disabled state; the active tab's underline appears with no motion */
+  :where(.shell) .tabbar:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: stretch; gap: 2px; border-bottom: 1px solid var(--line); min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  :where(.shell) .tabbar:not(:where(.no-shell, .no-shell *))::-webkit-scrollbar { display: none; }
+  :where(.shell) .tabbar [role="tab"]:not(:where(.no-shell, .no-shell *)) { all: unset; position: relative; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px; color: var(--fg-2); cursor: pointer; white-space: nowrap; font-size: 13px; font-weight: 500; transition: none; }
+  :where(.shell) .tabbar [role="tab"]:hover:not(:where(.no-shell, .no-shell *)) { color: var(--fg); }
+  :where(.shell) .tabbar [role="tab"]:focus-visible:not(:where(.no-shell, .no-shell *)) { outline: 2px solid var(--blue-fg); outline-offset: -2px; border-radius: 4px; }
+  :where(.shell) .tabbar [role="tab"][aria-selected="true"]:not(:where(.no-shell, .no-shell *)) { color: var(--fg); }
+  :where(.shell) .tabbar [role="tab"]:not(:where(.no-shell, .no-shell *))::after { content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--fg); visibility: hidden; transition: none; }
+  :where(.shell) .tabbar [role="tab"][aria-selected="true"]:not(:where(.no-shell, .no-shell *))::after { visibility: visible; }
+  :where(.shell) .tabbar [role="tab"][aria-disabled="true"]:not(:where(.no-shell, .no-shell *)) { opacity: .45; cursor: default; }
+  :where(.shell) .tabbar .n:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+  :where(.shell) .tabbar .n.blue:not(:where(.no-shell, .no-shell *)) { color: var(--blue-fg); font-weight: 500; }
+  :where(.shell) .tabbar .spacer:not(:where(.no-shell, .no-shell *)) { flex: 1; }
+  /* the record table: sortable monospace headers, every row opens its record, "None" when empty */
+  :where(.shell) .db-t:not(:where(.no-shell, .no-shell *)) { width: 100%; border-collapse: collapse; }
+  :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { text-align: left; border-bottom: 1px solid var(--line); }
+  :where(.shell) .db-t td:not(:where(.no-shell, .no-shell *)) { padding: 8px 14px; font-size: 12.5px; vertical-align: top; }
+  :where(.shell) .db-t th:not(:where(.no-shell, .no-shell *)) { padding: 0; background: var(--well); }
+  :where(.shell) .db-t th button.sort:not(:where(.no-shell, .no-shell *)) { all: unset; display: block; width: 100%; box-sizing: border-box; padding: 8px 14px; cursor: pointer; font: 500 11px/16px var(--mono); color: var(--muted); }
+  :where(.shell) .db-t th button.sort:hover:not(:where(.no-shell, .no-shell *)) { color: var(--fg); background: var(--hover); }
+  :where(.shell) .db-t th button.sort:focus-visible:not(:where(.no-shell, .no-shell *)), :where(.shell) .db-t tr.click:focus-visible:not(:where(.no-shell, .no-shell *)) { outline: 2px solid var(--blue-fg); outline-offset: -2px; }
+  :where(.shell) .db-t tr:last-child td:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; }
+  :where(.shell) .db-t tr.click:not(:where(.no-shell, .no-shell *)) { cursor: pointer; } :where(.shell) .db-t tr.click:hover td:not(:where(.no-shell, .no-shell *)) { background: var(--hover); }
+  :where(.shell) .db-t tr.none td:not(:where(.no-shell, .no-shell *)) { color: var(--muted); font-size: 12px; }
+  :where(.shell) .db-t .cell:not(:where(.no-shell, .no-shell *)) { min-width: 0; overflow-wrap: anywhere; }
+  /* the properties table: monospace keys, rules between rows only, no line above the first */
+  :where(.shell) .props:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: 150px minmax(0, 1fr); margin: 0 0 16px; font-size: 12.5px; }
+  :where(.shell) .props dt:not(:where(.no-shell, .no-shell *)), :where(.shell) .props dd:not(:where(.no-shell, .no-shell *)) { margin: 0; padding: 7px 8px; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+  :where(.shell) .props dt:not(:where(.no-shell, .no-shell *)) { color: var(--muted); padding-left: 0; font-family: var(--mono); font-size: 11.5px; }
+  :where(.shell) .props dt[title]:not(:where(.no-shell, .no-shell *)) { cursor: help; }
+  :where(.shell) .props dt:last-of-type:not(:where(.no-shell, .no-shell *)), :where(.shell) .props dd:last-of-type:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; }
+  @media (max-width: 560px) { :where(.shell) .props:not(:where(.no-shell, .no-shell *)) { grid-template-columns: 110px minmax(0, 1fr); } }
+  /* the segmented control: one for every pick-one set, every button 28px tall */
+  :where(.shell) .seg:not(:where(.no-shell, .no-shell *)) { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; flex: none; }
+  :where(.shell) .seg button:not(:where(.no-shell, .no-shell *)) { margin: 0; height: 28px; box-sizing: border-box; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font: 500 12px/1 var(--sans); padding: 0 10px; cursor: pointer; }
+  :where(.shell) .seg button + button:not(:where(.no-shell, .no-shell *)) { border-left: 1px solid var(--line-2); }
+  :where(.shell) .seg button:hover:not(:disabled):not(:where(.no-shell, .no-shell *)) { color: var(--fg); background: var(--hover); }
+  :where(.shell) .seg button[aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: var(--well); color: var(--fg); }
+  :where(.shell) .seg button:disabled:not(:where(.no-shell, .no-shell *)) { cursor: default; opacity: .6; }
+  /* the fleet switch: Run, Drain, Park for the project, a hub row or the machine */
+  :where(.shell) .fleet-switch:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  :where(.shell) .fleet-switch .k:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--fg-2); display: inline-flex; align-items: center; gap: 6px; }
+  :where(.shell) .fleet-switch[data-scope="row"] .k:not(:where(.no-shell, .no-shell *)) { display: none; }
+  :where(.shell) .fleet-switch [data-fleet="drain"][aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--amber) 18%, var(--surface)); }
+  :where(.shell) .fleet-switch [data-fleet="park"][aria-pressed="true"]:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
+  :where(.shell) .fleet-switch button.confirm:not(:where(.no-shell, .no-shell *)) { color: var(--red-fg); }
+  :where(.shell) .fleet-switch .msg:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--muted); } :where(.shell) .fleet-switch .err:not(:where(.no-shell, .no-shell *)) { font-size: 12px; color: var(--red-fg); }
+  /* the step bar (today's look): finished steps in --series-1, the current one amber, a status line under Built and Met */
+  :where(.shell) .steps:not(:where(.no-shell, .no-shell *)) { display: flex; gap: 0; list-style: none; padding: 0; margin: 10px 0 6px; font-size: 11.5px; color: var(--muted); }
+  :where(.shell) .steps li:not(:where(.no-shell, .no-shell *)) { flex: 1; padding-top: 8px; margin-right: 3px; position: relative; --seg: var(--line-2); --fill: 0%; min-width: 0; }
+  :where(.shell) .steps li:last-child:not(:where(.no-shell, .no-shell *)) { margin-right: 0; }
+  :where(.shell) .steps li:not(:where(.no-shell, .no-shell *))::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 2px; background: linear-gradient(to right, var(--seg) var(--fill), var(--line-2) var(--fill)); }
+  :where(.shell) .steps li.done:not(:where(.no-shell, .no-shell *)) { --seg: var(--series-1); --fill: 100%; color: var(--fg-2); }
+  :where(.shell) .steps li.now:not(:where(.no-shell, .no-shell *)) { --seg: var(--amber); color: var(--fg); font-weight: 500; }
+  :where(.shell) .steps li.now:not([style*="--fill"]):not(:where(.no-shell, .no-shell *)) { --fill: 100%; }
+  :where(.shell) .steps li.part:not(:where(.no-shell, .no-shell *)) { --seg: var(--series-1); }
+  :where(.shell) .steps .step-sub:not(:where(.no-shell, .no-shell *)) { display: block; margin-top: 2px; font-weight: 400; color: var(--muted); font-size: 11px; line-height: 1.35; }
+  /* Upkeep's heartbeat: a cell a day in the step bar's styling, today at the right */
+  :where(.shell) .heartbeat:not(:where(.no-shell, .no-shell *)) { display: grid; grid-template-columns: repeat(var(--hb-n, 14), minmax(0, 1fr)); gap: 3px; margin: 10px 0 0; }
+  :where(.shell) .heartbeat i:not(:where(.no-shell, .no-shell *)) { display: block; height: 3px; border-radius: 2px; background: var(--line-2); }
+  :where(.shell) .heartbeat i.l1:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 35%, var(--line-2)); } :where(.shell) .heartbeat i.l2:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 60%, var(--line-2)); }
+  :where(.shell) .heartbeat i.l3:not(:where(.no-shell, .no-shell *)) { background: color-mix(in srgb, var(--series-1) 80%, var(--line-2)); } :where(.shell) .heartbeat i.l4:not(:where(.no-shell, .no-shell *)) { background: var(--series-1); } :where(.shell) .heartbeat i.bad:not(:where(.no-shell, .no-shell *)) { background: var(--red); }
+  :where(.shell) .heartbeat i:hover:not(:where(.no-shell, .no-shell *)) { outline: 2px solid color-mix(in srgb, var(--series-1) 30%, transparent); outline-offset: 2px; }
+  :where(.shell) .hb-labels:not(:where(.no-shell, .no-shell *)) { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin: 8px 0 6px; }
+  /* the peek frame: it slides in with --ease, its header --bar-h tall, both panels padded --panel-pad; one backdrop */
+  :where(.shell) .scrim:not(:where(.no-shell, .no-shell *)) { position: fixed; inset: 0; background: var(--backdrop); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); z-index: 20; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease); }
+  :where(.shell) .drawer:not(:where(.no-shell, .no-shell *)) { position: fixed; top: 0; bottom: 0; right: 0; width: min(720px, 100vw); box-sizing: border-box; background: var(--surface); border-left: 1px solid var(--line); z-index: 21; overflow-y: auto; box-shadow: -8px 0 32px rgba(0, 0, 0, .16); transform: translateX(104%); visibility: hidden; transition: transform var(--dur) var(--ease), right var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  :where(.shell).peek-open .scrim:not(:where(.no-shell, .no-shell *)) { opacity: 1; pointer-events: auto; }
+  :where(.shell).peek-open .drawer:not(:where(.no-shell, .no-shell *)) { transform: none; visibility: visible; transition: transform var(--dur) var(--ease), right var(--dur) var(--ease), visibility 0s; }
+  :where(.shell) .drawer-head:not(:where(.no-shell, .no-shell *)) { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; height: var(--bar-h); box-sizing: border-box; padding: 0 var(--panel-pad); background: var(--surface); border-bottom: 1px solid var(--line); }
+  :where(.shell) .drawer-head h2:not(:where(.no-shell, .no-shell *)) { margin: 0; font-size: 15px; display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  :where(.shell) .drawer-head .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; gap: 6px; align-items: center; flex: none; }
+  :where(.shell) .drawer-body:not(:where(.no-shell, .no-shell *)) { padding: 18px var(--panel-pad) 60px; }
+  :where(.shell) .drawer-body > .card:not(:where(.no-shell, .no-shell *)) { margin-bottom: 12px; }
+  /* the frame: .main holds the page bar and the page. peek-open and threads-open go on the .shell element itself;
+     while Threads is open, the page and the peek stop at its edge (below 900px each panel takes the full width) */
+  :where(.shell) .main:not(:where(.no-shell, .no-shell *)) { transition: margin-right var(--dur) var(--ease); }
+  :where(.shell).threads-open .main:not(:where(.no-shell, .no-shell *)) { margin-right: var(--threads-w); }
+  :where(.shell).threads-open .drawer:not(:where(.no-shell, .no-shell *)), :where(.shell).threads-open .scrim:not(:where(.no-shell, .no-shell *)) { right: var(--threads-w); }
+  @media (max-width: 900px) { :where(.shell).threads-open .main:not(:where(.no-shell, .no-shell *)) { margin-right: 0; } :where(.shell).threads-open .drawer:not(:where(.no-shell, .no-shell *)), :where(.shell).threads-open .scrim:not(:where(.no-shell, .no-shell *)) { right: 0; } }
+  /* the Threads sidebar: full height, --threads-w wide, sliding with --ease; its tab bar --bar-h tall, in line with the page bar's */
+  :where(.shell) .threads:not(:where(.no-shell, .no-shell *)) { position: fixed; top: 0; right: 0; bottom: 0; width: var(--threads-w); box-sizing: border-box; background: var(--surface); border-left: 1px solid var(--line); z-index: 22; display: flex; flex-direction: column; transform: translateX(100%); visibility: hidden; transition: transform var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  :where(.shell).threads-open .threads:not(:where(.no-shell, .no-shell *)) { transform: none; visibility: visible; transition: transform var(--dur) var(--ease), visibility 0s; }
+  :where(.shell) .threads-head:not(:where(.no-shell, .no-shell *)) { display: flex; align-items: stretch; gap: 8px; height: var(--bar-h); box-sizing: border-box; padding: 0 var(--panel-pad); border-bottom: 1px solid var(--line); flex: none; }
+  :where(.shell) .threads-head .tabbar:not(:where(.no-shell, .no-shell *)) { border-bottom: 0; flex: 1; align-items: flex-end; }
+  :where(.shell) .threads-head .end:not(:where(.no-shell, .no-shell *)) { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+  :where(.shell) .threads-body:not(:where(.no-shell, .no-shell *)) { flex: 1; min-height: 0; overflow-y: auto; padding: 12px var(--panel-pad); }
+  /* the Threads list: a --line-2 rule between threads, none after the last */
+  :where(.shell) .thread-list > * + *:not(:where(.no-shell, .no-shell *)) { border-top: 1px solid var(--line-2); }
+  /* running text: never wider than half the grid at full desktop width */
+  :where(.shell) p:not(:where(.no-shell, .no-shell *)), :where(.shell) .ctx:not(:where(.no-shell, .no-shell *)) { max-width: var(--measure); }
+  /* reduced motion: nothing slides, and the red dot doesn't pulse (last, and as specific as the pulse) */
+  @media (prefers-reduced-motion: reduce) { :root { --dur: 0ms; } :where(.shell) .dot.red.pulse:not(:where(.no-shell, .no-shell *)) { animation: none; } }
+  /* devteam-layout end */
   :root { --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -225,6 +386,279 @@
   </div>
 </div>
 <script>
+/* devteam-shell-js start */
+// dashboard-shell@1 (docs/devteam/dashboard/shell.md): the builders, binders and URL rules both
+// pages share. Byte-identical in index.html and hub.html; it touches no DOM until a binder is
+// called and uses no page global, so test/dashboard-shell.test.mjs runs it in vm.
+const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const shellText = (html) => String(html ?? '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&').trim();
+
+// ---- the tab bar: counts, a disabled state, roving tabindex, arrows that skip disabled tabs ----
+function tabBar({ tabs = [], selected = null } = {}) {
+  const sel = tabs.some((t) => t.id === selected && !t.disabled) ? selected : (tabs.find((t) => !t.disabled) || {}).id;
+  return `<div class="tabbar" role="tablist">${tabs.map((t) => {
+    const on = t.id === sel;
+    const n = t.count === undefined || t.count === null || t.count === '' ? '' : ` <span class="n${t.waiting ? ' blue' : ''}">${escHtml(t.count)}</span>`;
+    return `<button type="button" role="tab" data-tab="${escHtml(t.id)}" aria-selected="${on}" tabindex="${on ? 0 : -1}"${t.disabled ? ' aria-disabled="true"' : ''}>${escHtml(t.label)}${n}</button>`;
+  }).join('')}</div>`;
+}
+// the tab an arrow, Home or End moves to from fromId, wrapping and skipping disabled tabs (null: not a move)
+function tabStep(tabs, fromId, key) {
+  const on = tabs.filter((t) => !t.disabled);
+  if (!on.length || !['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(key)) return null;
+  if (key === 'Home') return on[0].id;
+  if (key === 'End') return on[on.length - 1].id;
+  const all = tabs.map((t) => t.id);
+  let i = all.indexOf(fromId);
+  if (i < 0) return key === 'ArrowRight' ? on[0].id : on[on.length - 1].id;
+  for (let n = 0; n < all.length; n++) {
+    i = (i + (key === 'ArrowRight' ? 1 : -1) + all.length) % all.length;
+    if (!tabs[i].disabled) return tabs[i].id;
+  }
+  return null;
+}
+function bindTabBar(root, { onSelect }) {
+  const tabsOf = (bar) => [...bar.querySelectorAll('[role="tab"]')].map((b) => ({ id: b.dataset.tab, disabled: b.getAttribute('aria-disabled') === 'true' }));
+  // after the page's redraw (if it redraws at once) the tab is a new element: find it again by its id
+  const pick = (bar, id) => {
+    onSelect(id);
+    const b = [...(bar.isConnected ? bar : root).querySelectorAll('[role="tab"]')].find((x) => x.dataset.tab === id);
+    if (b) b.focus();
+  };
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('[role="tab"]');
+    if (!b || !root.contains(b) || b.getAttribute('aria-disabled') === 'true') return;
+    pick(b.closest('[role="tablist"]'), b.dataset.tab);
+  });
+  root.addEventListener('keydown', (e) => {
+    const b = e.target.closest('[role="tab"]');
+    if (!b || !root.contains(b)) return;
+    const bar = b.closest('[role="tablist"]');
+    const to = tabStep(tabsOf(bar), b.dataset.tab, e.key);
+    if (to === null) return;
+    e.preventDefault();
+    pick(bar, to);
+  });
+}
+
+// ---- the record table: one row per record, sortable headers, every row opens its record ----
+const shellCols = (cols) => cols.map((c) => (typeof c === 'string' ? { label: c } : c));
+const shellCells = (r) => (Array.isArray(r) ? r : r.cells);
+const shellKey = (r, i) => { const k = Array.isArray(r) ? undefined : r.sort?.[i]; return k === undefined ? shellText(shellCells(r)[i]) : k === null ? '' : String(k); };
+const shellNum = (k) => (/^\s*-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?\s*$/i.test(k) ? Number(k) : null);
+// a column whose keys are all numbers sorts as numbers (-2, 1.25, 1.5, 10); any other as text with its digit
+// runs as numbers (kit-2 before kit-10). One rule per column, so the order never depends on the input's
+const shellText2 = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+// the rows in display order, as [index in rows as passed, row]: numeric-aware, stable
+function sortRows(rows, sort) {
+  const out = rows.map((r, i) => [i, r]);
+  if (!sort || sort.col === null || sort.col === undefined) return out;
+  const dir = sort.dir === -1 ? -1 : 1;
+  const keys = out.map(([, r]) => shellKey(r, sort.col));
+  const nums = keys.every((k) => k === '' || shellNum(k) !== null) ? keys.map((k) => (k === '' ? -Infinity : shellNum(k))) : null;
+  const cmp = nums ? (i, j) => (nums[i] === nums[j] ? 0 : nums[i] < nums[j] ? -1 : 1) : (i, j) => shellText2(keys[i], keys[j]);
+  return out.sort((a, b) => cmp(a[0], b[0]) * dir || a[0] - b[0]);
+}
+const nextSort = (sort, col) => (sort && sort.col === col ? { col, dir: sort.dir === -1 ? 1 : -1 } : { col, dir: 1 });
+function dbTable(cols, rows, { sort = null } = {}) {
+  const cs = shellCols(cols);
+  const head = cs.map((c, i) => {
+    const on = sort && sort.col === i;
+    return `<th aria-sort="${on ? (sort.dir === -1 ? 'descending' : 'ascending') : 'none'}"><button type="button" class="sort" data-col="${i}">${escHtml(c.label)}${on ? (sort.dir === -1 ? ' ↓' : ' ↑') : ''}</button></th>`;
+  }).join('');
+  const body = rows.length
+    ? sortRows(rows, sort).map(([i, r]) => `<tr class="click" data-row="${i}" tabindex="0">${shellCells(r).map((v) => `<td><div class="cell">${v}</div></td>`).join('')}</tr>`).join('')
+    : `<tr class="none"><td colspan="${cs.length || 1}"><div class="cell">None</div></td></tr>`;
+  return `<table class="db-t"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+function bindDbTable(root, { onSort, onOpen }) {
+  root.addEventListener('click', (e) => {
+    const s = e.target.closest('button.sort[data-col]');
+    if (s && root.contains(s)) { if (onSort) onSort(Number(s.dataset.col)); return; }
+    const tr = e.target.closest('tr[data-row]');
+    // a link or button inside a row is its own; the row opens on any other click
+    if (tr && root.contains(tr) && !e.target.closest('a, button, input, select, textarea, summary, label') && onOpen) onOpen(Number(tr.dataset.row));
+  });
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const tr = e.target.closest('tr[data-row]');
+    if (!tr || !root.contains(tr) || e.target !== tr || !onOpen) return;
+    e.preventDefault();
+    onOpen(Number(tr.dataset.row));
+  });
+}
+
+// ---- the properties table: [key, value HTML, tooltip?] ----
+const props = (rows) => `<dl class="props">${rows.map(([k, v, tip]) => `<dt${tip ? ` title="${escHtml(tip)}" tabindex="0"` : ''}>${escHtml(k)}</dt><dd>${v ?? ''}</dd>`).join('')}</dl>`;
+
+// ---- the step bar: Defining, Planning, Waiting on you, Built, Met; each word follows its state ----
+const GOAL_STEP_WORDS = [['Defining', 'Defining', 'Defined'], ['Planning', 'Planning', 'Planned'], ['Approval', 'Waiting on you', 'Approved'], ['Built', 'Building', 'Built'], ['Met', 'Met?', 'Met']];
+function goalSteps({ step = 0, built = null, met = null } = {}) {
+  return `<ol class="steps" aria-label="Progress">${GOAL_STEP_WORDS.map((w, i) => {
+    const cls = i < step ? 'done' : i === step ? 'now' : '';
+    const part = i === 3 ? built : i === 4 ? met : null;
+    const fill = part && i >= step && typeof part.frac === 'number' ? Math.max(0, Math.min(1, part.frac)) : null;
+    const tip = part ? part.title || part.text || '' : '';
+    return `<li class="${cls || (fill !== null ? 'part' : '')}"${fill !== null ? ` style="--fill:${Math.round(fill * 100)}%"` : ''}${tip ? ` title="${escHtml(tip)}"` : ''}>${w[cls === 'done' ? 2 : cls === 'now' ? 1 : 0]}${part && part.text ? `<span class="step-sub">${escHtml(part.text)}</span>` : ''}</li>`;
+  }).join('')}</ol>`;
+}
+// ---- Upkeep's heartbeat: a cell a day, oldest first, today last; shade by items, red when failed ----
+function heartbeat(days = []) {
+  // the date as the day it names (Nov 2), whatever the viewer's locale or zone
+  const label = (d) => { const m = /^\d{4}-(\d{2})-(\d{2})$/.exec(String(d ?? '')); return m && +m[1] >= 1 && +m[1] <= 12 ? `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][+m[1] - 1]} ${+m[2]}` : String(d ?? ''); };
+  const cells = days.map((d, i) => {
+    const items = Array.isArray(d.items) ? d.items.map(String) : [];
+    const cls = d.failed ? 'bad' : items.length ? `l${Math.min(4, items.length)}` : '';
+    return `<i class="${cls}" title="${escHtml(`${label(d.day)}${i === days.length - 1 ? ' (today)' : ''}: ${items.length ? items.join(', ') : 'quiet'}`)}"></i>`;
+  }).join('');
+  return `<div class="heartbeat" role="img" aria-label="Upkeep, the last ${days.length} days" style="--hb-n:${days.length || 1}">${cells}</div><div class="hb-labels"><span>${escHtml(days.length ? label(days[0].day) : '')}</span><span>today</span></div>`;
+}
+
+// ---- a project's status pill: the hub's words and tone for each pulse state ----
+const PULSE_STATES = {
+  building: { label: 'Building', tone: 'green', rank: 3 },
+  moving: { label: 'Moving', tone: 'blue', rank: 3 },
+  blocked: { label: 'Fully blocked', tone: 'red', rank: 0 },
+  waiting: { label: 'Waiting on you', tone: 'amber', rank: 1 },
+  stalled: { label: 'Stalled', tone: 'red', rank: 0 },
+  idle: { label: 'Idle', tone: '', rank: 4 },
+  parked: { label: 'Parked', tone: '', rank: 4 },
+  gone: { label: 'Not answering', tone: 'red', rank: 0 },
+  starting: { label: 'Starting', tone: '', rank: 5 },
+  unknown: { label: 'Running', tone: 'blue', rank: 3 },
+};
+const statusPill = (state) => { const s = PULSE_STATES[Object.hasOwn(PULSE_STATES, state) ? state : 'unknown']; return `<span class="pill${s.tone ? ` ${s.tone}` : ''}">${escHtml(s.label)}</span>`; };
+
+// ---- the fleet switch: Run, Drain, Park (with a confirm), for a project, a hub row or the machine ----
+const FLEET_MODES = [['run', 'Run', 'Workers start and continue tickets'], ['drain', 'Drain', 'Workers finish what they have; nothing new starts'], ['park', 'Park', 'Every session stops where it is']];
+function fleetSwitch({ scope = 'project', mode = 'run', counts = {}, confirming = false, busy = null, error = null } = {}) {
+  const c = { running: 0, draining: 0, parked: 0, ...counts };
+  // the machine's Park asks about the projects it would park: those not parked already
+  const toPark = c.running + c.draining;
+  const dot = { run: 'green', drain: 'amber', park: '', mixed: 'amber' }[mode] ?? '';
+  const label = scope === 'row' ? '' : mode === 'mixed' ? `Mixed: ${c.running} running, ${c.draining} draining, ${c.parked} parked` : scope === 'machine' ? 'Every fleet' : 'Fleet';
+  const btns = FLEET_MODES.map(([m, word, why]) => {
+    const conf = m === 'park' && confirming;
+    const text = conf ? (scope === 'machine' ? `Park ${toPark} project${toPark === 1 ? '' : 's'}?` : 'Confirm park') : word;
+    return `<button type="button" data-fleet="${m}"${conf ? ' class="confirm" data-confirm="1"' : ''} title="${escHtml(why)}" aria-pressed="${mode === m}"${busy ? ' disabled' : ''}>${escHtml(text)}</button>`;
+  }).join('');
+  return `<div class="fleet-switch" data-scope="${escHtml(scope)}" data-mode="${escHtml(mode)}"${confirming ? ' data-confirming="1"' : ''}><span class="k"><span class="dot ${dot}"></span>${escHtml(label)}</span><span class="seg" role="group" aria-label="${scope === 'machine' ? 'Every fleet on this machine' : scope === 'row' ? 'This project' : 'The whole fleet'}: run, drain or park">${btns}</span>${busy ? `<span class="msg">${escHtml(busy)}</span>` : ''}${error ? `<span class="err">${escHtml(error)}</span>` : ''}</div>`;
+}
+function bindFleetSwitch(root, { onPress, onConfirm, onCancel }) {
+  root.addEventListener('click', (e) => {
+    const b = e.target.closest('.fleet-switch [data-fleet]');
+    if (!b || !root.contains(b) || b.disabled) return;
+    if (b.dataset.confirm === '1') { if (onConfirm) onConfirm(b.dataset.fleet); return; }
+    if (onPress) onPress(b.dataset.fleet);
+  });
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const sw = e.target.closest('.fleet-switch');
+    if (!sw || !root.contains(sw) || sw.dataset.confirming !== '1') return;
+    e.preventDefault();
+    if (onCancel) onCancel();
+  });
+}
+
+// ---- pages, and the Threads panel's tabs ----
+const SHELL_PAGES = [];
+function registerPage({ id, title, group, icon, count, render }) {
+  if (!/^[a-z][a-z0-9-]*$/.test(String(id))) throw new Error(`a page id is lower-case letters, digits and dashes: ${id}`);
+  if (SHELL_PAGES.some((p) => p.id === id)) throw new Error(`page ${id} is registered already`);
+  SHELL_PAGES.push({ id, title, group, icon, count, render });
+}
+const shellPages = () => SHELL_PAGES.slice();
+const threadsTabs = (() => {
+  const tabs = [];
+  return {
+    register({ id, label, count, render, disabled = false }) {
+      if (tabs.some((t) => t.id === id)) throw new Error(`Threads tab ${id} is registered already`);
+      tabs.push({ id, label, count, render, disabled });
+    },
+    list() {
+      return tabs.map((t) => { let n = null; try { n = t.count ? t.count() : null; } catch { n = null; } return { id: t.id, label: t.label, count: n, disabled: !!t.disabled }; });
+    },
+    // one tab's pane: a tab whose render throws shows its error, and the panel keeps working
+    render(id, el) {
+      const t = tabs.find((x) => x.id === id);
+      if (!t || t.disabled || !t.render) { el.innerHTML = ''; return false; }
+      try { t.render(el); return true; } catch (e) { el.innerHTML = `<p class="err">${escHtml(`${t.label} could not draw: ${e && e.message ? e.message : e}`)}</p>`; return false; }
+    },
+  };
+})();
+
+// ---- the URL: page heads (#<page>[?state]) and today's link heads ----
+const STATE_KEYS = { '*': ['th', 't'], board: ['goal', 'feat', 'repo', 'att'], progress: ['goal', 'narrow', 'show'], library: ['kind', 'goal'], goals: ['gt'], sensors: ['st'], loop: ['lt', 'kind', 'orient'] };
+const stateKeys = (page) => [...(STATE_KEYS[page] || []), ...STATE_KEYS['*']];
+// routes (the page's own table, outside this block): { pages, links: { kind: home }, files: [[RegExp, home]], redirects: { head: head } }
+function parseHead(hash, routes) {
+  let h = String(hash ?? '').replace(/^#/, '');
+  let redirected = false;
+  if (Object.hasOwn(routes.redirects || {}, h)) { h = String(routes.redirects[h]).replace(/^#/, ''); redirected = true; }
+  const q = h.indexOf('?'), s = h.indexOf('/');
+  const first = h.slice(0, Math.min(q < 0 ? h.length : q, s < 0 ? h.length : s));
+  if (s >= 0 && (q < 0 || s < q) || first === 'file' || first === 'review-preview') {
+    const kind = first;
+    let home = Object.hasOwn(routes.links || {}, kind) ? routes.links[kind] : 'overview';
+    if (kind === 'file') {
+      let path = '';
+      try { path = new URLSearchParams(h.slice(q + 1)).get('path') || ''; } catch { path = ''; }
+      const hit = (routes.files || []).find(([re]) => re.test(path));
+      home = hit ? hit[1] : 'library';
+    }
+    return { link: h, kind, home };
+  }
+  const page = (routes.pages || []).includes(first) ? first : 'overview';
+  const got = new URLSearchParams(q < 0 ? '' : h.slice(q + 1));
+  const state = {};
+  for (const k of stateKeys(page)) if (got.has(k)) state[k] = got.get(k);
+  return redirected ? { page, state, redirected } : { page, state };
+}
+function headFor(p) {
+  if (p.link !== undefined) return `#${p.link}`;
+  const qs = new URLSearchParams();
+  for (const k of stateKeys(p.page)) if (p.state && p.state[k] !== undefined && p.state[k] !== null) qs.set(k, p.state[k]);
+  const s = qs.toString();
+  return `#${p.page}${s ? `?${s}` : ''}`;
+}
+// history.state for an entry: { page, depth, openedHere }. entry = { hash, state }, here = what was on
+// screen (its stamp), cold = the visit's first route
+function stampFor(entry, here, cold, routes) {
+  if (entry.state && typeof entry.state.page === 'string') return entry.state;
+  const p = parseHead(entry.hash, routes);
+  if (p.link === undefined) return { page: headFor(p), depth: 0, openedHere: !cold };
+  if (cold || !here) return { page: headFor(parseHead(p.home, routes)), depth: 1, openedHere: false };
+  // from a peek: every entry down to the page was pushed in this visit only if the peek below's were
+  if (here.depth > 0) return { page: here.page, depth: here.depth + 1, openedHere: !!here.openedHere };
+  return { page: here.page, depth: 1, openedHere: true };
+}
+// a change to Threads (th, t) while a peek stays open: the same entry, its page head updated (replaceState)
+const withPage = (state, page) => ({ ...state, page });
+// closing a peek: back to the page under it, by history when this visit pushed the entries, else in place
+const closeTarget = (state) => (state && state.openedHere && state.depth > 0 ? { go: -state.depth } : { replace: (state && state.page) || '#overview' });
+// remembered filters: a page's own keys, applied only to a fresh entry whose head carries none of them
+const REMEMBERED = { board: ['goal', 'feat', 'repo', 'att'], progress: ['goal'], library: ['goal', 'kind'] };
+// stored as one flat object ({ goal, feat, repo, att, kind }), so the goal is shared by the pages that remember it
+const FILTERS_KEY = 'devteam.board.filters';
+function storedFilters() { try { return JSON.parse(localStorage.getItem(FILTERS_KEY) || '{}') || {}; } catch { return null; } }
+function rememberedFilters(page, keys, fresh, stored = storedFilters()) {
+  const own = REMEMBERED[page] || [];
+  if (!fresh || !own.length || !stored || typeof stored !== 'object') return null;
+  if ((keys || []).some((k) => own.includes(k))) return null;
+  const out = {};
+  for (const k of own) if (typeof stored[k] === 'string' && stored[k]) out[k] = stored[k];
+  return Object.keys(out).length ? out : null;
+}
+function saveFilters(page, state) {
+  const own = REMEMBERED[page] || [];
+  if (!own.length) return;
+  try {
+    const cur = storedFilters() || {};
+    for (const k of own) { if (state && state[k]) cur[k] = String(state[k]); else delete cur[k]; }
+    localStorage.setItem(FILTERS_KEY, JSON.stringify(cur));
+  } catch {}
+}
+/* devteam-shell-js end */
 // An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
 for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 // The hub's page: a tab per devteam instance on the machine (its name, and a badge when its Inbox
@@ -383,18 +817,7 @@ async function setFleet(roots, mode) {
 // ----- the Overview: every project on one page, to see at a glance that each is moving ----------
 // Each card is that project's own hello (its pulse), as text. A dashboard on an older kit sends no
 // pulse; its card says so and shows what it does send.
-const STATES = {
-  building: { label: 'Building', tone: 'green', rank: 3 },
-  moving: { label: 'Moving', tone: 'blue', rank: 3 },
-  blocked: { label: 'Fully blocked', tone: 'red', rank: 0 },
-  waiting: { label: 'Waiting on you', tone: 'amber', rank: 1 },
-  stalled: { label: 'Stalled', tone: 'red', rank: 0 },
-  idle: { label: 'Idle', tone: '', rank: 4 },
-  parked: { label: 'Parked', tone: '', rank: 4 },
-  gone: { label: 'Not answering', tone: 'red', rank: 0 },
-  starting: { label: 'Starting', tone: '', rank: 5 },
-  unknown: { label: 'Running', tone: 'blue', rank: 3 },
-};
+const STATES = PULSE_STATES;
 const stateOf = (it) => {
   if (it.goneAt) return 'gone';
   if (it.x.inbox === null || it.x.inbox === undefined) return 'starting';
