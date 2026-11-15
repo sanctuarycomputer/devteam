@@ -14153,7 +14153,35 @@ async function cmdBoxPins() {
     out(`wrote ${file}`);
     return;
   }
-  if (mode === 'installed') die(`box-pins ${mode}: not yet`);
+  if (mode === 'installed') {
+    // inside the image: what each tool says it is, asked at its path in the image, never through PATH
+    // (on the box dev's PATH finds mise's own uv first), against the pins the image was built with
+    const pinned = (process.env.DEVTEAM_BOX_TOOLS ?? '').trim();
+    if (!pinned) die('box-pins installed: DEVTEAM_BOX_TOOLS is not set (not the box image?)', 2);
+    const want = new Map(), unknown = [];
+    for (const pair of pinned.split(/\s+/)) {
+      const i = pair.indexOf('=');
+      const name = i > 0 ? pair.slice(0, i) : pair;
+      if (BOX_TOOLS.some((t) => t.name === name)) want.set(name, pair.slice(i + 1)); else unknown.push(name);
+    }
+    const bin = process.env.DEVTEAM_BOX_BIN || '/usr/local/bin';
+    let bad = 0;
+    const say = (line, ok = false) => { out(line); if (!ok) bad++; };
+    for (const tool of BOX_TOOLS) {
+      const pin = want.get(tool.name);
+      if (pin === undefined) { say(`${tool.name}: not in DEVTEAM_BOX_TOOLS`); continue; }
+      const [file, ...args] = tool.run;
+      const r = spawnSync(path.join(bin, file), args, { encoding: 'utf8', timeout: 20000, env: { ...process.env, ...tool.env } });
+      if (r.error || r.status !== 0) { say(`${tool.name}: did not run (${r.error ? safe(r.error.code) : r.signal ? safe(r.signal) : `exit ${r.status}`})`); continue; }
+      const found = tool.parse(r.stdout);
+      if (!found) { say(`${tool.name}: no version in its output`); continue; }
+      const v = pinForm(found, pin);
+      if (v === pin) say(`${tool.name}: ${safe(v)}`, true); else say(`${tool.name}: installed ${safe(v)}, pinned ${safe(pin)}`);
+    }
+    for (const n of unknown) say(`${safe(n)}: not a tool box-pins knows`);
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
   die(`usage: ${BOX_PINS_USAGE}`);
 }
 

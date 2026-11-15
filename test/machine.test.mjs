@@ -1277,3 +1277,59 @@ test('bump downloads nothing for a tool already current', async (t) => {
   const after = fs.readFileSync(f, 'utf8');
   for (const a of ['TTYD_VERSION', 'TTYD_SHA256_X86_64', 'TTYD_SHA256_AARCH64']) assert.equal(argOf(after, a), argOf(before, a));
 });
+
+// installed, as the image runs it: the image's kit (a folder that is no repo), from a cwd that is no
+// repo, each tool by its path in the image (here DEVTEAM_BOX_BIN), and a PATH whose first uv is
+// mise's shim, which a lookup through PATH would wrongly ask.
+const imageKit = path.join(tmp, 'image-kit');
+fs.cpSync(kit, imageKit, { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+const TOOLS_ENV = 'claude-code=2.1.307 claude-swap=1.0.0 gh=2.104.0 ttyd=1.7.7 mise=v2026.10.17 uv=0.13.7';
+function fakeBins(name, scripts) {
+  const d = path.join(tmp, name);
+  for (const [f, body] of Object.entries(scripts)) { write(path.join(d, f), `#!/bin/sh\n${body}\n`); fs.chmodSync(path.join(d, f), 0o755); }
+  return d;
+}
+const say = (s) => `printf '%s\\n' ${s.split('\n').map((l) => `'${l}'`).join(' ')}`;
+const boxBin = fakeBins('box-bin', {
+  claude: say('2.1.307 (Claude Code)'),
+  gh: say('gh version 2.104.0 (2026-10-01)\nhttps://github.com/cli/cli/releases/tag/v2.104.0'),
+  ttyd: say('ttyd version 1.7.7-40e79c7'),
+  mise: say('2026.10.17 linux-x64 (2026-10-21)'),
+  uv: `case "$1" in
+  --version) ${say('uv 0.13.7 (x86_64-unknown-linux-gnu)')} ;;
+  tool) if [ "$UV_TOOL_DIR" = /opt/uv/tools ]; then ${say('claude-swap v1.0.0\n- claude-swap\n- cswap')}; else echo 'No tools installed'; fi ;;
+  *) exit 2 ;;
+esac`,
+});
+const shimBin = fakeBins('shim-bin', { claude: say('9.9.9 (Claude Code)'), gh: say('gh version 9.9.9'), ttyd: say('ttyd version 9.9.9'), mise: say('9.9.9 linux-x64'), uv: `[ "$1" = tool ] && ${say('claude-swap v9.9.9')} || ${say('uv 0.9.0 (mise shim)')}` });
+const installed = (env) => spawnSync(process.execPath, [path.join(imageKit, 'scripts', 'devteam.mjs'), 'box-pins', 'installed'], { cwd: nowhere, encoding: 'utf8', env: pinsEnv({ PATH: `${shimBin}${path.delimiter}${baseEnv.PATH}`, ...env }) });
+
+test('box-pins installed reads each tool by its image path and claude-swap from the image\'s tool dir', () => {
+  const r = installed({ DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: TOOLS_ENV });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.deepEqual(r.stdout.trim().split('\n'), ['claude-code: 2.1.307', 'claude-swap: 1.0.0', 'gh: 2.104.0', 'ttyd: 1.7.7', 'mise: v2026.10.17', 'uv: 0.13.7']);
+  // the same from inside a worker's checkout, with its session's run folder: still the machine's command
+  const w = installed({ DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: TOOLS_ENV, DEVTEAM_RUN: path.join(tmp, 'elsewhere', 'run') });
+  assert.equal(w.status, 0, w.stderr);
+});
+
+test('installed exits 1 naming the tool that differs, or is missing', () => {
+  const r = installed({ DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: TOOLS_ENV.replace('gh=2.104.0', 'gh=2.105.0') });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /^gh: installed 2\.104\.0, pinned 2\.105\.0$/m);
+  assert.match(r.stdout, /^uv: 0\.13\.7$/m);
+  const partial = fakeBins('box-bin-no-ttyd', Object.fromEntries(['claude', 'gh', 'mise', 'uv'].map((f) => [f, `exec '${path.join(boxBin, f)}' "$@"`])));
+  const m = installed({ DEVTEAM_BOX_BIN: partial, DEVTEAM_BOX_TOOLS: TOOLS_ENV });
+  assert.equal(m.status, 1);
+  assert.match(m.stdout, /^ttyd: did not run \(ENOENT\)$/m);
+  const odd = installed({ DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: `${TOOLS_ENV.replace(' uv=0.13.7', '')} node=22.1.0` });
+  assert.equal(odd.status, 1);
+  assert.match(odd.stdout, /^uv: not in DEVTEAM_BOX_TOOLS$/m);
+  assert.match(odd.stdout, /^node: not a tool box-pins knows$/m);
+});
+
+test('installed without DEVTEAM_BOX_TOOLS exits 2', () => {
+  const r = installed({ DEVTEAM_BOX_BIN: boxBin });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /box-pins installed: DEVTEAM_BOX_TOOLS is not set \(not the box image\?\)/);
+});
