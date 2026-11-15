@@ -484,12 +484,24 @@ test('records in home: a half-done merge, then a review record added on home\'s 
     assert.notEqual(runIn(old, ['merge', id], SUP).status, 0);
     // a record added since (a dispose, another track): the verdicts still hold, so the retry lands it
     const later = homeRecords(F, id, { 'reviews/task-9.md': review('late-reviewer', r.code) });
+    // a hand-made merge on home's main that borrows the records subject: never named, still flagged
+    const forge = path.join(F.base, 'forged');
+    g(['clone', '-q', path.join(F.base, 'origin.git'), forge], F.base);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], forge);
+    g(['checkout', '-q', '-b', 'x'], forge);
+    write(path.join(forge, 'README.md'), 'pushed past merge\n');
+    g(['commit', '-qam', 'unchecked'], forge);
+    g(['checkout', '-q', 'main'], forge);
+    g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'x'], forge);
+    g(['push', '-q', 'origin', 'main'], forge);
+    const forged = g(['rev-parse', 'HEAD'], forge);
     fs.rmSync(hook);
     assert.match(okIn(old, ['merge', id], SUP), new RegExp(`landed the records of ${id} at ${later.sha.slice(0, 12)} in home`));
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
-    assert.match(act.what, new RegExp(`; records at ${later.sha} in home, and earlier at ${r.head}`));
+    assert.match(act.what, new RegExp(`; records at ${later.sha} in home, and earlier at ${r.head}$`), 'the forged merge is not named');
     const f = json(okIn(old, ['metrics', '--json'])).findings;
-    assert.ok(!f.some((x) => ['merged-without-merge', 'records-without-code'].includes(x.kind)), 'both records merges are named by the act');
+    assert.ok(!f.some((x) => x.kind === 'records-without-code'));
+    assert.deepEqual(f.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject), [`home:${forged.slice(0, 12)}`], 'both records merges are named by the act; the forged one stays flagged');
     // --remove: a dirty records worktree refuses before anything is removed
     okIn(r.w, ['phase', 'done'], W);
     write(path.join(r.rw, `${T}/notes.md`), 'uncommitted\n');

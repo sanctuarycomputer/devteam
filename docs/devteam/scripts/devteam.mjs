@@ -5119,15 +5119,18 @@ function pinRecords(id) {
 // run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
 // (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
 // add a fallback to home there. null, or why it didn't land.
-// Every records head of a ticket merged into home's main by landRecords (its subject, "<id>:
-// records"): a half-done merge's first landing, and a later one after the records branch moved.
-// The merge act names them all, so none reads as a merge no act made.
-function landedRecordsHeads(id) {
+// Every earlier records head of a ticket merged into home's main by landRecords: a half-done
+// merge's first landing, before the records branch moved. The merge act names them, so none reads
+// as a merge no act made. A subject is only text anyone can write, so a head counts only when it is
+// an ancestor of the records merge checks now (so those checks covered it) and its merge changed
+// nothing outside the ticket's records folder; any other merge stays merged-without-merge.
+function landedRecordsHeads(id, recSha) {
+  const own = `${projectRel}/tickets/${id}/`;
   git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
   mainRefCache = undefined;
   const main = mainRef();
   if (!main) return [];
-  return (git(['log', main, '--first-parent', '--merges', '--format=%P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')[1]).filter((h) => /^[0-9a-f]{40}$/.test(h ?? ''));
+  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own))).map(([, , h]) => h);
 }
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
@@ -5430,7 +5433,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home${landedRecordsHeads(id).filter((h) => h !== rec.sha).map((h) => `, and earlier at ${h}`).join('')}` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home${landedRecordsHeads(id, rec.sha).map((h) => `, and earlier at ${h}`).join('')}` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
