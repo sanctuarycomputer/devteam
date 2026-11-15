@@ -14,7 +14,7 @@ Feature `supervisor-browser` (SB-S2, SB-S3). Spec, plan, reviews and verificatio
 
 ## For kit-66
 
-The page expects its socket at `/socket` on its own origin (`ws:` or `wss:`), serves nothing else, sends coordinates in frame pixels, sends a `paste` of up to 10 000 characters (about 60 KB of JSON at worst), and closes its socket on `bye` (spec, Contracts, Provided 1 to 6).
+The page expects its socket at `/socket` on its own origin (`ws:` or `wss:`), serves nothing else, sends coordinates in frame pixels, sends a `paste` of up to 10 000 characters (about 60 KB of JSON at worst), and closes its socket on `bye` (spec, Contracts, Provided 1 to 6). From final review 1: `nav.url` is what the owner typed (trimmed, `https://` added where it had no scheme), not the parsed URL, so the server's own check must parse it with the WHATWG URL parser, not a prefix or a regex (F4); and framing is the server's to limit: it must send `frame-ancestors` naming only the dashboard's origins, since a meta CSP can't (F5).
 
 ## How to verify
 
