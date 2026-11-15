@@ -978,6 +978,9 @@ test('merge covered_by: when coverage fails, the gate runs as today', async (t) 
         ['ci', [covRun('lint'), covSkipped('test')], [covRun('lint'), covSkipped('test')], /test is skipped/],
         [['test'], [covNeutral('test')], [covNeutral('test')], /test is neutral/],
         [['test'], green, [covRun('test'), covFailed('test')], /test is failure/],
+        // a re-run: the old failed attempt first, the new green one after; still not covered
+        [['test'], green, [covFailed('test'), covRun('test')], /test is failure/],
+        ['ci', green, [covFailed('test'), covRun('test')], /test is failure/],
         [['test'], green, [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: null }], /test is pending/],
         [['test'], green, [{ __typename: 'CheckRun', name: 'test' }], /test is pending/],
       ];
