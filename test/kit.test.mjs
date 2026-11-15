@@ -774,6 +774,71 @@ setInterval(() => {}, 1e6);
   }
 });
 
+// No caps by default: what keeps parallel workers apart is touches. ready marks a ready ticket whose
+// touches overlap a running one's (build rows only), idle capacity leaves it out, and caps the owner
+// sets still hold.
+test('ready marks a touches overlap with a running ticket, idle capacity skips it, and set caps still hold', async () => {
+  const F = threadsFixture('overlap');
+  try {
+    const H = 3600000;
+    const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+    const phaseLine = (id, from, to, agoMs) => F.hand(id, { id: `h-${stamp(new Date(Date.now() - agoMs))}-${id}`, type: 'phase', from, to }, agoMs, `${id}.jsonl`);
+    F.sup(['feature', 'add', 'olap', '--json', JSON.stringify({ title: 'Overlap', goals: [F.goal], stories: [{ id: 'OL-S1', text: 'parallel workers stay apart', release: 'v1.0.0' }] })]);
+    const add = (id, touches, depends_on = []) => F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'olap', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['OL-S1'], depends_on, touches, done_when: ['its test passes in CI'] })]);
+    add('o-01-running', ['src/a/**']);
+    add('o-02-overlaps', ['src/a/x.js']);
+    add('o-03-apart', ['lib/**']);
+    add('o-04-after', ['src/a/y.js'], ['o-01-running']);
+    // o-01 is a running worker: a phase line and its worktree here
+    phaseLine('o-01-running', null, 'starting', 60000);
+    phaseLine('o-01-running', 'starting', 'build', 30000);
+    F.g(['worktree', 'add', '-q', '-b', 'ticket/o-01-running', path.join(F.old, '.worktrees', 'o-01-running'), 'origin/main'], F.old);
+    const r = JSON.parse(F.sup(['ready', '--json']));
+    assert.ok(r.active.includes('o-01-running'));
+    const row = (id) => r.ready.find((x) => x.id === id);
+    assert.deepEqual(row('o-02-overlaps').overlaps_active, ['o-01-running'], 'an overlapping ready ticket is marked');
+    assert.equal(row('o-03-apart').overlaps_active, undefined, 'a disjoint one is not');
+    assert.ok(!row('o-04-after'), 'a ticket behind an unmerged dependency is not ready');
+    const text = F.sup(['ready']);
+    assert.match(text, /o-02-overlaps .*touches overlap o-01-running: start it once that merges/);
+    assert.doesNotMatch(text.split('\n').find((l) => / o-03-apart /.test(l)) ?? '', /overlap/);
+    assert.match(text, /^active workers: 1\/no cap$/m);
+    // plan-ahead: o-04 specs and plans beside its running dependency, and is told nothing about overlap
+    const pa = JSON.parse(F.sup(['ready', '--plan-ahead', '--json']));
+    assert.equal(pa.ready.find((x) => x.id === 'o-04-after')?.mode, 'plan-ahead');
+    assert.equal(pa.ready.find((x) => x.id === 'o-04-after').overlaps_active, undefined, 'plan-ahead rows are not marked');
+    // idle capacity offers only what can start, and says how many wait
+    const findings = JSON.parse(F.sup(['metrics', '--json'])).findings;
+    if (!findings.some((f) => f.kind === 'memory-full')) {
+      const idle = findings.find((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject));
+      assert.ok(idle, 'idle capacity');
+      assert.match(idle.suggestion, /o-03-apart/);
+      assert.doesNotMatch(idle.suggestion, /o-02-overlaps/, 'never suggests a ticket ready says must wait');
+      assert.match(idle.detail, /1 more wait on a running ticket/);
+    }
+    // caps the owner sets still hold: N/M, the component at cap, and idle capacity stops at the cap
+    const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+    const was = fs.readFileSync(sf, 'utf8');
+    assert.ok(was.includes('"agent_command": "true"') && !was.includes('max_active_tickets'));
+    fs.writeFileSync(sf, was.replace('"agent_command": "true"', '"max_active_tickets": 1, "max_active_per_component": 1, "agent_command": "true"'));
+    F.g(['commit', '-qm', 'caps', '--', 'docs/devteam/project/settings.md'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    const capped = F.sup(['ready']);
+    assert.match(capped, /^active workers: 1\/1$/m);
+    assert.match(capped, /o-03-apart .*\(component at cap\)/);
+    const rc = JSON.parse(F.sup(['ready', '--json']));
+    assert.equal(rc.caps.max_active_tickets, 1);
+    assert.ok(!JSON.parse(F.sup(['metrics', '--json'])).findings.some((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject)), 'at the cap, no idle capacity');
+    // 0 reads as no cap for both settings
+    fs.writeFileSync(sf, was.replace('"agent_command": "true"', '"max_active_tickets": 0, "max_active_per_component": 0, "agent_command": "true"'));
+    F.g(['commit', '-qm', 'zero caps', '--', 'docs/devteam/project/settings.md'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    const zero = F.sup(['ready']);
+    assert.match(zero, /^active workers: 1\/no cap$/m);
+    assert.doesNotMatch(zero, /component at cap/);
+  } finally { F.done(); }
+});
+
 // A stopped or held launch isn't a stuck session (kit-238): kit-211 was stopped a minute after launch
 // for the component cap (no window, no worktree), then held, and read as "starting, 109m STALE", a
 // high stale-worker on every sweep, and a worker toward the cap. Only a real stuck worker is stale.
@@ -786,7 +851,8 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     const phaseLine = (id, from, to, agoMs) => F.hand(id, { id: `h-${stamp(new Date(Date.now() - agoMs))}-${id}`, type: 'phase', from, to }, agoMs, `${id}.jsonl`);
     F.sup(['feature', 'add', 'stops', '--json', JSON.stringify({ title: 'Stops', goals: [F.goal], stories: [{ id: 'ST-S1', text: 'stopped launches read right', release: 'v1.0.0' }] })]);
     const ids = ['w-01-held', 'w-02-stopped', 'w-03-stuck', 'w-04-held-stopped'];
-    for (const id of ids) F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'stops', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['ST-S1'], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'] })]);
+    // w-02-stopped touches other files than the running w-03 and w-05: idle capacity offers only a ticket that can start
+    for (const id of ids) F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'stops', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['ST-S1'], depends_on: [], touches: [id === 'w-02-stopped' ? 'lib/**' : 'src/**'], done_when: ['the src test passes in CI'] })]);
     for (const id of ['w-01-held', 'w-02-stopped', 'w-04-held-stopped']) phaseLine(id, null, 'starting', 2 * H);
     phaseLine('w-03-stuck', null, 'starting', 2 * H + 60000);
     phaseLine('w-03-stuck', 'starting', 'build', 2 * H);

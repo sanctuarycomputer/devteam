@@ -24,7 +24,7 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${Math.round(inUse)}\nfile ${G}\n`);
   };
   const M = { ...SUP, DEVTEAM_CGROUP: cg, DEVTEAM_MEMINFO: none };
-  const ticket = (id) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['ch/**'], done_when: ['the tidy check passes in CI'] })], SUP);
+  const ticket = (id) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [`ch/${id}/**`], done_when: ['the tidy check passes in CI'] })], SUP);
   const starts = () => json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'worker-slots');
   const findings = (env) => json(ok(old, ['metrics', '--json'], env)).findings;
   const settings = (patch) => {
@@ -55,7 +55,7 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     const mf = full.find((f) => f.kind === 'memory-full');
     assert.ok(mf, 'memory-full is shown');
     assert.match(mf.detail, /^the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling, with 5 tickets ready, 0\/no cap workers active/);
-    assert.match(mf.suggestion, /lower max_active_tickets/);
+    assert.match(mf.suggestion, /set max_active_tickets \(or lower it\)/);
     assert.doesNotMatch(mf.suggestion, /make a worker|make workers/);
 
     // --force starts it, and its act says what it overrode

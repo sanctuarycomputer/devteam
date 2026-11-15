@@ -3816,6 +3816,13 @@ function notSchedulable(t) {
 // A cap setting as a number to compare against: null, absent or not a positive number is no cap.
 const capOf = (v) => (typeof v === 'number' && v > 0 ? v : Infinity);
 const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
+// The running tickets whose touches overlap t's in the same repo: t waits for them to merge. D4
+// usually orders such tickets already; touches widened after planning can still collide.
+function overlapsActive(t, activeIds, ts) {
+  const repo = repoOfTicketLink(t);
+  const mine = t.touches ?? [];
+  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => globsOverlap(ga, gb))); });
+}
 function cmdReady() {
   const ts = tickets();
   const rows = [];
@@ -3832,7 +3839,7 @@ function cmdReady() {
     if (isHeld(t)) { if (depsMerged || flags['plan-ahead']) held.push({ id: t.id, held: t.held }); continue; }
     if (depsMerged || flags['plan-ahead']) {
       const inc = t.kind === 'fix' ? incidentOfTicket(t.id) : null;
-      rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead', ...(inc ? { incident: inc.id, severity: incidentSeverity(inc) } : {}), touches: t.touches ?? [], repo: repoOfTicketLink(t) });
+      rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead', ...(inc ? { incident: inc.id, severity: incidentSeverity(inc) } : {}) });
     }
   }
   // fix tickets first, the most severe incident first; incident_slots lets that many run past
@@ -3842,14 +3849,15 @@ function cmdReady() {
   const active = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
-  // what keeps parallel workers apart: a ready ticket whose touches overlap a running one's in the same
-  // repo waits for it (D4 usually orders them already; a touches widened later can still collide)
+  // what keeps parallel workers apart: a ready ticket whose touches overlap a running one's waits for
+  // it to merge. Only build rows: a plan-ahead ticket specs and plans beside its running dependency.
   for (const r of rows) {
-    const hits = active.filter((id) => { const a = ts.get(id); return repoOfTicketLink(a) === r.repo && (a.touches ?? []).some((ga) => r.touches.some((gb) => globsOverlap(ga, gb))); });
+    if (r.mode !== 'build') continue;
+    const hits = overlapsActive(ts.get(r.id), active, ts);
     if (hits.length) r.overlaps_active = hits;
-    delete r.touches; delete r.repo;
   }
-  const capped = (r) => typeof s.max_active_per_component === 'number' && (perComponent[r.component] ?? 0) >= s.max_active_per_component;
+  // both caps read the same way: a positive number is a cap, anything else (null, 0) is none
+  const capped = (r) => (perComponent[r.component] ?? 0) >= capOf(s.max_active_per_component);
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
   out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
@@ -11583,12 +11591,15 @@ function collectMetrics(since) {
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
     if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
+  // what idle capacity offers: ready tickets that don't overlap a running one's touches (ready marks those)
+  const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length);
   // a ready fix ticket may use an incident slot past the cap
-  const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
+  const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
   if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
-  if (!drained && ready.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
-  if (memFull && (idlePlanning || (!drained && ((ready.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
+  if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
