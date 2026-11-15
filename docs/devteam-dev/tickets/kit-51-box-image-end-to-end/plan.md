@@ -3,8 +3,8 @@
 ## TL;DR
 
 - One file changes: `.github/workflows/box-image.yml`. Its `build` job keeps its build and its no-boot smoke check, then boots the image and checks it from inside, in the same job.
-- T1: boot, then the image's hub (DW1), a current dashboard leaving the port alone (DW2), and the versions (DW3).
-- T2: the hub comes back after a kill and after its window is closed (DW4), plus a failure dump and cleanup that always run.
+- T1: boot, then the image's hub (DW1), a current dashboard leaving the port alone (DW2), the versions (DW3), a failure dump, and cleanup.
+- T2: the hub comes back after a kill and after its window is closed (DW4). T1 already carries the failure dump and the cleanup (plan-1 F6).
 - Shared shell helpers are written once to `$RUNNER_TEMP/box.sh` and sourced. Every check reads a command's whole output first and then matches it. Never `cmd | grep -q` under pipefail (spec-1 F3).
 - Local checks only (no docker on the box): the YAML parses, and shellcheck passes on every `run:` body pulled out of it. The real test is the box-image run on the PR. The PR opens as a draft after T1, so each task is proved by its own CI run.
 - No kit, image or gateway change. If a check finds the image wrong, that goes to the supervisor as a `design-change`.
@@ -22,7 +22,7 @@
 ## Review focus
 
 1. **A check that passes vacuously.** REL is required to match `^v[0-9]+\.[0-9]+\.[0-9]+$` and TOOLS to be non-empty before any check uses them. The new-pid check after the kill requires the pid to differ from the killed one.
-2. **pipefail against an early-exiting reader** (box-status streams its output for seconds). Every check captures output first. In T1, the reviewer greps the yml for `| grep -q` and finds none.
+2. **pipefail against an early-exiting reader** (box-status streams its output for seconds). Every check captures output first. In the new steps, a grep for `| grep -q` finds none; the existing smoke step's two are left as they are (plan-1 F4).
 3. **docker exec's user and env.** The helper `dx` runs `docker exec -u dev -e HOME=/data/home box`. tmux then reaches dev's server (`/tmp/tmux-1000`), and lsof sees dev's processes.
 4. **A step that fails before box.sh exists.** The failure-dump and cleanup steps don't source it and never fail themselves.
 5. **Timing under load** (mise install and the operator's claude running): each wait is a poll with a deadline, never a single read or a fixed sleep. The one exception is the explicit "window is gone" check, made right after kill-window.
@@ -45,25 +45,30 @@
 - [ ] **Step 1:** Write the steps:
   1. `boot`: `docker volume create box-data`; `docker run -d --name box -e DEVTEAM_PUBLIC_URL=https://box.test -v box-data:/data -p 127.0.0.1:8080:8080 box`. Wait 120 s for `curl -fsS http://127.0.0.1:8080/healthz`; fail at once if `docker inspect -f '{{.State.Running}}' box` isn't `true`. Read REL and TOOLS with `docker exec box printenv` and validate them (review focus 1). Write box.sh.
   2. `the image's hub (DW1)`: `until_ok 60 'the hub answers' list_ok`; `has_hub_window`; `HUBPID=$(holder)`, exported.
-  3. `a current dashboard leaves the port alone (DW2)`. In one `dx sh -ec '…'`: `mkdir -p /data/home/code/e2e && cd` there; `git init -q -b main`; `mkdir -p docs`; `cp -R /opt/devteam/kit docs/devteam`; `node docs/devteam/scripts/devteam.mjs init --name e2e`; `git add -A`; `git -c user.name=e2e -c user.email=e2e@box.test commit -qm e2e`. Then `dx tmux new-window -d -t '=home:' -n e2e-dash -c /data/home/code/e2e "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"`. Run `until_ok 60` until the dashboard.log has `started on`. Then assert the log has a line whose text after the first `] ` is exactly `hub: left to the image (DEVTEAM_IMAGE_HUB=4320)`. Assert `holder` equals `$HUBPID`. Finally, `until_ok 15 'the list names e2e' list_ok /data/home/code/e2e`.
+  3. `a current dashboard leaves the port alone (DW2)`. In one `dx sh -ec '…'`: `mkdir -p /data/home/code/e2e && cd` there; `git init -q -b main`; `mkdir -p docs`; `cp -R /opt/devteam/kit docs/devteam`; `node docs/devteam/scripts/devteam.mjs init --name e2e`; `git add -A`; `git -c user.name=e2e -c user.email=e2e@box.test commit -qm e2e`. Then `dx tmux new-window -d -t '=home:' -n e2e-dash -c /data/home/code/e2e "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"`. Run `until_ok 60` until the dashboard.log has `started on`. Then assert the log has a line whose text after the first `] ` is exactly `hub: left to the image (DEVTEAM_IMAGE_HUB=4320)`: `t=$(dx cat "$log")`, then `while IFS= read -r l; do [ "${l#*] }" != '…' ] || left=1; done <<<"$t"` and require `left` (plan-1 F7). Assert `holder` equals `$HUBPID`. Finally, `until_ok 15 'the list names e2e' list_ok /data/home/code/e2e`.
   4. `the versions show (DW3)`: `logs=$(docker logs box 2>&1)`, then `grep -qxF "image: $REL"`. `st=$(dx box-status)`. Assert `st` has the whole line `machine: hub 4320 up, kit $REL (image)`, and the whole line `machine: box $REL: ` followed by TOOLS turned from `n=v n=v` into `n v, n v` in order.
-- [ ] **Step 2:** Check locally. `node -e` parses the yml with a YAML parser if one is at hand, or `python3 -c 'import yaml'` if PyYAML is present; otherwise check the indentation by eye and rely on GitHub's parse. Then extract each `run:` body to the scratchpad and run `shellcheck -s bash` on it. Expect no errors; any warnings are fixed or justified in a comment.
+  6. `on failure, what the box said`, with `if: failure()` and no box.sh: `docker logs box`, then `docker exec box cat` on `/data/home/box.log`, `/data/home/.devteam/hub-4320.log` and `/data/home/code/e2e/docs/devteam/run/dashboard.log`, then `docker exec -u dev -e HOME=/data/home box tmux list-windows -a`. Each is followed by `|| true`.
+  7. `clean up`, with `if: always()`: `docker rm -f box || true; docker volume rm box-data || true`.
+- [ ] **Step 2:** Check locally (plan-1 F5). Parse the yml with a real YAML parser (`ruby -ryaml`, or the npm `yaml` package in the scratchpad). Extract each `run:` body, box.sh as written, and the `IN_BOX` text to the scratchpad, and run `shellcheck -s bash` on each one. Expect nothing at warning level or above; info-level SC2016 on the single-quoted in-box text is intended. Then smoke the in-box checks locally against a real `hub --release v0.52.0` on a spare port (not 4320–4345), with port and kit path substituted. Each check passes on the hub, and fails on a wrong REL, an unlisted root, or a wrong argv[1].
 - [ ] **Step 3:** Commit (`kit-51 T1: boot the built image; its hub, a dashboard beside it, the versions`). Push, open the PR as a draft, and watch the box-image run. **Pass:** steps 1–4 green. If a check is red because the image is wrong (not the check), stop and send a `design-change` to the supervisor.
 - [ ] **Step 4:** Task review `reviews/task-1.md` (fresh subagent), with the run's URL and result in the request.
 
-### Task 2: the hub comes back; failure dump; cleanup (DW4)
+### Task 2: the hub comes back (DW4)
 
-**Files:** Modify `.github/workflows/box-image.yml` (steps after T1's).
+**Files:** Modify `.github/workflows/box-image.yml` (step 5 goes after T1's step 4, before the failure dump and cleanup).
 
 **Interfaces:** Consumes T1's `box.sh` helpers and `HUBPID`, `REL`.
 
 - [ ] **Step 1:** Write the steps:
-  5. `the hub comes back (DW4)`. In one `dx bash -c "$IN_BOX"'; …'`, with HUBPID and REL passed in by `-e`: `kill "$HUBPID"`, then poll every 0.2 s for 25 rounds (5 s). Each round: `list_in` succeeds and `holder_in` prints a pid other than HUBPID. Exit 1 if no round passes. Then `dx tmux kill-window -t '=home:hub'`, assert `! has_hub_window` once, `until_ok 90 'the minute loop brings back home:hub' has_hub_window`, then `until_ok 15 'the hub answers again' list_ok`, and assert `holder` succeeds.
-  6. `on failure, what the box said`, with `if: failure()` and no box.sh: `docker logs box`, then `docker exec box cat` on `/data/home/box.log`, `/data/home/.devteam/hub-4320.log` and `/data/home/code/e2e/docs/devteam/run/dashboard.log`, then `docker exec -u dev -e HOME=/data/home box tmux list-windows -a`. Each is followed by `|| true`.
-  7. `clean up`, with `if: always()`: `docker rm -f box || true; docker volume rm box-data || true`.
+  5. `the hub comes back (DW4)`. In one `dx env HUBPID="$HUBPID" bash -c "$IN_BOX"'<newline>…'` (REL arrives through `dx`'s `-e`; plan-1 F3): `kill "$HUBPID"`, then poll every 0.2 s against a wall-clock deadline 5 s after the kill (`date +%s%N`), not a count of rounds (plan-1 F2). Each poll: `list_in` succeeds and `holder_in` prints a pid other than HUBPID. Exit 1 once the deadline passes. Then `dx tmux kill-window -t '=home:hub'`, assert the window is gone with `if has_hub_window; then …; exit 1; fi` (`!` would be ignored by `set -e`; plan-1 F1), `until_ok 90 'the minute loop brings back home:hub' has_hub_window`, then `until_ok 15 'the hub answers again' list_ok`, and assert `holder` succeeds.
 - [ ] **Step 2:** Local checks as in T1, step 2.
 - [ ] **Step 3:** Commit (`kit-51 T2: the hub comes back after a kill and a closed window`). Push and watch the run. **Pass:** the whole box-image job is green.
 - [ ] **Step 4:** Task review `reviews/task-2.md`.
+
+## Rulings
+
+- m-20261115-052400316-supervisor: spec approved (at dd19577; spec-2 APPROVE).
+- m-20261115-051035503-supervisor: run only touched test files at --test-concurrency=2; the image build and boot run in GitHub CI, not on the box.
 
 ## Verification
 
