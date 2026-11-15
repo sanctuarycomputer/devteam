@@ -3999,7 +3999,18 @@ const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.en
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
 // A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
 // branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+// A dashboard request reads every ticket's records several times (deriveStatus and collectMetrics
+// each run more than once, and metrics reads them for reviewStats and reviewPasses): while one runs,
+// each ticket's folder is read once (reviewMemo, set by dashboardData) and reviewReads counts reads.
+let reviewMemo = null;
+let reviewReads = 0;
 const ticketReviews = (id, src) => {
+  if (!reviewMemo) return ticketReviewsRead(id, src);
+  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}`}`;
+  if (!reviewMemo.has(k)) { reviewReads++; reviewMemo.set(k, ticketReviewsRead(id, src)); }
+  return reviewMemo.get(k);
+};
+const ticketReviewsRead = (id, src) => {
   if (recordsInHomeId(id)) {
     const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
     return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
@@ -11436,6 +11447,62 @@ function threadAnswersUnbound() {
     return why ? { id: l.id, why } : null;
   }).filter(Boolean);
 }
+// ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
+
+const METRICS_INTERNALS = Symbol('metrics internals');
+// kit-98's weeks: the last 12 calendar weeks (Monday 00:00 UTC), oldest first, ending with this one.
+const efficiencyWeeks = (now) => Array.from({ length: 12 }, (_, i) => { const start = mondayOf(now) - (11 - i) * WEEK; return { start, end: start + WEEK }; });
+// A ticket's review record as a pass of its own work, by file name: parseReview reads task-2.md as
+// pass 2 and task-2-2.md as stage task-2-2, but each task-<n>.md is task n's first review (ruling
+// m-20261115-204118085-supervisor). Tracks, contracts, designs and graphs aren't counted.
+function reviewPassOf(file) {
+  const x = /^(spec|plan|final)-(\d+)\.md$/.exec(file);
+  if (x) return { stage: x[1], first: Number(x[2]) === 1 };
+  if (/^task-\d+\.md$/.test(file)) return { stage: 'task', first: true };
+  if (/^task-\d+-\d+\.md$/.test(file)) return { stage: 'task', first: false };
+  return null;
+}
+function firstPassOf(records) {
+  const firsts = records.filter((r) => r.verdict && reviewPassOf(r.file)?.first);
+  return { first_passes: firsts.length, rejected: firsts.filter((r) => r.verdict === 'CHANGES').length };
+}
+// every ticket's records, from where reviewStats reads them (shared through reviewMemo)
+const ticketReviewWalk = () => new Map([...tickets().keys()].map((id) => { const b = ticketBranchRef(id); return [id, ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)]; }));
+const TOKEN_KINDS = ['input', 'output', 'cache_read', 'cache_write'];
+function tokensByPhase(items) {
+  const o = {};
+  for (const r of items) { const t = (o[r.phase] ??= { input: 0, output: 0, cache_read: 0, cache_write: 0 }); for (const k of TOKEN_KINDS) t[k] += r[k]; }
+  return o;
+}
+function efficiencyData(m) {
+  const { cycles, ticketUsd, perPoint, items } = m[METRICS_INTERNALS];
+  const walk = ticketReviewWalk();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const r2 = (x) => +x.toFixed(2);
+  const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
+    // the week's tickets: merged in it with spend recorded, the set perPoint counts
+    const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
+    const pp = perPoint(start, end);
+    const points = pp?.points ?? 0;
+    const fp = done.map((c) => firstPassOf(walk.get(c.id) ?? [])).reduce((a, f) => ({ n: a.n + f.first_passes, bad: a.bad + f.rejected }), { n: 0, bad: 0 });
+    // the week's spend items: those timed in it, as collectMetrics selects them for its window
+    const its = items.filter((x) => x.at >= start && x.at < end);
+    const usd = {};
+    for (const r of its) usd[r.phase] = (usd[r.phase] ?? 0) + r.usd;
+    const inSide = its.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    return {
+      starts_at: new Date(start).toISOString(), tickets: done.length, points, usd_per_point: pp?.usd_per_point ?? null,
+      hours_per_point: points ? r2(done.reduce((a, c) => a + c.ms, 0) / 3600000 / points) : null,
+      first_pass: fp.n ? r2((fp.n - fp.bad) / fp.n) : 1, first_passes: fp.n,
+      cache_read_share: inSide ? r2(its.reduce((a, x) => a + x.cache_read, 0) / inSide) : null,
+      escaped_defects: defects.filter((t) => t >= start && t < end).length,
+      usd_by_phase: Object.fromEntries(Object.entries(usd).map(([k, v]) => [k, r2(v)])), tokens_by_phase: tokensByPhase(its),
+      score: null, parts: null,
+    };
+  });
+  return { weeks, best: null, score: null, parts: null, observe: null, waste: [], trials: [], suggestions: [] };
+}
+
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -11538,6 +11605,8 @@ function collectMetrics(since) {
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
     escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
   };
+  // what efficiencyData recomputes per calendar week, by the same code (not in the JSON)
+  Object.defineProperty(m, METRICS_INTERNALS, { value: { cycles, ticketUsd, perPoint, items, POINTS } });
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
   const threadsNow = threadViews(readLog().objects);
@@ -12044,7 +12113,12 @@ function collectOoda() {
   };
 }
 function dashboardData() {
+  reviewMemo = new Map();
+  try { return dashboardDataRead(); } finally { reviewMemo = null; }
+}
+function dashboardDataRead() {
   const settings = loadSettings();
+  const metrics = collectMetrics(0);
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
@@ -12056,7 +12130,8 @@ function dashboardData() {
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
-    metrics: collectMetrics(0),
+    metrics,
+    efficiency: efficiencyData(metrics),
     progress: collectProgress(),
     planners: planners(),
     ooda: collectOoda(),
@@ -12091,7 +12166,11 @@ function dashboardKit() {
   if (!dashboardKitCache || Date.now() - dashboardKitCache.at > 60000) dashboardKitCache = { at: Date.now(), kit: kitVersion() };
   return dashboardKitCache.kit;
 }
-const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
+const cmdDashboardData = () => {
+  gitReadCache = new Map();
+  out(JSON.stringify(dashboardData()));
+  if (process.env.DEVTEAM_TEST_REVIEW_READS) process.stderr.write(`review reads: ${reviewReads}\n`);
+};
 
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
