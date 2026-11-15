@@ -233,8 +233,14 @@ test('threads by state, in the hello and the data', { timeout: 300000 }, async (
   const t4 = open('fourth question');
   F.owner(['thread', 'resolve', t4]);
 
+  // T5: proposed as ready, then the owner spoke again: no longer ready, and it waits on the supervisor
+  const t5 = open('fifth question');
+  F.sup(['thread', 'reply', t5, 'an answer']);
+  F.sup(['thread', 'ready', t5, '--outcome', 'done']);
+  F.owner(['thread', 'say', t5, 'not yet']);
+
   const before = logBytes(F);
-  const want = { you: 1, waiting: 1, ready: 1 };
+  const want = { you: 1, waiting: 2, ready: 1 };
   assert.deepEqual(json(F.ok(F.old, ['hello', '--json'])).threads, want);
   assert.deepEqual(data(F).threads, want);
   assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
