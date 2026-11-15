@@ -278,6 +278,10 @@
                 "type": "string",
                 "maxLength": 200,
                 "description": "The machine a fleet op ran on, so the moved fleet's supervisor knows whether it is on the old machine or the new one."
+              },
+              "move": {
+                "const": true,
+                "description": "The fleet op is a move to another machine (fleet park|drain --move): only then is the host claim released. Absent, the op is a pause on this machine (throttling spend, waiting on the owner or on information)."
               }
             },
             "required": [

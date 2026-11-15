@@ -117,8 +117,22 @@ test('host claim: a parked or drained fleet hands the claim to the machine it mo
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
     assert.equal(run(neu, ['prompt', 'supervisor'], MAC).status, 1);
     // park on the box: the claim says so at once
-    ok(old, ['fleet', 'park', '--reason', 'moving to the mac'], { ...SUP, ...BOX });
+    // a park with no --move is a pause: the claim stays this machine's, and the Mac still can't start
+    ok(old, ['fleet', 'park', '--reason', 'throttling spend'], { ...SUP, ...BOX });
+    assert.equal(claimOf(g, org).fleet, null, 'a pause keeps the claim');
+    assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /parked as a pause on this machine, not a move/);
+    assert.match(ok(old, ['prompt', 'supervisor'], { ...SUP, ...BOX }), /a pause on this machine, not a move/);
+    assert.equal(run(neu, ['prompt', 'supervisor'], MAC).status, 1, 'another machine still may not take a paused fleet');
+    const paused = json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet;
+    assert.equal(paused.mode, 'park');
+    assert.equal(paused.moving, false, 'a pause is not a move');
+    assert.equal(paused.goals.run, 0);
+    assert.ok(paused.goals.park >= 1, 'every goal counted as parked');
+    ok(old, ['fleet', 'unpark'], { ...SUP, ...BOX });
+    // park on the box to move it: the claim says so at once
+    ok(old, ['fleet', 'park', '--move', '--reason', 'moving to the mac'], { ...SUP, ...BOX });
     assert.equal(claimOf(g, org).fleet, 'park');
+    assert.equal(json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet.moving, true, 'a park with --move is a move');
     assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /supervising machine: the-box \(machine box-0000000001, this machine\), last seen .*its fleet parked for a move/);
     // the Mac starts: it takes the claim over
     const took = run(neu, ['prompt', 'supervisor'], MAC);

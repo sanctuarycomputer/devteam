@@ -80,7 +80,7 @@ Every goal, and the built-in Upkeep goal that owns chores, has a toggle on the d
 **Moving to another machine.** On the old one, park the fleet from the dashboard, or tell the supervisor ("Park the fleet; I'm moving it to my new laptop"). Fleet drain works too, more slowly: every ticket in flight finishes first. It runs:
 
 ```
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet park --reason "moving to a new laptop"
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet park --move --reason "moving to a new laptop"
 # once every session is parked, its own handoff, pushed as a tag:
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs handoff --supervisor < note.md
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet status     # what's left; repeat until "ready to move: yes"

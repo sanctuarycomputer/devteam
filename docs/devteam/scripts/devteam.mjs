@@ -3651,6 +3651,13 @@ function fleetOpInForce() {
   const hs = holdableGoals().map((g) => g.hold).filter((h) => h?.fleet);
   return hs.sort((a, b) => b.fleet.localeCompare(a.fleet))[0] ?? null;
 }
+// The fleet is held to move to another machine: a fleet op made with --move, or an old drain (which
+// was only ever for a move). A pause (throttling, waiting on the owner) keeps the machine's claim.
+// How many holdable goals (Upkeep included) are running, draining and parked: a fleet whose goals
+// are mixed is partly held, which fleetMode alone (every goal one way, or null) can't say. The hub's
+// Overview and machine status read it, so a fleet with most goals parked never looks fully running.
+const goalModeCounts = () => { const c = { run: 0, drain: 0, park: 0 }; for (const g of holdableGoals()) { const m = goalMode(g); if (m in c) c[m]++; } return c; };
+const movingFleet = () => !!draining() || !!fleetOpInForce()?.move;
 const newFleetId = () => { const at = nowIso(); return `f-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
 // A session's goals: a worker's ticket's; a planner's feature line's, its questions', or its launch's.
 function sessionGoals(name) {
@@ -13935,6 +13942,8 @@ function machineLine(last) {
 // What the last check-in saw, and what this one leaves for the next: kept at least DEVTEAM_STATUS_SECONDS
 // (20 minutes), so a run by hand in between doesn't hide a change from the next check-in.
 const statusLastFile = () => path.join(os.homedir(), '.devteam', `status-last-${HUB_PORT}`);
+// box-status's fleet= when goals are mixed: (2 of 11 goals running), with draining ones named too
+const partlyHeld = (f) => { const c = f?.goals; if (!c) return ''; const all = c.run + c.drain + c.park; if (!all || c.run === all || c.park === all || (c.drain === all)) return ''; return `(${c.run} of ${all} goals running${c.drain ? `, ${c.drain} draining` : ''})`; };
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -13991,7 +14000,7 @@ async function machineStatus() {
     const ks = harvestOf(root, notes);
     if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
     const sib = siblingOf(root, roots);
-    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
+    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'}${partlyHeld(hello.fleet)} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
   }
   // every agent's pane (never the owner's shell, never read): those stuck, and those that moved since the last reading
   const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_current_command}\t#{session_name}']) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
@@ -14509,7 +14518,7 @@ async function cmdDashboard() {
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
-    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
+    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) && (b.move === undefined || typeof b.move === 'boolean') ? ['fleet', b.op, '--owner', ...(b.move === true && ['drain', 'park'].includes(b.op) ? ['--move'] : []), ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     // the card's Mark met: goal status met, which reads a repo or prod check again first
     'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
     // the owner's goal order (kit-234's drag to reorder): the goals named, first to last
@@ -16307,14 +16316,17 @@ function cmdFleet() {
     if (inForce('drain')) fleetUndo('drain');
     return;
   }
-  die('usage: fleet drain | park [--reason "…"]   |   fleet undrain | unpark | resume   |   fleet status   |   fleet host [--release | --take]   (add --owner when the owner runs it)');
+  die('usage: fleet drain | park [--reason "…"] [--move]   |   fleet undrain | unpark | resume   |   fleet status   |   fleet host [--release | --take]   (add --owner when the owner runs it)');
 }
 // Set every goal's hold at once (Upkeep included), recording what each was. A fleet drain touches
 // only running goals and a fleet park only goals not already parked, so undoing it puts back
 // exactly what it changed.
 function fleetOp(mode) {
   const by = fleetWriter();
-  const reason = flagStr('reason') ?? (mode === 'park' ? 'moving the fleet to another machine' : 'finishing in-flight work, starting none');
+  // A park or drain is a pause unless it says it is a move (--move): throttling spend, waiting on
+  // the owner or on information, a quiet week. Only a move releases the host claim (hostClaimBody).
+  const move = !!flags.move;
+  const reason = flagStr('reason') ?? (mode === 'park' ? (move ? 'moving the fleet to another machine' : 'paused: nothing runs until the fleet is unparked') : (move ? 'finishing in-flight work, then moving the fleet to another machine' : 'finishing in-flight work, starting none'));
   const op = newFleetId();
   const host = os.hostname();
   const changed = [];
@@ -16323,14 +16335,14 @@ function fleetOp(mode) {
     if (mode === 'drain' ? m !== 'run' : m === 'park') continue;
     const cur = g.hold ?? { mode: 'run' };
     const prior = { mode: cur.mode, ...(cur.reason ? { reason: cur.reason } : {}), ...(cur.fleet ? { fleet: cur.fleet } : {}) };
-    writeHold(g, { mode, reason, fleet: op, host, prior }, by);
+    writeHold(g, { mode, reason, fleet: op, host, ...(move ? { move: true } : {}), prior }, by);
     changed.push(isUpkeep(g) ? 'upkeep' : g.id);
   }
   if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
-  // the claim says the fleet is held for a move, so the machine it moves to may take it over
+  // only a move releases the claim, so the machine it moves to may take it over; a pause keeps it here
   logCache = null;
   if (by === 'supervisor') hostCheck();
-  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})${move ? ' to move it' : ''}: ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
   out(`${mode === 'park' ? 'parked' : 'draining'} the fleet (${op}): ${changed.length} goal(s) set to ${mode}, Upkeep included; nothing new starts until fleet un${mode}`);
   if (mode === 'park') {
     if (by === 'supervisor') {
@@ -16339,10 +16351,10 @@ function fleetOp(mode) {
       out("next: once every session is parked, write your own handoff (what you were in the middle of, what you are waiting on, what you told the owner you would do, and anything from your agent's own memory the next supervisor needs: owner rules belong in knowledge) and push it: devteam.mjs handoff --supervisor, the note on stdin");
     } else nudgeSupervisor(`[devteam fleet park ${op} from owner] send the park rulings (goal park-sessions --all), write your handoff and land it, then fleet status`);
   } else {
-    out('in-flight work carries on and merges; fleet status says "ready to move" once nothing is running');
+    out(move ? 'in-flight work carries on and merges; fleet status says "ready to move" once nothing is running' : 'in-flight work carries on and merges; nothing new starts until fleet undrain');
     if (by !== 'supervisor') nudgeSupervisor(`[devteam fleet drain ${op} from owner] start nothing new; let in-flight work finish and merge`);
   }
-  out('then: fleet status until it says "ready to move" if you are moving machines (it lists what is left, and the new machine\'s checklist)');
+  out(move ? 'then: fleet status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)' : `a pause on this machine, not a move: it keeps supervising here. To move machines, fleet ${mode} --move (supervisor.md §12)`);
 }
 // Everything the move needs, checked, then the new machine's checklist. Writes nothing.
 // A whole fleet parked or drained can move: parked sessions carry their work in git with a handoff
@@ -16536,6 +16548,7 @@ function fleetStatus() {
   out(`open owner questions (they move with the log): ${openQs.length ? openQs.map((q) => `${q.id} "${q.question.slice(0, 60)}"`).join('; ') : 'none'}`);
   if (blockers.length) { out('\nleft to do:'); for (const b of blockers) out(`  - ${b}`); }
   if (warnings.length) { out('\nwarnings:'); for (const w of warnings) out(`  - ${w}`); }
+  if (fm && !movingFleet()) out(`\n${fm === 'park' ? 'parked' : 'draining'} as a pause on this machine, not a move (its claim stays here); to move it, fleet ${fm} --move`);
   out(`\nready to move: ${ready ? 'yes' : 'no'}`);
   if (parity) out(`parity: ${parity.hash} (${parity.lines} log entries). fleet un${fm} on the new machine prints its own before it writes anything; they match when the move is 1:1. Stop now: anything you log from here on stays on this machine.`);
   out('\nnew-machine checklist:');
@@ -16647,7 +16660,9 @@ function drainedPreface() {
   const op = fleetOpInForce();
   const host = legacy ? drainHost(legacy) : op?.host ?? null;
   const what = legacy ? `drained by an old drain (${legacy.id}, ${legacy.created_at}: ${drainReason(legacy)})` : `${fm === 'park' ? 'parked' : 'draining'}${op ? ` (${op.fleet}${op.reason ? `: ${op.reason}` : ''})` : ' (every goal is held)'}`;
-  if (fm === 'drain' && !legacy) return `The fleet is ${what}${host ? `, set on ${host}` : ''}: every goal is draining, so in-flight work finishes and merges and nothing new starts. Carry on with what is running; fleet status says "ready to move" once nothing is. fleet undrain lifts it.`;
+  if (fm === 'drain' && !legacy) return `The fleet is ${what}${host ? `, set on ${host}` : ''}: every goal is draining, so in-flight work finishes and merges and nothing new starts. Carry on with what is running${movingFleet() ? '; fleet status says "ready to move" once nothing is' : ''}. fleet undrain lifts it.`;
+  // a pause, not a move: this machine keeps supervising, and nothing here is about moving
+  if (!legacy && !movingFleet()) return `The fleet is ${what}${host ? `, on ${host}` : ''}: a pause on this machine, not a move (the owner may be throttling spend or waiting on something). Start no ticket and no planner. Keep the loop: observe, answer threads and messages, keep questions and the log current. Resume when the owner unparks it, or says to (fleet unpark). Moving machines is fleet park --move (supervisor.md §12).`;
   // A checkout with no live log is a fresh clone; hostnames repeat (a default laptop name), so a
   // matching one counts only where run/log is still there.
   const liveHere = fs.existsSync(liveLogDir()) && fs.readdirSync(liveLogDir()).some((f) => f.endsWith('.jsonl'));
@@ -16771,6 +16786,7 @@ function hostClaimBody(prev) {
   let fleet = null;
   try {
     fleet = draining() ? 'park' : fleetMode();
+    if (fleet && !movingFleet()) fleet = null;
     if (fleet === 'drain' && liveSessions().some((s) => lastPhaseOf(s.name)?.to !== 'parked')) fleet = null;
   } catch {}
   const me = hostMachineId();
@@ -18787,7 +18803,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -19699,6 +19715,7 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   fleet drain | park [--reason r] [--owner]   every goal at once (Upkeep included): drain sets running goals to drain, park sets every goal not parked to park; each records what it replaced
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
   handoff [--file f] [--supervisor]   a parked worker or planner: the note (stdin) as an empty "devteam handoff: <name>" commit on its branch, pushed; the supervisor: an annotated devteam-handoff/<op> tag on origin
+  fleet park|drain [--reason r] [--move]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
   fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
   fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
   drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
