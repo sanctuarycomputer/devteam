@@ -5702,8 +5702,10 @@ async function viewerArtifact() {
   const d = got.d;
   showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: held ?? (d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read'), fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
 }
-// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, and the
-// instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
+// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, the
+// instance's hello (its name) every 30 s, and for an artifact on main or a draft its fingerprint
+// every 10 s while seen (/api/view: one artifact describe per ask, for the reload button's hint).
+// Nothing else.
 async function viewerBoot() {
   document.documentElement.classList.add('viewer');
   if (VIEWER.kind === 'preview') { if (showPreview(VIEWER.name, await previewInfo(VIEWER.name)) === 'reload') return; }
@@ -5730,6 +5732,19 @@ async function viewerBoot() {
   viewerTalk();
   addEventListener('hashchange', viewerTalk);
   setInterval(() => { if (document.visibilityState === 'visible') tlRefresh(); }, 5000);
+  // one ask at a time (a describe can take 12 s), for the stage as it is when asked; a tree never changes
+  let asking = false;
+  setInterval(async () => {
+    if (asking || document.visibilityState !== 'visible' || TS.kind !== 'artifact' || String(TS.at).startsWith('tree:')) return;
+    const { slug, at } = TS;
+    asking = true;
+    const stop = new AbortController();
+    const late = setTimeout(() => stop.abort(), 15000);
+    try {
+      const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`, { signal: stop.signal });
+      if (r.ok) { const j = await r.json(); avFpSeen(j.fp ?? null, j.main_fp ?? null, slug, at); }
+    } catch {} finally { clearTimeout(late); asking = false; }
+  }, 10000);
 }
 // #talk/<id> in a viewer tab, and nothing else of the dashboard's routes.
 function viewerTalk() {

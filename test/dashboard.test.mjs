@@ -2066,7 +2066,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     assert.deepEqual(await p.ev(`[TS.kind, TS.at, /^[0-9a-f]{64}$/.test(TS.fp ?? '')]`), ['artifact', 'demo-01-draft', true], 'opened with its fingerprint');
     let b = await button();
     assert.deepEqual([b.stale, b.title], [false, FRESH], 'nothing newer at open');
-    // a press before any check: what it loaded is still known, so a later change still says so
+    // a press on the version shown changes nothing (a press before any check is the viewer tab's, below)
     await p.click('#av-reload');
     await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
     assert.equal((await button()).stale, false);
@@ -2081,11 +2081,42 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     assert.notEqual(dark, light, 'the dark token is another colour');
     assert.equal((await button()).color, dark, 'the warning colour, dark');
     await scheme('light');
+    // and some seconds on, still the old version: only the press loads it
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(await said('v2'), 0, 'still nothing reloaded by itself');
     await p.click('#av-reload');
     await soon(`__titles.includes('v2')`, 'the new version in the frame');
     b = await button();
     assert.deepEqual([b.stale, b.title], [false, FRESH], 'the outline goes');
     assert.equal(await p.ev('TS.fp === TS.fpNow'), true);
+  });
+
+  await t.test('in a viewer tab: its own check of the draft, every 10 s; a press before any check still leaves the hint to come; a tree is never checked', async () => {
+    edit('v1');
+    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=demo-01-draft` });
+    await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the viewer');
+    // pressed before the tab's first check: only boot's ask so far
+    await p.click('#av-reload');
+    await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
+    assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'no check yet when pressed');
+    let b = await button();
+    assert.deepEqual([b.stale, b.title], [false, FRESH]);
+    edit('v3');
+    await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
+    b = await button();
+    assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
+    await p.click('#av-reload');
+    await soon(`__titles.includes('v3')`, 'the new version in the frame');
+    assert.deepEqual([(await button()).stale, (await button()).title], [false, FRESH], 'the outline goes');
+    // a published tree: after one 10 s tick has passed (four reads of the threads: boot's and three
+    // 5 s ticks, started beside it), still only boot's ask
+    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=tree:${T}` });
+    await soon(`document.documentElement.classList.contains('viewer') && typeof TS === 'object' && TS.at === 'tree:${T}'`, 'the tree in the viewer');
+    await soonView(`__asked.filter((u) => u === '/api/threads').length >= 4`, 'a 10 s tick gone by');
+    assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'a tree is never checked');
+    assert.equal((await button()).stale, false);
   });
 });
 test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
