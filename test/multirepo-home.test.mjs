@@ -311,6 +311,7 @@ test('records in home: merge checks the records at one pinned sha and lands them
     tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| local | x | pass |\n` }, () => {
       assert.match(runIn(old, ['check-ticket', id, '--sha', r.code]).out, /records verdict .* does not hold/);
       assert.equal(dry().status, 0, dry().out);
+      assert.doesNotMatch(runIn(old, ['check-pr', '--repo', 'console', '--head-ref', `ticket/${id}`, '--sha', r.code]).out, /records verdict|no records/, "check-pr --repo judges origin's records, which hold");
     });
     // and the reverse: origin's records broken, the local branch fine: merge refuses
     tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| pushed | x | pass |\n` }, () => { g(['push', '-q', 'origin', `ticket/${id}`], r.rw); });
@@ -318,6 +319,12 @@ test('records in home: merge checks the records at one pinned sha and lands them
     assert.match(dry().out, /records verdict .* does not hold/);
     assert.match(runIn(old, ['check-pr', '--repo', 'console', '--head-ref', `ticket/${id}`, '--sha', r.code]).out, /records verdict .* does not hold/, "check-pr --repo judges origin's records too");
     g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.rw);
+    // home's ticket/<id> not on origin: check-pr --repo refuses, never passing with no records read
+    g(['push', '-q', 'origin', `:ticket/${id}`], r.rw);
+    const gone = runIn(old, ['check-pr', '--repo', 'console', '--head-ref', `ticket/${id}`, '--sha', r.code]);
+    assert.notEqual(gone.status, 0);
+    assert.match(gone.out, new RegExp(`no records for ${id} in home: home's ticket/${id} is not on origin; push it`));
+    g(['push', '-q', 'origin', `ticket/${id}`], r.rw);
 
     // the half-done merge: console's origin refuses the push, after the records landed
     const hook = path.join(F.consoleOrigin, 'hooks', 'pre-receive');

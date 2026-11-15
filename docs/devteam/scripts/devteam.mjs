@@ -4813,7 +4813,10 @@ function cmdCheckPr() {
   const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
   // judged as origin has them (never a local branch that may not be pushed); none there: none
   const records = R.name !== 'home' && tid && recordsInHomeId(tid) ? (gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0 ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
-  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
+  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) });
+  // none on origin: say so (checkTicket leaves the why to its caller when told none is pinned)
+  if (records === null) fails.push(`no records for ${tid} in home: home's ticket/${tid} is not on origin; push it`);
+  report(fails, `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
 // A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
