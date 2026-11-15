@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import { bareProject, hasTmux, kit, PORTS, startDashboard, until } from './lib/kit.mjs';
-import { agentProgram, box, GW_PUBLIC, machine, nowhere, OP, otherKey, prompt, seat, shown, signedPress, SUBJECT, tmp, tmuxSh } from './lib/operator-threads-fixture.mjs';
+import { agentProgram, box, cleanup, GW_PUBLIC, machine, nowhere, OP, otherKey, prompt, seat, shown, signedPress, SUBJECT, tmp, tmuxSh } from './lib/operator-threads-fixture.mjs';
 
 // ----- the hub's routes, and the Overview's dock and pin ------------------------------------------
 const ask = (port, method, route, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
@@ -23,7 +23,7 @@ const ask = (port, method, route, { headers = {}, body } = {}) => new Promise((r
 });
 // One project's dashboard serving a hub of its own, on a machine of its own, with a stand-in for the
 // operator's agent.
-async function hubFixture(t, name, { box: boxed = false } = {}) {
+async function hubFixture(later, name, { box: boxed = false } = {}) {
   const base = fs.mkdtempSync(path.join(tmp, `${name}-`));
   const home = path.join(base, 'home');
   fs.mkdirSync(home);
@@ -34,7 +34,8 @@ async function hubFixture(t, name, { box: boxed = false } = {}) {
   const A = bareProject(base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
   const dash = startDashboard(A, env);
-  t.after(async () => { await dash.stop(); tmuxSh(['kill-session', '-t', `=devteam-home-${HUB}`]); });
+  later(() => dash.stop());
+  later(() => tmuxSh(['kill-session', '-t', `=devteam-home-${HUB}`]));
   await until(async () => { try { return (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.pulse); } catch { return false; } }, 'the hub, listing alpha with its pulse');
   const own = { origin: `http://127.0.0.1:${HUB}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
   const dir = boxed ? path.join(home, 'operator') : path.join(home, '.devteam', `operator-${HUB}`);
@@ -49,7 +50,8 @@ async function hubFixture(t, name, { box: boxed = false } = {}) {
 }
 
 test('the hub takes the owner\'s turns only from its own page, within its caps, and starts the laptop\'s operator on the first', { skip: !hasTmux, timeout: 240000 }, async (t) => {
-  const F = await hubFixture(t, 'routes');
+  const later = cleanup(t);
+  const F = await hubFixture(later, 'routes');
   const { HUB, own } = F;
   const post = (route, body, headers = own) => ask(HUB, 'POST', `/operator/${route}`, { headers, body });
   // a read, for the hub's own page: no operator yet, and it can be started
@@ -151,7 +153,8 @@ test('the hub takes the owner\'s turns only from its own page, within its caps, 
 // On a box the owner is never local, and every agent there is the hub's own Unix user: the hub's
 // own page's headers are what any of them can send. A press must carry the gateway's signature.
 test('on a box the hub takes a press only with the gateway\'s signature: a local program with the page\'s own headers is refused', { skip: !hasTmux, timeout: 240000 }, async (t) => {
-  const F = await hubFixture(t, 'boxroutes', { box: true });
+  const later = cleanup(t);
+  const F = await hubFixture(later, 'boxroutes', { box: true });
   const { HUB, own } = F;
   const send = (route, body, headers) => ask(HUB, 'POST', route, { headers: { ...own, ...headers }, body });
   const refused = async (r, why, what) => { r = await r; assert.equal(r.status, 403, what); assert.match(r.json.error, /^on a box the owner's threads come only through the box's gateway/, what); if (why) assert.match(r.json.error, why, what); };
@@ -185,12 +188,13 @@ test('on a box the hub takes a press only with the gateway\'s signature: a local
 });
 
 test('the Overview in Chrome: the Threads dock, a pin on what it is about across redraws, the operator\'s reply as text, a phone', { skip: !hasTmux ? 'needs tmux' : canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
-  const F = await hubFixture(t, 'chrome');
+  const later = cleanup(t);
+  const F = await hubFixture(later, 'chrome');
   const { HUB } = F;
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
@@ -332,15 +336,16 @@ test('on a box the standalone hub takes a press only as the gateway signed it, o
   const env = { ...M.env, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(PORTS + 60) };
   for (const k of ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS', 'DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR']) delete env[k];
   const imageKit = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-image-kit-'));
-  t.after(() => fs.rmSync(imageKit, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(imageKit, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   fs.cpSync(kit, imageKit, { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
   const a = seat(M);
-  t.after(() => a.kill());
+  later(() => a.kill());
   const hub = spawn(process.execPath, [path.join(imageKit, 'scripts', 'devteam.mjs'), 'hub', '--release', 'v9.9.9'], { cwd: nowhere, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let said = '';
   hub.stdout.on('data', (b) => { said += b; });
   hub.stderr.on('data', (b) => { said += b; });
-  t.after(() => (hub.exitCode === null && hub.signalCode === null ? new Promise((r) => { hub.once('exit', r); try { process.kill(-hub.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  later(() => (hub.exitCode === null && hub.signalCode === null ? new Promise((r) => { hub.once('exit', r); try { process.kill(-hub.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
   await until(async () => { try { return (await ask(HUB, 'GET', '/instances.json')).json?.kit === 'v9.9.9'; } catch { return false; } }, `the image's hub (${said})`);
   await shown(a.pane, 'the operator');
   const own = { origin: `http://127.0.0.1:${HUB}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };

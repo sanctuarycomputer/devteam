@@ -106,4 +106,18 @@ function seat(M, screens = [box(prompt)]) {
 const shown = (pane, text) => until(() => tmuxSh(['capture-pane', '-p', '-t', pane]).stdout.includes(text), `pane ${pane} drawn`);
 const SUBJECT = (root, selector = 'inbox', label = 'Inbox 3') => ({ kind: 'overview', root, name: path.basename(root), anchor: { selector, label } });
 
-export { agentProgram, bin, box, GW_PUBLIC, KIT, machine, nowhere, OP, otherKey, prompt, seat, shown, signedPress, stubShell, SUBJECT, tmp, tmuxSh };
+// A test's stops, run last-registered first, each on its own: a removal registered first runs
+// after every stop, and one stop that throws skips none of the others (node runs t.after hooks in
+// the order they were registered and stops at the first that throws). The first error is thrown
+// once all have run.
+function cleanup(t) {
+  const fns = [];
+  t.after(async () => {
+    let first = null;
+    for (const f of fns.reverse()) { try { await f(); } catch (e) { first ??= e; } }
+    if (first) throw first;
+  });
+  return (f) => { fns.push(f); };
+}
+
+export { agentProgram, bin, box, cleanup, GW_PUBLIC, KIT, machine, nowhere, OP, otherKey, prompt, seat, shown, signedPress, stubShell, SUBJECT, tmp, tmuxSh };

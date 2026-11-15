@@ -5,7 +5,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { hasTmux, threadsFixture, until } from './lib/kit.mjs';
-import { heldDirOf, heldFor, logLines, menuPane, nap } from './lib/pane-question-fixture.mjs';
+import { cleanup, heldDirOf, heldFor, logLines, menuPane, nap } from './lib/pane-question-fixture.mjs';
 
 const tick = (F, S) => { const r = F.run(F.old, ['accounts-tick'], { ...S, ...F.SUP }); assert.equal(r.status, 0, r.err); };
 // a held line's file, as if it had been held that long ago
@@ -13,7 +13,8 @@ const age = (F, pane, ms, i = 0) => { const n = heldFor(F, pane)[i]; const older
 
 test("a message for a pane that is asking is held, not typed; no command answers the question; answered at the terminal, the held lines are typed in order, once", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-held');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F);
   const S = { DEVTEAM_SUPERVISOR: pane.target };
   const { ask, problem } = JSON.parse(F.owner(['pane', 'question', '--json'], S));
@@ -67,7 +68,8 @@ test("a message for a pane that is asking is held, not typed; no command answers
 
 test('held lines are typed once each, in the order they came, however many processes look at once', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-race');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F);
   const S = { DEVTEAM_SUPERVISOR: pane.target };
   for (let i = 0; i < 6; i++) assert.equal(F.run(F.old, ['send', 'supervisor', `held ${i}`, '--owner'], S).status, 0);
@@ -89,10 +91,11 @@ test('held lines are typed once each, in the order they came, however many proce
 
 test("a claim nobody is working goes back as it was: its process gone, or alive but silent for a minute (a pid can be anyone's); one being worked is left alone", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-claims');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const root = path.join(F.old, 'docs/devteam/run/held');
   const live = spawn('sleep', ['600']);
-  t.after(() => live.kill());
+  later(() => live.kill());
   const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' }).stdout.trim();
   const old = new Date(Date.now() - 5 * 60000);
   for (const [name, claim, recovers] of [['dead', () => `${dead}-${Date.now()}`, true], ['stale', () => `${live.pid}-${old.getTime()}`, true], ['fresh', () => `${live.pid}-${Date.now()}`, false]]) {
@@ -120,7 +123,8 @@ test("a claim nobody is working goes back as it was: its process gone, or alive 
 
 test('held lines wait for the input box: a second prompt holds them again, an agent with no box gets them after two minutes, and one a day old is let go and logged', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-ready');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   // a second prompt right after the first
   const two = menuPane(F, 'menu,menu2,input');
   let S = { DEVTEAM_SUPERVISOR: two.target };

@@ -38,7 +38,7 @@ The runner gives each file its own process and `TMPDIR`. Run under `nice`, one t
 
 ### T3 recovery (3 parts)
 
-- Split. Edits: L130 becomes `until()` the clock's second is past the session's `session_created`. L138 becomes `until()` it is past the launch's (`now`'s) second. L224 becomes `until()` the pane's `pane_current_command` isn't `node`. Each keeps the comment saying why it waits.
+- Split. Edits: L130 becomes `until()` the clock's second is past the session's `session_created`. L138 becomes `until()` it is past the launch's (`now`'s) second. L224 becomes `until()` the pane's `pane_current_command` is `sh`, `bash`, `dash` or `zsh` (a leading `-` allowed), not merely other than `node` (spec review N1). Each keeps the comment saying why it waits.
 - Check: the three parts pass alone.
 
 ### T4 pane-question (3 parts) and its hooks

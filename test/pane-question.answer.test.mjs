@@ -8,17 +8,17 @@ import path from 'node:path';
 import { paneSignature } from '../cloud/gateway.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 import { freePort, hasTmux, startDashboard, threadsFixture, until } from './lib/kit.mjs';
-import { heldFor, logLines, menuPane } from './lib/pane-question-fixture.mjs';
+import { cleanup, heldFor, logLines, menuPane } from './lib/pane-question-fixture.mjs';
 
 const acts = (F) => logLines(F).filter((l) => l.type === 'act' && l.class === 'pane-answer');
 
 // A dashboard for a fixture whose supervisor is that pane; requests as the page's own (a browser
 // sends Origin and Sec-Fetch-Site on every fetch POST, and Sec-Fetch-Site on its reads).
-async function dash(t, F, pane, env = {}) {
+async function dash(later, F, pane, env = {}) {
   const port = await freePort();
   const B = `http://127.0.0.1:${port}`;
   const d = startDashboard(F.old, F.env({ DEVTEAM_SUPERVISOR: pane.target, ...env }), ['--port', String(port)]);
-  t.after(() => d.stop());
+  later(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   const own = { origin: B, 'sec-fetch-site': 'same-origin' };
   const asked = (headers = { 'sec-fetch-site': 'same-origin' }) => fetch(`${B}/api/threads`, { headers }).then((r) => r.json()).then((j) => j.supervisor.question);
@@ -30,9 +30,10 @@ async function dash(t, F, pane, env = {}) {
 
 test("the dashboard: an answer only from its own page, with that page's token for that question, only a digit, only to the question showing", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-route');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F);
-  const D = await dash(t, F, pane);
+  const D = await dash(later, F, pane);
   const q = await D.question();
   assert.deepEqual([q.options, q.selected, q.hint], [[{ n: 1, label: 'Yes' }, { n: 2, label: 'No' }], 1, 'Esc to cancel']);
   assert.match(q.question, /someone else's artifact/);
@@ -89,9 +90,10 @@ test("the dashboard: an answer only from its own page, with that page's token fo
 
 test('a menu whose digit only moves the cursor gets the Enter; one that takes no digit, or whose cursor is on it already, is left as it is, and said so; a dialog with no numbers is never answered from here', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-keys');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F, 'menu:move,menu2:deaf,trust,input');
-  const D = await dash(t, F, pane);
+  const D = await dash(later, F, pane);
   const q = await D.question();
   let r = await D.post({ digest: q.digest, option: 2, token: q.token });
   assert.deepEqual([r.status, await r.json()], [200, { ok: true, out: 'answered: 2. No' }]);
@@ -122,9 +124,10 @@ test('a menu whose digit only moves the cursor gets the Enter; one that takes no
 
 test("one click is one answer: the same question asked again at once (a retry, two calls in parallel) gets no Enter", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-again');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F, 'menu,menu,input');
-  const D = await dash(t, F, pane);
+  const D = await dash(later, F, pane);
   const q = await D.question();
   const r = await D.post({ digest: q.digest, option: 1, token: q.token });
   assert.equal(r.status, 409, await r.clone().text());
@@ -136,9 +139,10 @@ test("one click is one answer: the same question asked again at once (a retry, t
 
 test('a question that goes as the key is sent: the digit in the input box is not an answer; it is logged as one that may not have landed, and nothing held is typed', { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-vanish');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F);
-  const D = await dash(t, F, pane, { DEVTEAM_PANE_ANSWER_DELAY_MS: '2500' });
+  const D = await dash(later, F, pane, { DEVTEAM_PANE_ANSWER_DELAY_MS: '2500' });
   const q = await D.question();
   F.run(F.old, ['send', 'supervisor', 'held meanwhile', '--owner'], { DEVTEAM_SUPERVISOR: pane.target });
   const answering = D.post({ digest: q.digest, option: 1, token: q.token });
@@ -163,14 +167,15 @@ test('a question that goes as the key is sent: the digit in the input box is not
 
 test("on a box an answer needs the gateway's signature for that press, once: every agent there can send the dashboard any header", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('pane-box');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pair = crypto.generateKeyPairSync('ed25519');
   const priv = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
   const pub = path.join(F.base, 'thread-key.pub');
   fs.writeFileSync(pub, pair.publicKey.export({ type: 'spki', format: 'pem' }));
   const box = { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: pub };
   const pane = menuPane(F);
-  const D = await dash(t, F, pane, box);
+  const D = await dash(later, F, pane, box);
   const q = await D.question();
   const body = JSON.stringify({ digest: q.digest, option: 1, token: q.token });
   // the page's own headers and token, as any agent on the box can send them: not enough
@@ -207,12 +212,13 @@ test("on a box an answer needs the gateway's signature for that press, once: eve
 
 test("the dashboard page: the card at the top of the Inbox and in the dock, the terminal's words as text, at phone width; its buttons wait a second; a click answers; a dialog with no numbers has no buttons", { skip: !hasTmux ? 'no tmux' : canDrive ? false : 'no Chrome to drive' }, async (t) => {
   const F = threadsFixture('pane-page');
-  t.after(() => F.done());
+  const later = cleanup(t);
+  later(() => F.done());
   const pane = menuPane(F, 'menu,trust,input');
-  const D = await dash(t, F, pane);
+  const D = await dash(later, F, pane);
   await D.question();
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
   await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
   await p.send('Page.navigate', { url: `${D.B}/#inbox` });

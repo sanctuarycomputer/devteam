@@ -47,7 +47,10 @@ test('the key guard: a window closed in a session older than its launch stays cl
   const F = fixture('guard');
   try {
     F.ensureSession();
-    sleepMs(1100);
+    // the launch a second after the session was made
+    const made = Number(spawnSync('tmux', ['display-message', '-p', '-t', `=${F.session}:`, '#{session_created}'], { encoding: 'utf8' }).stdout.trim());
+    assert.ok(made > 0, 'the session\'s session_created');
+    await until(() => Math.floor(Date.now() / 1000) > made, 'the second after the session was made');
     const now = new Date().toISOString();
     F.worker('demo-03-c', { at: now });
     F.planner('p2', { at: now });
@@ -55,7 +58,8 @@ test('the key guard: a window closed in a session older than its launch stays cl
     assert.deepEqual(F.relaunched(), []);
     assert.ok(findings(F).some((f) => f.kind === 'planner-gone' && f.subject === 'plan-p2'), 'the existing finding reports it');
     F.killSession();
-    sleepMs(1100);
+    // and a session made a second after the launch
+    await until(() => Math.floor(Date.now() / 1000) > Math.floor(Date.parse(now) / 1000), 'the second after the launch');
     F.ensureSession();
     // a session created after the launch: what a reboot, a kept tmux restarted by hand, leaves
     assert.match(F.tick(OFF), /relaunched/);
@@ -141,7 +145,8 @@ test('the race: a supervisor\'s --resume right after the tick\'s relaunch leaves
     assert.deepEqual(F.relaunched(), ['demo-30-y'], 'nothing typed into it');
     // and once that agent has gone, it resumes
     execFileSync('tmux', ['respawn-pane', '-k', '-t', `=${F.session}:demo-30-y`, STUB_SHELL]);
-    sleepMs(200);
+    // a shell the kit knows (the stub shell execs /bin/sh -i): not node, and not the stub's own name
+    await until(() => /^-?(sh|bash|dash|zsh)$/.test((spawnSync('tmux', ['display-message', '-p', '-t', `=${F.session}:demo-30-y`, '#{pane_current_command}'], { encoding: 'utf8' }).stdout ?? '').trim()), 'a shell in its pane, the agent gone');
     const later = F.run(['worker', 'demo-30-y', '--resume']);
     assert.equal(later.status, 0, later.stderr);
     assert.doesNotMatch(later.stderr, /moments ago/);
