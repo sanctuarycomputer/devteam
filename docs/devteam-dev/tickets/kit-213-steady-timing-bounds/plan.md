@@ -19,6 +19,7 @@
 ## Rulings
 
 - m-20261115-183218194-supervisor: one combined spec and plan review. Lessons k-20261115-182656232, k-20261115-080753394 and k-20261115-164245020 go in every brief (spelled out in the spec's Rulings). Only the touched files run, at `--test-concurrency=2`.
+- m-20261115-185641944-supervisor: approve-spec and approve-plan at 1d22f06. B3: bound the whole Inbox read, as the spec says. verification.md notes that a slowdown in ranking alone is below what this bound detects.
 
 ## Global constraints
 
