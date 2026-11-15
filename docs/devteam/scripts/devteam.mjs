@@ -11566,6 +11566,7 @@ function collectMetrics(since) {
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
   const accounts = accountsState();
+  if (!accounts?.exhausted && accounts?.capacity?.gap) add('medium', 'accounts-capacity-gap', 'cswap', `the accounts with room run out about ${accounts.capacity.runs_out_at}, before the first full one resets (${accounts.capacity.next_reset_at})`, 'tell the owner: add an account (cswap add), or slow the fleets until a reset');
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
   for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
@@ -12295,6 +12296,28 @@ function lastReadingFull(a) {
   });
 }
 const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// The fleet's Claude capacity across every cswap account, for the operator and the supervisors: how many
+// have room, the active one's use, and whether the room left lasts until a full account resets. cswap
+// projects each window (projectedExhaustionAt, willLastToReset); a gap is room that runs out first.
+function capacityOf(rows) {
+  const usable = rows.filter((a) => !a.disabled);
+  const room = usable.filter(accountHasRoom);
+  const full = usable.filter(accountKnownFull);
+  const week = (a) => a?.usage?.sevenDay ?? a?.lastGoodUsage?.sevenDay ?? null;
+  const pct = (w) => (typeof w?.pct === 'number' ? Math.round(w.pct) : null);
+  const active = rows.find((a) => a.active);
+  const resets = full.map((a) => [a?.usage?.fiveHour, week(a)].filter((w) => w?.pct >= 100 && w.resetsAt).map((w) => w.resetsAt).sort().pop()).filter(Boolean).sort();
+  const lasts = room.some((a) => mainWindows(a).every((w) => w.willLastToReset !== false));
+  const outs = room.map((a) => mainWindows(a).map((w) => w.projectedExhaustionAt).filter(Boolean).sort()[0]).filter(Boolean).sort();
+  const runsOut = lasts || outs.length < room.length ? null : outs.pop() ?? null;
+  const nextReset = resets[0] ?? null;
+  return {
+    accounts: usable.length, room: room.length,
+    active_week_pct: pct(week(active)), active_5h_pct: pct(active?.usage?.fiveHour),
+    runs_out_at: runsOut, next_reset_at: nextReset,
+    gap: !!(room.length && runsOut && nextReset && Date.parse(runsOut) < Date.parse(nextReset)),
+  };
+}
 // One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
 function switchAccount(bin, args) {
   const r = runCswap(bin, ['switch', ...args, '--json']);
@@ -13924,6 +13947,12 @@ async function machineStatus() {
   // the freshest of each project's record of its accounts (accounts-tick writes it each minute); cswap itself is never run here
   const acc = roots.map((r) => { try { const a = readJson(path.join(r, 'docs', 'devteam', 'run', 'accounts.json')); return a && typeof a.at === 'string' ? a : null; } catch { return null; } }).filter(Boolean).sort((x, y) => y.at.localeCompare(x.at))[0];
   out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
+  const cap = acc?.capacity;
+  if (cap && typeof cap.accounts === 'number') {
+    const when = (t) => (t ? t.slice(0, 16).replace('T', ' ') : '-');
+    const flag = cap.room === 0 ? ' NONE' : cap.gap ? ' GAP' : cap.room <= 1 && cap.accounts > 1 ? ' THIN' : '';
+    out(`machine: capacity ${cap.room} of ${cap.accounts} accounts with room${flag}; active ${cap.active_week_pct ?? '?'}% week, ${cap.active_5h_pct ?? '?'}% 5h; room runs out ${cap.runs_out_at ? when(cap.runs_out_at) : cap.room ? 'after the next reset' : 'now'}; next reset ${when(cap.next_reset_at)}`);
+  }
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
   out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
@@ -14030,6 +14059,7 @@ function cmdAccountsTick() {
     const rows = cswapAccounts(bin);
     if (rows) {
       state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
+      state.capacity = capacityOf(rows);
       const usable = rows.filter((a) => !a.disabled);
       if (usable.length && usable.every(accountKnownFull)) state.exhausted = true;
       const active = rows.find((a) => a.active);

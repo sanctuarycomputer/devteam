@@ -566,7 +566,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
   fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n- ${seenL}: stays\nfriction: same as ${kitL}, in passing\n`);
   fs.mkdirSync(path.join(r, '.worktrees/a/node_modules'), { recursive: true });
   fs.writeFileSync(path.join(r, '.worktrees/a/node_modules/big'), Buffer.alloc(4096 * 256));
-  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null }));
+  fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null, capacity: { accounts: 5, room: 1, active_week_pct: 9, active_5h_pct: 31, runs_out_at: null, next_reset_at: '2026-11-16T21:00:00Z', gap: false } }));
   // tmux, as the kit sees it, noting what it was asked
   const logged = path.join(tmp, 'tmux-asked');
   const spy = path.join(tmp, 'spy');
@@ -589,6 +589,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.equal(st.status, 0, st.stderr);
     assert.match(st.stdout, /^machine: disk \S+ free of \S+.*; memory .*; cpus \S+.*; load [\d.]+ [\d.]+ [\d.]+$/m);
     assert.match(st.stdout, /^machine: accounts cswap active=a@b exhausted=false no-room=false needs-login=c@d as of /m);
+    assert.match(st.stdout, /^machine: capacity 1 of 5 accounts with room THIN; active 9% week, 31% 5h; room runs out after the next reset; next reset 2026-11-16 21:00$/m);
     assert.match(st.stdout, new RegExp(`^machine: hub ${process.env.DEVTEAM_HUB_PORT} DOWN$`, 'm'));
     assert.match(st.stdout, new RegExp(`^statused sup=up fleet=run kit=v0\\.1\\.0\\S* inbox=\\d+ missing=config/master\\.key tools=ok behind=v9\\.9\\.9 pane=${a.pane} state=ready dash=${portUp}/up wt=1/\\S+ new-questions=1 new-knowledge=2$`, 'm'));
     assert.match(st.stdout, /^machine: daily review due \(last never\)$/m);

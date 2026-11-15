@@ -131,6 +131,30 @@ test('rotation: runs cswap auto --once with no strategy of its own, reads its ev
   } finally { F.done(); }
 });
 
+test('capacity: the tick records how many accounts have room and whether that room lasts to the first reset', () => {
+  const F = fixture('capacity');
+  try {
+    const OUT = '2026-11-16T05:00:00Z';
+    const RESET = '2026-11-16T21:00:00Z';
+    const full = { number: 2, email: 'b@x', usageStatus: 'ok', usage: { fiveHour: { pct: 10 }, sevenDay: { pct: 100, resetsAt: RESET } } };
+    const left = (lasts) => ({ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 31.4, willLastToReset: true }, sevenDay: { pct: 9, projectedExhaustionAt: OUT, willLastToReset: lasts } } });
+    F.set({ schemaVersion: 1, accounts: [left(false), full] });
+    F.tick();
+    assert.deepEqual(F.state().capacity, { accounts: 2, room: 1, active_week_pct: 9, active_5h_pct: 31, runs_out_at: OUT, next_reset_at: RESET, gap: true });
+    const gap = findings(F).find((f) => f.kind === 'accounts-capacity-gap');
+    assert.ok(gap && gap.severity === 'medium', 'room that runs out before a reset is a finding');
+    F.set({ schemaVersion: 1, accounts: [left(true), full] });
+    F.tick();
+    assert.equal(F.state().capacity.gap, false);
+    assert.equal(F.state().capacity.runs_out_at, null, 'room that lasts to its own reset has no end');
+    assert.ok(!findings(F).some((f) => f.kind === 'accounts-capacity-gap'));
+    F.set(FULL);
+    F.tick();
+    assert.equal(F.state().capacity.room, 0);
+    assert.ok(!findings(F).some((f) => f.kind === 'accounts-capacity-gap'), 'no room at all is accounts-exhausted, not a gap');
+  } finally { F.done(); }
+});
+
 test('restarting: a session at the limit menu is relaunched on the active account, no key reaching the menu, once there is room', { skip: !hasTmux }, async () => {
   const F = fixture('resume');
   try {
