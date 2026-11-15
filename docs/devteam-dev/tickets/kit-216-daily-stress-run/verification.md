@@ -59,7 +59,20 @@ All 1 file passed on every repeat.
 
 ## Final-head rows (the trigger-removal commit)
 
-Filled in by the trigger-removal commit.
+These rows were run on the working tree that is committed as the trigger-removal commit. That commit removes `push:` with its two comment lines and the three `github.event_name == 'push' && '…' ||` prefixes, changes no other workflow line, and adds these rows. A row can't name its own commit's sha (P2-1). At the final head, `git diff <trigger-removal commit>..HEAD -- .github/` is empty.
+
+| Check | Command | Result |
+|---|---|---|
+| run just before the removal | Run [43743999609](https://github.com/sanctuarycomputer/devteam/actions/runs/43743999609): push at bb5c7d4, the verification commit right before the trigger-removal commit | **success**. The same command line and burners as 43743793354; `test/search.test.mjs  10.1  ok (run 1)`, `10.5  ok (run 2)`, `stopped 2 burners`; summary `All 1 file passed on every repeat.` with the row `` `test/search.test.mjs` | ok 10.1 s | ok 10.5 s `` |
+| no push or pull_request trigger | `grep -nE '^\s*(push\|pull_request\|pull_request_target):' .github/workflows/test-stress.yml` | exit 1 (no match). The only triggers are `schedule:` (line 8) and `workflow_dispatch:` (line 10) |
+| no secrets, no environment | `grep -nE 'secrets\.\|^\s*environment:' .github/workflows/test-stress.yml` | exit 1 (no match) |
+| permissions, concurrency, timeout | read the file | `permissions: contents: read` (lines 27-28, top level); `concurrency:` at line 29 (`group: test-stress-${{ github.ref }}`, `cancel-in-progress: false`); `timeout-minutes: 240` on the only job (line 36) |
+| env from inputs only | the stress step's env | `FILES: ${{ inputs.files }}`, `REPEAT: ${{ inputs.repeat \|\| '3' }}`, `LOAD: ${{ inputs.load \|\| '0' }}` |
+| summary script | `check-summary.sh` | exit 0, 8 of 8 ok |
+| inputs and no `${{` in `run:` | `check-inputs.sh` | exit 0, 23 of 23 ok |
+| burners and exit | `check-exit.sh` | exit 0, 8 of 8 ok |
+| the checks catch breakage | `mutate.sh` | exit 0, 9 of 9 mutants caught |
+| actionlint (done-when 4) | `actionlint.sh`: actionlint 1.7.7 (sha256 `023070a2…0757`) with shellcheck 0.10.0 (sha256 `6c881ab0…df87`) | exit 0, no findings |
 
 ## The supervisor's condition (m-20261115-174531437-supervisor)
 

@@ -24,10 +24,6 @@ on:
         type: string
         required: false
         default: '0'
-  # TEMPORARY (kit-216 done-when 4): runs this branch's file once with the push defaults below;
-  # removed, with those defaults, before merge
-  push:
-    branches: [ticket/kit-216-daily-stress-run]
 permissions:
   contents: read
 concurrency:
@@ -53,9 +49,9 @@ jobs:
         shell: bash
         # inputs reach the script only here, as environment; on a schedule they are empty
         env:
-          FILES: ${{ github.event_name == 'push' && 'test/search.test.mjs' || inputs.files }}
-          REPEAT: ${{ github.event_name == 'push' && '2' || inputs.repeat || '3' }}
-          LOAD: ${{ github.event_name == 'push' && '2' || inputs.load || '0' }}
+          FILES: ${{ inputs.files }}
+          REPEAT: ${{ inputs.repeat || '3' }}
+          LOAD: ${{ inputs.load || '0' }}
         run: |
           set -euo pipefail
           # --- inputs ---
