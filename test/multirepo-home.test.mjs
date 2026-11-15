@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { kit, line, write, json, review, multiFixture } from './lib/kit.mjs';
+import { kit, line, write, json, review, hasTmux, multiFixture } from './lib/kit.mjs';
 
 test('three repos: the fixture validates, and links shows each', () => {
   const F = multiFixture('multi-smoke');
@@ -369,5 +369,50 @@ test('records in home on a GitHub home: a merged records PR is recognized (branc
     g(['push', '-q', 'origin', `ticket/${id}`], r.rw);
     write(merged, '[]');
     assert.match(dry().out, new RegExp(`no open home PR from ticket/${id} \\(its records\\)`));
+  } finally { F.done(); }
+});
+
+test('records in home: the worker\'s records worktree and prompt, review-worktree\'s records checkout, timeline, and --remove', (t) => {
+  const F = recordsFixture('records-worktrees');
+  const { old, g, okIn, runIn, ticket } = F;
+  const id = 'console-01-a';
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id };
+  try {
+    if (hasTmux) {
+      ticket('console-03-c');
+      okIn(old, ['worker', 'console-03-c'], SUP);
+      spawnSync('tmux', ['kill-server'], { env: F.env({}) });
+      const rw = path.join(old, '.worktrees', 'records-console-03-c');
+      assert.equal(F.real(g(['rev-parse', '--path-format=absolute', '--git-common-dir'], rw)), F.real(path.join(old, '.git')), 'a worktree of home');
+      assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD'], rw), 'ticket/console-03-c');
+      assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD'], path.join(old, '.worktrees', 'console-03-c')), 'ticket/console-03-c');
+      const prompt = fs.readFileSync(path.join(old, 'docs/devteam/run/prompts/console-03-c.txt'), 'utf8');
+      assert.match(prompt, /Keep its records \(spec, plan, verification, reviews\) under docs\/devteam\/project\/tickets\/console-03-c\/ in \S*\.worktrees\/records-console-03-c, a checkout of home on its branch ticket\/console-03-c/);
+      assert.match(prompt, /"- Records: <full sha>"/);
+      assert.doesNotMatch(prompt, /in this repo\./, "not the default's records line");
+    } else t.diagnostic('tmux not installed: the worker launch is not exercised');
+    const r = readyInHome(F, id);
+    // timeline lists the records from home (no repo field)
+    const files = json(okIn(old, ['timeline', id, '--json'])).files;
+    assert.deepEqual(files.map((f) => [f.title, f.repo]), [['spec', undefined], ['plan', undefined], ['verification', undefined]]);
+    // review-worktree: the link checkout, and home's records beside it at their full sha
+    const out = okIn(old, ['review-worktree', id, r.code]).split('\n');
+    const rv = out[0];
+    const m = /^records: (\S+) \(([0-9a-f]{40})\)$/.exec(out[1] ?? '');
+    assert.ok(m, out.join('\n'));
+    assert.equal(m[2], r.head);
+    assert.equal(F.real(g(['rev-parse', '--path-format=absolute', '--git-common-dir'], m[1])), F.real(path.join(old, '.git')));
+    assert.ok(fs.existsSync(path.join(m[1], `docs/devteam/project/tickets/${id}/spec.md`)));
+    okIn(old, ['review-worktree', '--remove', rv]);
+    assert.ok(!fs.existsSync(rv) && !fs.existsSync(m[1]), 'both removed');
+    // --remove after the merge removes both worktrees
+    okIn(old, ['merge', id], SUP);
+    okIn(r.w, ['phase', 'done'], W);
+    const rm = okIn(old, ['worker', id, '--remove'], SUP);
+    assert.match(rm, /removed .*console-01-a \(a worktree of console\)/);
+    assert.match(rm, /removed .*records-console-01-a \(a worktree of home\)/);
+    assert.ok(!fs.existsSync(r.rw));
+    // once merged, timeline reads home's main
+    assert.equal(json(okIn(old, ['timeline', id, '--json'])).files.find((f) => f.title === 'spec').ref, 'origin/main');
   } finally { F.done(); }
 });

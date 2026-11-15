@@ -4747,7 +4747,11 @@ function cmdReviewWorktree() {
     const listed = R ? (R.git(['worktree', 'list', '--porcelain'], R.root) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9))) : [];
     if (!at || path.dirname(at) !== real(root) || !path.basename(at).startsWith('review-') || !listed.includes(at)) die(`${target} is not a review worktree under ${root} (review-worktree removes only what it made)`);
     R.gitOrDie(['worktree', 'remove', '--force', at], R.root);
-    return out(`removed ${at}`);
+    out(`removed ${at}`);
+    // its records checkout (records in home), made beside it
+    const rat = real(`${at}-records`);
+    if (rat && R.name !== 'home' && worktreeRepo(rat)?.name === 'home') { gitOrDie(['worktree', 'remove', '--force', rat], mainRoot); out(`removed ${rat}`); }
+    return;
   }
   const [id, ref] = positional;
   if (!id || !ref) die('usage: review-worktree <ticket-id> <sha> [--name <suffix>]   |   review-worktree --remove <path>');
@@ -4765,6 +4769,18 @@ function cmdReviewWorktree() {
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   seedWorktree(wt, { repo: R });
   out(wt);
+  // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
+  // reviewer writes in its record's "- Records:" line
+  if (recordsInHomeId(id)) {
+    const ref = homeRecordsRef(id);
+    const rsha = ref ? resolveCommit(ref) : null;
+    if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
+    else {
+      const rwt = `${wt}-records`;
+      gitOrDie(['worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      out(`records: ${rwt} (${rsha})`);
+    }
+  }
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
@@ -12064,7 +12080,10 @@ function timelineView(id) {
   const R = factsRepo(id);
   const branch = ticketBranchRef(id);
   const ref = branch && !mergeShaFor(id) ? branch : R?.mainRef() ?? null;
-  const files = !R ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${R.projectRel}/tickets/${id}/${f}`).filter((f) => ref && R.git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref, ...(R.name === 'home' ? {} : { repo: R.name }) }));
+  // records in home: home's ticket/<id> until merged, then home's main
+  const RR = recordsInHomeId(id) ? repo('home') : R;
+  const rref = RR === R ? ref : (mergeShaFor(id) ? mainRef() : homeRecordsRef(id));
+  const files = !RR ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${RR.projectRel}/tickets/${id}/${f}`).filter((f) => rref && RR.git(['cat-file', '-e', `${rref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref: rref, ...(RR.name === 'home' ? {} : { repo: RR.name }) }));
   const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
   return { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))), st, all };
 }
@@ -15527,7 +15546,10 @@ function promptFor(role, id, R = repo('home')) {
   const base = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${fixCare}`;
   if (R.name === 'home') return base;
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
-  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
+  const head = `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}`;
+  // records in home: the code goes here, the records in home's ticket/<id>
+  if (role === 'worker' && recordsInHomeId(id)) return `${head}. Only this ticket's code goes in ${R.name}: nothing of the project, records included. Keep its records (spec, plan, verification, reviews) under ${projectRel}/tickets/${id}/ in ${recordsWorktreePath(id)}, a checkout of home on its branch ticket/${id}; commit and push them there, and run dispose there. A final review record names the home commit of the records it reviewed in a line "- Records: <full sha>" beside its verdict on this repo's head.${loadSettings().forge === 'git' ? '' : ` Open a PR in home from ticket/${id} with this ticket's PR title too: merge lands it with the code.`}`;
+  return `${head}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
 // The supervisor's opening prompt: the drained or parked preface first, when there is one.
 function supervisorOpeningPrompt(p = PROMPTS.supervisor) {
@@ -15919,6 +15941,21 @@ const plannerPrompt = (feature) => {
 // one removed by hand leaves no stale entry holding ticket/<id> checked out. Refused until the
 // ticket is merged and its worker has logged phase done (its final spend); --force removes it
 // anyway. The branch stays, so a reopened ticket's worker starts again from it.
+// A records-in-home worker's checkout of home on ticket/<id>: the local branch, else origin's
+// (a moved fleet), else new from home's main. Not seeded: it holds only records.
+const recordsWorktreePath = (id) => path.join(mainRoot, '.worktrees', `records-${id}`);
+function ensureRecordsWorktree(id) {
+  const rw = recordsWorktreePath(id);
+  if (fs.existsSync(rw)) return rw;
+  const branch = `ticket/${id}`;
+  const mb = loadSettings().main_branch;
+  git(['fetch', '--quiet', 'origin', mb]);
+  git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', rw, branch], mainRoot);
+  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
+  else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  return rw;
+}
 function removeWorkerWorktree(id) {
   const wt = path.join(mainRoot, '.worktrees', id);
   const T = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
@@ -15933,6 +15970,12 @@ function removeWorkerWorktree(id) {
     out(`removed ${wt} (a worktree of ${R.name})`);
   }
   R.gitOrDie(['worktree', 'prune'], R.root);
+  // records in home: its records worktree goes too, through home
+  if (recordsInHomeId(id)) {
+    const rw = recordsWorktreePath(id);
+    if (fs.existsSync(rw)) { gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), rw], mainRoot); out(`removed ${rw} (a worktree of home)`); }
+    gitOrDie(['worktree', 'prune'], mainRoot);
+  }
   out(`pruned ${R.name}'s worktree list; now close its window`);
 }
 // The tick's tidy (observe-metrics, at most every 30 minutes): a worktree under home's .worktrees
@@ -15992,6 +16035,11 @@ function tidyFinished(name, rec, R, gitdir) {
   if (tickets().has(name)) {
     if (rec.detached || rec.branch !== `refs/heads/ticket/${name}` || factsRepo(name)?.name !== R.name) return null;
     return mergeShaFor(name) && lastPhaseOf(name)?.to === 'done' ? `ticket ${name} is merged and its worker logged phase done` : null;
+  }
+  if (name.startsWith('records-') && tickets().has(name.slice('records-'.length))) {
+    const tid = name.slice('records-'.length);
+    if (R.name !== 'home' || rec.detached || rec.branch !== `refs/heads/ticket/${tid}` || !recordsInHomeId(tid)) return null;
+    return mergeShaFor(tid) && lastPhaseOf(tid)?.to === 'done' ? `ticket ${tid} is merged and its worker logged phase done` : null;
   }
   if (name.startsWith('chore-')) {
     if (R.name !== 'home' || rec.detached || rec.branch !== `refs/heads/${name}`) return null;
@@ -16174,6 +16222,9 @@ function makeSession(role) {
     resume = false;
   }
   seedWorktree(wt, { repo: R });
+  // records in home: home's ticket/<id> in its own worktree, made on its own (a resume whose
+  // records worktree was removed gets it back)
+  if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
   // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
   if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
   else if (s.agent_trust_command?.trim()) {
