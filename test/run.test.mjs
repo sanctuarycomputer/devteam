@@ -450,12 +450,37 @@ function killFixtures(out) {
     if (o.socket && realTmuxPath && /^\/tmp\/dtr-|^\/private\/tmp\/dtr-/.test(o.socket)) spawnSync(realTmuxPath, ['-S', o.socket, 'kill-server'], { stdio: 'ignore', timeout: 5000 });
   }
 }
-const hangEnv = (t, extra = {}) => fixtureEnv(t, extra, killFixtures);
-const allDead = async (o) => {
+// a shared dir of the test's own, so its port locks can be read
+const hangEnv = (t, extra = {}) => {
+  const S = fresh('shared');
+  const f = fixtureEnv(t, { DEVTEAM_TEST_SHARED_TMP: S, ...extra }, killFixtures);
+  t.after(() => fs.rmSync(S, { recursive: true, force: true }));
+  return { ...f, S };
+};
+// A killed file's port lock is freed: a SIGKILL skips its own exit hook, and a lock whose owner is
+// gone otherwise holds its block for an hour, on every checkout on the machine.
+const locksOf = (S) => { const d = path.join(S, 'devteam-kit-ports'); try { return fs.readdirSync(d).map((f) => Number(fs.readFileSync(path.join(d, f), 'utf8'))); } catch { return []; } };
+const allDead = async (o, S) => {
   for (const p of [o.file, o.detached, ...(o.server ? [o.server] : [])]) assert.ok(await deadSoon(p.pid), `pid ${p.pid} (${p.args}) is dead`);
+  if (S) assert.ok(!locksOf(S).includes(o.file.pid), `the killed file's port lock is freed: ${locksOf(S).join(' ')}`);
   if (o.socket) assert.notEqual(spawnSync(realTmuxPath || 'tmux', ['-S', o.socket, 'has-session'], { stdio: 'ignore' }).status, 0, 'its tmux server is gone');
   assert.equal(fs.existsSync(o.scratch), false, 'its scratch folder is gone');
 };
+
+test('freeLocks frees only the port locks of pids that are gone, and only the ones named', (t) => {
+  const S = fresh('locks');
+  t.after(() => fs.rmSync(S, { recursive: true, force: true }));
+  const d = path.join(S, 'devteam-kit-ports');
+  fs.mkdirSync(d);
+  const [gone, goneUnnamed] = [9000091, 9000092];
+  fs.writeFileSync(path.join(d, '1.lock'), String(process.pid));
+  fs.writeFileSync(path.join(d, '2.lock'), String(gone));
+  fs.writeFileSync(path.join(d, '3.lock'), String(goneUnnamed));
+  // the live pid is named too: a lock whose owner is alive is never freed
+  assert.deepEqual(R.freeLocks(S, [process.pid, gone]), [gone]);
+  assert.deepEqual(fs.readdirSync(d).sort(), ['1.lock', '3.lock']);
+  assert.deepEqual(R.freeLocks(path.join(S, 'no-such'), [gone]), []);
+});
 
 test('stopTree with scripted snapshots', () => {
   const [Rt, A, B, X, Y, Q, Z] = [9000001, 9000002, 9000003, 9000004, 9000005, 9000006, 9000007];
@@ -487,8 +512,9 @@ test('stopTree with scripted snapshots', () => {
   assert.deepEqual(r2.killed, [Rt]);
   assert.deepEqual(r2.unstopped, [Y]);
   assert.ok(!log2.includes(`SIGKILL ${Q}`) && !log2.includes(`SIGKILL ${Y}`) && !log2.includes(`SIGKILL ${Z}`));
-  // nothing the walk stopped is left stopped: what it didn't kill, it resumes (Q has exited)
-  assert.deepEqual(log2.filter((l) => l.startsWith('SIGCONT')), [`SIGCONT ${Y}`, `SIGCONT ${Z}`]);
+  // nothing the walk stopped is left stopped: what it didn't kill, it resumes (Q has exited); Z
+  // shows a new parent while its old one (Y) lives, so the pid is another process's: left alone
+  assert.deepEqual(log2.filter((l) => l.startsWith('SIGCONT')), [`SIGCONT ${Y}`]);
   assert.ok(Date.now() - t0 < 4000, 'bounded');
   assert.throws(() => R.stopTree(1, { snapshot: () => new Map() }), /together/);
 });
@@ -519,10 +545,25 @@ test('stopTree, when ps fails mid-walk, kills what the last snapshot showed unde
   const { r, log } = scripted({ root: Rt, snaps: [[[Rt, 1, 'S'], [A, Rt, 'S'], [X, 1, 'S']], new Error('ps failed')] });
   assert.deepEqual(log, [`SIGSTOP ${Rt}`, `SIGSTOP ${A}`, `SIGKILL ${A}`, `SIGKILL ${Rt}`]);
   assert.match(r.error, /ps failed/);
+  // the last good snapshot shows A under another parent: not killed
+  const moved = scripted({ root: Rt, snaps: [[[Rt, 1, 'S'], [A, Rt, 'S']], [[Rt, 1, 'T'], [A, 1, 'S']], new Error('ps failed')] });
+  assert.deepEqual(moved.r.killed, [Rt]);
   // no snapshot at all: the root alone, then the error
   const none = scripted({ root: Rt, snaps: [new Error('no ps')] });
   assert.deepEqual(none.log, [`SIGSTOP ${Rt}`, `SIGKILL ${Rt}`]);
   assert.match(none.r.error, /no ps/);
+});
+
+test('stopTree goes on past a pid it may not signal', () => {
+  const [Rt, A, B] = [9000041, 9000042, 9000043];
+  const log = [];
+  const snaps = [[[Rt, 1, 'S'], [A, Rt, 'S'], [B, Rt, 'S']], [[Rt, 1, 'T'], [A, Rt, 'S'], [B, Rt, 'T']]];
+  const snap = (r) => new Map(r.map(([pid, ppid, stat]) => [pid, { ppid, stat }]));
+  let k = 0;
+  // A belongs to another user: the real sender gets EPERM for it
+  const r = R.stopTree(Rt, { snapshot: () => snap(snaps[Math.min(k++, 1)]), signal: R.signalWith((pid, sig) => { if (pid === A) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); log.push(`${sig} ${pid}`); }), now: fakeClock(), sleep: () => {} });
+  assert.deepEqual(r.killed, [B, Rt]);
+  assert.deepEqual(log, [`SIGSTOP ${Rt}`, `SIGSTOP ${B}`, `SIGKILL ${B}`, `SIGKILL ${Rt}`]);
 });
 
 test('stopTree always kills the root, its own unreaped child, and never waits on a zombie', () => {
@@ -537,12 +578,12 @@ test('stopTree always kills the root, its own unreaped child, and never waits on
 });
 
 test('a hung file is killed with its tree, and a survivor is refused tmux', async (t) => {
-  const { out, env } = hangEnv(t, { DTR_SURVIVOR: '1' });
+  const { out, env, S } = hangEnv(t, { DTR_SURVIVOR: '1' });
   const r = await runRunner(['--file-timeout', '5', fx('hang.mjs')], { env, deadline: 45000 });
   assert.equal(r.code, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /^timed out: test\/fixtures\/run\/hang\.mjs after 5 s \(last test finished: first passes\)$/m);
   assert.match(r.stdout, /^test\/fixtures\/run\/hang\.mjs {2}\d+\.\d {2}timed out/m);
-  await allDead(readJson(path.join(out, 'pids.json')));
+  await allDead(readJson(path.join(out, 'pids.json')), S);
   assert.ok(await waitFor(path.join(out, 'survivor.json'), 10000), 'the survivor reported');
   const s = readJson(path.join(out, 'survivor.json'));
   assert.equal(s.status, 1);
@@ -551,7 +592,7 @@ test('a hung file is killed with its tree, and a survivor is refused tmux', asyn
 
 for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTERM', 'the runner', 143]]) {
   test(`${sig} to ${how} cleans up every running file`, async (t) => {
-    const { out, env } = hangEnv(t);
+    const { out, env, S } = hangEnv(t);
     const run = runRunner([fx('hang.mjs')], { env, deadline: 45000 });
     assert.ok(await waitFor(path.join(out, 'pids.json'), 30000), 'the fixture started');
     assert.ok(run.alive(), 'the runner is still running');
@@ -559,6 +600,6 @@ for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTER
     const r = await run;
     assert.equal(r.code, code, r.stdout + r.stderr);
     assert.match(r.stdout, /^interrupted$/m);
-    await allDead(readJson(path.join(out, 'pids.json')));
+    await allDead(readJson(path.join(out, 'pids.json')), S);
   });
 }

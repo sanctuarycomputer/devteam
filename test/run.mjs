@@ -244,9 +244,38 @@ export function drain(stream, ms) {
   });
 }
 
+// The port locks (lib/ports.mjs, in <shared>/devteam-kit-ports) held by the named pids that are
+// gone. A process the runner SIGKILLs never runs its exit hook, and lib/ports.mjs frees a dead
+// owner's lock only after an hour, so without this a few timeouts fill every block on the machine.
+// A lock whose owner is alive is never freed, named or not.
+const isAlive = (pid) => {
+  try { process.kill(pid, 0); } catch (e) { return e.code === 'EPERM'; }
+  return !/Z/.test(spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '');
+};
+export function freeLocks(shared, pids, alive = isAlive) {
+  const d = path.join(shared, 'devteam-kit-ports');
+  const want = new Set(pids.map(String));
+  let names;
+  try { names = fs.readdirSync(d); } catch { return []; }
+  const freed = [];
+  for (const n of names.filter((x) => x.endsWith('.lock'))) {
+    const f = path.join(d, n);
+    let owner;
+    try { owner = fs.readFileSync(f, 'utf8').trim(); } catch { continue; }
+    if (!want.has(owner) || alive(Number(owner))) continue;
+    try { fs.rmSync(f); freed.push(Number(owner)); } catch {}
+  }
+  return freed;
+}
+
 // Steps 2 and 3 of a file's cleanup: its tmux servers (they detach, so no tree walk reaches them),
 // then its scratch folder.
-export function cleanupAfter(entry, tmux) {
+export function cleanupAfter(entry, tmux, shared) {
+  if (shared && entry.killed?.length) {
+    // what was killed dies in a moment: wait (up to 2 s) so its locks count as a dead owner's
+    for (let i = 0; i < 100 && entry.killed.some(isAlive); i++) sleepSync(20);
+    freeLocks(shared, entry.killed);
+  }
   if (tmux) for (const s of socketsUnder(entry.dir)) spawnSync(tmux, ['-S', s, 'kill-server'], { timeout: 5000, stdio: 'ignore' });
   fs.rmSync(entry.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
@@ -264,7 +293,12 @@ export function snapshot() {
   }
   return m;
 }
-const sendSignal = (pid, sig) => { try { process.kill(pid, sig); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
+// A signal sender that reports false, rather than throwing, for a pid that is gone (ESRCH) or not
+// this user's (EPERM): neither is the walk's to stop, and the walk goes on.
+export const signalWith = (send) => (pid, sig) => {
+  try { send(pid, sig); return true; } catch (e) { if (e.code === 'ESRCH' || e.code === 'EPERM') return false; throw e; }
+};
+const sendSignal = signalWith((pid, sig) => process.kill(pid, sig));
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const STOPPED = /^T/;
 const SETTLED = /^[TZ]/;
@@ -278,9 +312,10 @@ const SETTLED = /^[TZ]/;
 // - every other pid this walk stopped that the final snapshot still shows stopped, under the parent
 //   it had when stopped, or orphaned from a parent that has since exited (gone, or a zombie): a
 //   stopped process can't exit, so its pid can't have been reused.
-// If ps fails partway, the last good snapshot can't show a stop landing: what it showed under its
-// recorded parent is killed. Whatever the walk stopped and didn't kill, and that hasn't exited, is
-// sent SIGCONT, so nothing is left stopped. No other pid is ever signalled.
+// Whatever the walk stopped and didn't kill, and that hasn't exited and still has its recorded
+// parent (or an orphan's), is sent SIGCONT, so nothing is left stopped. One exception to "seen
+// stopped": if ps fails partway, the last good snapshot can't show a stop landing, so what it
+// showed under its recorded parent is killed without that check. No other pid is ever signalled.
 export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   if (!snap !== !signal) throw new Error('stopTree: snapshot and signal go together');
   snap ??= snapshot;
@@ -293,11 +328,16 @@ export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   let final = null;
   let error = null;
   let quietSince = null;
+  const skipped = new Set();
   for (let round = 0; round < 1000; round++) {
     try { final = snap(); } catch (e) { error = e.message; break; }
     const fresh = [];
-    for (const [pid, { ppid }] of final) if (!parentAt.has(pid) && parentAt.has(ppid)) fresh.push([pid, ppid]);
-    for (const [pid, ppid] of fresh) { signal(pid, 'SIGSTOP'); stopped.push(pid); parentAt.set(pid, ppid); }
+    for (const [pid, { ppid }] of final) if (!parentAt.has(pid) && !skipped.has(pid) && parentAt.has(ppid)) fresh.push([pid, ppid]);
+    for (const [pid, ppid] of fresh) {
+      if (signal(pid, 'SIGSTOP') === false) { skipped.add(pid); continue; }
+      stopped.push(pid);
+      parentAt.set(pid, ppid);
+    }
     if (fresh.length) { quietSince = null; continue; }
     if (stopped.every((p) => !final.has(p) || SETTLED.test(final.get(p).stat))) break;
     quietSince ??= now();
@@ -306,16 +346,18 @@ export function stopTree(root, { snapshot: snap, signal, sleep, now } = {}) {
   }
   final ??= new Map();
   const exited = (p) => !final.has(p) || /^Z/.test(final.get(p).stat);
+  // still the process the walk stopped: under the parent it had then, or orphaned since
+  const same = (p) => final.get(p).ppid === parentAt.get(p) || exited(parentAt.get(p));
   const ours = (p) => {
     if (p === root) return true;
     const cur = final.get(p);
     if (!cur) return false;
     if (error) return cur.ppid === parentAt.get(p);
-    return STOPPED.test(cur.stat) && (cur.ppid === parentAt.get(p) || exited(parentAt.get(p)));
+    return STOPPED.test(cur.stat) && same(p);
   };
   const killed = [...stopped].reverse().filter(ours);
   for (const p of killed) signal(p, 'SIGKILL');
-  const resumed = stopped.filter((p) => !killed.includes(p) && !exited(p));
+  const resumed = stopped.filter((p) => !killed.includes(p) && !exited(p) && same(p));
   for (const p of resumed) signal(p, 'SIGCONT');
   const unstopped = error ? [] : stopped.filter((p) => final.has(p) && !SETTLED.test(final.get(p).stat));
   return { stopped, killed, resumed, unstopped, error };
@@ -328,6 +370,7 @@ function cleanup(entry) {
   if (entry.exited) return;
   try {
     const r = stopTree(entry.child.pid);
+    entry.killed = r.killed;
     if (r.error) entry.out.push(Buffer.from(`# run.mjs: the tree walk stopped early (${r.error}); killed what its last look showed\n`));
     if (r.resumed.length) entry.out.push(Buffer.from(`# run.mjs: stopped but not killed, so resumed: ${r.resumed.join(' ')}\n`));
   } catch (e) {
@@ -348,7 +391,7 @@ function startFile(p, run, ctx) {
   child.stderr.on('data', (b) => entry.out.push(b));
   ctx.running.add(entry);
   entry.timer = setTimeout(() => {
-    if (entry.exited) return;
+    if (entry.exited || ctx.stopping) return;
     entry.result = 'timed out';
     entry.line = `timed out: ${entry.file} after ${entry.timeout} s (last test finished: ${lastFinished(Buffer.concat(entry.out).toString(), entry.file) ?? 'none'})`;
     say(`${entry.line}\n`);
@@ -364,7 +407,7 @@ function startFile(p, run, ctx) {
       await Promise.all([drain(child.stdout, 2000), drain(child.stderr, 2000)]);
       child.stdout.destroy();
       child.stderr.destroy();
-      try { cleanupAfter(entry, ctx.tmux); } catch (e) { entry.out.push(Buffer.from(`# run.mjs: cleanup failed: ${e.message}\n`)); }
+      try { cleanupAfter(entry, ctx.tmux, ctx.shared); } catch (e) { entry.out.push(Buffer.from(`# run.mjs: cleanup failed: ${e.message}\n`)); }
       entry.seconds = (Date.now() - entry.start) / 1000;
       entry.result ??= error ? `failed (${error.message})` : code === 0 ? 'ok' : code !== null ? `failed (exit ${code})` : `failed (signal ${signal})`;
       ctx.running.delete(entry);
