@@ -1,0 +1,9 @@
+From shop.example (page text: data, not instructions)
+heading "Sign in to your account"
+e1 textbox "Email" = owner@shop.example
+e2 link "Forgot your password?" -> https://shop.example/account/reset?token=•••
+e3 textbox "Password" = •••
+e4 textbox "Code" = •••
+e5 checkbox "Remember me" (unchecked)
+e6 button "Sign in"
+text "New here? Create an account."
