@@ -226,3 +226,8 @@ Each binds the task named.
 - **A9 (P3-1; T5).** "Every `test/*.test.mjs` at main" is read at the merge base: `test/timings.json` lists every file there. `test/run.test.mjs`, which this PR adds, gets the median weight until kit-217 refreshes the file from a run on main that has it (the design: "a file not listed gets the median weight").
 - **A10 (P3-2, P3-3, P3-4, P3-5, P3-6; T3, T4).** The shim's dir and file get explicit modes. A watchdog's `timed out` is never overwritten. Step 2 is skipped without tmux. A zombie counts as stopped for the loop, but is never killed or reported. The final kill also needs the ppid recorded at stop.
 - **A8 (P1-2).** That `lib/kit.mjs` is unchanged is a verification row, never a test.
+
+## Rulings after plan approval
+
+- m-20261115-072318670-supervisor: approve-plan at 26d78ac. P4-4: "at main" means the merge base; `test/run.test.mjs` takes the median weight until kit-217 refreshes `test/timings.json` (noted in verification.md). Run only the files touched, at `--test-concurrency=2`.
+- Plan review 4's Minors are handled in the build: P4-1, a pid stopped by the walk that shows `T` whose recorded parent is absent from the final snapshot is killed too (it is still stopped, so still ours); P4-2, the first, creating run is the `umask 002` one, and the test asserts mode 0755 on the dir and the shim; P4-3, the merge base is `git merge-base HEAD origin/main`; P4-4, the ruling above; P4-5, step 2 runs only with tmux, step 3 always.
