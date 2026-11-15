@@ -13607,6 +13607,22 @@ const hubLine = (port) => new Promise((resolve) => {
   });
   r.on('error', () => done(answered ? 'up, not a hub' : 'DOWN'));
 });
+// What the box's image is, from its ENV (cloud/Dockerfile's last lines, as the gateway's boxImage
+// reads them): machine: box <release>: <name> <version>, … in the pins' order, or null on a machine
+// without them. Only values of the token form reach the terminal: ? for the release, else left out.
+function boxStatusLine(env = process.env) {
+  const ok = (v) => /^[\w.+-]{1,64}$/.test(v);
+  const rel = String(env.DEVTEAM_KIT_RELEASE ?? '').trim();
+  const pins = String(env.DEVTEAM_BOX_TOOLS ?? '').trim();
+  if (!rel && !pins) return null;
+  const tools = new Map();
+  for (const pair of pins ? pins.split(/\s+/) : []) {
+    const i = pair.indexOf('=');
+    const [name, version] = [pair.slice(0, i), pair.slice(i + 1)];
+    if (i > 0 && ok(name) && ok(version) && !tools.has(name)) tools.set(name, version);
+  }
+  return `machine: box ${ok(rel) ? rel : '?'}${tools.size ? `: ${[...tools].map(([n, v]) => `${n} ${v}`).join(', ')}` : ''}`;
+}
 const gb = (k) => `${Math.round(k / 1048576)}G`;
 const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
 // The machine's memory in bytes, { inUse, max, source }, or null when nothing says (macOS: no cgroup
@@ -13680,6 +13696,8 @@ async function machineStatus() {
   // a hub that doesn't answer and each project's dashboard: nothing else says they went down
   const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
   out(`machine: hub ${HUB_PORT} ${await hubLine(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
+  const boxed = boxStatusLine();
+  if (boxed) out(boxed);
   const notes = notedIn();
   if (flagStr('notes')) { const r = lastReview(notes); out(r === utcDay() ? `machine: daily review done ${r}` : `machine: daily review due (last ${r ?? 'never'})`); }
   const flagged = [];

@@ -23,7 +23,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Low | quality.md §3 (tests pin the claim) | test/hub-overview.test.mjs, 'the Overview draws the box line…' | No test covers the DOM half of the wiring. Three mutants survive: `innerHTML` in place of `el(…, text)`, the `amber` class dropped, and the `.ov-box` own-row CSS dropped. The spec's acceptance 3 asks only for the source assertions that are there, and boxLine's token filter makes `innerHTML` harmless today, so this doesn't block. Cheap to close: also match `el('span', x.amber ? 'amber' : '', x.text)` and the `.ov-head .ov-box { flex-basis: 100%` rule. | |
-| F2 | Info | plan Task 3, "Look at it" | verification.md (Finish) | Chrome is available on this box (`/usr/bin/chromium`), so verification.md should record a look rather than say it couldn't take one. My headless render above shows the line on its own row with the amber part. | |
+| F1 | Low | quality.md §3 (tests pin the claim) | test/hub-overview.test.mjs, 'the Overview draws the box line…' | No test covers the DOM half of the wiring. Three mutants survive: `innerHTML` in place of `el(…, text)`, the `amber` class dropped, and the `.ov-box` own-row CSS dropped. The spec's acceptance 3 asks only for the source assertions that are there, and boxLine's token filter makes `innerHTML` harmless today, so this doesn't block. Cheap to close: also match `el('span', x.amber ? 'amber' : '', x.text)` and the `.ov-head .ov-box { flex-basis: 100%` rule. | fixed (source assertions added with T4) |
+| F2 | Info | plan Task 3, "Look at it" | verification.md (Finish) | Chrome is available on this box (`/usr/bin/chromium`), so verification.md should record a look rather than say it couldn't take one. My headless render above shows the line on its own row with the amber part. | fixed (screenshots in look/, light and dark) |
 
 Verdict: APPROVE a6654295be5633f56c2be6dcffeda4cd36be2cd2

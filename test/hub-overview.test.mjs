@@ -187,6 +187,11 @@ test('the Overview draws the box line from box.json and the latest list', () => 
   assert.match(draw, /hubSeen = data;/, 'draw keeps the list it read');
   assert.match(draw, /catch \{ hubSeen = null; paintOverview\(\); return; \}/, 'and forgets it, and paints, when it read none');
   assert.match(draw, /if \(!data \|\| typeof data !== 'object'\) throw/, 'JSON that is no list (null, a number) is none');
+  // each part goes in as text, amber by its class, on a row of its own
+  assert.match(body('function paintOverview('), /d\.append\(el\('span', x\.amber \? 'amber' : '', x\.text\)\)/, 'a span per part, its text as text');
+  assert.ok(!/innerHTML/.test(body('function paintOverview(')), 'no markup from the line');
+  assert.match(html, /\.ov-head \.ov-box \{ flex-basis: 100%; order: 1;/, 'its own row under the head');
+  assert.match(html, /\.ov-box \.amber \{ color: var\(--amber-fg\); \}/);
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
@@ -483,4 +488,29 @@ test('a dashboard\'s hub run by a kit outside its project names no release', { t
   const list = await until(() => hubList(HUB), `the foreign kit's dashboard hub (${o})`);
   assert.equal(list.kit, null);
   assert.equal('image' in list, false);
+});
+
+// box-status's box line: machine status, right after the hub line, names what the box's image is
+// (its ENV), and nothing on a machine without it.
+test('machine status prints the box line after the hub line, only with the image ENV', { timeout: 120000 }, async (t) => {
+  const M = hubMachine(t, 'box-line', PORTS + 96);
+  const empty = fs.mkdtempSync(path.join(M.base, 'no-repos-'));
+  const script = path.join(kit, 'scripts', 'devteam.mjs');
+  const repo = path.resolve(kit, '..', '..');
+  const before = execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' });
+  const status = (vars) => {
+    const r = spawnSync(process.execPath, [script, 'machine', 'status', '--in', empty], { cwd: M.cwd, env: { ...M.env, ...vars }, encoding: 'utf8', timeout: 60000 });
+    const lines = r.stdout.split('\n');
+    const hub = lines.findIndex((l) => l.startsWith('machine: hub '));
+    assert.ok(hub >= 0, `a hub line: ${r.stdout}${r.stderr}`);
+    return { next: lines[hub + 1], box: lines.filter((l) => l.startsWith('machine: box')) };
+  };
+  let s = status({ DEVTEAM_KIT_RELEASE: 'v9.9.9', DEVTEAM_BOX_TOOLS: 'claude-code=2.1.310 gh=2.83.0' });
+  assert.equal(s.next, 'machine: box v9.9.9: claude-code 2.1.310, gh 2.83.0', 'right after the hub line, in the ENV\'s order');
+  assert.equal(s.box.length, 1);
+  assert.deepEqual(status({}).box, [], 'no image ENV: no box line');
+  assert.deepEqual(status({ DEVTEAM_KIT_RELEASE: ' ', DEVTEAM_BOX_TOOLS: '' }).box, [], 'spaces only are unset');
+  assert.equal(status({ DEVTEAM_KIT_RELEASE: '\u001b[31mx', DEVTEAM_BOX_TOOLS: 'gh=2.83.0 uv=\u001b[0m \u001b[1m=1 gh=9' }).next, 'machine: box ?: gh 2.83.0', 'only plain values reach the terminal');
+  assert.equal(status({ DEVTEAM_KIT_RELEASE: 'v1.0.0' }).next, 'machine: box v1.0.0', 'no tools named');
+  assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }), before, 'no file added');
 });
