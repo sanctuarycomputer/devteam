@@ -3103,7 +3103,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   let T;
   // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
   // unless the page cancels the key. It can be sent with Shift, with Ctrl, as a key repeat, or as 229
-  // (the Enter that ends an IME's composition). Each arrives in window.__keys, so a check knows the key it meant reached the page.
+  // (the Enter that ends an IME's composition). Each arrives in window.__keys, so a check knows the
+  // key it meant reached the page.
   const enter = async ({ shift = false, ctrl = false, repeat = false, code = 13 } = {}) => {
     const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: code, modifiers: (shift ? 8 : 0) | (ctrl ? 2 : 0) };
     await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', autoRepeat: repeat });
