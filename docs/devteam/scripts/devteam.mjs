@@ -14038,6 +14038,47 @@ function checkPins(pins) {
   }));
 }
 const pinsCheckLine = (r) => `${r.name}: ${r.status === 'stale' ? `stale ${safe(r.pinned)} -> ${safe(r.latest)}` : r.status === 'held' ? `held ${holdText(r.reason)}` : r.status === 'unknown' ? `unknown ${r.why}` : `current ${safe(r.pinned)}`}`;
+// A release asset's sha256, from its bytes: downloaded (GitHub redirects to its object store) with no
+// auth header whatever the URL, and checked against the digest GitHub publishes for it when it does.
+async function assetSum(asset) {
+  const url = String(asset.browser_download_url ?? '');
+  if (!/^https?:\/\//.test(url)) throw new Error(`${safe(asset.name)} has no download URL`);
+  let res;
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins' }, redirect: 'follow', signal: AbortSignal.timeout(120000) }); } catch (e) { throw new Error(`download of ${safe(asset.name)} failed (${safe(e?.cause?.code ?? e?.name)})`); }
+  if (!res.ok) throw new Error(`download of ${safe(asset.name)}: HTTP ${res.status}`);
+  const sum = crypto.createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex');
+  const d = typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
+  if (d && d !== sum) throw new Error(`the digest GitHub publishes for ${safe(asset.name)} is not the sha256 of its download`);
+  return sum;
+}
+// The Dockerfile with every unheld tool at its latest release (sums from its assets' bytes) and the
+// stamp at release; only those ARG lines change. Throws `<tool>: <why>` on any upstream failure.
+async function bumpPins(pins, release) {
+  const lines = [...pins.lines];
+  const changes = [];
+  const set = (i, name, from, to) => { if (from === to) return; lines[i] = `ARG ${name}=${to}`; changes.push({ arg: name, from, to }); };
+  const moves = await Promise.all(pins.tools.map(async (p) => {
+    if (p.hold) return null;
+    try {
+      const latest = await latestOf(p.tool);
+      if (!newer(latest.version, p.version)) return null;
+      const version = pinForm(latest.version, p.version);
+      const sums = {};
+      for (const [arch, nameOf] of Object.entries(p.tool.assets ?? {})) {
+        const asset = (latest.release?.assets ?? []).find((a) => a?.name === nameOf(version));
+        if (!asset) throw new Error(`no asset ${safe(nameOf(version))} in release ${safe(latest.version)}`);
+        sums[arch] = await assetSum(asset);
+      }
+      return { p, version, sums };
+    } catch (e) { throw new Error(`${p.tool.name}: ${e.message}`); }
+  }));
+  for (const m of moves.filter(Boolean)) {
+    set(m.p.versionLine, `${m.p.tool.prefix}_VERSION`, m.p.version, m.version);
+    for (const [arch, sum] of Object.entries(m.sums)) set(m.p.sumLines[arch], `${m.p.tool.prefix}_SHA256_${BOX_ARCHES[arch]}`, m.p.sums[arch], sum);
+  }
+  set(pins.releaseLine, 'DEVTEAM_RELEASE', pins.release, release);
+  return { text: lines.join('\n'), changes, held: pins.tools.filter((p) => p.hold).map((p) => ({ name: p.tool.name, reason: p.hold })) };
+}
 const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
@@ -14069,7 +14110,38 @@ async function cmdBoxPins() {
     process.exitCode = rows.some((r) => r.status === 'stale') ? 1 : rows.some((r) => r.status === 'unknown') ? 3 : 0;
     return;
   }
-  if (['bump', 'installed'].includes(mode)) die(`box-pins ${mode}: not yet`);
+  if (mode === 'bump') {
+    const release = releaseFlag();
+    if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    const { file, text } = pinsFile();
+    const pins = readPins(text);
+    if (pins.problems.length) {
+      for (const p of pins.problems) out(`box-pins bump: ${p}`);
+      die('box-pins bump: nothing written');
+    }
+    if (newer(pins.release, release)) die(`box-pins bump: --release ${release} is older than DEVTEAM_RELEASE ${pins.release}; nothing written`);
+    let bumped;
+    try { bumped = await bumpPins(pins, release); } catch (e) { die(`box-pins bump: ${e.message}; nothing written`); }
+    // what is written must verify at that release, or nothing is
+    const again = readPins(bumped.text);
+    if (again.release !== release) again.problems.push(`DEVTEAM_RELEASE is ${safe(again.release)}, not ${release}`);
+    if (again.problems.length) die(`box-pins bump: the result would not verify (${again.problems.join('; ')}); nothing written`);
+    for (const c of bumped.changes) out(`${c.arg} ${safe(c.from)} -> ${safe(c.to)}`);
+    for (const h of bumped.held) out(`held ${h.name}: ${holdText(h.reason)}`);
+    if (flags['dry-run']) return out('--dry-run: nothing written');
+    if (bumped.text === text) return out('unchanged');
+    // beside the file, so the rename is atomic; with its mode, whatever the umask
+    const mode = fs.statSync(file).mode & 0o777;
+    const tmpFile = `${file}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmpFile, bumped.text, { mode });
+      fs.chmodSync(tmpFile, mode);
+      fs.renameSync(tmpFile, file);
+    } catch (e) { fs.rmSync(tmpFile, { force: true }); throw e; }
+    out(`wrote ${file}`);
+    return;
+  }
+  if (mode === 'installed') die(`box-pins ${mode}: not yet`);
   die(`usage: ${BOX_PINS_USAGE}`);
 }
 

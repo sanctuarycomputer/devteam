@@ -1094,3 +1094,132 @@ test('check on a broken file exits 2 with its problems, in --json too', async (t
   assert.deepEqual(JSON.parse(j.stdout), { box_pins: 1, problems: ['ttyd has no TTYD_SHA256_X86_64'] });
   assert.equal(u.state.hits.length, 0, 'nothing asked of upstream');
 });
+
+const argOf = (text, name) => new RegExp(`^ARG ${name}=(.*)$`, 'm').exec(text)?.[1];
+const fileSha = (f) => sha256(fs.readFileSync(f));
+const assetBody = (tool, tag, i) => `${REPOS[tool]}/${assetNames(tool, tag)[i]}/${tag}`;
+
+test('box-pins bump --release v9.9.9 sets each unheld tool to latest with the assets\' real sums', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy((x) => x.replace(/^ARG UV_VERSION=/m, '# hold: 0.13.8 breaks claude-swap\n$&'));
+  const before = fs.readFileSync(f, 'utf8');
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  const after = fs.readFileSync(f, 'utf8');
+  assert.deepEqual(['CLAUDE_CODE', 'CLAUDE_SWAP', 'GH', 'TTYD', 'MISE', 'UV'].map((p) => argOf(after, `${p}_VERSION`)), ['2.1.308', '1.0.1', '2.105.0', '1.7.8', 'v2026.11.8', FIXED.UV]);
+  for (const [tool, p] of [['gh', 'GH'], ['ttyd', 'TTYD'], ['mise', 'MISE']]) {
+    assert.equal(argOf(after, `${p}_SHA256_X86_64`), sha256(assetBody(tool, LATEST[tool], 0)), `${tool} x86_64`);
+    assert.equal(argOf(after, `${p}_SHA256_AARCH64`), sha256(assetBody(tool, LATEST[tool], 1)), `${tool} aarch64`);
+  }
+  for (const a of ['UV_VERSION', 'UV_SHA256_X86_64', 'UV_SHA256_AARCH64']) assert.equal(argOf(after, a), argOf(before, a), `held uv keeps ${a}`);
+  assert.match(after, /^# hold: 0\.13\.8 breaks claude-swap\nARG UV_VERSION=/m);
+  assert.ok(!u.state.hits.some((h) => h.path.includes('astral-sh/uv')), 'nothing asked about a held tool');
+  assert.equal(argOf(after, 'DEVTEAM_RELEASE'), 'v9.9.9');
+  assert.match(r.stdout, /^TTYD_VERSION 1\.7\.7 -> 1\.7\.8$/m);
+  assert.match(r.stdout, /^held uv: 0\.13\.8 breaks claude-swap$/m);
+  assert.match(r.stdout, new RegExp(`^wrote ${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.equal(after.split('\n').length, before.split('\n').length, 'only ARG lines were rewritten');
+  assert.equal(pins(['verify', '--release', 'v9.9.9', '--dockerfile', f]).status, 0);
+});
+
+test('bump --dry-run prints the change and leaves the file byte-identical', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  const sum = fileSha(f);
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dry-run', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.match(r.stdout, /^TTYD_VERSION 1\.7\.7 -> 1\.7\.8$/m);
+  assert.match(r.stdout, new RegExp(`^TTYD_SHA256_X86_64 ${fixedSum('TTYD_SHA256_X86_64')} -> ${sha256(assetBody('ttyd', '1.7.8', 0))}$`, 'm'));
+  assert.match(r.stdout, /^DEVTEAM_RELEASE v0\.52\.0 -> v9\.9\.9$/m);
+  assert.match(r.stdout, /^--dry-run: nothing written$/m);
+  assert.equal(fileSha(f), sum);
+});
+
+test('bump writes nothing when an upstream fails, or a digest disagrees', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  const sum = fileSha(f);
+  u.state.assets[`cli/cli/${assetNames('gh', LATEST.gh)[1]}`] = { status: 500 };
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /box-pins bump: gh: .*500.*; nothing written/);
+  assert.equal(fileSha(f), sum);
+  u.state.assets[`cli/cli/${assetNames('gh', LATEST.gh)[1]}`] = { body: assetBody('gh', LATEST.gh, 1) };
+  u.state.releases['jdx/mise'][0].assets[0].digest = `sha256:${'0'.repeat(64)}`;
+  const d = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(d.status, 1, d.stdout);
+  assert.match(d.stderr, /box-pins bump: mise: .*digest.*; nothing written/);
+  assert.equal(fileSha(f), sum);
+  u.state.releases['jdx/mise'][0].assets[0].digest = `sha256:${sha256(assetBody('mise', LATEST.mise, 0))}`;
+  u.state.npm['@anthropic-ai/claude-code'] = { status: 503 };
+  const n = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(n.status, 1);
+  assert.match(n.stderr, /box-pins bump: claude-code: HTTP 503; nothing written/);
+  assert.equal(fileSha(f), sum);
+});
+
+test('bump sends no token with a download', async (t) => {
+  const u = await upstream(t);
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], { ...upEnv(u), GH_TOKEN: 'fake-token' });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.ok(u.state.hits.some((h) => h.path.startsWith('/dl/')) && u.state.hits.some((h) => h.path.startsWith('/assets/')), 'downloads went through the redirect');
+  for (const h of u.state.hits) {
+    if (h.path.startsWith('/gh/')) assert.equal(h.headers.authorization, 'Bearer fake-token');
+    else assert.equal(h.headers.authorization, undefined, h.path);
+  }
+});
+
+test('bump keeps the file\'s mode, and writes nothing when nothing changes', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  fs.chmodSync(f, 0o640);
+  assert.equal((await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u))).status, 0);
+  assert.equal(fs.statSync(f).mode & 0o777, 0o640);
+  const { mtimeMs } = fs.statSync(f);
+  const sum = fileSha(f);
+  const again = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /^unchanged$/m);
+  assert.equal(fileSha(f), sum);
+  assert.equal(fs.statSync(f).mtimeMs, mtimeMs);
+  assert.deepEqual(fs.readdirSync(path.dirname(f)).filter((x) => x.endsWith('.tmp')), [], 'no temp file left');
+});
+
+test('bump and check refuse a malformed hold', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy((x) => x.replace(/^ARG MISE_VERSION=/m, '# Hold: x\n$&'));
+  const sum = fileSha(f);
+  const b = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(b.status, 1);
+  assert.match(b.stdout, /box-pins bump: line \d+ looks like a hold but is not "# hold: <reason>"/);
+  assert.equal(fileSha(f), sum);
+  assert.equal((await pinsAsync(['check', '--dockerfile', f], upEnv(u))).status, 2);
+  assert.equal(u.state.hits.length, 0, 'nothing asked of upstream');
+});
+
+test('bump refuses a --release older than the stamp, and needs one', async (t) => {
+  const u = await upstream(t);
+  const f = pinsCopy();
+  const sum = fileSha(f);
+  const r = await pinsAsync(['bump', '--release', 'v0.1.0', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /--release v0\.1\.0 is older than DEVTEAM_RELEASE v0\.52\.0/);
+  const none = await pinsAsync(['bump', '--dockerfile', f], upEnv(u));
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /usage: box-pins/);
+  assert.equal(fileSha(f), sum);
+  assert.equal(u.state.hits.length, 0);
+});
+
+test('bump downloads nothing for a tool already current', async (t) => {
+  const u = await upstream(t);
+  u.state.releases['tsl0922/ttyd'] = [u.release('ttyd', FIXED.TTYD)];
+  for (const n of assetNames('ttyd', FIXED.TTYD)) u.state.assets[`tsl0922/ttyd/${n}`] = { status: 500 };
+  const f = pinsCopy();
+  const before = fs.readFileSync(f, 'utf8');
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.ok(!u.state.hits.some((h) => /^\/(dl|assets)\/tsl0922\//.test(h.path)), 'no ttyd download');
+  const after = fs.readFileSync(f, 'utf8');
+  for (const a of ['TTYD_VERSION', 'TTYD_SHA256_X86_64', 'TTYD_SHA256_AARCH64']) assert.equal(argOf(after, a), argOf(before, a));
+});
