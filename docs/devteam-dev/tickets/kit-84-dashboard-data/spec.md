@@ -90,23 +90,40 @@ The overhaul's page tickets (kit-87 onward, kit-93, kit-94) each draw from data 
 
 ### 6. Every kit setting (scope added: m-20261115-195732788-supervisor; owner, thread t-20261115-194652602-owner)
 
-- `/api/data` gains `settings_all`: one entry for every setting the kit reads. It is built from the code, so a key added later shows with no list to keep in step.
-  - The keys are those of `SETTINGS_DEFAULTS` (41 today), plus the owner settings with no default entry: `gates` and `remediations`, from `OWNER_SETTINGS`. That makes 43.
-  - The done-when says "all 42". The mock's 42 are the 41 plus `gates`. `remediations` is a real setting too (the owner's, `governance-edit`, read by `ask --remediations` and merge), so it is listed under Production. I flag the count in the review request.
-- Each entry is `{ key, group, name, description, value, set, default, owner_only }`:
-  - `group`, `name`, `description` come from one `SETTINGS_WORDS` map beside `SETTINGS_DEFAULTS`: `{ key: [group, name, description] }`.
-    - The groups and words are the mock's (`SETTINGS_ALL` at 3cb8d6b), in its order: Fleet and capacity, Agents and sessions, Merging and checks, Questions and findings, Upstream and releases, Production, Rhythm, Project and links.
-    - `remediations` is added to Production: "Remediations", "the reviewed scripts that may restart, scale or roll back production".
-    - Each description is one line.
-  - `value`: the value in force, from main's `settings.md` (`settingsAt(mainRef())`, defaults filled in), or `loadSettings()` where main has none. `set` says whether main's file sets the key at all.
-  - `default`: the kit's default (`SETTINGS_DEFAULTS[key]`; `{}` for `gates` and `remediations`). The kit's defaults are reported as the code has them. Changing a default (the mock's "no limit" for worker caps) is another ticket's.
-  - `owner_only`: the class from `OWNER_SETTINGS` (for example `'gate-change'`), or `null`.
-  - `settings_all` keeps the mock's order: groups in order, keys in `SETTINGS_WORDS` order.
-- **Secrets are never shown, only their names.**
-  - `links`, `sensors` and `remediations` show only their entry names (`value: ['devteam-kit', …]`). A link's locator, a sensor's URL and a remediation's params can carry a credential.
-  - Every other value is shown as `settings` shows it, with no credential in it.
-  - The test plants a credential-looking string in a link's URL, a sensor URL and a remediation, and asserts it appears nowhere in `settings_all`.
-- The test fails if a key in `SETTINGS_DEFAULTS` or `OWNER_SETTINGS` has no `SETTINGS_WORDS` entry, naming it. The test also checks the reverse: a `SETTINGS_WORDS` key that the kit doesn't read is a stale name, and it fails.
+- `/api/data` gains `settings_all`: one entry for every setting the kit reads. It is built from the code, so a key added later shows up with no list to keep in step.
+- **The keys** (F2-2) are the union of:
+  - `SETTINGS_DEFAULTS`, 41 keys today;
+  - `OWNER_SETTINGS`, which adds `gates` and `remediations`;
+  - one short list beside them, `SETTINGS_READ_ONLY_HERE`, for keys the kit reads with no default and no owner class. Today that is only `sensor_scrub`, read by `scrubExtra` and checked by merge.
+
+  That makes 44 keys. The test scans `devteam.mjs` for `loadSettings().<key>` and `settingsAt(…)?.<key>` reads, so a key read anywhere and missing from the union fails it. A missing default is never added: that would change what `settings` prints, which the G1 goldens pin.
+- **The count** (F2-4). The done-when says "all 42": the mock's 42 are the 41 defaults plus `gates`. `remediations` (the owner's, `governance-edit`) and `sensor_scrub` are real settings too, so they are listed under Production. The review request asks the supervisor to amend the done-when to "every setting the kit reads (44 today)", or to record a ruling.
+- Each entry is `{ key, group, name, description, shown, value, local, set, default, owner_only }`. The group, name and description come from one `SETTINGS_WORDS` map beside `SETTINGS_DEFAULTS`, written `{ key: [group, name, description, show] }`.
+  - **Groups** follow the mock's order (`SETTINGS_ALL` at 3cb8d6b): Fleet and capacity, Agents and sessions, Merging and checks, Questions and findings, Upstream and releases, Production, Rhythm, Project and links. Entries come in `SETTINGS_WORDS` order.
+  - **Names** are the mock's, plus "Remediations" and "Sensor scrub patterns" under Production.
+  - **Descriptions** (F2-3) are one line each, true to the code as it stands, and start from the mock's wording. They are not copied where the mock is wrong:
+    - the worker caps say what the defaults are now (5 and 2), since the "none by default" wording waits on the ticket that changes the defaults, which updates the words;
+    - `hold_review_days` is about a goal parked that long being asked about again;
+    - `incident_slots` is fix tickets that may run past the worker cap;
+    - `secret_commands` is the command prefixes a secret sink may run;
+    - `release` is how a release reaches production: a tag, a branch, or every merge.
+
+    The plan lists every description, so the reviewers check each one against the code.
+- **What is shown** (F2-1): never a credential, by construction rather than by scrubbing. Each key's `show` is one of four kinds:
+  - `value`: the value as main has it. Only for keys whose values the kit types narrowly: numbers, booleans, branch and method names, enums (`forge`, `merge_method`, `upstream_sync`, `release`), the release tag, the project and session names, the port, `usage_sources` and `ignored_checks` (names), `worktree_files` (paths), `worker_denied_commands` (patterns), and `autonomy_ceilings` (class to number).
+  - `names`: only the object's own keys, for `links`, `sensors`, `remediations`, `gates`, `components` and `model_prices`. `sensor_defaults` shows its key names, never its values.
+  - `count`: how many entries, for `sensor_scrub`, `secret_commands` and the like ("3 patterns"), never their text.
+  - `hidden`: nothing of the value (`value: null`), with `set` saying whether the project changed it. This covers every free-text command (`agent_command`, `resume_command`, `agent_trust_command`, `usage_command`, `worktree_setup`), since a command can carry a token anywhere. It also covers `upstream_repo`, a locator that can carry credentials; its `redactUrl` form is not enough here, because only a URL's userinfo is redacted.
+
+  The kit's own `default` shows only for `value` keys and for the hidden commands, whose defaults are the kit's own constants (`claude --dangerously-skip-permissions`, `''`, `null`). Otherwise `default` is in the same kind as the value.
+- **The value in force** (F2-5):
+  - `value` and `set` come from main's file, `settingsAt(mainRef(), { orNull: true })`.
+  - When that is `null` (no main, no file, or bad JSON), they come from `loadSettings()`, and `source: 'working tree'` says so.
+  - `local` holds the main checkout's working-tree value, in the same kind, when it differs from main's. That is what the running kit uses today for the supervisor's own keys until an edit lands. The page can say "applies once landed" from it.
+- **`owner_only`**: the class from `OWNER_SETTINGS` (for example `'gate-change'`), or `null`.
+- **The tests.**
+  - A key in the union with no `SETTINGS_WORDS` entry fails the test, which names the key. So does a `SETTINGS_WORDS` key the kit doesn't read, as a stale name.
+  - Credential-looking strings are planted where secrets could live: `agent_command`, `resume_command`, `worktree_setup`, `usage_command`, `agent_trust_command`, a gate's cmd, `upstream_repo` (a URL with a token in its path and in its userinfo), a link URL, a sensor URL, `sensor_defaults.params`, a remediation's params, a `sensor_scrub` pattern and a `secret_commands` entry. Each must appear nowhere in the serialized `settings_all`, `value` and `local` alike.
 
 ## Acceptance checks (the done-whens, restated)
 
@@ -142,16 +159,16 @@ All of these are in `test/dashboard-data.test.mjs`, green in CI at the PR head.
 
    `upkeep_days` has 14 days with today last, and each day's items are as expected. The CI-fix day has `failed: true`. The retro counts once. The log chore and the old line are absent. A quiet day is empty.
 6. **Every setting.**
-   - `settings_all` has one entry for each key in `SETTINGS_DEFAULTS` and `OWNER_SETTINGS`, in group order, each with key, group, name, description, value, set, default and owner_only.
-   - A value set on main shows with `set: true`. A working-tree-only edit doesn't show.
-   - Owner settings carry their class.
+   - `settings_all` has one entry for every key in the union (44 today), in group order. Each entry has key, group, name, description, shown, value, set, default and owner_only.
+   - A value set on main shows with `set: true`. A working-tree-only edit shows in `local`, not in `value`.
+   - Owner settings carry their class. A `names` key shows only names, and a `count` key only its count.
    - No planted credential appears anywhere in `settings_all`.
-   - A missing or stale `SETTINGS_WORDS` entry fails with its key.
+   - A missing or stale `SETTINGS_WORDS` entry fails, naming its key. A key read in the code and missing from the union fails too.
 
 ## Contracts
 
 - Provided: `GET /api/governance` and `governance --json`; in `/api/data`, `class_words`, `class_name`, `held_by`, `threads`, `upkeep_days` and `settings_all`; `threads` in `hello --json`; the finding `blocked-without-question`. None is a versioned contract: the design says each is defined by its provider ticket's tests.
-- Consumed: `threadViews`, `rankQuestions`, `questions()`, `deriveStatus`, `planners`, `ladder()`, the merge acts as `merge` writes them, `settingsAt`, `SETTINGS_DEFAULTS` and `OWNER_SETTINGS`.
+- Consumed: `threadViews`, `rankQuestions`, `questions()`, `deriveStatus`, `planners`, `ladder()`, the merge acts as `merge` writes them, `settingsAt`, `SETTINGS_DEFAULTS`, `OWNER_SETTINGS`.
 
 ## Edge cases
 
