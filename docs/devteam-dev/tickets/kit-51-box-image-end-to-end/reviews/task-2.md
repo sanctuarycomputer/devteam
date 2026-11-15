@@ -18,6 +18,6 @@ What I checked:
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | spec step 5 (within 5 s) | DW4 step, the in-box kill loop | The deadline is checked only before a poll starts. A poll that starts at 4.9 s can still succeed: `list_in`'s curl can run up to 2 s, then node and `holder_in`'s lsof run after it. That counts as a pass. With a `list_in` stub that sleeps 2 s, the loop exits 0 at 6.4 s. To fail, the new hub has to be listening before 5 s but answer late, so the gap is narrow, but the bound is not a true wall-clock bound. Re-read `date +%s%N` after a successful poll and pass only if it is still before `end`. | |
+| F1 | Minor | spec step 5 (within 5 s) | DW4 step, the in-box kill loop | The deadline is checked only before a poll starts. A poll that starts at 4.9 s can still succeed: `list_in`'s curl can run up to 2 s, then node and `holder_in`'s lsof run after it. That counts as a pass. With a `list_in` stub that sleeps 2 s, the loop exits 0 at 6.4 s. To fail, the new hub has to be listening before 5 s but answer late, so the gap is narrow, but the bound is not a true wall-clock bound. Re-read `date +%s%N` after a successful poll and pass only if it is still before `end`. | fixed in 83fd9be |
 
 Verdict: APPROVE a421989c042c3ae79c827f2dfc63e75ea55210c4
