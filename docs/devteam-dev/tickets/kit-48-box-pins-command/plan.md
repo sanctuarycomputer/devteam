@@ -201,3 +201,11 @@ test('installed without DEVTEAM_BOX_TOOLS exits 2', () => { /* `DEVTEAM_BOX_TOOL
 - m-20261115-004401439-supervisor: hold line above `_VERSION`; the env-cleared test command.
 - m-20261115-011227101-supervisor: spec approved at c989c4a, its calls beyond the done-whens included (check exits 3 on unknown-and-none-stale and 2 on a broken file; bump refuses an older --release; verify checks DEVTEAM_BOX_TOOLS). The supervisor reads the whole plan once its review passes (risk high).
 - m-20261115-012104539-supervisor: plan approved (read whole); buffered hashing is fine. The PR body's "doesn't defend against" line must say: bump pins whatever upstream publishes (trust on first download, cross-checked only against GitHub's own digest), so a compromised upstream release would be pinned; the reviewed release-prep PR is the check.
+
+### Builder rulings (made while building; each with its cost if wrong)
+
+- T2: the check line helper is `pinsCheckLine`, since `checkLine` already names the log validator. Cost: none.
+- T2 (task-2 F2): a `_VERSION` that is not a plain version is a verify problem, so check and bump refuse it rather than reading it `current` for ever. Cost: a tool pinned to a prerelease on purpose needs the plain version or a hand edit; none today.
+- T2 (task-2 F1, F4): `DEVTEAM_PINS_TIMEOUT_MS` (tests only) bounds every upstream request and download, so the timeout paths are tested without a 15 s or 120 s wait. Cost: one more env knob.
+- T2 (task-2 F6): `latestOf(tool)` takes no pin (the plan's `latestOf(tool, pinned)` was a slip; it never needed one). Cost: none.
+- T3 (task-3 F4): bump writes through a symlinked `--dockerfile` to its real path. Cost: none.

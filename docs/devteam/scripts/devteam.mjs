@@ -14051,10 +14051,13 @@ const pinsCheckLine = (r) => `${r.name}: ${r.status === 'stale' ? `stale ${safe(
 async function assetSum(asset) {
   const url = String(asset.browser_download_url ?? '');
   if (!/^https?:\/\//.test(url)) throw new Error(`${safe(asset.name)} has no download URL`);
-  let res;
-  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins' }, redirect: 'follow', signal: AbortSignal.timeout(120000) }); } catch (e) { throw new Error(`download of ${safe(asset.name)} failed (${safe(e?.cause?.code ?? e?.name)})`); }
+  const failed = (e) => new Error(`download of ${safe(asset.name)} failed (${timedOut(e) ? 'timed out' : safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.code ?? e?.name)})`);
+  const signal = AbortSignal.timeout(Number(process.env.DEVTEAM_PINS_TIMEOUT_MS) || 120000);
+  let res, bytes;
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins' }, redirect: 'follow', signal }); } catch (e) { throw failed(e); }
   if (!res.ok) throw new Error(`download of ${safe(asset.name)}: HTTP ${res.status}`);
-  const sum = crypto.createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex');
+  try { bytes = Buffer.from(await res.arrayBuffer()); } catch (e) { throw failed(e); }
+  const sum = crypto.createHash('sha256').update(bytes).digest('hex');
   const d = typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
   if (d && d !== sum) throw new Error(`the digest GitHub publishes for ${safe(asset.name)} is not the sha256 of its download`);
   return sum;
@@ -14138,13 +14141,14 @@ async function cmdBoxPins() {
     for (const h of bumped.held) out(`held ${h.name}: ${holdText(h.reason)}`);
     if (flags['dry-run']) return out('--dry-run: nothing written');
     if (bumped.text === text) return out('unchanged');
-    // beside the file, so the rename is atomic; with its mode, whatever the umask
-    const mode = fs.statSync(file).mode & 0o777;
-    const tmpFile = `${file}.${process.pid}.tmp`;
+    // beside the file (a symlink's target), so the rename is atomic; with its mode, whatever the umask
+    const real = fs.realpathSync(file);
+    const mode = fs.statSync(real).mode & 0o777;
+    const tmpFile = `${real}.${process.pid}.tmp`;
     try {
       fs.writeFileSync(tmpFile, bumped.text, { mode });
       fs.chmodSync(tmpFile, mode);
-      fs.renameSync(tmpFile, file);
+      fs.renameSync(tmpFile, real);
     } catch (e) { fs.rmSync(tmpFile, { force: true }); throw e; }
     out(`wrote ${file}`);
     return;

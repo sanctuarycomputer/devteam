@@ -1140,7 +1140,8 @@ test('box-pins bump --release v9.9.9 sets each unheld tool to latest with the as
   assert.match(r.stdout, /^TTYD_VERSION 1\.7\.7 -> 1\.7\.8$/m);
   assert.match(r.stdout, /^held uv: 0\.13\.8 breaks claude-swap$/m);
   assert.match(r.stdout, new RegExp(`^wrote ${f.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
-  assert.equal(after.split('\n').length, before.split('\n').length, 'only ARG lines were rewritten');
+  const notArg = (x) => x.split('\n').filter((l) => !l.startsWith('ARG '));
+  assert.deepEqual(notArg(after), notArg(before), 'only ARG lines were rewritten');
   assert.equal(pins(['verify', '--release', 'v9.9.9', '--dockerfile', f]).status, 0);
 });
 
@@ -1194,9 +1195,9 @@ test('bump sends no token with a download', async (t) => {
 test('bump keeps the file\'s mode, and writes nothing when nothing changes', async (t) => {
   const u = await upstream(t);
   const f = pinsCopy();
-  fs.chmodSync(f, 0o640);
+  fs.chmodSync(f, 0o664); // group-writable: a umask of 022 alone would lose it
   assert.equal((await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u))).status, 0);
-  assert.equal(fs.statSync(f).mode & 0o777, 0o640);
+  assert.equal(fs.statSync(f).mode & 0o777, 0o664);
   const { mtimeMs } = fs.statSync(f);
   const sum = fileSha(f);
   const again = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
@@ -1231,6 +1232,37 @@ test('bump refuses a --release older than the stamp, and needs one', async (t) =
   assert.match(none.stderr, /usage: box-pins/);
   assert.equal(fileSha(f), sum);
   assert.equal(u.state.hits.length, 0);
+});
+
+test('bump writes nothing that would not verify, says a failed download in its own words, and bumps a symlink\'s target (task-3 review)', async (t) => {
+  const u = await upstream(t);
+  // a comment already naming ttyd's next version becomes a stray once ttyd moves to it
+  const f = pinsCopy((x) => x.replace(/^# ttyd, the web terminal$/m, '$& (1.7.8 fixes resize)'));
+  const sum = fileSha(f);
+  const r = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', f], upEnv(u));
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /box-pins bump: the result would not verify \(ttyd's version 1\.7\.8 is written outside its ARG .*\); nothing written/);
+  assert.equal(fileSha(f), sum);
+  // a refused download: our words and the error code, not Node's message
+  for (const n of assetNames('uv', LATEST.uv)) u.state.releases['astral-sh/uv'][0].assets.find((a) => a.name === n).browser_download_url = `http://127.0.0.1:${await closedPort()}/x`;
+  const d = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], upEnv(u));
+  assert.equal(d.status, 1);
+  assert.match(d.stderr, /box-pins bump: uv: download of uv-x86_64-unknown-linux-gnu\.tar\.gz failed \(ECONNREFUSED\); nothing written/);
+  // a download whose body stalls: timed out
+  u.state.releases['astral-sh/uv'] = [u.release('uv', LATEST.uv)];
+  u.state.hang = (p) => p.startsWith('/assets/astral-sh/');
+  const h = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
+  assert.equal(h.status, 1);
+  assert.match(h.stderr, /box-pins bump: uv: download of .* failed \(timed out\); nothing written/);
+  u.state.hang = null;
+  // --dockerfile a symlink: its target is bumped and the link stays a link
+  const target = pinsCopy();
+  const link = path.join(path.dirname(target), 'Dockerfile.link');
+  fs.symlinkSync(target, link);
+  const l = await pinsAsync(['bump', '--release', 'v9.9.9', '--dockerfile', link], upEnv(u));
+  assert.equal(l.status, 0, l.stderr);
+  assert.ok(fs.lstatSync(link).isSymbolicLink());
+  assert.equal(argOf(fs.readFileSync(target, 'utf8'), 'DEVTEAM_RELEASE'), 'v9.9.9');
 });
 
 test('bump downloads nothing for a tool already current', async (t) => {
