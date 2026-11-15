@@ -1107,15 +1107,20 @@ test('covered_by on an existing gate is the owner\'s gate-change', () => {
   const F = fleetFixture('cov-owner');
   const { old, ok, run } = F;
   try {
-    covMainGates(F, { test: 'true' });
+    // main's gate in object form, so only covered_by differs
+    covMainGates(F, { test: { cmd: 'true' } });
     covChore(F, 'cover', { test: { cmd: 'true', covered_by: 'ci' } });
-    const merge = (...extra) => { const r = run(old, ['merge', '--chore', 'cover', '--dry-run', ...extra], COV_SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
-    const none = merge();
-    assert.notEqual(none.status, 0, none.text);
-    assert.match(none.text, /changes owner settings: gates \(gate-change\)/);
+    // and the same edit riding along with a gate the supervisor may add alone
+    covChore(F, 'ride', { test: { cmd: 'true', covered_by: 'ci' }, lint: 'true' });
+    const merge = (slug, ...extra) => { const r = run(old, ['merge', '--chore', slug, '--dry-run', ...extra], COV_SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+    for (const slug of ['cover', 'ride']) {
+      const none = merge(slug);
+      assert.notEqual(none.status, 0, none.text);
+      assert.match(none.text, /changes owner settings: gates \(gate-change\) \(gates: it changes test; only adding a gate is the supervisor's\)/, slug);
+    }
     const q = ok(old, ['ask', '--question', 'Let merge trust CI for the test gate?', '--recommendation', 'yes', '--class', 'gate-change', '--reasons', 'owner-only'], COV_SUP);
     ok(old, ['answer', q, 'yes']);
-    const r = merge('--approved', q);
+    const r = merge('cover', '--approved', q);
     assert.equal(r.status, 0, r.text);
   } finally { F.done(); }
 });
