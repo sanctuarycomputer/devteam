@@ -905,6 +905,36 @@ test('hub_window makes home:hub on a real tmux even when another session has a w
   } finally { kill(); }
 });
 
+// box-deploy.yml's step, as a release runs it, from this checkout (box-pins runs only in the kit's
+// own repo) and with no hook: the stamp is checked before the hook is read, so even a run without
+// the secret refuses a release cut without its release-prep PR.
+test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads the hook', () => {
+  const wf = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'box-deploy.yml'), 'utf8');
+  const lines = wf.split('\n');
+  const from = lines.indexOf('        run: |');
+  assert.ok(from > 0, 'the deploy step\'s run block');
+  const block = [];
+  for (const l of lines.slice(from + 1)) { if (l.trim() && !l.startsWith(' '.repeat(10))) break; block.push(l.slice(10)); }
+  const script = block.join('\n');
+  const stamp = /^ARG DEVTEAM_RELEASE=(v\S+)$/m.exec(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8'))[1];
+  const env = { ...process.env, HOOK: '' };
+  for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_TICKET', 'DEVTEAM_ROLE']) delete env[k];
+  const run = (tag) => spawnSync('bash', ['-c', script], { cwd: REPO, encoding: 'utf8', env: { ...env, TAG: tag } });
+  const ok = run(stamp);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /no RENDER_DEPLOY_HOOK/);
+  const bad = run('v0.0.1');
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+  assert.match(bad.stdout, /^refusing v0\.0\.1: .*box-pins bump --release v0\.0\.1/m);
+  assert.doesNotMatch(bad.stdout, /no RENDER_DEPLOY_HOOK/, 'refused before the hook is read');
+  // what the image is built from: every path the Dockerfile copies; and every rule there was
+  assert.match(script, /^inputs=\(cloud docs\/devteam\)$/m);
+  for (const rule of ["github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease", 'environment: box', 'git merge-base --is-ancestor "$SHA" origin/main', 'TAG: ${{ github.event.release.tag_name }}']) assert.ok(wf.includes(rule), rule);
+  const copies = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').filter((l) => l.startsWith('COPY ')).map((l) => l.split(/\s+/).slice(1).filter((w) => !w.startsWith('--'))[0]).filter((src) => !src.startsWith('<<'));
+  assert.ok(copies.length >= 3, copies.join(' '));
+  for (const src of copies) assert.ok(/^(cloud|docs\/devteam)(\/|$)/.test(src), `${src} is an input`);
+});
+
 test('after the first deploy, a supervisor only an older image\'s ages still named stays stopped', { skip: !hasTmux || skipOld() }, () => {
   const dir = path.join(tmp, 'box-code-fold');
   const kept = repo('fold-kept', { tag: 'v0.25.0', dir });
