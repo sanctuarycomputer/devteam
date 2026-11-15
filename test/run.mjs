@@ -91,7 +91,8 @@ export function parseArgs(argv, env, root = ROOT) {
 }
 
 const CHROME_STATIC = /^\s*import\b[^;]*?['"]\.\/lib\/chrome\.mjs['"]/m;
-const CHROME_DYNAMIC = /\bimport\(\s*['"]\.\/lib\/chrome\.mjs['"]\s*\)/;
+// a dynamic import with no quote before it on its line, so one named inside a string isn't one
+const CHROME_DYNAMIC = /^[^'"`\n]*\bimport\(\s*['"]\.\/lib\/chrome\.mjs['"]\s*\)/m;
 export function groupOf(rel, src) {
   if (rel === 'test/kit.test.mjs') return 'chain';
   if (ALONE.includes(rel)) return 'alone';
@@ -145,7 +146,7 @@ export function lastFinished(tap, file) {
   for (const line of tap.split('\n')) {
     const m = /^\s*(?:not )?ok \d+(?: - (.*?))?(?:\s+# (?:SKIP|TODO)\b.*)?$/i.exec(line);
     if (!m || m[1] === undefined) continue;
-    const name = m[1].replace(/\\#/g, '#');
+    const name = m[1].replace(/\\([\\#])/g, '$1');
     if (name === file || (path.isAbsolute(name) && name.endsWith(`/${file}`))) continue;
     last = name;
   }

@@ -75,7 +75,9 @@ test('groups by rule', () => {
   assert.equal(R.groupOf('test/dashboard.test.mjs', src('test/dashboard.test.mjs')), 'chrome');
   assert.equal(R.groupOf('test/search.test.mjs', src('test/search.test.mjs')), 'rest');
   assert.equal(R.groupOf('test/x.test.mjs', "const c = await import('./lib/chrome.mjs');\n"), 'chrome');
-  assert.equal(R.groupOf('test/x.test.mjs', "// see ./lib/chrome.mjs for how\nimport fs from 'node:fs';\n"), 'rest');
+  assert.equal(R.groupOf('test/x.test.mjs', "// see './lib/chrome.mjs' for how\nimport fs from 'node:fs';\n"), 'rest');
+  assert.equal(R.groupOf('test/x.test.mjs', "const s = \"import('./lib/chrome.mjs')\";\n"), 'rest', 'a dynamic import inside a string');
+  assert.equal(R.groupOf('test/run.test.mjs', src('test/run.test.mjs')), 'rest', 'this file names chrome.mjs only in strings');
   const plan = R.planRun({ files: [], groups: ['chain', 'alone'], shard: null }, root);
   assert.deepEqual(plan.map((p) => p.file), ['test/bounds.test.mjs', 'test/kit.test.mjs']);
 });
@@ -93,8 +95,10 @@ test('shards cover each file once and balance', () => {
     assert.equal(new Set(all).size, all.length, `no file twice at n=${n}`);
     assert.deepEqual([...all].sort(), files);
   }
-  const m = R.weightsFor(['x', 'y', 'z', 'new'], { x: 1, y: 5, z: 9 });
-  assert.equal(m.get('new'), 5);
+  assert.equal(R.weightsFor(['x', 'y', 'z', 'new'], { x: 1, y: 2, z: 9 }).get('new'), 2, 'the median, not the mean');
+  assert.equal(R.weightsFor(['w', 'x', 'y', 'z', 'new'], { w: 1, x: 2, y: 9, z: 10 }).get('new'), 5.5, 'an even count: the middle two averaged');
+  const ones = new Map([['c', 1], ['a', 1], ['b', 1]]);
+  assert.deepEqual(R.shard(['c', 'a', 'b'], ones, 1), [['a', 'b', 'c']], 'equal weights: by path');
   assert.equal(R.weightsFor(['new'], {}).get('new'), 1);
 });
 
@@ -114,6 +118,14 @@ test('parseArgs', () => {
     const o = R.parseArgs(['./test/search.test.mjs', abs, path.join(link, 'test/search.test.mjs')], {}, root);
     assert.deepEqual(o.files, ['test/search.test.mjs']);
   } finally { fs.rmSync(path.dirname(link), { recursive: true, force: true }); }
+  const out = fresh('outside');
+  try {
+    const f = path.join(out, 'elsewhere.test.mjs');
+    fs.writeFileSync(f, "import { test } from 'node:test';\n");
+    const o = R.parseArgs([f], {}, root);
+    assert.deepEqual(o.files, [fs.realpathSync(f)], 'a file outside the root keeps its real absolute path');
+    assert.deepEqual(R.planRun(o, root), [{ file: fs.realpathSync(f), group: 'rest', timeout: 300 }]);
+  } finally { fs.rmSync(out, { recursive: true, force: true }); }
 });
 
 test('timeouts and rows', () => {
@@ -142,6 +154,10 @@ test('lastFinished', () => {
   ].join('\n');
   assert.equal(R.lastFinished(tap, '/abs/test/x.test.mjs'), 'skipped one');
   assert.equal(R.lastFinished('TAP version 13\nnot ok 3 - broke\n# Subtest: next\n', 'test/x.test.mjs'), 'broke');
+  // Node 18 and 20 name the wrapper by its absolute path; the runner passes the relative one
+  assert.equal(R.lastFinished('    ok 1 - inner one\nnot ok 1 - /abs/test/x.test.mjs\n', 'test/x.test.mjs'), 'inner one');
+  // TAP escapes # and \ in a description
+  assert.equal(R.lastFinished('ok 1 - a \\\\ b \\# c\n', 'test/x.test.mjs'), 'a \\ b # c');
   assert.equal(R.lastFinished('TAP version 13\n# Subtest: first\n', 'test/x.test.mjs'), null);
 });
 
