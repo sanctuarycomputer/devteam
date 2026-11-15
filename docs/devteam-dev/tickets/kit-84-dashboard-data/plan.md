@@ -51,13 +51,13 @@ Helpers at the top of the file, written in T1 and reused after:
 - `data(F)`: `json(F.ok(F.old, ['dashboard-data']))`, the same JSON `/api/data` serves.
 - `logBytes(F)`: a `Map` of each `docs/devteam/run/log/*.jsonl` to its bytes. A test asserts it is equal before and after its reads.
 - `handLine(F, by, o, agoMs, file?)` (P1-1, P2-1): writes one log line by hand, with an explicit, unique id. `agoMs` is how long ago, the same sense `F.hand` uses. `F.hand` itself makes ids only for thread, turn, question and observation lines, so this helper doesn't call it; it writes the line in `F.hand`'s format.
-  - `at = Date.now() - agoMs`. While `at` is in the module's `used` set, it subtracts 1 ms; then it adds `at` to `used`.
-  - `id = ${PREFIX[o.type]}-${stamp(new Date(at))}-${by}`, with `PREFIX = { act: 'a', phase: 'h', message: 'm', decision: 'd', observation: 'o' }`. `stamp` is `F.hand`'s (plan-2 confirmed these shapes pass log-check).
+  - `at = Math.floor(Date.now() - agoMs)`, a whole millisecond (P3-1). While `at` is in the module's `used` set, it adds 1 ms, so a line written later never sorts earlier. Then it adds `at` to `used`. Callers keep lines at least a minute from now, so the few added milliseconds never reach the future.
+  - `id = ${PREFIX[o.type]}-${stamp(new Date(at))}-${by}`, with `PREFIX = { act: 'a', phase: 'h', message: 'm', decision: 'd', observation: 'o' }`. `stamp` is a copy, in the test, of the one-line `stamp` inside `threadsFixture` (`kit.mjs` ~150), which is not exported (P3-2). Plan-2 confirmed these shapes pass log-check.
   - It appends kit.mjs's `line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: new Date(at).toISOString(), by })` to `F.logDir/(file ?? \`${by}-${yyyy-mm of at}.jsonl\`)`.
   - So each line's `at` is the one asked for, give or take a few tie-break milliseconds, and no two lines share an id.
 - `dayAt(d)` (P1-12): a time inside UTC day `d` back from today that is never in the future.
   - For `d ≥ 1`, it is that day's UTC midnight plus 30 minutes.
-  - For `d = 0`, it is `day0 + (Date.now() - day0) / 2`, which lies inside today even just after midnight.
+  - For `d = 0`, it is `day0 + Math.floor((Date.now() - day0) / 2)`, which lies inside today even just after midnight. T4 writes its day-0 lines in the order it expects them, and the tie-break keeps that order.
 
 ---
 
