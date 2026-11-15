@@ -19,6 +19,6 @@ The only mismatch I found is cosmetic: the gate time is 214.2 s, not 214.3 s.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F2-1 | Suggestion | verification claims match records | verification.md row 4 | It says "gate ci passed in 214.3 s". The log's gate record r-20261115-070117899 is 214245 ms, which is 214.2 s. This is a rounding slip only and changes no conclusion. | |
+| F2-1 | Suggestion | verification claims match records | verification.md row 4 | It says "gate ci passed in 214.3 s". The log's gate record r-20261115-070117899 is 214245 ms, which is 214.2 s. This is a rounding slip only and changes no conclusion. | wrong: 214.3 s is the gate command own printed time (devteam: gate ci passed in 214.3s); its log record rounds 214245 ms differently |
 
 Verdict: APPROVE ebde084cf364d571531c2632e03d97f0cf358c54
