@@ -207,8 +207,11 @@ function runRunner(args, { env, cwd = root, deadline = 60000, umask, script = ru
   });
   return Object.assign(done, { child, alive });
 }
-const fixtureEnv = (t, extra = {}) => {
+// after hooks run in the order they are registered, and stop at the first that throws: a teardown
+// that reads the folder (killFixtures) goes before its removal
+const fixtureEnv = (t, extra = {}, teardown = null) => {
   const out = fresh('out');
+  if (teardown) t.after(() => teardown(out));
   t.after(() => fs.rmSync(out, { recursive: true, force: true }));
   return { out, env: { DTR_FIXTURE_OUT: out, ...extra } };
 };
@@ -361,3 +364,84 @@ test('drain', async () => {
   await R.drain(ended, 5000);
   assert.ok(Date.now() - t1 < 1000, 'an ended stream drains at once');
 });
+
+// ---- the watchdog, cleanup and signals (T4) ----
+const realTmuxPath = R.realTmux(process.env.PATH);
+const argsOf = (pid) => spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim();
+// A fixture's processes, killed only if each still runs what it ran when it wrote its pid: a pid
+// that died and was reused is someone else's.
+function killFixtures(out) {
+  const recs = [];
+  for (const f of ['pids.json', 'survivor-pid.json']) { try { recs.push(readJson(path.join(out, f))); } catch {} }
+  for (const o of recs) {
+    for (const p of [o, o.file, o.detached, o.server]) if (p?.pid > 1 && !isDead(p.pid) && argsOf(p.pid) === p.args) try { process.kill(p.pid, 'SIGKILL'); } catch {}
+    if (o.socket && realTmuxPath && /^\/tmp\/dtr-|^\/private\/tmp\/dtr-/.test(o.socket)) spawnSync(realTmuxPath, ['-S', o.socket, 'kill-server'], { stdio: 'ignore', timeout: 5000 });
+  }
+}
+const hangEnv = (t, extra = {}) => fixtureEnv(t, extra, killFixtures);
+const allDead = async (o) => {
+  for (const p of [o.file, o.detached, ...(o.server ? [o.server] : [])]) assert.ok(await deadSoon(p.pid), `pid ${p.pid} (${p.args}) is dead`);
+  if (o.socket) assert.notEqual(spawnSync(realTmuxPath || 'tmux', ['-S', o.socket, 'has-session'], { stdio: 'ignore' }).status, 0, 'its tmux server is gone');
+  assert.equal(fs.existsSync(o.scratch), false, 'its scratch folder is gone');
+};
+
+test('stopTree with scripted snapshots', () => {
+  const [Rt, A, B, X, Y, Q, Z] = [9000001, 9000002, 9000003, 9000004, 9000005, 9000006, 9000007];
+  const snap = (rows) => new Map(rows.map(([pid, ppid, stat]) => [pid, { ppid, stat }]));
+  const snaps = [
+    // A is the root's child; X's parent is never stopped
+    snap([[Rt, 1, 'Ss'], [A, Rt, 'S'], [X, 1, 'S']]),
+    // B, A's child, first appears now; A hasn't shown stopped yet
+    snap([[Rt, 1, 'T'], [A, Rt, 'S'], [B, A, 'S'], [X, 1, 'S']]),
+    snap([[Rt, 1, 'T'], [A, Rt, 'Tl'], [B, A, 'T'], [X, 1, 'S']]),
+  ];
+  let k = 0;
+  const log = [];
+  const r = R.stopTree(Rt, { snapshot: () => snaps[Math.min(k++, snaps.length - 1)], signal: (pid, sig) => log.push(`${sig} ${pid}`) });
+  assert.deepEqual(log, [`SIGSTOP ${Rt}`, `SIGSTOP ${A}`, `SIGSTOP ${B}`, `SIGKILL ${B}`, `SIGKILL ${A}`, `SIGKILL ${Rt}`]);
+  assert.deepEqual(r.killed, [B, A, Rt]);
+  assert.deepEqual(r.unstopped, []);
+  // in the final snapshot: Y never shows stopped (listed, not killed); Q is a zombie (neither, and
+  // the walk doesn't wait on it); Z's parent changed since it was stopped (not killed)
+  const s2 = [
+    snap([[Rt, 1, 'S'], [Y, Rt, 'S'], [Q, Rt, 'S'], [Z, Y, 'S']]),
+    snap([[Rt, 1, 'T'], [Y, Rt, 'Ss'], [Q, Rt, 'Z'], [Z, Y, 'T']]),
+    snap([[Rt, 1, 'T'], [Y, Rt, 'Ss'], [Q, Rt, 'Z'], [Z, Rt, 'T']]),
+  ];
+  k = 0;
+  const log2 = [];
+  const t0 = Date.now();
+  const r2 = R.stopTree(Rt, { snapshot: () => s2[Math.min(k++, s2.length - 1)], signal: (pid, sig) => log2.push(`${sig} ${pid}`) });
+  assert.deepEqual(r2.killed, [Rt]);
+  assert.deepEqual(r2.unstopped, [Y]);
+  assert.ok(!log2.includes(`SIGKILL ${Q}`) && !log2.includes(`SIGKILL ${Y}`) && !log2.includes(`SIGKILL ${Z}`));
+  assert.ok(Date.now() - t0 < 4000, 'bounded');
+  assert.throws(() => R.stopTree(1, { snapshot: () => new Map() }), /together/);
+});
+
+test('a hung file is killed with its tree, and a survivor is refused tmux', async (t) => {
+  const { out, env } = hangEnv(t, { DTR_SURVIVOR: '1' });
+  const r = await runRunner(['--file-timeout', '5', fx('hang.mjs')], { env, deadline: 45000 });
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^timed out: test\/fixtures\/run\/hang\.mjs after 5 s \(last test finished: first passes\)$/m);
+  assert.match(r.stdout, /^test\/fixtures\/run\/hang\.mjs {2}\d+\.\d {2}timed out/m);
+  await allDead(readJson(path.join(out, 'pids.json')));
+  assert.ok(await waitFor(path.join(out, 'survivor.json'), 10000), 'the survivor reported');
+  const s = readJson(path.join(out, 'survivor.json'));
+  assert.equal(s.status, 1);
+  assert.match(s.stderr, /tmux refused/);
+});
+
+for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTERM', 'the runner', 143]]) {
+  test(`${sig} to ${how} cleans up every running file`, async (t) => {
+    const { out, env } = hangEnv(t);
+    const run = runRunner([fx('hang.mjs')], { env, deadline: 45000 });
+    assert.ok(await waitFor(path.join(out, 'pids.json'), 30000), 'the fixture started');
+    assert.ok(run.alive(), 'the runner is still running');
+    process.kill(sig === 'SIGINT' ? -run.child.pid : run.child.pid, sig);
+    const r = await run;
+    assert.equal(r.code, code, r.stdout + r.stderr);
+    assert.match(r.stdout, /^interrupted$/m);
+    await allDead(readJson(path.join(out, 'pids.json')));
+  });
+}

@@ -244,7 +244,76 @@ export function cleanupAfter(entry, tmux) {
   fs.rmSync(entry.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
+// ---- stopping a file's process tree ----
+
+// pid -> { ppid, stat } for every process on the machine (Linux and macOS)
+export function snapshot() {
+  const r = spawnSync('ps', ['-A', '-o', 'pid=,ppid=,stat='], { encoding: 'utf8', timeout: 5000 });
+  if (r.status !== 0 || r.error) throw new Error(`ps failed: ${r.error?.message ?? r.stderr ?? `exit ${r.status}`}`);
+  const m = new Map();
+  for (const line of r.stdout.split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length >= 3 && /^\d+$/.test(f[0])) m.set(Number(f[0]), { ppid: Number(f[1]), stat: f[2] });
+  }
+  return m;
+}
+const sendSignal = (pid, sig) => { try { process.kill(pid, sig); } catch (e) { if (e.code !== 'ESRCH') throw e; } };
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const STOPPED = /^T/;
+const SETTLED = /^[TZ]/;
+
+// Step 1 of a file's cleanup. The root is stopped first; then each snapshot stops every pid whose
+// parent this walk stopped (that reaches children in process groups of their own), until a
+// snapshot finds no new pid and every stopped pid shows stopped (signals land asynchronously) or
+// has already exited (a zombie), for at most 2 s. Then SIGKILL, in reverse stop order (children
+// before parents, the root last), goes only to stopped pids that the final snapshot still shows
+// stopped, under the parent they had when stopped, or orphaned from a parent that is gone: a
+// stopped process can't exit, so its pid can't have been reused. Nothing else is ever signalled.
+export function stopTree(root, { snapshot: snap, signal, sleep } = {}) {
+  if (!snap !== !signal) throw new Error('stopTree: snapshot and signal go together');
+  snap ??= snapshot;
+  signal ??= sendSignal;
+  sleep ??= sleepSync;
+  const parentAt = new Map([[root, null]]);
+  const stopped = [root];
+  signal(root, 'SIGSTOP');
+  let final;
+  let quietSince = null;
+  for (let round = 0; round < 1000; round++) {
+    final = snap();
+    const fresh = [];
+    for (const [pid, { ppid }] of final) if (!parentAt.has(pid) && stopped.includes(ppid)) fresh.push([pid, ppid]);
+    for (const [pid, ppid] of fresh) { signal(pid, 'SIGSTOP'); stopped.push(pid); parentAt.set(pid, ppid); }
+    if (fresh.length) { quietSince = null; continue; }
+    if (stopped.every((p) => !final.has(p) || SETTLED.test(final.get(p).stat))) break;
+    quietSince ??= Date.now();
+    if (Date.now() - quietSince > 2000) break;
+    sleep(20);
+  }
+  const ours = (p) => {
+    const now = final.get(p);
+    if (!now || !STOPPED.test(now.stat)) return false;
+    return p === root || now.ppid === parentAt.get(p) || !final.has(parentAt.get(p));
+  };
+  const killed = [...stopped].reverse().filter(ours);
+  for (const p of killed) signal(p, 'SIGKILL');
+  const unstopped = stopped.filter((p) => final.has(p) && !SETTLED.test(final.get(p).stat));
+  return { stopped, killed, unstopped };
+}
+
 const say = (text) => process.stdout.write(text);
+
+// Stops and kills a running file's tree (steps 2 and 3 follow when its child's exit fires).
+function cleanup(entry) {
+  if (entry.exited) return;
+  try {
+    const r = stopTree(entry.child.pid);
+    if (r.unstopped.length) entry.out.push(Buffer.from(`# run.mjs: pids that never showed stopped, left alone: ${r.unstopped.join(' ')}\n`));
+  } catch (e) {
+    sendSignal(entry.child.pid, 'SIGKILL');
+    entry.out.push(Buffer.from(`# run.mjs: tree walk failed: ${e.message}; killed the file's own process only\n`));
+  }
+}
 
 function startFile(p, run, ctx) {
   const dir = scratchDir();
@@ -256,6 +325,13 @@ function startFile(p, run, ctx) {
   child.stdout.on('data', (b) => entry.out.push(b));
   child.stderr.on('data', (b) => entry.out.push(b));
   ctx.running.add(entry);
+  entry.timer = setTimeout(() => {
+    if (entry.exited) return;
+    entry.result = 'timed out';
+    entry.line = `timed out: ${entry.file} after ${entry.timeout} s (last test finished: ${lastFinished(Buffer.concat(entry.out).toString(), entry.file) ?? 'none'})`;
+    say(`${entry.line}\n`);
+    cleanup(entry);
+  }, entry.timeout * 1000);
   entry.done = new Promise((resolve) => {
     let ended = false;
     const end = async (code, signal, error) => {
@@ -296,6 +372,19 @@ async function runPool(items, limit, ctx) {
 async function runAll(opts, plan) {
   const shared = sharedDir(process.env);
   const ctx = { shared, shimDir: ensureShim(shared, process.env.PATH), tmux: realTmux(process.env.PATH), running: new Set(), repeat: opts.repeat, stopping: false };
+  // Children have process groups of their own, so a terminal's Ctrl-C reaches only this process,
+  // and a dropped session's SIGHUP too: each running file is cleaned up before it exits.
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, async () => {
+      if (ctx.stopping) return;
+      ctx.stopping = true;
+      const running = [...ctx.running];
+      for (const e of running) { e.result = 'interrupted'; cleanup(e); }
+      await Promise.all(running.map((e) => e.done));
+      say('interrupted\n');
+      process.exit(128 + os.constants.signals[sig]);
+    });
+  }
   const results = [];
   for (let run = 1; run <= opts.repeat && !ctx.stopping; run++) {
     results.push(...await runPool(plan.filter((p) => p.group === 'alone').map((p) => [p, run]), 1, ctx));
@@ -307,6 +396,7 @@ async function runAll(opts, plan) {
     for (const r of results) say(`${rowFor({ ...r, repeat: opts.repeat })}\n`);
   }
   const bad = results.filter((r) => r.result !== 'ok');
+  for (const r of bad) if (r.line) say(`${r.line}\n`);
   for (const r of bad) say(`failed: ${r.file} (${r.result}${opts.repeat > 1 ? `, run ${r.run}` : ''})\n`);
   if (opts.timings) {
     const files = {};
