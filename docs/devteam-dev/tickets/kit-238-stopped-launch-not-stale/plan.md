@@ -21,8 +21,12 @@ test. Not tmux-gated as a whole: the no-session checks run everywhere; the windo
 1. `threadsFixture('stopped-launch')`; `feature add` a feature whose goal is `F.goal`; `ticket add`
    four tickets in component `web`, no dependencies: `w-01-held`, `w-02-stopped`, `w-03-stuck`,
    `w-04-held-stopped`.
-2. Hand-write (`F.hand(id, { type: 'phase', from: null, to: … }, 2h)`) a `starting` line for 01, 02
-   and 04, and `starting` then `build` for 03. `ticket set <id> --json '{"held":"waits for the cap"}'`
+2. Hand-write a `starting` line for 01, 02 and 04, and `starting` then `build` for 03, with
+   `F.hand(id, { id: `h-<stamp>-${id}`, type: 'phase', from, to }, ago)`. The id is explicit
+   because `hand` has no prefix for phase lines (it would write `undefined-…`, which the reader
+   drops); `<stamp>` is the same `yyyymmdd-hhmmssmmm` of `Date.now() - ago` that `hand` uses (a
+   small `phaseLine(id, from, to, ago)` helper in the test). 03's two lines are 2 h 1 min and 2 h
+   ago, so their ids and times differ. `ticket set <id> --json '{"held":"waits for the cap"}'`
    for 01 and 04.
 3. **Before any tmux session exists** (the "no session" branch): `status --json` has
    `not_started: true` on 02 and 04 only; `metrics --json` has no `stale-worker` for 02 or 04;
@@ -37,7 +41,8 @@ test. Not tmux-gated as a whole: the no-session checks run everywhere; the windo
    - `ready --json`: `active` holds 03 alone of the four, `active_per_component.web === 1`; `held`
      holds 01 and 04; `ready` ids include 02; text output `active workers: 1/`.
 5. **The relaunch** (with tmux): `goal hold <F.goal> drain --reason test`; `worker w-02-stopped`
-   fails with `draining goal … starts nothing new`; `goal hold <F.goal> run`; `worker w-02-stopped`
+   fails, matching `/draining goal.*starts nothing new/`; `goal hold <F.goal> run --reason test`
+   (the supervisor gives a reason for every mode); `worker w-02-stopped`
    matches `/made worker w-02-stopped/`; its worktree exists; its last phase line is a fresh
    `starting`; its `status` row no longer says `not started`.
 6. `finally`: kill the fixture's tmux server, `F.done()`.
@@ -57,7 +62,8 @@ judged by its exit code.
    STALE / WAITING ON SUPERVISOR as today.
 4. `cmdReady` (`:3797`): skip a ticket for its worker only when `countsAsWorker(t)`, so held
    tickets reach the `held` branch and an unheld stopped launch reaches `ready`;
-   `active = [...ts.values()].filter(countsAsWorker)`.
+   `active = [...ts.values()].filter(countsAsWorker).map((t) => t.id)` (ids, as `ready --json`
+   and the `perComponent` loop expect).
 5. `observe-metrics`: `ready` filter (`:11478`) uses `!(activeWorker(t.id) && !stoppedLaunch(t.id))`;
    `active` (`:11524`) uses `countsAsWorker`; `stale-worker` (`:11440`) adds
    `!isHeld(ts.get(id)) && !stoppedLaunch(id)`.
