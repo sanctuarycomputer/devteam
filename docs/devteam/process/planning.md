@@ -141,7 +141,6 @@ devteam.mjs ticket add api-07-session-tokens --json '{
 | kind | `contract`, `build`, `integration`, `chore`, `spike` |
 | size | `S` (up to about 400 changed non-test lines) or `M` (about 1,000). There is no L. |
 | risk | `normal` or `high` |
-| uncertainty | `low` (well-trodden: like work this project has done) or `high` (new ground: an unfamiliar library, API or domain, or a cause not yet known). Optional; unset reads as `low` for an S ticket and `high` otherwise. With size and risk it sets the review depth and the models (`quality.md` §3, Review depth). Rate it honestly: every merge checks the rating against what happened (`metrics` `mis-rated`), and a mis-rating comes back to you as a lesson. |
 | serves, depends_on | story ids it advances; ticket ids that must be **merged** before its build starts |
 | contracts | `provides` and `consumes`, contract paths with versions |
 | touches | globs of the files it may change |
