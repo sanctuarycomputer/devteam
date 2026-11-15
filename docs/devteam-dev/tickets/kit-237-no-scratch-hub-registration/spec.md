@@ -11,7 +11,7 @@ o-20261115-080748314: a reviewer subagent of kit-236 ran a kit dashboard in `scr
    - the run is a session's: `DEVTEAM_TICKET` or `DEVTEAM_FEATURE` set, or `DEVTEAM_ROLE` is `worker` or `planner`.
 
    Neither applies when `DEVTEAM_HUB_PORT` is set explicitly: a test fixture keeps its own hub and registers as today.
-2. Same test. `machineRepos` (and so the hub's machine list, box-status and `recover --machine`) ignores an existing record whose root is under a temp or scratchpad path. `machine status` says so once, as one `machine: stray hub record <file> (...)` line per such record, naming its file.
+2. Same test. `machineRepos` (and so box-status, `machine tell|questions|knowledge` and `recover --machine`; the hub's own list comes from probing ports, not the records) ignores an existing record whose root is under a temp or scratchpad path. `machine status` says so once, as one `machine: stray hub record <file> (...)` line per such record, naming its file.
 3. Same test. A real project root under a home `code` folder still registers as today.
 
 ## Design
@@ -19,11 +19,11 @@ o-20261115-080748314: a reviewer subagent of kit-236 ran a kit dashboard in `scr
 All in `docs/devteam/scripts/devteam.mjs`, next to `registerOnMachine`:
 
 - `hubPortExplicit()`: `DEVTEAM_HUB_PORT` is set and non-empty.
-- `scratchRootWhy(root)`: `'under the temp folder'` when `realPath(root)` is at or under `realPath(os.tmpdir())` or `realPath($TMPDIR)`; `'in a scratchpad'` when a segment of it is `scratchpad`; else null.
+- `scratchRootWhy(root)`: `'under the temp folder'` when `realPath(root)` equals, or is under by whole path segments, `realPath(os.tmpdir())` or `realPath($TMPDIR)`. So `/tmpfoo` is not under `/tmp`. `'in a scratchpad'` when one of its segments is `scratchpad`. Else null. A temp dir that is `/`, the home folder or an ancestor of it is no temp dir (a TMPDIR set that wide would otherwise make every real project a stray, and recover would skip them all).
 - `sessionRun()`: `DEVTEAM_TICKET` or `DEVTEAM_FEATURE` set, or `DEVTEAM_ROLE` ∈ {worker, planner}.
 - `registerOnMachine()` returns without writing when `DEVTEAM_HUB_RECORD=off`, or when `!hubPortExplicit() && (sessionRun() || scratchRootWhy(root))`. The off knob always wins: it is an explicit "this run isn't a project's own", even under a fixture's port.
-- **The dashboard hand-off.** The dashboard's `accountsTick` deletes `DEVTEAM_TICKET` and `DEVTEAM_FEATURE` and sets `DEVTEAM_ROLE=supervisor` for its `accounts-tick` child. That child is where the tick registers (`noteSupervisorFromTick`). So the dashboard evaluates `sessionRun()` (or its own `DEVTEAM_HUB_RECORD=off`) on its own environment and, when true, passes `DEVTEAM_HUB_RECORD=off` to the child. A session's dashboard therefore doesn't register even at a real root.
-- `machineRecords()` returns `{ roots, strays }`. Without an explicit port, a record whose root has a `scratchRootWhy` goes into `strays` as `{ file, why }` and not into `roots`. `machineRepos()` is `machineRecords().roots`. `machineStatus` prints one `machine: stray hub record <file> (<why>; ignored, remove it)` line per stray, after the hub line. The file name is a sha1-hex `.json` the kit wrote, so it's printed only if it matches `/^[\w.-]{1,80}$/` (else `?`). The root from the file is never printed (untrusted data).
+- **The dashboard hand-off.** The dashboard's `accountsTick` deletes `DEVTEAM_TICKET` and `DEVTEAM_FEATURE` and sets `DEVTEAM_ROLE=supervisor` for its `accounts-tick` child. That child is where the tick registers (`noteSupervisorFromTick`). So the dashboard evaluates `sessionRun()` (or its own `DEVTEAM_HUB_RECORD=off`) on its own environment and, when true, passes `DEVTEAM_HUB_RECORD=off` to the child. A session's dashboard therefore doesn't register even at a real root. The dashboard passes it whatever the port: a fixture's session dashboard also stops registering. That is a deliberate narrowing of done-when 1's port exemption, since a fixture never runs with a session's env; the session-dashboard test relies on it.
+- `machineRecords()` returns `{ roots, strays }`. Without an explicit port, a record whose root has a `scratchRootWhy` goes into `strays` as `{ file, why }` and not into `roots`. `machineRepos()` is `machineRecords().roots`. `machineStatus` prints one `machine: stray hub record <file> (<why>; ignored, remove it)` line per stray, after the box line, so the box line stays right after the hub line. The file name is a sha1-hex `.json` the kit wrote, so it's printed only if it matches `/^[\w.-]{1,80}$/` (else `?`). The root from the file is never printed (untrusted data).
 - Read-only stays read-only: status never deletes the stray (test "each read the operator may run writes nothing").
 
 ## Contracts
@@ -55,7 +55,7 @@ All in `test/machine.test.mjs`. Nothing touches the real HOME or port 4320.
   - a repo under `<fake HOME>/code` with `DEVTEAM_HUB_RECORD=off` writes nothing;
   - the same repo without it writes exactly one record naming its root (done-when 3).
 
-  `accounts-tick` refuses a worker or ticket env outright (it is the supervisor's). So the session env reaches registration only through the dashboard, tested next.
+  `accounts-tick` refuses a worker or ticket env outright (it is the supervisor's). So the session env reaches registration only through the dashboard, tested next. A comment beside the tests says so: `sessionRun()` inside `registerOnMachine` is a guard for future callers, covered through the dashboard path.
 - **Session dashboard** (done-when 1, the env half). A real dashboard on the test's own hub port, with `DEVTEAM_IMAGE_HUB` set to that port so it binds no hub, `DEVTEAM_ACCOUNTS_MS=200` and cswap off. Started with `DEVTEAM_ROLE=worker` and `DEVTEAM_TICKET`, its ticks write `run/accounts.json` and no record for its root. Started without them (control), the record appears. A planner env (`DEVTEAM_FEATURE`, role planner) is the same as worker.
 - **Ignoring and saying so** (done-when 2). With no explicit port, fake HOME and the test `TMPDIR`, records are written by hand: one rooted under `TMPDIR`, one under a `scratchpad` segment, one real. Then:
   - `recover --machine --dry-run` names only the real one;
