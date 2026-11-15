@@ -1,0 +1,24 @@
+ok   empty
+ok   spaces-only
+ok   two-files
+ok   extra-spaces
+ok   option
+ok   option-after-file
+ok   subst
+ok   backtick
+ok   glob
+ok   semicolon
+ok   newline
+ok   tab
+ok   repeat-0
+ok   repeat-6
+ok   repeat-x
+ok   repeat-05
+ok   repeat-empty
+ok   load-9
+ok   load-08
+ok   load-neg
+ok   load-empty
+ok   no-expr-in-run
+ok   scan-covers-summary
+check-inputs: all ok
