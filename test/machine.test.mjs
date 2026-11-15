@@ -1334,3 +1334,9 @@ test('installed without DEVTEAM_BOX_TOOLS exits 2', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /box-pins installed: DEVTEAM_BOX_TOOLS is not set \(not the box image\?\)/);
 });
+
+test('help names box-pins and says only the top package of npm and PyPI tools is pinned', () => {
+  const r = spawnSync(process.execPath, [KIT, 'help'], { cwd: nowhere, encoding: 'utf8', env: pinsEnv() });
+  assert.equal(r.status, 0, r.stderr);
+  for (const re of [/box-pins verify \[--release vX\.Y\.Z\]/, /check \[--json\]/, /bump --release vX\.Y\.Z \[--dry-run\]/, /box-pins installed/, /only the top package of the npm and PyPI tools is pinned/i]) assert.match(r.stdout, re);
+});

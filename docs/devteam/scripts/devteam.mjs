@@ -421,10 +421,11 @@ function remoteKeyAt(r, base) {
 // a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
 // repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder has no settings.md
 // (a sibling's own copy, with or without tickets/, or a repo not adopted yet), for every command but
-// init (which adopts) and help, and, in the kit's own repo, its read-only views (KIT_VIEWS).
+// init (which adopts) and help, and, in the kit's own repo, its views (KIT_VIEWS).
 const cwdCommon = commonOf(process.cwd());
 // The kit's own repo (a remote of it is the kit's upstream) has no project of its own, but its
-// read-only views run there as they always did, over no tickets: nothing in them writes.
+// views run there as they always did, over no tickets: nothing in them writes but `box-pins bump`,
+// which rewrites only cloud/Dockerfile's pins (the release-prep PR's change, made in that checkout).
 const KIT_UPSTREAM = 'sanctuarycomputer/devteam';
 const KIT_VIEWS = ['status', 'whoami', 'validate', 'links', 'box-pins'];
 const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.url$'], root) ?? '').split('\n').some((l) => l && remoteKeyAt(l.slice(l.indexOf(' ') + 1), root) === KIT_UPSTREAM);
@@ -19498,6 +19499,8 @@ The log
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
+  box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]   [--dockerfile p]   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
+  box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
   hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
 `;
 
