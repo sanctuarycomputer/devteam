@@ -8918,6 +8918,20 @@ function rankQuestions(qs, inbox = qs) {
   const ranks = inboxRanks(inbox);
   return qs.map((q) => ({ ...q, rank: ranks.get(q.id) ?? null })).sort((a, b) => (a.rank?.position ?? Infinity) - (b.rank?.position ?? Infinity) || a.asked_at.localeCompare(b.asked_at));
 }
+// What holds each item that needs the owner: a ticket id, or plan-<feature> for a planner, to the
+// open Inbox question holding it (asked for the ticket or naming it in blocks; for a planner, one of
+// its waiting_on_owner). With several, the first in Inbox order: the one the owner answers first.
+function heldByMap() {
+  const qs = rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go'));
+  const H = new Map();
+  const hold = (key, qid) => { if (!H.has(key)) H.set(key, qid); };
+  const ps = planners();
+  for (const q of qs) {
+    for (const id of [q.ticket, ...(q.blocks ?? [])].filter(Boolean)) hold(id, q.id);
+    for (const p of ps) if (p.waiting_on_owner.includes(q.id)) hold(`plan-${p.feature}`, q.id);
+  }
+  return H;
+}
 function cmdQuestions() {
   let qs = questions();
   const inbox = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
@@ -11712,6 +11726,11 @@ function collectMetrics(since) {
   const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
   const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
   if (phaseNow.size >= 2 && costPhase && totalUsd >= HOTSPOT_MIN_USD && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
+  // what holds each item (heldByMap); a ticket that can still move: active, unmerged, and not on a
+  // parked or let-go goal (that one waits by choice)
+  const H = heldByMap();
+  const live = (id) => { const t = ts.get(id); return !!t && isActive(t) && !mergeShaFor(id) && !['park', 'let-go'].includes(ticketMode(t)); };
+  const blockedHint = (id) => `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`;
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
     // Blocked on an open owner question (asked for it, or naming it in blocks): the next move is the
@@ -11721,9 +11740,16 @@ function collectMetrics(since) {
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
+    // the first hour of the same: blocked with nothing holding it, raised at once
+    else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, blockedHint(id));
     // awaiting the word while an open owner question blocks it: the word waits on the owner
     if (p.phase === 'awaiting-word' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `waiting for the word for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     else if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
+  }
+  // a planner can't log phase blocked: it says so in a blocked message, shown while unanswered
+  for (const p of planners()) {
+    const key = `plan-${p.feature}`;
+    if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', blockedHint(key));
   }
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;
@@ -12117,11 +12143,13 @@ function dashboardData() {
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
+  const H = heldByMap();
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
     gates_configured: Object.keys(settings.gates ?? {}),
-    tickets: deriveStatus(),
+    // held_by: the open question holding it, or null
+    tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
     // every kind of decision in plain words; each row with a class carries its class_name
     class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
@@ -12129,7 +12157,7 @@ function dashboardData() {
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
-    planners: planners(),
+    planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),

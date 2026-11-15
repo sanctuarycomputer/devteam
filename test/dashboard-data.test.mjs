@@ -124,3 +124,83 @@ test('every kind of decision has a plain name, and no class id shows', { timeout
 
   assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
 });
+
+test('each blocked item names the question holding it', { timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('held-by');
+  undo.push(() => F.done());
+  const tk = (id, feature, story) => F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature, component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: [story], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'] })]);
+  F.sup(['feature', 'add', 'hb-work', '--json', JSON.stringify({ title: 'HB', goals: [F.goal], stories: [{ id: 'HB-S1', text: 'x', release: 'v1.0.0' }] })]);
+  for (const id of ['app-01-a', 'app-02-b', 'app-03-c', 'app-04-d']) tk(id, 'hb-work', 'HB-S1');
+  // a ticket on a second goal, to park (P1-4)
+  const g2 = F.sup(['goal', 'add', '--title', 'Other', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', '3']);
+  F.sup(['feature', 'add', 'hb-other', '--json', JSON.stringify({ title: 'HB other', goals: [g2], stories: [{ id: 'HB-S2', text: 'y', release: 'v1.0.0' }] })]);
+  tk('app-05-e', 'hb-other', 'HB-S2');
+
+  const qa = firstId(F.sup(['ask', '--blocks', 'app-01-a', '--question', 'Which tax table for a?', '--recommendation', 'the new one', '--stake', '3', '--urgency', '3']));
+  const qb = firstId(F.sup(['ask', '--ticket', 'app-02-b', '--question', 'Ship b before the billing page?', '--recommendation', 'yes', '--stake', '2', '--urgency', '2']));
+  const qa2 = firstId(F.sup(['ask', '--blocks', 'app-01-a', '--question', 'Which currency does a show first?', '--recommendation', 'dollars', '--stake', '1', '--urgency', '1']));
+  // a planner whose goal has an open question (P1-13): its branch isn't on main
+  const { goal: g3, question: qg } = F.approval();
+  const wt = path.join(F.base, 'plan-hb-plan');
+  F.g(['worktree', 'add', '-q', '-b', 'plan/hb-plan', wt, 'main'], F.old);
+  write(path.join(wt, 'docs/devteam/project/log/plan-hb-plan.jsonl'), `${JSON.stringify({ v: 1, id: 'hb-plan', type: 'feature', op: 'new', at: new Date().toISOString(), by: 'plan-hb-plan', title: 'HB plan', goals: [g3], stories: [] })}\n`);
+  F.g(['add', '-A'], wt);
+  F.g(['commit', '-qm', 'plan-hb-plan: feature'], wt);
+  F.g(['worktree', 'remove', wt], F.old);
+
+  // each read writes nothing to the log
+  const read = (f) => { const before = logBytes(F); const r = f(); assert.deepEqual(logBytes(F), before, 'the read wrote nothing to the log'); return r; };
+  const heldBy = (id) => read(() => data(F)).tickets.find((r) => r.id === id)?.held_by;
+  const findings = () => read(() => json(F.ok(F.old, ['metrics', '--json']))).findings;
+  const bwq = (subject) => findings().filter((f) => f.kind === 'blocked-without-question' && f.subject === subject);
+
+  const d = read(() => data(F));
+  const row = (id) => d.tickets.find((r) => r.id === id);
+  assert.equal(row('app-01-a').held_by, qa, 'the first in Inbox order holds it');
+  assert.equal(row('app-02-b').held_by, qb, 'held by the question asked for it');
+  assert.equal(row('app-03-c').held_by, null, 'no question names it');
+  for (const r of d.tickets) assert.ok('held_by' in r, `${r.id} has held_by`);
+  const plan = d.planners.find((p) => p.feature === 'hb-plan');
+  assert.ok(plan, `a planner row for hb-plan: ${JSON.stringify(d.planners)}`);
+  assert.deepEqual(plan.goals, [g3]);
+  assert.equal(plan.held_by, qg, 'the planner is held by its goal\'s open question');
+
+  F.owner(['answer', qa, 'yes']);
+  assert.equal(heldBy('app-01-a'), qa2, 'once the first is answered, the other holds it');
+  F.sup(['withdraw', qa2, '--reason', 'test']);
+  assert.equal(heldBy('app-01-a'), null, 'once both are closed, nothing holds it');
+
+  // a ticket just blocked with no question: medium, with the hint
+  handLine(F, 'app-03-c', { type: 'phase', to: 'blocked' }, 5 * 60000, 'app-03-c.jsonl');
+  const [c] = bwq('app-03-c');
+  assert.ok(c, 'blocked-without-question for app-03-c');
+  assert.equal(c.severity, 'medium');
+  assert.match(c.suggestion, /ask --blocks app-03-c/);
+  assert.match(c.suggestion, /answer its blocked message/);
+  // blocked over an hour: the existing high finding, and not this one
+  handLine(F, 'app-04-d', { type: 'phase', to: 'blocked' }, 2 * 3600000, 'app-04-d.jsonl');
+  let all = findings();
+  assert.ok(all.some((f) => f.kind === 'blocked' && f.severity === 'high' && f.subject === 'app-04-d'), 'blocked (high) for app-04-d');
+  assert.ok(!all.some((f) => f.kind === 'blocked-without-question' && f.subject === 'app-04-d'), 'no blocked-without-question past the hour');
+  // a question that blocks it: no finding
+  F.sup(['ask', '--blocks', 'app-03-c', '--question', 'May c drop the legacy export?', '--recommendation', 'drop it', '--stake', '2', '--urgency', '2']);
+  assert.deepEqual(bwq('app-03-c'), [], 'a question names app-03-c');
+  // a ticket blocked on a running goal, then parked with its goal (P2-3, P1-4)
+  handLine(F, 'app-05-e', { type: 'phase', to: 'blocked' }, 5 * 60000, 'app-05-e.jsonl');
+  assert.equal(bwq('app-05-e').length, 1, 'raised while its goal runs');
+  F.owner(['goal', 'hold', g2, 'park', '--owner']);
+  all = findings();
+  assert.ok(!all.some((f) => ['blocked-without-question', 'blocked'].includes(f.kind) && f.subject === 'app-05-e'), 'parked with its goal, it waits by choice');
+
+  // the planner: once its question is withdrawn (answer refuses a goal approval), a blocked message raises it
+  F.sup(['withdraw', qg, '--reason', 'test']);
+  assert.equal(read(() => data(F)).planners.find((p) => p.feature === 'hb-plan').held_by, null, 'the planner holds nothing');
+  assert.deepEqual(bwq('plan-hb-plan'), [], 'not blocked yet');
+  handLine(F, 'plan-hb-plan', { type: 'message', kind: 'blocked', to: 'supervisor', text: 'need a ruling' }, 60000);
+  const [p] = bwq('plan-hb-plan');
+  assert.ok(p, 'blocked-without-question for plan-hb-plan');
+  assert.equal(p.severity, 'medium');
+  assert.match(p.suggestion, /ask --blocks plan-hb-plan/);
+});
