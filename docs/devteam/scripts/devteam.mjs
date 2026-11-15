@@ -12701,7 +12701,8 @@ function recoverOne() {
   // A supervisor that ran in a plain terminal comes back in one, when there's one to take; otherwise
   // in tmux, as any unattended restore (a box, --machine) must.
   const inPlace = here || (rec?.kind === 'foreground' && !sessionFlag && process.stdin.isTTY && process.stdout.isTTY && !process.env.TMUX);
-  const line = `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} "$(cat '${promptFile}')"`;
+  // a resume's message is a short constant, passed as it is; a fresh start's prompt by its file
+  const line = `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`;
   if (inPlace) {
     writeSupervisorUp({ up: true, kind: 'foreground', pid: null, start: null, machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
     hostCheck({ start: true });
@@ -12918,7 +12919,7 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     // its fleet status says holds a move
     fs.writeFileSync(paneFile, pane);
     // by pane id: a dot in a window name reads as a pane to tmux
-    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
+    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} ${id ? `"$(cat '${promptFile}')"` : shq(promptPointer(promptFile))}`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
   };
   if (dry) return go();
@@ -15189,6 +15190,10 @@ function resolvePane(target) {
   return { target: exact };
 }
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
+// A prompt goes to the agent as a file it is told to read, never as its text on the command line:
+// one argument is at most 128 KB on Linux (MAX_ARG_STRLEN), and a prompt with a large knowledge block
+// passes that, so the shell refuses the line and no agent starts. Plain words, for any agent_command.
+const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now, every part (a long file takes more than one read), and follow it.`;
 const typeNow = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
@@ -15806,7 +15811,8 @@ function makeSession(role) {
     // every window that session's markers; a worker that inherits them runs as its child (Claude Code
     // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
     // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
-    type(`${sessionMarkerPrefix()}${cmd} "$(cat '${promptFile}')"`);
+    // by its file, fresh or resumed: a resume's prompt is as large as a fresh start's
+    type(`${sessionMarkerPrefix()}${cmd} ${shq(promptPointer(promptFile))}`);
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
