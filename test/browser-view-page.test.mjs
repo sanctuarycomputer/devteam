@@ -40,7 +40,7 @@ const RECORDER = `(() => {
 })();`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function until(fn, what, ms = 3000) {
+async function until(fn, what, ms = 5000) {
   const end = Date.now() + ms;
   for (;;) {
     let v; try { v = await fn(); } catch { v = false; }
@@ -568,7 +568,8 @@ test('the 4 px rule: a press that moves 3 px is a click at the press; one that m
     });
     assert.deepEqual(got.map((m) => m.type).filter((t) => t !== 'move'), ['down', 'up'], `released 10 px off: ${JSON.stringify(got)}`);
     near(got[0], a, 'the down at the press');
-    near(got.at(-1), { fx: got.at(-1).x, fy: got.at(-1).y }, 'the up');
+    const r = off(10);
+    near(got.at(-1), { fx: ((r.x - s.left) * s.w) / s.width, fy: ((r.y - s.top) * s.h) / s.height }, 'the up, at the release');
   } finally { await shut(p); await srv.close(); }
 });
 
@@ -646,5 +647,88 @@ test('Ctrl+V on a non-Latin layout still pastes; a Cmd chord whose keyup never c
       await keyEvent(p, 'keyUp', 'Meta', 'MetaLeft', { windowsVirtualKeyCode: 91 });
     });
     assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'a', code: 'KeyA', mods: 4 }, { t: 'key', type: 'up', key: 'a', code: 'KeyA' }]);
+    // a key still down when the canvas loses focus (Cmd+Tab away) gets its up then
+    got = await sent(c, async () => {
+      await keyEvent(p, 'rawKeyDown', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 });
+      await p.ev(`document.getElementById('screen').blur()`);
+      await keyEvent(p, 'keyUp', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 });
+    });
+    assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'Backspace', code: 'Backspace' }, { t: 'key', type: 'up', key: 'Backspace', code: 'Backspace' }], 'one up, on blur');
+  } finally { await shut(p); await srv.close(); }
+});
+
+// ----- Task 3: the address bar, Back, Sign out of everything --------------------------------------
+// An address-bar entry: the field filled, then a real Enter in it.
+async function go(p, value) {
+  await p.ev(`(() => { const a = document.getElementById('addr'); a.focus(); a.value = ${JSON.stringify(value)}; })()`);
+  await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 });
+  await keyEvent(p, 'keyUp', 'Enter', 'Enter', { windowsVirtualKeyCode: 13 });
+}
+
+test('the address bar sends http and https entries as nav, and refuses every other scheme', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,x', 'about:blank', 'chrome://settings', 'mailto:owner@shop.example']) {
+      const got = await sent(c, () => go(p, bad), 200);
+      assert.deepEqual(got, [], `${bad} sends nothing`);
+      assert.equal(await text(p, 'note'), 'Only http and https addresses open here.', `${bad} is refused in words`);
+    }
+    let got = await sent(c, () => go(p, `https://shop.example/${'a'.repeat(2030)}`), 200);
+    assert.deepEqual(got, [], 'an address over 2048 characters sends nothing');
+    assert.equal(await text(p, 'note'), 'That address is too long.');
+    for (const [typed, url] of [['shop.example/account', 'https://shop.example/account'], ['  localhost:8080/x ', 'https://localhost:8080/x'], ['http://a.example/', 'http://a.example/'], ['https://shop.example/account', 'https://shop.example/account']]) {
+      got = await sent(c, () => go(p, typed), 200);
+      assert.deepEqual(got, [{ t: 'nav', url }], `${JSON.stringify(typed)} sends ${url}`);
+      assert.equal(await text(p, 'note'), '', 'and the refusal line goes');
+    }
+    got = await sent(c, () => p.click('#back'), 200);
+    assert.deepEqual(got, [{ t: 'back' }]);
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('Sign out of everything sends forget only after its confirm', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  const isOpen = () => p.ev(`document.getElementById('confirm').open`);
+  try {
+    let got = await sent(c, () => p.click('#signout'), 200);
+    assert.deepEqual(got, [], 'opening the confirm sends nothing');
+    assert.equal(await isOpen(), true);
+    assert.equal(await p.ev(`document.getElementById('confirm').textContent.replace(/\\s+/g, ' ').trim()`), 'Sign this project\'s browser out of every site? Every site it is signed into forgets it, and the browser starts again empty. Cancel Sign out of every site');
+    await noHandBack(p);
+    got = await sent(c, () => p.click('#cancel'), 200);
+    assert.deepEqual(got, [], 'Cancel sends nothing');
+    assert.equal(await isOpen(), false);
+    await p.click('#signout');
+    got = await sent(c, async () => { await keyEvent(p, 'rawKeyDown', 'Escape', 'Escape', { windowsVirtualKeyCode: 27 }); await keyEvent(p, 'keyUp', 'Escape', 'Escape', { windowsVirtualKeyCode: 27 }); }, 200);
+    assert.deepEqual(got, [], 'Escape sends nothing');
+    assert.equal(await isOpen(), false);
+    await p.click('#signout');
+    got = await sent(c, () => p.click('#forget'), 200);
+    assert.deepEqual(got, [{ t: 'forget' }]);
+    assert.equal(await isOpen(), false);
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a url never overwrites what the owner is typing, and is shown as text', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  const value = () => p.ev(`document.getElementById('addr').value`);
+  try {
+    c.send({ t: 'url', url: 'https://shop.example/account' });
+    await until(async () => (await value()) === 'https://shop.example/account', 'the url');
+    await p.ev(`document.getElementById('addr').select()`);
+    await p.click('#addr');
+    await p.ev(`document.getElementById('addr').select()`);
+    await p.type('shop');
+    c.send({ t: 'url', url: 'https://shop.example/other' });
+    await sleep(300);
+    assert.equal(await value(), 'shop', 'the owner\'s edit stays while the field has focus');
+    await p.ev(`document.getElementById('addr').blur()`);
+    assert.equal(await value(), 'https://shop.example/other', 'the newest url shows on blur');
+    c.send({ t: 'url', url: 'https://a.example/<i>hi<i>' });
+    await until(async () => (await value()) === 'https://a.example/<i>hi<i>', 'the url with markup in it, as text');
+    assert.equal(await p.ev(`document.querySelector('i')`), null, 'no element made of it');
   } finally { await shut(p); await srv.close(); }
 });

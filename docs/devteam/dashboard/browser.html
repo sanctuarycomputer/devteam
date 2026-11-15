@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vwmVqBfghr4Ds8Z1QMS4kLSjpiHzwS/LHX3GxEerQ1I='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fBy45L6HskBbQ3d+MTzzsavvc4Yj6sPhaQQ8ldTnR6M='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -38,6 +38,10 @@
   .foot span:first-child { max-width: var(--text); }
   .chip { font: 12px var(--mono); padding: 1px 8px; border-radius: 999px; background: var(--chip); }
   .chip.live { color: var(--green); }
+  dialog { max-width: var(--text); border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+  dialog p { margin: 0 0 14px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
 <body>
@@ -61,6 +65,13 @@
   </div>
   <div class="foot" id="footbar"><span id="foot"></span><span class="chip" id="chip">Connecting…</span></div>
 </main>
+<dialog id="confirm" aria-labelledby="confirm-text">
+  <p id="confirm-text">Sign this project's browser out of every site? Every site it is signed into forgets it, and the browser starts again empty.</p>
+  <div class="actions">
+    <button type="button" class="btn" id="cancel">Cancel</button>
+    <button type="button" class="btn danger" id="forget">Sign out of every site</button>
+  </div>
+</dialog>
 <script>
 (() => {
   'use strict';
@@ -283,6 +294,40 @@
       i = j;
     }
   });
+
+  // a key still down when the canvas loses focus gets its up now: its keyup goes elsewhere
+  canvas.addEventListener('blur', () => {
+    for (const k of held.values()) send({ t: 'key', type: 'up', key: k.key, ...(k.code ? { code: k.code } : {}) });
+    held.clear();
+  });
+
+  // ----- the address bar, Back, Sign out of everything -----------------------------------------
+  // What the owner typed, with https:// in front where it names no scheme; the page sends only
+  // http and https (the server and the guard check again).
+  const SCHEME = /^[a-z][a-z0-9+.-]*:(?!\d)/i;
+  function toNav(typed) {
+    const v = typed.trim();
+    const url = v.includes('://') || SCHEME.test(v) ? v : `https://${v}`;
+    let u;
+    try { u = new URL(url); } catch { return { refuse: 'Only http and https addresses open here.' }; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { refuse: 'Only http and https addresses open here.' };
+    if (url.length > 2048) return { refuse: 'That address is too long.' };
+    return { url };
+  }
+  $('go').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!addr.value.trim()) return;
+    const r = toNav(addr.value);
+    if (r.refuse) return note(r.refuse);
+    note('');
+    send({ t: 'nav', url: r.url });
+    addr.blur();
+  });
+  $('back').addEventListener('click', () => send({ t: 'back' }));
+  const confirm = $('confirm');
+  $('signout').addEventListener('click', () => confirm.showModal());
+  $('cancel').addEventListener('click', () => confirm.close());
+  $('forget').addEventListener('click', () => { confirm.close(); send({ t: 'forget' }); });
 
   connect();
 })();
