@@ -13,4 +13,4 @@ Product code and tests as of `1b56d9a` (the build, with task reviews 1 and 2 fix
 
 ## CI
 
-PR #260. Pending at the time of writing; filled in when the run ends.
+PR #260, at `64549a2` (product code `1b56d9a`): `devteam.mjs gate ci -- gh run watch 43701358347 --repo sanctuarycomputer/devteam --exit-status` ok; all 8 kit jobs (18/20/22/24 × chain/rest) and `build` pass (run 43701358347). The first watch, started on the run for `d9fb8d1`, was cut off when the verification push replaced that run (`gh` said "no checks reported"; recorded as gate ci FAIL, not a test failure). After kit-235 merges (m-20261115-094951709), `origin/main` is merged in and CI runs again before the final review.
