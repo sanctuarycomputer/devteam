@@ -2874,13 +2874,15 @@ function paneWaitingIn(window) {
 
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
-// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
-// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
-// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
-// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
-// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
-// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
+// window; when the pane's body (its lines above the harness footer, its chrome left out: paneBody)
+// still holds that text's tail, nothing on the pane says the agent is busy, no prompt is up (the
+// caller checked), nobody is at the pane (a tmux client on it that pressed a key lately) and the
+// text is LOST_ENTER_SECONDS old, press Enter and log it. That Enter can be lost the same way (seen
+// on a loaded machine), so the text still sitting there LOST_ENTER_SECONDS after a press gets
+// another, up to LOST_ENTER_TRIES in all, but only while the body is as it was at the last press: a
+// lost Enter on an idle pane changes nothing there (the footer, the agent list and shell counts
+// change on their own, so they're left out), while a reply, a submission or someone typing does.
+// The text is never retyped. The record
 // is claimed (moved aside) and read again before each key, so however many passes or processes look,
 // and however stale their first read, one press happens per claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
@@ -2889,6 +2891,23 @@ const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
 const squash = (t) => t.replace(/[\s─-╿]+/g, '');
+// The harness's own chrome, not the pane's content: a box-drawing rule (the input box's border), a
+// running-shell count, a token counter (an agent's list line or spinner). They change on an idle
+// pane, so the lost-Enter rescue doesn't digest them. The body is the last 8 lines above the last
+// rule that aren't chrome, shell counts taken out; the text is looked for in the raw lines.
+const PANE_RULE = /^[─-╿]{8,}$/;
+const PANE_TOKENS = /[↑↓]\s*[\d.,]+\s*[km]?\s+tokens\b/i;
+const PANE_SHELLS = new RegExp(PANE_SHELL.source, 'gi');
+const paneNorm = (l) => l.replace(PANE_SHELLS, ' ').replace(/[\s·]+/g, ' ').trim();
+function paneBody(lines, tail) {
+  let end = lines.length;
+  for (let i = end - 1; i >= 0; i--) if (PANE_RULE.test(lines[i].replace(/\s+/g, ''))) { end = i + 1; break; }
+  // text below the last rule: no box under the input, so nothing below it is a footer
+  if (end < lines.length && squash(lines.slice(end).join('')).includes(tail)) end = lines.length;
+  const kept = [];
+  for (let i = end - 1; i >= 0 && kept.length < 8; i--) if (!PANE_TOKENS.test(lines[i]) && paneNorm(lines[i])) kept.unshift(i);
+  return { text: squash(lines.slice(kept[0] ?? end, end).join('')), digest: crypto.createHash('sha1').update(kept.map((i) => paneNorm(lines[i])).join('\n')).digest('hex') };
+}
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
@@ -2915,8 +2934,8 @@ function resendLostEnter(key, target, lines) {
   try { rec = readJson(file); } catch { return; }
   const tail = squash(rec.text ?? '').slice(-40);
   if (!tail || !ripe(rec)) return;
-  const bottom = lines.slice(-8);
-  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
+  const body = paneBody(lines, tail);
+  const digest = body.digest;
   const claimed = `${file}.claim-${process.pid}`;
   const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
   // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
@@ -2932,8 +2951,9 @@ function resendLostEnter(key, target, lines) {
     putBack();
     return null;
   };
-  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
-  if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
+  if (!body.text.includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
+  // every line captured, chrome and all: a footer's or a spinner's busy marker counts
+  if (lines.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
   if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
