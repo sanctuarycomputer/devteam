@@ -160,3 +160,188 @@ test('--list prints the plan and runs nothing', () => {
   assert.equal(bad.status, 2);
   assert.match(bad.stderr, /shard/);
 });
+
+// ---- running files (T3) ----
+const { spawn } = await import('node:child_process');
+const { PassThrough } = await import('node:stream');
+const fx = (name) => `test/fixtures/run/${name}`;
+const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// dead: gone, or a zombie nobody has reaped yet
+const isDead = (pid) => {
+  try { process.kill(pid, 0); } catch (e) { return e.code === 'ESRCH'; }
+  return /Z/.test(spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '');
+};
+const deadSoon = async (pid) => { for (let i = 0; i < 50; i++) { if (isDead(pid)) return true; await sleep(100); } return isDead(pid); };
+const waitFor = async (f, ms) => { for (let i = 0; i < ms / 100; i++) { if (fs.existsSync(f)) return true; await sleep(100); } return fs.existsSync(f); };
+
+// Every runner spawn has a deadline: past it, the runner's group is killed (only while the runner,
+// its leader, hasn't exited, so the group can't be someone else's) and the call rejects.
+function runRunner(args, { env, cwd = root, deadline = 60000, umask, script = runMjs } = {}) {
+  const argv = umask ? ['sh', ['-c', `umask ${umask}; exec "$0" "$@"`, process.execPath, script, ...args]] : [process.execPath, [script, ...args]];
+  const child = spawn(argv[0], argv[1], { cwd, env: nodeEnv(env), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const out = [], err = [];
+  child.stdout.on('data', (b) => out.push(b));
+  child.stderr.on('data', (b) => err.push(b));
+  const alive = () => child.exitCode === null && child.signalCode === null;
+  const done = new Promise((resolve, reject) => {
+    const t = setTimeout(() => { if (alive()) try { process.kill(-child.pid, 'SIGKILL'); } catch {} reject(new Error(`runner still running after ${deadline} ms: ${args.join(' ')}\n${Buffer.concat(out)}${Buffer.concat(err)}`)); }, deadline);
+    child.on('close', (code, signal) => { clearTimeout(t); resolve({ code, signal, stdout: Buffer.concat(out).toString(), stderr: Buffer.concat(err).toString() }); });
+  });
+  return Object.assign(done, { child, alive });
+}
+const fixtureEnv = (t, extra = {}) => {
+  const out = fresh('out');
+  t.after(() => fs.rmSync(out, { recursive: true, force: true }));
+  return { out, env: { DTR_FIXTURE_OUT: out, ...extra } };
+};
+
+test('a passing file', async () => {
+  const r = await runRunner(['test/search.test.mjs']);
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^# test\/search\.test\.mjs\n(TAP version 13\n)?/m);
+  assert.match(r.stdout, /^summary: 1 file, concurrency 2$/m);
+  assert.match(r.stdout, /^ok \d+ - \S/m, 'its tests ran');
+  assert.doesNotMatch(r.stdout, /called recursively/);
+  assert.match(r.stdout, /^test\/search\.test\.mjs {2}\d+\.\d {2}ok$/m);
+});
+
+test('exit codes', async (t) => {
+  const { env } = fixtureEnv(t);
+  for (const f of ['fail.mjs', 'throws.mjs', 'exit-nonzero.mjs']) {
+    const r = await runRunner([fx(f)], { env });
+    assert.equal(r.code, 1, `${f}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`^failed: test/fixtures/run/${f.replace('.', '\\.')} \\(`, 'm'));
+  }
+  assert.equal((await runRunner([fx('pass.mjs')], { env })).code, 0);
+  const both = await runRunner([fx('pass.mjs'), fx('fail.mjs')], { env });
+  assert.equal(both.code, 1);
+  assert.match(both.stdout, /^failed: test\/fixtures\/run\/fail\.mjs/m);
+  assert.doesNotMatch(both.stdout, /^failed: test\/fixtures\/run\/pass\.mjs/m);
+});
+
+test('per-file temp and the shim', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const S = fresh('shared');
+  t.after(() => fs.rmSync(S, { recursive: true, force: true }));
+  // the first run, which makes the shim, under a umask that would leave it group-writable
+  const r = await runRunner([fx('env.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: S }, umask: '002' });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const e = readJson(path.join(out, 'env.json'));
+  if (fs.existsSync('/tmp')) assert.match(e.TMPDIR, /^\/tmp\/dtr-/);
+  assert.equal(e.tmpdir, e.TMPDIR);
+  assert.equal(fs.existsSync(e.TMPDIR), false, 'the scratch folder is gone');
+  assert.equal(e.shared, S);
+  const [first, second] = e.PATH.split(path.delimiter);
+  assert.ok(first.startsWith(`${e.TMPDIR}/`), `kit's shim first: ${first}`);
+  assert.equal(path.dirname(second), S);
+  assert.match(path.basename(second), new RegExp(`^devteam-test-tmux-shim-run-${process.getuid()}-[0-9a-f]{12}$`));
+  assert.match(fs.readFileSync(path.join(second, 'tmux'), 'utf8'), /tmux refused: TMUX_TMPDIR/);
+  assert.equal(fs.statSync(second).mode & 0o777, 0o755);
+  assert.equal(fs.statSync(path.join(second, 'tmux')).mode & 0o777, 0o755);
+  const again = await runRunner([fx('env.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: S } });
+  assert.equal(again.code, 0, again.stdout + again.stderr);
+  assert.equal(readJson(path.join(out, 'env.json')).PATH.split(path.delimiter)[1], second, 'the shim is reused');
+});
+
+test('the default shared dir', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const X = fresh('tmpdir');
+  t.after(() => fs.rmSync(X, { recursive: true, force: true }));
+  const r = await runRunner([fx('env.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: undefined, TMPDIR: X } });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.equal(readJson(path.join(out, 'env.json')).shared, X);
+});
+
+test('two files at once claim distinct port blocks', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const S = fresh('shared');
+  t.after(() => fs.rmSync(S, { recursive: true, force: true }));
+  const r = await runRunner(['--concurrency', '2', fx('ports.mjs'), fx('ports-2.mjs')], { env: { ...env, DEVTEAM_TEST_SHARED_TMP: S } });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const got = fs.readdirSync(out).filter((f) => /^ports-\d+\.json$/.test(f)).map((f) => readJson(path.join(out, f)));
+  assert.equal(got.length, 2);
+  for (const g of got) {
+    assert.equal(g.LOCK_DIR, path.join(S, 'devteam-kit-ports'));
+    assert.ok(g.two, 'each saw the other hold a block');
+  }
+  assert.notEqual(got[0].PORTS, got[1].PORTS);
+});
+
+test('a file that ends on its own has its tmux servers killed and folder removed', { skip: !hasTmux && 'no tmux' }, async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const r = await runRunner([fx('tmux-ends.mjs')], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const o = readJson(path.join(out, 'tmux-ends.json'));
+  assert.ok(o.server > 0);
+  assert.ok(await deadSoon(o.server), `tmux server ${o.server} is dead`);
+  assert.equal(fs.existsSync(o.scratch), false);
+});
+
+test('--repeat 3 names the failing run', async (t) => {
+  const { env } = fixtureEnv(t);
+  const r = await runRunner(['--repeat', '3', fx('flaky.mjs')], { env });
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  const rows = r.stdout.split('\n').filter((l) => l.startsWith('test/fixtures/run/flaky.mjs  '));
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map((l) => /failed/.test(l)), [false, true, false]);
+  assert.match(rows[1], /\(run 2\)$/);
+});
+
+test('--timings writes wall seconds', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const f = path.join(out, 'timings.json');
+  const r = await runRunner(['--timings', f, fx('pass.mjs')], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const o = readJson(f);
+  assert.ok('run' in o);
+  assert.deepEqual(Object.keys(o.files), ['test/fixtures/run/pass.mjs']);
+  assert.equal(typeof o.files['test/fixtures/run/pass.mjs'], 'number');
+});
+
+test('--list runs nothing', async (t) => {
+  const { out, env } = fixtureEnv(t);
+  const r = await runRunner(['--list', fx('env.mjs')], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.deepEqual(fs.readdirSync(out), []);
+});
+
+test('a loud file', async (t) => {
+  const { env } = fixtureEnv(t);
+  const r = await runRunner([fx('loud.mjs')], { env });
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.stdout.length > 2000000);
+});
+
+test('from another cwd, through a symlink', async (t) => {
+  const { env } = fixtureEnv(t);
+  const d = fresh('link');
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const L = path.join(d, 'kit');
+  fs.symlinkSync(root, L);
+  const r = await runRunner([path.join(L, fx('fail.mjs'))], { env, cwd: '/', script: path.join(L, 'test/run.mjs') });
+  assert.equal(r.code, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /^failed: test\/fixtures\/run\/fail\.mjs/m);
+});
+
+test('an empty shard', async (t) => {
+  const { env } = fixtureEnv(t);
+  const r = await runRunner(['--shard', '2/2', fx('pass.mjs')], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^no files$/m);
+});
+
+test('drain', async () => {
+  const s = new PassThrough();
+  const t0 = Date.now();
+  await R.drain(s, 200);
+  assert.ok(Date.now() - t0 < 1200);
+  const ended = new PassThrough();
+  ended.end();
+  ended.resume();
+  await new Promise((r) => ended.on('end', r));
+  const t1 = Date.now();
+  await R.drain(ended, 5000);
+  assert.ok(Date.now() - t1 < 1000, 'an ended stream drains at once');
+});
