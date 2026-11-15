@@ -1,6 +1,6 @@
 # kit-237-no-scratch-hub-registration: verification
 
-At commit `cf7c1b83175d9cd05480a5f3792e40b56e933d72` (later commits change only this ticket's records). Local runs were on the box with Node 18.20.4. As the box rule says, only the touched test file ran, at `--test-concurrency=2`. CI runs the whole suite on Node 18, 20, 22 and 24.
+At commit `abc0ecc3cb88f6fa8165109facfc6687c082c7c0` (later commits change only this ticket's records). The gate runs below are from there; the first two ran at `cf7c1b8`, before final-1's two comment-and-env fixes, and the same 57 pass at `abc0ecc`. CI (the whole suite, all jobs) passed at `950be36`, run 43696952752. The run at the head is in the merge request. Local runs were on the box with Node 18.20.4. As the box rule says, only the touched test file ran, at `--test-concurrency=2`. CI runs the whole suite on Node 18, 20, 22 and 24.
 
 Box safety (ruling m-20261115-082335469-supervisor): every case runs with a HOME of its own. The cases with no `DEVTEAM_HUB_PORT` set `DEVTEAM_IMAGE_HUB=4320`, so nothing binds 4320. The only contact is `machine status`'s read-only GET of `/instances.json`, which the spec accepts. The real `~/.devteam/repos-4320/` held the same five files (`37843d29…`, `525596…`, `a26b98…`, `b3ed4f…`, `d6ea08…`) before and after every local run, the reviewers' included.
 
@@ -14,6 +14,7 @@ Box safety (ruling m-20261115-082335469-supervisor): every case runs with a HOME
 Not run locally (box rule: touched files only): the explicit-port record tests in `test/recovery.test.mjs` (`recover --machine`) and the box-line order test in `test/hub-overview.test.mjs`. The code reviewer read both against the change: explicit-port records are never strays, and the stray lines print after the box line. CI runs them.
 
 Not covered by a test:
+- `ownerProcessEnv` (so `tmuxServerEnv`) dropping `DEVTEAM_HUB_RECORD` (final-1 F2): a tmux server or owner action a session's dashboard starts doesn't inherit the off mark. Read, not tested.
 - macOS `/var` → `/private/var`. CI is Linux. The code resolves both sides (`realPath` for temp dirs and home, `realPathMade` for a record's root).
 - `registerOnMachine`'s own `sessionRun()` branch with no explicit port. `accounts-tick` refuses a session env before it registers, so a session reaches it only through its dashboard's `DEVTEAM_HUB_RECORD=off`, which is tested.
 
