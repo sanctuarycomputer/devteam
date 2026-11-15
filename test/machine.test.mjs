@@ -1329,6 +1329,20 @@ test('installed exits 1 naming the tool that differs, or is missing', () => {
   assert.match(odd.stdout, /^node: not a tool box-pins knows$/m);
 });
 
+test('installed runs from a repo that is no project, never looks a tool up on PATH, and names a pin given twice (task-4 review)', () => {
+  const repoDir = path.join(tmp, 'not-a-project');
+  fs.mkdirSync(repoDir, { recursive: true });
+  execFileSync('git', ['init', '-q'], { cwd: repoDir });
+  const r = spawnSync(process.execPath, [path.join(imageKit, 'scripts', 'devteam.mjs'), 'box-pins', 'installed'], { cwd: repoDir, encoding: 'utf8', env: pinsEnv({ PATH: `${shimBin}${path.delimiter}${baseEnv.PATH}`, DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: TOOLS_ENV }) });
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  // a relative DEVTEAM_BOX_BIN is a folder, never a bare name for PATH to find
+  const rel = spawnSync(process.execPath, [path.join(imageKit, 'scripts', 'devteam.mjs'), 'box-pins', 'installed'], { cwd: boxBin, encoding: 'utf8', env: pinsEnv({ PATH: `${shimBin}${path.delimiter}${baseEnv.PATH}`, DEVTEAM_BOX_BIN: '.', DEVTEAM_BOX_TOOLS: TOOLS_ENV }) });
+  assert.equal(rel.status, 0, rel.stdout);
+  const twice = installed({ DEVTEAM_BOX_BIN: boxBin, DEVTEAM_BOX_TOOLS: `${TOOLS_ENV} gh=2.105.0` });
+  assert.equal(twice.status, 1);
+  assert.match(twice.stdout, /^gh: named 2 times in DEVTEAM_BOX_TOOLS$/m);
+});
+
 test('installed without DEVTEAM_BOX_TOOLS exits 2', () => {
   const r = installed({ DEVTEAM_BOX_BIN: boxBin });
   assert.equal(r.status, 2);

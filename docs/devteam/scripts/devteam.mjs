@@ -14159,18 +14159,21 @@ async function cmdBoxPins() {
     // (on the box dev's PATH finds mise's own uv first), against the pins the image was built with
     const pinned = (process.env.DEVTEAM_BOX_TOOLS ?? '').trim();
     if (!pinned) die('box-pins installed: DEVTEAM_BOX_TOOLS is not set (not the box image?)', 2);
-    const want = new Map(), unknown = [];
+    const want = new Map(), unknown = [], named = new Map();
     for (const pair of pinned.split(/\s+/)) {
       const i = pair.indexOf('=');
       const name = i > 0 ? pair.slice(0, i) : pair;
+      named.set(name, (named.get(name) ?? 0) + 1);
       if (BOX_TOOLS.some((t) => t.name === name)) want.set(name, pair.slice(i + 1)); else unknown.push(name);
     }
-    const bin = process.env.DEVTEAM_BOX_BIN || '/usr/local/bin';
+    // always a folder: a relative one is made absolute, so no tool is ever a bare name PATH resolves
+    const bin = path.resolve(process.env.DEVTEAM_BOX_BIN || '/usr/local/bin');
     let bad = 0;
     const say = (line, ok = false) => { out(line); if (!ok) bad++; };
     for (const tool of BOX_TOOLS) {
       const pin = want.get(tool.name);
       if (pin === undefined) { say(`${tool.name}: not in DEVTEAM_BOX_TOOLS`); continue; }
+      if (named.get(tool.name) > 1) { say(`${tool.name}: named ${named.get(tool.name)} times in DEVTEAM_BOX_TOOLS`); continue; }
       const [file, ...args] = tool.run;
       const r = spawnSync(path.join(bin, file), args, { encoding: 'utf8', timeout: 20000, env: { ...process.env, ...tool.env } });
       if (r.error || r.status !== 0) { say(`${tool.name}: did not run (${r.error ? safe(r.error.code) : r.signal ? safe(r.signal) : `exit ${r.status}`})`); continue; }
