@@ -5041,7 +5041,7 @@ function governanceView() {
     ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
     : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
   const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
-  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback }));
+  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
   const settingsRel = `${projectRel}/settings.md`;
   const newest = new Map();
   const syncs = new Set();
@@ -5063,9 +5063,11 @@ function governanceView() {
     const text = sf && readText(path.resolve(projectRoot, sf));
     if (text) shallow = new Set(text.split('\n').filter(Boolean));
   }
-  const files = [...kit, ...project].map(({ group, path: p, fallback }) => {
+  const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
     const text = at(p);
-    const written = text !== null;
+    // init's untouched strategy template counts as not written, by its marker line, as strategyState
+    // reads it; exterior.md has no template, so it is written once it exists
+    const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
     const c = newest.get(p);
     const known = c && !shallow.has(c.sha);
     const differs = group === 'project' || !syncs.size || !known ? null : !syncs.has(c.sha);

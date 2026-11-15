@@ -301,8 +301,8 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   undo.push(() => F.done());
   // each main commit pushed: main is origin's
   const commit = (root, msg) => { F.g(['add', '-A'], root); F.g(['commit', '-qm', msg], root); F.g(['push', '-q', 'origin', 'main'], root); };
-  // A project initialised fresh, with its own origin, in fleetFixture's folder. Init's strategy
-  // template is taken out, so neither project file is written.
+  // A project initialised fresh, with its own origin, in fleetFixture's folder. Init's untouched
+  // strategy template is kept: it reads as not written yet.
   const govFixture = (name, upstreamBase, project = null) => {
     const root = path.join(F.base, name);
     const org = path.join(F.base, `${name}.git`);
@@ -316,7 +316,7 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
     const pre = project ? ['--project', project] : [];
     F.ok(root, ['init', '--name', name, ...(upstreamBase ? ['--upstream-base', upstreamBase] : []), ...pre]);
     const proj = path.join(root, project ?? 'docs/devteam/project');
-    fs.rmSync(path.join(proj, 'strategy.md'));
+    assert.ok(fs.existsSync(path.join(proj, 'strategy.md')), "init's strategy template");
     const sf = path.join(proj, 'settings.md');
     fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"gates": {}, "forge": "git", "agent_command": "true", "resume_command": "true"'));
     commit(root, 'init');
@@ -346,6 +346,7 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   assert.match(con.last_change, ISO);
   for (const r of files.filter((x) => x.group !== 'project')) assert.equal(r.differs, false, `${r.path} untouched`);
   notWritten(row(files, 'docs/devteam/project/strategy.md'), 'docs/devteam/project/strategy.md', 'Strategy');
+  assert.match(row(files, 'docs/devteam/project/strategy.md').last_change, ISO, 'the template is on main, and still not written');
   notWritten(row(files, 'docs/devteam/project/exterior.md'), 'docs/devteam/project/exterior.md', 'Exterior');
 
   // a local edit
