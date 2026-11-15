@@ -30,12 +30,12 @@ A new top-level `test('a folder-trust dialog in a new session's pane is a blocke
    `❯ 1. Yes, I trust this folder` (finding), `│ Quick safety check: Is this a project you trust?` (finding),
    `the dialog says Yes, I trust this folder, and I answered it` (no `blocked-prompt` for `plan-big`),
    the full dialog followed by a line `✻ Reading… (esc to interrupt)` (busy: no `blocked-prompt`). Each waits until the pane shows its last line before `metrics`.
-5. **The hook.** Settings `agent_trust_command` set to `sh <trust.sh>` (committed and pushed). Kill the window; `planner big --resume`; wait for a new line. `trusted.txt`'s first line is `fs.realpathSync(<F.old>/.worktrees/plan-big)`, its second (`$PWD`) the same worktree (realpath-compared); the launch's stdout still matches `resumed planner plan-big` and holds nothing the hook printed (trust.sh also echoes `hook-out`, which must show only in stderr); the call recorded `trusted: true`; metrics has no `blocked-prompt` for `plan-big`.
-6. **A failing hook.** `agent_trust_command` `exit 3`; kill the window, remove `trusted.txt`; `planner big --resume` exits 0, warns `agent_trust_command failed`; the agent starts (a new line), shows the dialog, and metrics has the finding again.
-7. **Merge refuses it.** From `F.old` on main: a branch `chore-trust` that changes `agent_trust_command` in settings.md, pushed; `merge --chore trust --dry-run --title 'chore-trust: trust hook' --body-file <body>` (body `## One-way doors\n\nNone.\n`) fails with `changes owner settings: agent_trust_command (governance-edit)`; an answered `governance-edit` question (`ask … --class governance-edit --reasons owner-only`, `answer <q> yes`) as `--approved` makes the dry run pass.
+5. **The hook.** Settings `agent_trust_command` set to `sh <trust.sh>` (committed and pushed). Kill the window; `planner big --resume`; wait for a new line. `trusted.txt`'s first line is `fs.realpathSync(<F.old>/.worktrees/plan-big)`, its second (`$PWD`) the same worktree (realpath-compared); the launch, through `F.run` with role supervisor, has stdout matching `resumed planner plan-big` without `hook-out` (trust.sh echoes it), and stderr with it; the call recorded `trusted: true`; metrics has no `blocked-prompt` for `plan-big`.
+6. **A failing hook.** Replace the `agent_trust_command` value (the key's one occurrence, not a second key) with `exit 3`, committed and pushed to main (owner settings are read from main); kill the window, remove `trusted.txt`; `planner big --resume` through `F.run` with role supervisor (stdout and stderr) exits 0, its stderr says `agent_trust_command failed`; the agent starts (a new line), shows the dialog, and metrics has the finding again.
+7. **Merge refuses it.** A worktree `F.base/chore-trust` off `origin/main` on a new branch `chore-trust` (`git worktree add -q -b chore-trust <dir> origin/main` from `F.old`, as approvals.test.mjs's `choreOf` does; `F.old`'s checkout is not switched), with `agent_trust_command` changed in settings.md, committed and pushed; `merge --chore trust --dry-run --title 'chore-trust: trust hook' --body-file <body>` (body `## One-way doors\n\nNone.\n`) fails with `changes owner settings: agent_trust_command (governance-edit)`; an answered `governance-edit` question (`ask … --class governance-edit --reasons owner-only`, `answer <q> yes`) as `--approved` makes the dry run pass.
 8. Clean up: kill the fixture's tmux server; `F.done()`.
 
-Steps 5 and 7 commit settings on main in the fixture: step 7 runs last, so nothing later sees it.
+Steps 2, 5 and 6 commit settings on main in the fixture; step 7 only pushes a branch. The `❯` and `│` cases need tmux to read the pane as UTF-8: every tmux and kit call in this test gets `LANG: 'C.UTF-8'` through its env (role env for `F.run`/`F.sup`, `F.env({ LANG })` for tmux), not `process.env`, so the file's other tests are untouched (plan review F3). The `❯ 1. Yes, I trust this folder` case already matches on main (the old `❯\s*1\.\s*Yes`); it stays as a regression guard, with a comment saying so (F5).
 
 Run: `devteam.mjs gate test -- node --test --test-concurrency=2 --test-name-pattern='folder-trust' test/kit.test.mjs`. Red on main: step 3 finds no finding.
 
@@ -49,12 +49,16 @@ In `docs/devteam/scripts/devteam.mjs`:
 4. In the worker/planner launch, after `seedWorktree(wt, { repo: R })`: when `s.agent_trust_command` is a non-empty string, run `execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: fs.realpathSync(wt) }, timeout: 60000 })`; on throw, `warn(...)` as the spec says and go on.
 5. Re-run Task 1's test: green.
 
-In `docs/devteam/governance/quality.md` §130: add `agent_trust_command` after `agent_command` in the governance-edit list.
+In `docs/devteam/governance/quality.md` §4 (the owner-settings list, line 130): add `agent_trust_command` after `agent_command` in the governance-edit list.
 
 ## Task 3: verification and finish
 
-`verification.md`, a row per done-when; merge `origin/main`; PR; final review; `check-ticket`; `merge-request`.
+`verification.md`, a row per done-when, noting that no test drives `limitStop` with a trust dialog (it already counted `Enter to confirm`; plan review F6); merge `origin/main`; PR; final review; `check-ticket`; `merge-request`.
 
 ## Rulings
 
 - m-20261115-071339001-supervisor (re m-20261115-071257437): `agent_trust_command` is owner-only, beside `agent_command`; governance/quality.md is in touches (one name added to the owner-settings list); merge refuses a PR that changes it without the owner's answer, as for `agent_command`, with a test (Task 1 step 7).
+
+## Review notes
+
+- spec-2 F2-1 (its row holds a literal `|`, so its Disposition cell is left empty for the supervisor to note): fixed in the plan, Task 2 step 1 keeps `Do you trust the files` in `PANE_WAITS`, where the lost-Enter check reads it.
