@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| S2-1 | Suggestion |  | spec.md acceptance 8 | `grep -c -- '--test-timeout' .github/workflows/test.yml` counts comment lines too, so the check prints 0 only if no comment names the flag. The plan asks for a comment saying the watchdog replaces `--test-timeout` (see plan-2 P2-2). Say here that the workflow names the flag nowhere, comments included, or narrow the grep to non-comment lines. |  |
+| S2-1 | Suggestion |  | spec.md acceptance 8 | `grep -c -- '--test-timeout' .github/workflows/test.yml` counts comment lines too, so the check prints 0 only if no comment names the flag. The plan asks for a comment saying the watchdog replaces `--test-timeout` (see plan-2 P2-2). Say here that the workflow names the flag nowhere, comments included, or narrow the grep to non-comment lines. | wont-fix in the approved text (an edit voids the verdict); the build does it: no comment in test.yml names the flag, so the grep counts only real use (Task 1) |
 
 Pass 1 follow-up. S1-1 is fixed: acceptance 5 now runs the coverage step's own script, extracted from `test.yml`, on real lists laid out as download-artifact v4 writes them (`lists/list-<node>-<key>/list.txt`). It runs once on the real lists and once each with a duplicate, a missing file and a missing major. S1-2 is fixed: the ps step runs on `failure() || cancelled()`, so it also runs after a job-level timeout cancels the job, and the upload comes before both run steps, so the list is already uploaded by then. S1-3 is fixed: `overwrite: true` and `retention-days: 7`. A re-run of failed jobs keeps the same run id, so download-artifact v4 still finds the green jobs' lists. S1-4 is fixed, with the reason given in one line.
 
