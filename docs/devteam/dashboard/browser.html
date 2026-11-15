@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ohlw62yef+ntPbz+yE2xB9gXo+6FZWDSOa1OpVvKH2M='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-LNHzXp9DftO4hz9wVXMmH5i0hK3eYs90FWtuVOkhfjc='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -74,7 +74,8 @@
   // that doesn't match its shape is ignored
   const JPEG = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/;
   const QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-  const MASKED = /^(?:about:blank|https?:\/\/[^/?#@\s]+(?:\/(?:•••|(?=(?:[^/?#\s\d]*\d){0,3}[^/?#\s\d]*(?:[/?]|$))[^/?#\s]{0,19}(?=[/?]|$)))*(?:\?(?:(?:[^=&#\s•]+=•••|•••)(?:&(?:[^=&#\s•]+=•••|•••))*)?)?)$/;
+  // x-masked-url, as the schema writes it (a test holds the two equal)
+  const MASKED = new RegExp(String.raw`^(?:about:blank|https?://[^/?#@\s]+(?:/(?:•••|(?=(?:[^/?#\s\d]*\d){0,3}[^/?#\s\d]*(?:[/?]|$))[^/?#\s]{0,19}(?=[/?]|$)))*(?:\?(?:(?:[^=&#\s•]+=•••|•••)(?:&(?:[^=&#\s•]+=•••|•••))*)?)?)$`);
   const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
   const closed = (m, keys) => Object.keys(m).every((k) => keys.includes(k));
 
@@ -84,6 +85,7 @@
   let pendingUrl = null;
   let wait = 500;
   let timer = 0;
+  let opened = false; // a socket has opened at least once
 
   const chip = (s) => { $('chip').textContent = s; $('chip').classList.toggle('live', s === 'Live'); };
 
@@ -98,6 +100,8 @@
     canvas.style.height = `${Math.floor(frame.h * s)}px`;
   }
   addEventListener('resize', fit);
+  // the line under the bar; the canvas fits again, since it moves the screen down or up
+  const note = (s) => { $('note').textContent = s; fit(); };
 
   async function draw(m, sock) {
     if (!closed(m, ['t', 'data', 'w', 'h', 'seq']) || !int(m.w, 1, 8192) || !int(m.h, 1, 8192) || !int(m.seq, 0, Number.MAX_SAFE_INTEGER) || typeof m.data !== 'string' || !JPEG.test(m.data)) return;
@@ -144,13 +148,13 @@
     const s = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
     socket = s;
     drawnSeq = -1;
-    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; chip('Live'); area.classList.remove('down'); });
+    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; opened = true; chip('Live'); area.classList.remove('down'); });
     s.addEventListener('message', (e) => { if (s === socket && typeof e.data === 'string') onMessage(e.data, s); });
     s.addEventListener('close', () => {
       if (s !== socket) return;
       socket = null;
       area.classList.add('down');
-      chip('Reconnecting…');
+      chip(opened ? 'Reconnecting…' : 'Connecting…');
       timer = setTimeout(connect, wait);
       wait = Math.min(wait * 2, 5000);
     });

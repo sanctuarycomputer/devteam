@@ -55,6 +55,7 @@ async function startServer({ page = () => fs.readFileSync(PAGE) } = {}) {
   const conns = [];
   let refusing = false;
   let others = 0;
+  const attempts = []; // when each upgrade to /socket came, refused or not
   const srv = http.createServer((q, s) => {
     if (q.url === '/') { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return s.end(page()); }
     others++;
@@ -62,6 +63,7 @@ async function startServer({ page = () => fs.readFileSync(PAGE) } = {}) {
   });
   srv.on('upgrade', (q, sock) => {
     sock.on('error', () => {});
+    if (q.url === '/socket') attempts.push(Date.now());
     if (q.url !== '/socket' || refusing) return sock.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
     const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
     sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
@@ -96,7 +98,7 @@ async function startServer({ page = () => fs.readFileSync(PAGE) } = {}) {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
   return {
-    port, conns,
+    port, conns, attempts,
     origin: `http://127.0.0.1:${port}`,
     get others() { return others; },
     refuse: (v) => { refusing = v; },
@@ -120,6 +122,8 @@ async function open(srv, { width = 1000, height = 800, url = `${srv.origin}/` } 
   await until(async () => (await p.ev('document.readyState')) === 'complete', 'the page to load');
   return p;
 }
+// The tab is left on about:blank, so it stops reconnecting to a server that is gone.
+const shut = async (p) => { try { await p.send('Page.navigate', { url: 'about:blank' }); } catch {} p.close(); };
 const canvasState = (p) => p.ev(`(() => { const c = document.getElementById('screen'); const r = c.getBoundingClientRect();
   let alpha = 0; if (c.width && c.height) { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 3; i < d.length; i += 4) if (d[i]) { alpha = 1; break; } }
   return { w: c.width, h: c.height, alpha, left: r.left, top: r.top, width: r.width, height: r.height, bottom: r.bottom, vh: innerHeight }; })()`);
@@ -140,6 +144,8 @@ test('the page draws each frame at its size, shows the url, and the held line', 
     await srv.waitConn(1);
     const c = srv.last();
     assert.equal(await text(p, 'foot'), '', 'no held line before held');
+    assert.equal(await p.ev(`document.getElementById('waiting').hidden`), false);
+    assert.equal(await text(p, 'waiting'), 'Connecting to the supervisor\'s browser…', 'before the first frame');
     for (const m of FROM_SERVER.filter((m) => m.t !== 'bye')) {
       c.send(m);
       if (m.t === 'frame') await drawn(p, m.w, m.h);
@@ -150,8 +156,7 @@ test('the page draws each frame at its size, shows the url, and the held line', 
       }
     }
     assert.equal(await p.ev(`document.getElementById('addr').value`), 'https://shop.example/account');
-    await noHandBack(p);
-  } finally { p.close(); await srv.close(); }
+  } finally { await shut(p); await srv.close(); }
 });
 
 test('the address bar shows the url exactly as sent, masked', { skip, timeout: 60000 }, async () => {
@@ -163,19 +168,53 @@ test('the address bar shows the url exactly as sent, masked', { skip, timeout: 6
     await until(async () => (await p.ev(`document.getElementById('addr').value`)) === 'https://shop.example/account/login?next=•••', 'the masked url');
     srv.last().send({ t: 'held', qid: QID });
     await until(async () => (await text(p, 'foot')) === 'When you\'re done, press Done on the card.', 'the held line');
-  } finally { p.close(); await srv.close(); }
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('the address bar shows only a masked url: the page holds the contract\'s mask', { skip, timeout: 60000 }, async () => {
+  const schema = JSON.parse(fs.readFileSync(new URL('../docs/devteam/schema/browser.schema.json', import.meta.url), 'utf8'));
+  const html = fs.readFileSync(PAGE, 'utf8');
+  const src = /const MASKED = new RegExp\(String\.raw`(.*)`\);\n/.exec(html);
+  assert.ok(src, 'the page has its MASKED pattern');
+  assert.equal(src[1], schema['x-masked-url'], 'the page\'s mask is x-masked-url, exactly');
+  const srv = await startServer();
+  const p = await open(srv);
+  try {
+    await srv.waitConn(1);
+    const c = srv.last();
+    c.send({ t: 'url', url: 'https://shop.example/account' });
+    await until(async () => (await p.ev(`document.getElementById('addr').value`)) === 'https://shop.example/account', 'a masked url');
+    for (const url of ['https://shop.example/login?code=abc123', 'https://shop.example/a#token=1', 'https://u:p@shop.example/', 'https://shop.example/reset/12345678', 'file:///etc/passwd']) c.send({ t: 'url', url });
+    c.send({ t: 'url', url: 'https://shop.example/ok', extra: 1 });
+    c.send({ t: 'held', qid: QID }); // a marker: everything before it has been read
+    await until(async () => (await text(p, 'foot')) !== '', 'the held line');
+    assert.equal(await p.ev(`document.getElementById('addr').value`), 'https://shop.example/account', 'an unmasked url, or one with another field, is never shown');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('the page has no Done or hand-back control', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const p = await open(srv);
+  try {
+    await srv.waitConn(1);
+    srv.last().send({ t: 'held', qid: QID });
+    srv.last().send(BIG);
+    await drawn(p, 320, 200);
+    await noHandBack(p);
+  } finally { await shut(p); await srv.close(); }
 });
 
 test('the canvas fits the window, up and down', { skip, timeout: 60000 }, async () => {
   const srv = await startServer();
+  let p;
   try {
-    let p = await open(srv, { width: 700, height: 700 });
+    p = await open(srv, { width: 700, height: 700 });
     await srv.waitConn(1);
     srv.last().send(BIG);
     let s = await drawn(p, 320, 200);
     assert.ok(s.width > 320, `a 320 px frame is scaled up in a 700 px window (shown ${s.width} px)`);
     assert.ok(Math.abs(s.width / s.height - 1.6) < 0.016, 'aspect kept');
-    p.close();
+    await shut(p);
     p = await open(srv, { width: 1200, height: 500 });
     await srv.waitConn(2);
     srv.last().send(BIG);
@@ -184,8 +223,7 @@ test('the canvas fits the window, up and down', { skip, timeout: 60000 }, async 
     assert.ok(Math.abs(s.width / s.height - 1.6) < 0.016, 'aspect kept');
     const foot = await p.ev(`document.getElementById('foot').getBoundingClientRect().bottom`);
     assert.ok(foot <= s.vh, 'and the foot line too');
-    p.close();
-  } finally { await srv.close(); }
+  } finally { if (p) await shut(p); await srv.close(); }
 });
 
 test('the page\'s CSP hashes its own script and style, and it loads nothing from elsewhere', { skip, timeout: 60000 }, async () => {
@@ -215,7 +253,7 @@ test('the page\'s CSP hashes its own script and style, and it loads nothing from
     await sleep(300);
     assert.equal(hits, 0, 'the other origin got no request');
     assert.equal(srv.others, 0, 'and the page asked its own server for nothing but itself');
-  } finally { p.close(); other.close(); await srv.close(); }
+  } finally { await shut(p); other.close(); await srv.close(); }
 });
 
 test('the page reconnects by itself after the server closes the socket', { skip, timeout: 60000 }, async () => {
@@ -228,9 +266,49 @@ test('the page reconnects by itself after the server closes the socket', { skip,
     await drawn(p, 320, 200);
     srv.last().close();
     await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'the chip to say Reconnecting…');
+    assert.equal(await p.ev(`document.getElementById('area').classList.contains('down')`), true, 'the last frame dimmed while it is down');
     await srv.waitConn(2, 3000);
     await until(async () => (await text(p, 'chip')) === 'Live', 'Live again');
     srv.last().send({ ...SMALL, seq: 0 });
     await drawn(p, 160, 100); // the count starts again on a new socket
-  } finally { p.close(); await srv.close(); }
+    assert.equal(await p.ev(`document.getElementById('area').classList.contains('down')`), false);
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('the page waits 0.5 s, then doubling up to 5 s, between tries, and 0.5 s again once one opens', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const p = await open(srv);
+  try {
+    await srv.waitConn(1);
+    srv.refuse(true);
+    const from = srv.attempts.length;
+    const closedAt = Date.now();
+    srv.last().close();
+    await until(() => srv.attempts.length >= from + 4, 'four refused tries', 12000);
+    const at = [closedAt, ...srv.attempts.slice(from, from + 4)];
+    const gaps = at.slice(1).map((t, i) => t - at[i]);
+    for (const [i, want] of [500, 1000, 2000, 4000].entries()) assert.ok(gaps[i] >= want * 0.8 && gaps[i] <= want * 1.3 + 300, `try ${i + 1} after ~${want} ms (gaps ${gaps})`);
+    assert.equal(await text(p, 'chip'), 'Reconnecting…');
+    srv.refuse(false);
+    await srv.waitConn(2, 9000);
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    await sleep(200);
+    const t = Date.now();
+    srv.last().close();
+    await srv.waitConn(3, 3000);
+    assert.ok(Date.now() - t < 1400, `after a socket opened, the next try is back to 0.5 s (${Date.now() - t} ms)`);
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a page whose first socket never opens still says Connecting…', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  srv.refuse(true);
+  const p = await open(srv);
+  try {
+    await until(() => srv.attempts.length >= 2, 'two refused tries', 5000);
+    assert.equal(await text(p, 'chip'), 'Connecting…', 'nothing dropped: it never connected');
+    srv.refuse(false);
+    await srv.waitConn(1, 6000);
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+  } finally { await shut(p); await srv.close(); }
 });
