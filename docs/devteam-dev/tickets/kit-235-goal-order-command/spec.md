@@ -1,0 +1,71 @@
+# kit-235: goal order in one step
+
+Ticket `kit-235-goal-order-command` (feature dashboard-cleanup, serves DCL-S5, risk normal, size S).
+
+## Why
+
+A supervisor had to ask six goal-change questions to put the owner's priorities in order: `goal set --approved` takes one goal per answer. Reordering is one decision; it should be one owner command and, when the supervisor proposes it, one question. Priority stays owner-only: the supervisor applies only an order the owner approved.
+
+## What changes
+
+### 1. The owner's `goal order <g-id> <g-id> …`
+
+- Owner only (`ownerWriter`): the owner's terminal or the dashboard. In an agent session (`DEVTEAM_ROLE` set, or the supervisor's pane) it is refused, as every owner command is.
+- Names at least one goal; each id is a goal of this log, named once. A goal whose status is `met` or `abandoned` is refused with its status (`<id> is met`, `<id> is let go`); Upkeep is refused (it has no place in the order); an unknown id or a duplicate is refused. Nothing is written when any is refused.
+- The named goals get priority 1..n in the order given. The live goals left out (status draft or ready, not Upkeep, with a numeric priority) keep their relative place after the named ones: priority n+1, n+2, … in their current order (by priority, then by when they were created). A left-out goal with no priority stays without one.
+- One goal line (`op: set`, `priority`) per named goal, and one per left-out goal whose priority changes; then one act (`class: goal-order`, `refs` every goal written, `what` the order). For the owner the act is a record of what the owner did (`created_by: owner`), not a call.
+- Prints the new order.
+
+### 2. One goal-change question that proposes a whole order
+
+- `ask --class goal-change --order '["g-…","g-…",…]' --recommendation "…" …` records `order` on the question; no `--goal`, no `--change` (each refused alongside `--order`). The order must be a JSON array of at least two distinct goal ids, each live (the same refusals as §1). `--order` on any other class is refused.
+- `questionView` carries `order` (null when none), so the Inbox, `questions --json` and the fold see it.
+
+### 3. The supervisor's `goal order --approved <qid> [<g-id> …]`
+
+- Supervisor only (`supervisorOnly`). Applies the question's order exactly as §1 does (same lines, same act with `approved_by: <qid>` and class `goal-order`).
+- Refused unless: the question exists, is class goal-change and carries an order; it is answered by the owner; the answer is its recommendation (`matched`); the answer has not been used (no goal line with `approved: <qid>`, no act with `approved_by: <qid>`); any ids given equal the proposed order exactly (no ids applies the proposed order); and every goal in the order is still live.
+- The supervisor without `--approved` is refused, pointing at `ask --class goal-change --order`.
+
+### 4. The fold accepts order lines
+
+A supervisor's line on a goal past draft is ignored today unless `goalChangeProblem` passes for its `approved` question, and `goalApprovals` lets one answer authorise one goal line. Lines written under an order question are checked by a new `goalOrderProblem` instead: the question is a matched, answered goal-change question with an order; the line sets only `priority` (plus envelope and `approved`); a goal named in the order gets its index + 1; a goal left out gets a priority greater than the order's length; and each goal is set at most once under that answer. `goalChangeProblem` and the one-goal path are unchanged for questions without an order.
+
+### 5. Channels
+
+- The dashboard's ACTIONS gain `goal-order`: body `{ ids: [<g-id>…] }` (1 to 50 ids, each a log id) → `['goal', 'order', ...ids]`, run as the owner (channel `dashboard`). This is what kit-234 posts.
+- The hub's `HUB_ACTIONS` do not gain it: the hub's `/operator/goal-order` is refused (405, as any non-action POST), and an `operator-thread` run is never given it.
+- The supervisor channel (an agent session) is refused by `ownerWriter` (§1).
+
+### 6. supervisor.md
+
+A new row in the question-kinds table: `owner-decision`, `--class goal-change`: one goal's change with `--goal` and `--change`, applied with `goal set --approved`; to reorder several goals, one `--order` question applied with `goal order --approved`, never one question per goal.
+
+## Acceptance checks (the done-whens)
+
+1. `test/goal-order.test.mjs` passes in CI: the owner's `goal order A B C` sets priority 1..3 on A, B, C in that order, writing one goal line per named goal and one act; a left-out goal keeps its relative place after them (n+1…); a met or let-go goal named is refused with its status, and nothing is written.
+2. Same test: `ask --class goal-change --order '[…]' --recommendation …` records the order on one question, without `--goal`; `goal order --approved <qid>` applies exactly that order once the owner answers its recommendation; a second use of the same answer, an answer that isn't the recommendation, and any order other than the one proposed are refused.
+3. Same test: the dashboard's `POST /api/goal-order` (owner channel) applies an order and the line says channel `dashboard`; `goal order` from the supervisor (DEVTEAM_ROLE=supervisor) is refused; the hub's `POST /operator/goal-order` is refused.
+4. Same test: the one-goal path is unchanged: `ask --class goal-change --goal G --change '{"priority":…}'`, answered, then `goal set G --approved <qid>` applies, and a second `goal set` with it is refused (goalChangeProblem's messages as today); a hand-written supervisor goal line with an order question's `approved` but a wrong priority is ignored by the fold.
+5. supervisor.md's goal-change row says to ask one `--order` question to reorder several goals, never one question per goal.
+
+## Contracts
+
+Provided: the `goal order` command (owner, and supervisor with `--approved`); the dashboard action `goal-order` `{ ids }` (consumed by kit-234); the question field `order`. Consumed: none new.
+
+## Edge cases
+
+- An order naming every live goal: no left-out lines.
+- A named goal already at its target priority: still gets its line (one per named goal, as the done-when says); a left-out goal already at its place gets none.
+- Draft goals may be named and are renumbered like ready ones.
+- A goal named in an approved order becomes met or let go before it is applied: refused with its status; the supervisor asks again.
+- The dashboard's body with a non-array, an empty array, a non-id or more than 50 ids: 400.
+
+## Out of scope
+
+- Any dashboard UI to drag goals into order (kit-234 builds it on this action).
+- Changing `goal set --approved` or how priority clashes are reported by `goal check`.
+
+## Rulings
+
+- m-20261115-092227487-supervisor: write spec and plan before the first review, one combined review (spec-1.md and plan-1.md from one fresh session), approve-spec and approve-plan asked together; any kit run outside tests gets its own HOME, a DEVTEAM_HUB_PORT away from 4320, its own port and DEVTEAM_* unset; on this box run only the touched test files at --test-concurrency=2.
