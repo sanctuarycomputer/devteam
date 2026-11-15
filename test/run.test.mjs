@@ -476,9 +476,11 @@ test('freeLocks frees only the port locks of pids that are gone, and only the on
   fs.writeFileSync(path.join(d, '1.lock'), String(process.pid));
   fs.writeFileSync(path.join(d, '2.lock'), String(gone));
   fs.writeFileSync(path.join(d, '3.lock'), String(goneUnnamed));
-  // the live pid is named too: a lock whose owner is alive is never freed
-  assert.deepEqual(R.freeLocks(S, [process.pid, gone]), [gone]);
-  assert.deepEqual(fs.readdirSync(d).sort(), ['1.lock', '3.lock']);
+  // pid 1 is alive and, to anyone but root, answers kill(1, 0) with EPERM
+  fs.writeFileSync(path.join(d, '4.lock'), '1');
+  // the live pids are named too: a lock whose owner is alive is never freed
+  assert.deepEqual(R.freeLocks(S, [process.pid, gone, 1]), [gone]);
+  assert.deepEqual(fs.readdirSync(d).sort(), ['1.lock', '3.lock', '4.lock']);
   assert.deepEqual(R.freeLocks(path.join(S, 'no-such'), [gone]), []);
 });
 
@@ -555,14 +557,16 @@ test('stopTree, when ps fails mid-walk, kills what the last snapshot showed unde
 });
 
 test('stopTree goes on past a pid it may not signal', () => {
-  const [Rt, A, B] = [9000041, 9000042, 9000043];
+  const [Rt, A, B, C] = [9000041, 9000042, 9000043, 9000044];
   const log = [];
-  const snaps = [[[Rt, 1, 'S'], [A, Rt, 'S'], [B, Rt, 'S']], [[Rt, 1, 'T'], [A, Rt, 'S'], [B, Rt, 'T']]];
+  // C is A's child: with A not stopped, C isn't the walk's either
+  const snaps = [[[Rt, 1, 'S'], [A, Rt, 'S'], [B, Rt, 'S'], [C, A, 'S']], [[Rt, 1, 'T'], [A, Rt, 'S'], [B, Rt, 'T'], [C, A, 'S']]];
   const snap = (r) => new Map(r.map(([pid, ppid, stat]) => [pid, { ppid, stat }]));
   let k = 0;
   // A belongs to another user: the real sender gets EPERM for it
   const r = R.stopTree(Rt, { snapshot: () => snap(snaps[Math.min(k++, 1)]), signal: R.signalWith((pid, sig) => { if (pid === A) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); log.push(`${sig} ${pid}`); }), now: fakeClock(), sleep: () => {} });
   assert.deepEqual(r.killed, [B, Rt]);
+  assert.deepEqual(r.stopped, [Rt, B]);
   assert.deepEqual(log, [`SIGSTOP ${Rt}`, `SIGSTOP ${B}`, `SIGKILL ${B}`, `SIGKILL ${Rt}`]);
 });
 

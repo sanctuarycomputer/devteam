@@ -250,7 +250,7 @@ export function drain(stream, ms) {
 // A lock whose owner is alive is never freed, named or not.
 const isAlive = (pid) => {
   try { process.kill(pid, 0); } catch (e) { return e.code === 'EPERM'; }
-  return !/Z/.test(spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '');
+  return !/Z/.test(spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: 2000 }).stdout ?? '');
 };
 export function freeLocks(shared, pids, alive = isAlive) {
   const d = path.join(shared, 'devteam-kit-ports');
@@ -272,8 +272,10 @@ export function freeLocks(shared, pids, alive = isAlive) {
 // then its scratch folder.
 export function cleanupAfter(entry, tmux, shared) {
   if (shared && entry.killed?.length) {
-    // what was killed dies in a moment: wait (up to 2 s) so its locks count as a dead owner's
-    for (let i = 0; i < 100 && entry.killed.some(isAlive); i++) sleepSync(20);
+    // what was killed dies in a moment: wait (2 s at most, by the clock) so its locks count as a
+    // dead owner's; one still alive then keeps its lock
+    const until = Date.now() + 2000;
+    while (Date.now() < until && entry.killed.some(isAlive)) sleepSync(20);
     freeLocks(shared, entry.killed);
   }
   if (tmux) for (const s of socketsUnder(entry.dir)) spawnSync(tmux, ['-S', s, 'kill-server'], { timeout: 5000, stdio: 'ignore' });
@@ -367,7 +369,9 @@ const say = (text) => process.stdout.write(text);
 
 // Stops and kills a running file's tree (steps 2 and 3 follow when its child's exit fires).
 function cleanup(entry) {
-  if (entry.exited) return;
+  // once per file: a second walk (an interrupt right after a timeout) would find only the root,
+  // and replace the list of killed pids whose port locks are freed
+  if (entry.exited || entry.killed) return;
   try {
     const r = stopTree(entry.child.pid);
     entry.killed = r.killed;
@@ -375,6 +379,7 @@ function cleanup(entry) {
     if (r.resumed.length) entry.out.push(Buffer.from(`# run.mjs: stopped but not killed, so resumed: ${r.resumed.join(' ')}\n`));
   } catch (e) {
     sendSignal(entry.child.pid, 'SIGKILL');
+    entry.killed = [entry.child.pid];
     entry.out.push(Buffer.from(`# run.mjs: tree walk failed: ${e.message}; killed the file's own process only\n`));
   }
 }
