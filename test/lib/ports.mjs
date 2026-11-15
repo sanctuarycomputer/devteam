@@ -1,8 +1,8 @@
 // Each test process owns a block of 100 ports between 20000 and 32699 (below 32768, where Linux
 // starts handing out ephemeral ports; macOS starts at 49152). A block is claimed with a lock file in
-// the shared temp dir (DEVTEAM_TEST_SHARED_TMP, else the temp dir), so the suite's files running side by side, and another checkout's suite, never share
-// one. The lock goes when the process exits; one left by a process that died is cleared once it is
-// an hour old.
+// the shared temp dir (DEVTEAM_TEST_SHARED_TMP, else the temp dir), so the suite's files running
+// side by side, and another checkout's suite, never share one. The lock goes when the process
+// exits; one left by a process that died is cleared once it is an hour old.
 //
 // Inside a block, a test names a hub port and an instance base. Only a dashboard that picks its own
 // port, or a hub asked for its list (/instances.json), scans base..base+24, so such a base must be

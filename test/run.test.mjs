@@ -46,7 +46,8 @@ test('cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP', { skip: !m
     const script = path.join(S, 'hello.mjs');
     fs.writeFileSync(script, 'console.log("hello");\n');
     const code = `import { runNode } from ${JSON.stringify(pathToFileURL(path.join(lib, 'cli.mjs')).href)};
-      const r = runNode(${JSON.stringify(script)}, [], { env: { ...process.env, TMPDIR: ${JSON.stringify(T2)} } });
+      // a test's own env, without DEVTEAM_TEST_SHARED_TMP: the runner must have read it before the swap
+      const r = runNode(${JSON.stringify(script)}, [], { env: { PATH: process.env.PATH, TMPDIR: ${JSON.stringify(T2)} } });
       console.log(JSON.stringify(r));`;
     // DEVTEAM_TEST_COLD would bypass the warm runner this checks
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env: nodeEnv({ DEVTEAM_TEST_SHARED_TMP: S, DEVTEAM_TEST_COLD: undefined }), encoding: 'utf8', timeout: 30000 });
