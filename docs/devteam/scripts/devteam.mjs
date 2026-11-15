@@ -15189,11 +15189,11 @@ function resolvePane(target) {
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
 }
-// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
 // A prompt goes to the agent as a file it is told to read, never as its text on the command line:
 // one argument is at most 128 KB on Linux (MAX_ARG_STRLEN), and a prompt with a large knowledge block
 // passes that, so the shell refuses the line and no agent starts. Plain words, for any agent_command.
 const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now, every part (a long file takes more than one read), and follow it.`;
+// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
 const typeNow = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once

@@ -623,7 +623,8 @@ setInterval(() => {}, 1e6);
       assert.equal(call.lens.length, 1, `${how}: one argument`);
       assert.ok(call.lens.every((n) => n < 131072), `${how}: no argument reaches the per-argument limit`);
       assert.ok(call.lens[0] < 1024, `${how}: a short message (${call.lens[0]} bytes)`);
-      assert.equal(call.first, `Your prompt for this session is in the file ${prompt}. Read all of it now, every part (a long file takes more than one read), and follow it.`);
+      // the kit names the file from its own root, the real path (a temp dir may be a symlink: macOS's /var)
+      assert.ok([prompt, fs.realpathSync(prompt)].some((p) => call.first === `Your prompt for this session is in the file ${p}. Read all of it now, every part (a long file takes more than one read), and follow it.`), call.first);
       assert.ok(path.isAbsolute(call.named));
       assert.equal(call.read, size, `${how}: the agent read the whole file`);
     };
