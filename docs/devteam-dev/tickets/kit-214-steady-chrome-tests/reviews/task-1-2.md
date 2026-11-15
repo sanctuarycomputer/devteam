@@ -1,0 +1,20 @@
+# Task 1 review, pass 2
+
+- Reviewer: task-reviewer-2 (fresh subagent, claude-opus-5-5)
+- Reviewed: 9ed21dd46a45952096e6ee49829932c37916b111 (task 1, diff since 1a7efa6)
+
+Diff `19043f4..9ed21dd -- test/`, checked against pass 1 (reviews/task-1.md: T1-1, T1-2, T1-3, T1-5), spec.md done-when 1 (P1-1) and § Design lib/chrome.mjs, and plan.md Task 1.
+
+- `test/dashboard-teardown.test.mjs` at 9ed21dd, run once with the ticket's `run-test.sh` (Node 22, 2 cores, own HOME, DEVTEAM_BOX=off): exit 0, tests 6, pass 6, fail 0, cancelled 0, 17.8 s. No `devteam-teardown-` or `devteam-chrome-` process was left afterwards.
+- T1-1, fixed. The child's env keeps `DEVTEAM_TEST_*` (so `DEVTEAM_TEST_SHARED_TMP` too) plus `DEVTEAM_CGROUP`, `DEVTEAM_MEMINFO` and `DEVTEAM_BOX`, and drops every other `DEVTEAM_*`. The removal case's child imports `lib/kit.mjs`, which claims its block via `ports.mjs` (`LOCK_DIR` under `DEVTEAM_TEST_SHARED_TMP`) and sets `DEVTEAM_HUB_PORT`/`DEVTEAM_PORT_BASE` from it, so its block is now one the other files can see. The other `DEVTEAM_TEST_*` vars that get through (`_KEEP`, `_COLD`, `_GITLEAKS`, `_CONCURRENCY`) are runner settings and do no harm in the child. The header comment (:5) and the new comment (:37-40) say how the ports are claimed.
+- T1-2, fixed. `proc.ref()` is gone, and so is the `proc.unref()` in `done()` that undid it, which is right because nothing re-refs the process now. The comment now credits the pending timers with holding the loop. That is accurate: `hard` is pending from the call until `done()`, then `last`. `done()` clears both on every path, including the already-exited one.
+- T1-3, fixed. The new case leaves a `Runtime.evaluate` that never settles, closes the page's socket, and requires a rejection matching /page connection closed \(code \d+/ within 5 s, then requires a later `send` to reject at once. Mutation, reasoned and not run (one run allowed): with `ws.onclose` disabled, the waiting call can end only through its unref'd 30 s timer with "no answer", or by the loop emptying. The later `send` on a closed WebSocket is dropped silently and never settles. Either way the case fails, so it can fail first. See T1b-1 for what it doesn't cover.
+- T1-5, fixed. The removal case prints `dash` right after `dashboardOnFreePort`, `kid` right after its spawn, and `chrome` right after `openChrome()`, each before the next await that could hang. `pidsOf()` merges every `PIDS` line, and `p[k] > 0` skips the non-pid keys (`removal`, `closedMs`). A hang inside `openChrome()` before it returns is covered by its own 60 s SIGKILL, which comes before the child's 120 s limit. Probe (scratch, under `timeout -s KILL 8`): a `node --test --test-reporter=tap` child that does a `console.log('PIDS …')` and then hangs shows `# PIDS {...}` on stdout before it is killed. So the parent does see pids printed by a test that is still hung, and the fix holds on the timeout path it is for.
+- Nothing wrong was added: the scrub, the helper changes and the new case pass. The other cases' assertions are unchanged.
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| T1b-1 | Minor | spec § Design lib/chrome.mjs newPage() (Chrome died or closed it) | test/dashboard-teardown.test.mjs:183-198 | The new case closes the socket from the client (`p.close()`). The case the spec names, Chrome's end going away (Chrome dead, group SIGKILLed), is not exercised, and neither is the `; Chrome exited: …` suffix that `onclose` adds then. Both closes go through the same handler, so the T1-3 regression is caught. This does not block. A second case (SIGKILL `-chrome.pid` with a call pending, then expect a rejection with /Chrome's page connection closed/ well inside 30 s) would cover the class-B path itself. |  |
+| T1b-2 | Minor | comment accuracy | test/dashboard-teardown.test.mjs:39-40 | "the machine stand-ins test.yml sets": test-stress.yml sets `DEVTEAM_CGROUP` and `DEVTEAM_MEMINFO` too. Wording only. |  |
+
+Verdict: APPROVE 9ed21dd46a45952096e6ee49829932c37916b111
