@@ -80,6 +80,11 @@ them pass, commit, task review (`reviews/task-<n>.md`, fresh subagent).
 - Refactor first: today's link landing dies inside (`viaGit` push refused, `gh pr merge` refused);
   it becomes `landCode()` returning null or its reason, so merge can print the records-landed
   message. `landRecords` uses `detachedWorktree(…, repo('home'), { seed: false })`.
+- The records merge's message is merge's own, never read from `run/pr/` (that file is the link
+  PR's): forge `git`: subject `<id>: records`, body `Merged home's ticket/<id> at <recSha>: the
+  records of <id>, whose code lands in <link>` (no `from …ticket/<id>` / `Merge … ticket/<id>`
+  wording that `findMergeSha` reads); GitHub: `gh pr merge` with `--subject` and `--body` the same.
+  Home's `mergeShaFor` is never asked about a link ticket (`factsRepo` routes it to the link).
 - Landing: `landRecords` unless `recSha` is in home's `origin/<main>`: home forge `git` →
   detached worktree at home `origin/<main>`, `merge --no-ff recSha`, push; else `gh pr merge
   --<home merge_method> --match-head-commit recSha`. Failure → die (nothing else landed). Then the
@@ -118,21 +123,22 @@ merge was stopped there.
   moved after the records landed (a new commit), the records checks run at the new head, which
   holds no fresh final review over it unless one was added, so the retry refuses rather than
   landing unreviewed records.
-- **What status shows.** `deriveStatus` gains `records_landed: true` for a records-in-home
-  ticket that isn't merged and whose records folder is on home's main
+- **What status shows.** `deriveStatus` gains `records_landed: true` for an active (not
+  superseded) records-in-home ticket that isn't merged and whose records folder is on home's main
   (`<projectRel>/tickets/<id>/spec.md` at home's main ref); `status` prints
   `records in home, code not merged: run merge <id> again` on its row. `observe-metrics` /
   `metrics` raise one high finding `records-without-code` (subject the ticket, the same fix
-  line), and `merged-without-merge` skips that home merge commit (its second parent is the
-  ticket's records head), so the owner sees one finding that names the fix, not a generic alarm.
-  Once the retry lands the code, both go away.
+  line, active tickets only). `merged-without-merge` keeps firing on that home merge commit, as
+  the spec says (records landed with no merge act is true); the new finding is the one that names
+  the fix. Once the retry lands the code, the act names the records sha and all three go away.
 - **Test** (in T3's merge test, after the refused push): exit non-zero with the records-landed
   message; home's `origin/main` has the records, console's `origin/trunk` doesn't have the code;
   no merge act; `status --json` row `records_landed: true` and `status` text names the retry;
-  `metrics --json` has `records-without-code` for the ticket and no `merged-without-merge`;
+  `metrics --json` has `records-without-code` for the ticket and `merged-without-merge` for the
+  home records merge;
   hook removed, `merge` lands only the code (home's main gains no second records merge: its
   merge count for `ticket/<id>` is 1), logs one act; then `records_landed` and the finding are
-  gone; a third `merge` prints `nothing to merge, nothing logged`.
+  gone, and so is `merged-without-merge`; a third `merge` prints `nothing to merge, nothing logged`.
 
 ### T4: worker, prompt, review-worktree, remove, tidy, approve-plan, timeline
 
