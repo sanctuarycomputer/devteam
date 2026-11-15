@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kxR3cgZFVFlVW55U16Q2rvURR5L1yaesECFy2+zypNk='; style-src 'sha256-cqYYaeELvHFgB3LEIGD5/i37pu/j+tY+GNvrwVFT1xw='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Supervisor's browser</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --surface: #ffffff; --fg: #171717; --fg-2: #666666; --line: #ebebeb; --chip: #f2f2f2; --red: #e5484d; --green: #2e9e5b; --focus: #0070f3;
+    --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; --page: 1200px; --text: 600px; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000000; --surface: #0a0a0a; --fg: #ededed; --fg-2: #a1a1a1; --line: #1f1f1f; --chip: #161616; --red: #ff6369; --green: #4cc38a; --focus: #52a8ff; } }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+  main { max-width: var(--page); margin: 0 auto; padding: 8px 12px 8px; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
+  .bar input { flex: 1; min-width: 0; font: 13px var(--mono); padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--fg); }
+  .btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap; }
+  .btn:focus-visible, .bar input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .btn.danger { color: var(--red); }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .note { margin: 0; min-height: 0; max-width: var(--text); color: var(--red); font-size: 13px; }
+  .note:empty { display: none; }
+  .area { position: relative; display: flex; justify-content: center; align-items: flex-start; min-height: 120px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  canvas { display: block; touch-action: none; cursor: default; }
+  canvas.empty { display: none; }
+  canvas:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
+  .area.down canvas { opacity: 0.5; }
+  .waiting { margin: 40px 16px; max-width: var(--text); color: var(--fg-2); text-align: center; }
+  .waiting[hidden] { display: none; }
+  .bye { position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center; background: color-mix(in srgb, var(--surface) 92%, transparent); }
+  .bye[hidden] { display: none; }
+  .bye > div { max-width: var(--text); }
+  .bye p { margin: 0 0 8px; }
+  .bye .why { font-size: 15px; font-weight: 600; }
+  .bye .sub { color: var(--fg-2); }
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0 0; font-size: 13px; color: var(--fg-2); }
+  .foot span:first-child { max-width: var(--text); }
+  .chip { font: 12px var(--mono); padding: 1px 8px; border-radius: 999px; background: var(--chip); }
+  .chip.live { color: var(--green); }
+  dialog { width: min(var(--text), calc(100vw - 32px)); max-width: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
+  dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+  dialog p { margin: 0 0 14px; }
+  .actions { display: flex; justify-content: flex-end; gap: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <form class="bar" id="go" autocomplete="off">
+    <button type="button" class="btn" id="back" aria-label="Back" title="Back">←</button>
+    <input id="addr" aria-label="Address" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button type="button" class="btn danger" id="signout" disabled>Sign out of everything</button>
+  </form>
+  <p class="note" id="note" role="status"></p>
+  <div class="area down" id="area">
+    <canvas id="screen" class="empty" tabindex="0" aria-label="The supervisor's browser"></canvas>
+    <p class="waiting" id="waiting">Connecting to the supervisor's browser…</p>
+    <div class="bye" id="bye" hidden>
+      <div>
+        <p class="why" id="bye-why"></p>
+        <p class="sub">You can close this page.</p>
+        <button type="button" class="btn" id="again">Show it again</button>
+      </div>
+    </div>
+  </div>
+  <div class="foot" id="footbar"><span id="foot"></span><span class="chip" id="chip">Connecting…</span></div>
+</main>
+<dialog id="confirm" aria-labelledby="confirm-text">
+  <p id="confirm-text">Sign this project's browser out of every site? Every site it is signed into forgets it, and the browser starts again empty.</p>
+  <div class="actions">
+    <button type="button" class="btn" id="cancel">Cancel</button>
+    <button type="button" class="btn danger" id="forget">Sign out of every site</button>
+  </div>
+</dialog>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const canvas = $('screen');
+  const ctx = canvas.getContext('2d');
+  const area = $('area');
+  const addr = $('addr');
+
+  // browser@1's view messages from the server (docs/devteam/schema/browser.schema.json); a message
+  // that doesn't match its shape is ignored
+  const JPEG = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/;
+  const QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+  // x-masked-url, as the schema writes it (a test holds the two equal)
+  const MASKED = new RegExp(String.raw`^(?:about:blank|https?://[^/?#@\s]+(?:/(?:•••|(?=(?:[^/?#\s\d]*\d){0,3}[^/?#\s\d]*(?:[/?]|$))[^/?#\s]{0,19}(?=[/?]|$)))*(?:\?(?:(?:[^=&#\s•]+=•••|•••)(?:&(?:[^=&#\s•]+=•••|•••))*)?)?)$`);
+  const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+  const closed = (m, keys) => Object.keys(m).every((k) => keys.includes(k));
+
+  let socket = null;
+  let frame = null; // the last frame drawn: { w, h }
+  let drawnSeq = -1; // on this socket
+  let pendingUrl = null;
+  let wait = 500;
+  let timer = 0;
+  let opened = false; // a socket has opened at least once
+  let ended = false; // the server said bye: no reconnect until the owner asks
+
+  const chip = (s) => { $('chip').textContent = s; $('chip').classList.toggle('live', s === 'Live'); };
+
+  // The canvas shows the whole frame: as large as fits the page's width and the height under the bar,
+  // up or down, aspect kept. Its own size is the frame's, so on-screen points scale by its box alone.
+  function fit() {
+    if (!frame) return;
+    const top = area.getBoundingClientRect().top;
+    const below = $('footbar').getBoundingClientRect().height + 8 + 2;
+    const s = Math.max(0.05, Math.min(area.clientWidth / frame.w, (innerHeight - top - below) / frame.h));
+    canvas.style.width = `${Math.floor(frame.w * s)}px`;
+    canvas.style.height = `${Math.floor(frame.h * s)}px`;
+  }
+  addEventListener('resize', fit);
+  // the line under the bar; the canvas fits again, since it moves the screen down or up
+  const note = (s) => { $('note').textContent = s; fit(); };
+
+  async function draw(m, sock) {
+    if (!closed(m, ['t', 'data', 'w', 'h', 'seq']) || !int(m.w, 1, 8192) || !int(m.h, 1, 8192) || !int(m.seq, 0, Number.MAX_SAFE_INTEGER) || typeof m.data !== 'string' || !JPEG.test(m.data)) return;
+    if (m.seq <= drawnSeq) return;
+    let bitmap;
+    try {
+      const bin = atob(m.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+    } catch { return; }
+    // a newer frame, or another socket, got there first
+    if (sock !== socket || m.seq <= drawnSeq) { bitmap.close(); return; }
+    drawnSeq = m.seq;
+    const resized = !frame || frame.w !== m.w || frame.h !== m.h;
+    if (resized) { canvas.width = m.w; canvas.height = m.h; }
+    ctx.drawImage(bitmap, 0, 0, m.w, m.h);
+    bitmap.close();
+    frame = { w: m.w, h: m.h };
+    if (resized) { canvas.classList.remove('empty'); $('waiting').hidden = true; fit(); }
+  }
+
+  function showUrl(url) {
+    if (document.activeElement === addr) pendingUrl = url;
+    else { addr.value = url; pendingUrl = null; }
+  }
+  addr.addEventListener('blur', () => { if (pendingUrl !== null) showUrl(pendingUrl); });
+
+  function onMessage(data, sock) {
+    let m;
+    try { m = JSON.parse(data); } catch { return; }
+    if (!m || typeof m !== 'object' || Array.isArray(m)) return;
+    if (m.t === 'frame') draw(m, sock);
+    else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
+    else if (m.t === 'bye') {
+      // 1 to 200 characters, counted as the schema counts them: by code point
+      if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || !int([...m.why].length, 1, 200)) return;
+      ended = true;
+      $('bye-why').textContent = m.why;
+      $('bye').hidden = false;
+      $('chip').hidden = true;
+      sock.close();
+    }
+    else if (m.t === 'held') {
+      if (!closed(m, ['t', 'qid'])) return;
+      if (m.qid === null) $('foot').textContent = 'The supervisor has the browser. You can watch.';
+      else if (typeof m.qid === 'string' && QID.test(m.qid)) $('foot').textContent = 'When you\'re done, press Done on the card.';
+      fit(); // a line that wraps takes height from the screen
+    }
+  }
+
+  function connect() {
+    clearTimeout(timer);
+    const s = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
+    socket = s;
+    drawnSeq = -1;
+    // nothing held down on an earlier socket gets its up on this one
+    press = null;
+    held.clear();
+    s.addEventListener('open', () => { if (s !== socket) return; wait = 500; opened = true; $('signout').disabled = false; chip('Live'); area.classList.remove('down'); });
+    s.addEventListener('message', (e) => { if (s === socket && typeof e.data === 'string') onMessage(e.data, s); });
+    s.addEventListener('close', () => {
+      if (s !== socket) return;
+      socket = null;
+      // with no socket, Sign out could only fail: it is off until one opens
+      $('signout').disabled = true;
+      // what was held down went with that socket: its up must not go to the next one
+      press = null;
+      held.clear();
+      area.classList.add('down');
+      if (ended) return;
+      chip(opened ? 'Reconnecting…' : 'Connecting…');
+      timer = setTimeout(connect, wait);
+      wait = Math.min(wait * 2, 5000);
+    });
+  }
+
+  // ----- the owner's input, on the canvas only -----------------------------------------------
+  // send is the only way out, and it drops what finds no open socket: nothing is queued, so a
+  // password typed during a reconnect is never replayed into whatever page is up by then. What the
+  // owner types or pastes lives only in the handler that sends it.
+  const send = (m) => { if (socket && socket.readyState === 1) socket.send(JSON.stringify(m)); };
+  const MODS = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  const withMods = (m, e) => { const k = MODS(e); if (k) m.mods = k; return m; };
+  const BUTTONS = ['left', 'middle', 'right'];
+  const round = (v) => Math.round(v * 100) / 100;
+  // frame pixels: the on-screen point scaled by the canvas's box to the last frame drawn
+  function toFrame(e) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: round(Math.min(frame.w, Math.max(0, ((e.clientX - r.left) * frame.w) / r.width))),
+      y: round(Math.min(frame.h, Math.max(0, ((e.clientY - r.top) * frame.h) / r.height))),
+    };
+  }
+
+  // A press is held back until it is a click (released within 4 px) or a drag (it travels further).
+  let press = null; // { button, x, y, cx, cy, down, last }
+  let lastClick = null; // { at, cx, cy, button, n }: the page counts clicks itself
+  let queued = null;
+  let raf = 0;
+  const flush = () => { cancelAnimationFrame(raf); raf = 0; if (queued) { send(queued); queued = null; } };
+  const queue = (m) => { queued = m; if (!raf) raf = requestAnimationFrame(flush); };
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.focus();
+    const button = BUTTONS[e.button];
+    if (!frame || press || !button) return;
+    canvas.setPointerCapture(e.pointerId);
+    flush();
+    press = { button, ...toFrame(e), cx: e.clientX, cy: e.clientY, down: false, last: null };
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!frame) return;
+    const at = toFrame(e);
+    if (!press) return queue(withMods({ t: 'mouse', type: 'move', ...at, button: 'none' }, e));
+    if (!press.down && Math.hypot(e.clientX - press.cx, e.clientY - press.cy) > 4) {
+      press.down = true;
+      send(withMods({ t: 'mouse', type: 'down', x: press.x, y: press.y, button: press.button, clicks: 1 }, e));
+    }
+    if (press.down) { press.last = at; queue(withMods({ t: 'mouse', type: 'move', ...at, button: press.button }, e)); }
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (!press || BUTTONS[e.button] !== press.button) return;
+    const p = press;
+    press = null;
+    // released further than 4 px from the press with no move between: a drag all the same
+    if (!p.down && Math.hypot(e.clientX - p.cx, e.clientY - p.cy) > 4) { p.down = true; send(withMods({ t: 'mouse', type: 'down', x: p.x, y: p.y, button: p.button, clicks: 1 }, e)); }
+    if (p.down) { flush(); send(withMods({ t: 'mouse', type: 'up', ...toFrame(e), button: p.button, clicks: 1 }, e)); return; }
+    const now = performance.now();
+    const again = lastClick && lastClick.button === p.button && now - lastClick.at <= 500 && Math.hypot(p.cx - lastClick.cx, p.cy - lastClick.cy) <= 4;
+    lastClick = { at: now, cx: p.cx, cy: p.cy, button: p.button, n: again ? Math.min(3, lastClick.n + 1) : 1 };
+    send(withMods({ t: 'mouse', type: 'click', x: p.x, y: p.y, button: p.button, clicks: lastClick.n }, e));
+  });
+  // a drag whose capture is lost still ends where it last was; a press not yet a drag just ends
+  canvas.addEventListener('lostpointercapture', () => {
+    const p = press;
+    press = null;
+    if (!p || !p.down) return;
+    flush();
+    send({ t: 'mouse', type: 'up', ...(p.last ?? { x: p.x, y: p.y }), button: p.button, clicks: 1 });
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (!frame) return;
+    const k = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? frame.h : 1;
+    const px = (v) => Math.max(-100000, Math.min(100000, round(v * k)));
+    send(withMods({ t: 'wheel', ...toFrame(e), dx: px(e.deltaX), dy: px(e.deltaY) }, e));
+  }, { passive: false });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // Keys. A modifier alone sends nothing (it rides as mods on what it modifies); a paste chord is
+  // left to the browser so its paste event fires. held maps the physical key (its code) of each
+  // down this socket saw to its key name, until its up, so no up goes to a socket that never saw
+  // the down. Only keys sent as down are in it: never a typed character or a paste.
+  const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'Fn', 'FnLock', 'Hyper', 'Super', 'Symbol', 'SymbolLock', 'NumLock', 'ScrollLock', 'OS']);
+  const held = new Map(); // code → { key, code?, meta }
+  // by its key or, on a layout whose V types something else, by its place on the keyboard
+  const pasteChord = (e) => ((e.key === 'v' || e.key === 'V' || e.code === 'KeyV') && (e.ctrlKey || e.metaKey) && !e.altKey) || (e.key === 'Insert' && e.shiftKey);
+  // AltGr, or Ctrl and Alt together (how Windows reports it) when the key types something other
+  // than its own letter: Ctrl+Alt+Q typing @ is a character, Ctrl+Alt+Q typing q a chord
+  const altGr = (e) => e.getModifierState('AltGraph') || (e.ctrlKey && e.altKey && !(/^Key[A-Z]$/.test(e.code) && e.key.toLowerCase() === e.code.slice(3).toLowerCase()));
+  const named = (e) => (e.code && e.code.length <= 32 ? { key: e.key, code: e.code } : { key: e.key });
+  canvas.addEventListener('keydown', (e) => {
+    if (e.isComposing || MODIFIERS.has(e.key) || pasteChord(e)) return;
+    e.preventDefault();
+    if (!e.key || e.key.length > 32) return;
+    if (e.key === 'Enter') return send(withMods({ t: 'key', type: 'press', ...named(e), text: '\r' }, e));
+    if ([...e.key].length === 1 && (!(e.ctrlKey || e.metaKey) || altGr(e))) {
+      // a character: its text is what it types, so Ctrl and Alt from AltGr aren't sent with it
+      const m = { t: 'key', type: 'press', ...named(e), text: e.key };
+      if (e.shiftKey) m.mods = 8;
+      return send(m);
+    }
+    held.set(e.code || e.key, { ...named(e), meta: e.metaKey });
+    send(withMods({ t: 'key', type: 'down', ...named(e) }, e));
+  });
+  canvas.addEventListener('keyup', (e) => {
+    // macOS sends no keyup for a key pressed while Cmd was held: its up goes when Cmd does
+    if (e.key === 'Meta') for (const [id, k] of held) if (k.meta) { held.delete(id); send({ t: 'key', type: 'up', key: k.key, ...(k.code ? { code: k.code } : {}) }); }
+    const k = held.get(e.code || e.key);
+    if (!k) return;
+    held.delete(e.code || e.key);
+    e.preventDefault();
+    send({ t: 'key', type: 'up', ...named(e) });
+  });
+  // A paste goes as typed text: pieces of at most 10 000 characters, cut between code points, up
+  // to 100 000 in all.
+  document.addEventListener('paste', (e) => {
+    if (document.activeElement !== canvas) return;
+    e.preventDefault();
+    const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    if (!text) return;
+    if (text.length > 100000) return note('That paste is too long to send.');
+    note('');
+    for (let i = 0; i < text.length;) {
+      let j = Math.min(text.length, i + 10000);
+      const c = text.charCodeAt(j - 1);
+      if (j < text.length && c >= 0xd800 && c <= 0xdbff) j--;
+      send({ t: 'paste', text: text.slice(i, j) });
+      i = j;
+    }
+  });
+
+  // a key still down when the canvas loses focus gets its up now: its keyup goes elsewhere
+  canvas.addEventListener('blur', () => {
+    for (const k of held.values()) send({ t: 'key', type: 'up', key: k.key, ...(k.code ? { code: k.code } : {}) });
+    held.clear();
+  });
+
+  // ----- the address bar, Back, Sign out of everything -----------------------------------------
+  // What the owner typed, with https:// in front where it names no scheme; the page sends only
+  // http and https (the server and the guard check again).
+  const SCHEME = /^[a-z][a-z0-9+.-]*:(?!\d)/i;
+  function toNav(typed) {
+    const v = typed.trim();
+    const url = SCHEME.test(v) ? v : `https://${v}`;
+    let u;
+    try { u = new URL(url); } catch { return { refuse: 'Only http and https addresses open here.' }; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { refuse: 'Only http and https addresses open here.' };
+    if (url.length > 2048) return { refuse: 'That address is too long.' };
+    return { url };
+  }
+  // with no socket an entry or Back would go nowhere: say so rather than drop it silently
+  const live = () => socket && socket.readyState === 1;
+  $('go').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (!addr.value.trim()) return;
+    const r = toNav(addr.value);
+    if (r.refuse) return note(r.refuse);
+    if (!live()) return note('Not connected: not sent.');
+    note('');
+    send({ t: 'nav', url: r.url });
+    addr.blur();
+  });
+  $('back').addEventListener('click', () => { if (!live()) return note('Not connected: not sent.'); note(''); send({ t: 'back' }); });
+  $('again').addEventListener('click', () => {
+    ended = false;
+    $('bye').hidden = true;
+    $('chip').hidden = false;
+    chip('Connecting…');
+    wait = 500;
+    connect();
+  });
+  const confirm = $('confirm');
+  $('signout').addEventListener('click', () => confirm.showModal());
+  $('cancel').addEventListener('click', () => confirm.close());
+  $('forget').addEventListener('click', () => {
+    confirm.close();
+    // the socket dropped with the confirm open: say so, never sign out silently into nothing
+    if (!live()) return note('Not connected: nothing was signed out.');
+    send({ t: 'forget' });
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>
