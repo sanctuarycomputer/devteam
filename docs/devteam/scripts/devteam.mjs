@@ -3342,7 +3342,7 @@ function recordsLandedOnly(t) {
   const main = mainRef();
   return !!main && git(['cat-file', '-e', `${main}:${projectRel}/tickets/${t.id}/spec.md`]) !== null;
 }
-const RECORDS_ONLY_FIX = (id) => `its records landed in home but its code is not merged: run merge ${id} again`;
+const RECORDS_ONLY_FIX = (id) => `records in home, code not merged: run merge ${id} again`;
 function deriveStatus() {
   const ts = tickets();
   return [...ts.values()].map((t) => {
@@ -3728,7 +3728,7 @@ function parkMessage(s, cause) {
   const reason = cause.reason ? ` (${String(cause.reason).slice(0, 80)})` : '';
   const why = cause.kind === 'fleet' ? `the fleet is parked${reason}` : cause.kind === 'let-go' ? `the owner let go of "${title}"` : `"${title}" is parked${reason}`;
   const tail = ` [${cause.marker}]`;
-  const recs = s.role === 'worker' && recordsInHomeId(s.id) ? ` Commit and push your records in ${recordsWorktreePath(s.id)} too (home's ticket/${s.id}).` : '';
+  const recs = s.role === 'worker' && recordsInHomeId(s.id) ? ` Push records-${s.id} too.` : '';
   const body = `Park: ${why}.${recs} Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
   // a message line holds 600 characters; the marker that sends it once per cause is kept whole
   return `${body.slice(0, 600 - tail.length)}${tail}`;
@@ -4769,7 +4769,8 @@ function cmdReviewWorktree() {
     out(`removed ${at}`);
     // its records checkout (records in home), made beside it
     const rat = real(`${at}-records`);
-    if (rat && R.name !== 'home' && worktreeRepo(rat)?.name === 'home') { gitOrDie(['worktree', 'remove', '--force', rat], mainRoot); out(`removed ${rat}`); }
+    const made = rat && R.name !== 'home' && worktreeRepo(rat)?.name === 'home' && worktreeRecords(repo('home')).some((w) => w.path === rat && w.detached);
+    if (made) { gitOrDie(['worktree', 'remove', '--force', rat], mainRoot); out(`removed ${rat}`); }
     return;
   }
   const [id, ref] = positional;
@@ -4810,8 +4811,9 @@ function cmdCheckPr() {
   fetchMain(R);
   // a records-in-home ticket's records are on home's ticket/<id>: as origin has it now
   const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
-  if (R.name !== 'home' && tid && recordsInHomeId(tid)) git(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]);
-  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
+  // judged as origin has them (never a local branch that may not be pushed); none there: none
+  const records = R.name !== 'home' && tid && recordsInHomeId(tid) ? (gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0 ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
+  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
 // A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
@@ -15567,7 +15569,7 @@ function promptFor(role, id, R = repo('home')) {
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
   const head = `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}`;
   // records in home: the code goes here, the records in home's ticket/<id>
-  if (role === 'worker' && recordsInHomeId(id)) return `${head}. Only this ticket's code goes in ${R.name}: nothing of the project, records included. Keep its records (spec, plan, verification, reviews) under ${projectRel}/tickets/${id}/ in ${recordsWorktreePath(id)}, a checkout of home on its branch ticket/${id}; commit and push them there, and run dispose there. A final review record names the home commit of the records it reviewed in a line "- Records: <full sha>" beside its verdict on this repo's head.${loadSettings().forge === 'git' ? '' : ` Open a PR in home from ticket/${id} with this ticket's PR title too: merge lands it with the code.`}`;
+  if (role === 'worker' && recordsInHomeId(id)) return `${head}. Only this ticket's code goes in ${R.name}: nothing of the project, records included. Keep its records (spec, plan, verification, reviews) under ${projectRel}/tickets/${id}/ in ${recordsWorktreePath(id)}, a checkout of home on its branch ticket/${id}; commit and push them there, and run dispose there. A final review record names the home commit of the records it reviewed in a line "- Records: <full sha>" beside its verdict on this repo's head.${repo('home').settings.forge === 'git' ? '' : ` Open a PR in home from ticket/${id} with this ticket's PR title too: merge lands it with the code.`}`;
   return `${head}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
 // The supervisor's opening prompt: the drained or parked preface first, when there is one.

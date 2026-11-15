@@ -253,16 +253,23 @@ test('records in home: check-ticket reads them from home\'s ticket/<id> at both 
     const check = (args = []) => runIn(old, ['check-ticket', id, '--sha', r.code, ...args]);
     assert.equal(check().status, 0, check().out);
     // the link's own records folder is no longer exempt: nothing of the project's in the link
+    const dry = () => runIn(old, ['merge', id, '--dry-run'], SUP).out;
     tryCommit(F, r.w, { [`${T}/spec.md`]: '# spec in the link\n' }, (sha) => {
       assert.match(runIn(old, ['check-ticket', id, '--sha', sha]).out, new RegExp(`changes files outside touches: ${T}/spec\\.md`));
+      g(['push', '-q', 'origin', `ticket/${id}`], r.w);
+      assert.match(dry(), new RegExp(`changes files outside touches: ${T}/spec\\.md`), 'merge refuses it too');
     });
+    g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.w);
     // the records branch holds only its records folder; home's check-pr on it says the same
     tryCommit(F, r.rw, { 'README.md': 'changed through the records branch\n' }, (sha) => {
       assert.match(check().out, new RegExp(`home's ticket/${id} changes files outside its records folder ${T}/: README\\.md`));
       const pr = runIn(old, ['check-pr', '--head-ref', `ticket/${id}`, '--sha', sha]);
       assert.notEqual(pr.status, 0);
       assert.match(pr.out, /changes files outside its records folder .*README\.md/);
+      g(['push', '-q', 'origin', `ticket/${id}`], r.rw);
+      assert.match(dry(), /changes files outside its records folder .*README\.md/, 'merge refuses it too');
     });
+    g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.rw);
     assert.equal(runIn(old, ['check-pr', '--head-ref', `ticket/${id}`, '--sha', r.head]).status, 0, 'a records-only branch passes home\'s check-pr');
     // the records edited after the final review: the records verdict no longer holds
     tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| more | x | pass |\n` }, () => {
@@ -273,7 +280,10 @@ test('records in home: check-ticket reads them from home\'s ticket/<id> at both 
     tryCommit(F, r.rw, { [`${T}/reviews/task-1.md`]: review('task-reviewer', r.code) }, () => assert.equal(check().status, 0, check().out));
     tryCommit(F, r.rw, { [`${T}/reviews/final-2.md`]: review('reviewer-c', r.code) }, () => {
       assert.match(check().out, /final-2\.md: no "- Records: <full sha>" line/);
+      g(['push', '-q', 'origin', `ticket/${id}`], r.rw);
+      assert.match(dry(), /final-2\.md: no "- Records: <full sha>" line/, 'merge refuses it too');
     });
+    g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.rw);
     // --records pins the records commit read: the reviewed one has no review in it yet
     assert.match(check(['--records', r.reviewed]).out, /no final review record/);
   } finally { F.done(); }
@@ -306,6 +316,7 @@ test('records in home: merge checks the records at one pinned sha and lands them
     tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| pushed | x | pass |\n` }, () => { g(['push', '-q', 'origin', `ticket/${id}`], r.rw); });
     assert.equal(runIn(old, ['check-ticket', id, '--sha', r.code]).status, 0);
     assert.match(dry().out, /records verdict .* does not hold/);
+    assert.match(runIn(old, ['check-pr', '--repo', 'console', '--head-ref', `ticket/${id}`, '--sha', r.code]).out, /records verdict .* does not hold/, "check-pr --repo judges origin's records too");
     g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.rw);
 
     // the half-done merge: console's origin refuses the push, after the records landed
@@ -322,7 +333,7 @@ test('records in home: merge checks the records at one pinned sha and lands them
     assert.equal(merges().length, 0, 'no merge act');
     const row = () => json(okIn(old, ['status', '--json'])).tickets.find((x) => x.id === id);
     assert.equal(row().records_landed, true);
-    assert.match(okIn(old, ['status']), new RegExp(`${id}.*its records landed in home but its code is not merged: run merge ${id} again`));
+    assert.match(okIn(old, ['status']), new RegExp(`${id}.*records in home, code not merged: run merge ${id} again`));
     const findings = () => json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(findings().some((x) => x.kind === 'records-without-code' && x.subject === id), 'the finding that names the fix');
     assert.ok(findings().some((x) => x.kind === 'merged-without-merge' && String(x.subject).startsWith('home:')), 'records on home\'s main with no merge act, which is true');
@@ -360,9 +371,12 @@ test('records in home on a GitHub home: a merged records PR is recognized (branc
     const dry = () => runIn(old, ['merge', id, '--dry-run'], SUP, { PATH: `${bin}${path.delimiter}${process.env.PATH}` });
     const origin = path.join(F.base, 'origin.git');
     g(['update-ref', 'refs/pull/7/head', r.head], origin);
-    write(merged, JSON.stringify([{ number: 7, headRefOid: r.head, mergedAt: '2026-11-15T00:00:00Z' }]));
+    // an older merge of an earlier head is newer in the list's order here: the one at the fetched head counts
+    g(['update-ref', 'refs/pull/8/head', r.reviewed], origin);
+    write(merged, JSON.stringify([{ number: 7, headRefOid: r.head, mergedAt: '2026-11-15T00:00:00Z' }, { number: 8, headRefOid: r.reviewed, mergedAt: '2026-11-15T01:00:00Z' }]));
     assert.match(dry().out, new RegExp(`records at ${r.head.slice(0, 12)} in home \\(landed already: only the code lands\\)`));
     // the head branch deleted on merge: the newest merged PR, fetched from refs/pull/<n>/head
+    write(merged, JSON.stringify([{ number: 7, headRefOid: r.head, mergedAt: '2026-11-15T00:00:00Z' }]));
     g(['push', '-q', 'origin', `:ticket/${id}`], r.rw);
     assert.match(dry().out, /\(landed already: only the code lands\)/);
     // no merged PR and no open one: refused
@@ -433,7 +447,7 @@ test('records in home: a parked worker is settled only once its records are comm
     okIn(w, ['phase', 'build'], W);
     okIn(old, ['fleet', 'park', '--reason', 'moving'], SUP);
     const told = json(okIn(old, ['messages', '--to', id, '--json'])).pop();
-    assert.match(told.text, /^Park: .* Commit and push your records in \S*records-console-01-a too \(home's ticket\/console-01-a\)\./);
+    assert.match(told.text, /^Park: .* Push records-console-01-a too\. Commit all work/);
     okIn(w, ['phase', 'parked', '--note', 'parked'], W);
     const problems = () => json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).sessions.find((x) => x.name === id).problems.filter((p) => p.startsWith('records:'));
     assert.deepEqual(problems(), [], 'a records branch with nothing of its own has nothing to lose');
