@@ -1,0 +1,12 @@
+# Spec review, pass 4
+
+- Reviewer: spec-reviewer-4 (fresh subagent, claude-opus-5-5)
+- Reviewed: c20206322e9c8c05415c59c1ae762a856a9396ba (spec.md, the fix for spec-3)
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| S4-1 | Minor | spec accuracy; code: `collectProgress()` (devteam.mjs:11755) calls `deriveStatus()` (11758), and `collectProgress()` runs twice per request, from `dashboardData` (11842 `progress:`) and from `collectRoadmap` (10624, through `collectOoda` 11798) | spec.md "One read of the review files", first sentence ("`deriveStatus()` twice (`tickets` and `upkeep`)") | `deriveStatus()` runs four times per dashboard request, not twice: `tickets` (11837), `upkeep` (11846), and twice through `collectProgress`. So today's count is at least eight reads per ticket folder, not six. "At least six" is still literally true, and the fix does not depend on the count (the memo in `ticketReviews` covers every caller, and the test counts memo misses), so nothing is built wrong. The list of callers is incomplete, though. Fix: say "`deriveStatus()` four times (`tickets`, `upkeep`, and `collectProgress` twice, directly and through `collectRoadmap`)", or drop the count. | |
+
+S3-1 is resolved. The memo now sits inside `ticketReviews(id, src)` (devteam.mjs:3945), and every `ticketReviews` call that a `dashboard-data` run reaches goes through it: `deriveStatus` (3324), `reviewStats` (3962) and `reviewPasses` (3978). Each picks its source by the same rule: the branch ref when the ticket is unmerged, else `WORKTREE`. So a key of ticket id and source gives one miss per ticket. The other callers are not on the dashboard path: `notSchedulable` (3802) is reached only from `cmdReady`, `checkTicket` (4226) from `check-ticket`/`check-pr`, `cmdAct` (8965), `retroDraft` (10834) and `timelineView` (11895). `dashboardData()` is synchronous, and the hub spawns a new `dashboard-data` process for each request (14840), so turning the memo on at entry and clearing it in `finally` is sound. The CLI's other commands are unaffected. Done-when 1's last sentence ("each ticket's folder read exactly once per `dashboard-data` run") is now true of the design, and the test counts every real read, not only the walk's. The rest of the diff introduces no other defect. S4-1 does not block.
+
+Verdict: APPROVE c20206322e9c8c05415c59c1ae762a856a9396ba
