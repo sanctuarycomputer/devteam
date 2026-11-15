@@ -367,6 +367,17 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   assert.equal(row(files, 'docs/devteam/process/worker.md').differs, false, 'the sync brought it');
   assert.equal(row(files, 'docs/devteam/process/worker.md').state, null);
 
+  // a settings edit that keeps the kit release is not a sync, so a kit file it carries is changed here (T5-1)
+  const was = fs.readFileSync(sf, 'utf8');
+  fs.writeFileSync(sf, was.replace('"forge": "git"', '"forge": "git", "tick_minutes": 20'));
+  assert.notEqual(fs.readFileSync(sf, 'utf8'), was, 'settings.md changed');
+  fs.appendFileSync(path.join(A.root, 'docs/devteam/process/worker.md'), '\nA local step.\n');
+  commit(A.root, 'tick every 20 minutes, and a local step');
+  files = gov(A);
+  assert.equal(row(files, 'docs/devteam/process/worker.md').differs, true, 'upstream_base unchanged: not a sync');
+  assert.equal(row(files, 'docs/devteam/process/worker.md').state, 'changed here');
+  assert.equal(row(files, 'docs/devteam/governance/constitution.md').differs, false, 'untouched since the first sync');
+
   // the strategy written
   fs.writeFileSync(path.join(A.proj, 'strategy.md'), '# Our strategy\n\nSell to admins.\n');
   commit(A.root, 'the strategy');
