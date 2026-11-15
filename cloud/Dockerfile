@@ -258,6 +258,32 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # The operator's commands (operator.md): the image's kit, for every repo in ~/code and any other the
 # machine has recorded. box-recover brings back what was up before a restart (the list devteam-dev
 # keeps), each repo by its own kit's recover, in tmux session home as sup-<repo>.
+# Tap ☰ at the left of tmux's status bar: scroll, and every window on the box, each a tap away. A phone
+# can't fit every tab in the bar, nor scroll tmux without a wheel (the gateway's page turns swipes into one).
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-tmux-menu
+#!/bin/sh
+c="$1"
+tab=$(printf '\t')
+set -- display-menu -c "$c" -T "#[align=centre] Box " -x 0 -y S \
+  "Scroll up a page" u "copy-mode -u" \
+  "Scroll down a page" d "send-keys -X page-down" \
+  "Stop scrolling" q "send-keys -X cancel" \
+  ""
+# the home session's windows first, then each project's agents under its name
+list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
+  awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
+last=""
+while IFS="$tab" read -r s _ n id; do
+  [ -n "$id" ] && [ "$n" != dashboard ] || continue
+  case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
+  [ "$s" != "$last" ] && [ -n "$last" ] && set -- "$@" "-#[align=centre]$tag" "" ""
+  last="$s"
+  set -- "$@" "$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34)" "" "switch-client -c '$c' -t '$id'"
+done <<LIST
+$list
+LIST
+exec tmux "$@"
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
 #!/bin/sh
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs recover --machine --in "$HOME/code" --session home --was-up "$HOME/.devteam-supervisors.boot" "$@"
@@ -349,6 +375,16 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devtea
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 # Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
 grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
+# a phone's screen: short tabs, and the ☰ menu (box-tmux-menu) to scroll and reach any window
+grep -q MouseDown1StatusLeft .tmux.conf || cat >> .tmux.conf <<'TMUX'
+set -g status-left '#[reverse] ☰ #[default] '
+set -g status-left-length 5
+set -g status-right ''
+set -g window-status-separator ''
+set -g window-status-format ' #I #{=7:#{s/^sup-//:window_name}} '
+set -g window-status-current-format '#[reverse] #I #{=7:#{s/^sup-//:window_name}} #[default]'
+bind -n MouseDown1StatusLeft run-shell -b "box-tmux-menu '#{client_name}'"
+TMUX
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'

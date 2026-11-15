@@ -1437,6 +1437,30 @@ export function createGateway(opts = {}) {
     });
   }, 100);
 })();</script>`);
+  // A phone's swipe doesn't scroll tmux: xterm.js sends tmux a mouse wheel, but nothing for a touch, and
+  // tmux's history isn't in xterm's own scrollback. This turns a one-finger vertical swipe into wheel
+  // steps on the terminal, which tmux (mouse on) reads as scrolling its history. Taps are left alone.
+  const TERM_TOUCH = Buffer.from(`<script>(() => {
+  let y = null, acc = 0;
+  const STEP = 18;
+  addEventListener('touchstart', (e) => { y = e.touches.length === 1 ? e.touches[0].clientY : null; acc = 0; }, { passive: true, capture: true });
+  addEventListener('touchmove', (e) => {
+    if (y === null || e.touches.length !== 1) return;
+    const t = document.querySelector('.xterm-screen');
+    if (!t) return;
+    const ny = e.touches[0].clientY;
+    acc += y - ny;
+    y = ny;
+    const r = t.getBoundingClientRect();
+    while (Math.abs(acc) >= STEP) {
+      const d = acc > 0 ? STEP : -STEP;
+      acc -= d;
+      t.dispatchEvent(new WheelEvent('wheel', { deltaY: d, deltaMode: 0, clientX: r.left + r.width / 2, clientY: Math.min(Math.max(ny, r.top + 1), r.bottom - 1), bubbles: true, cancelable: true }));
+    }
+    e.preventDefault();
+  }, { passive: false, capture: true });
+  addEventListener('touchend', () => { y = null; }, { capture: true });
+})();</script>`);
   // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
   // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
   // ttyd reconnects without loading the page again, so a tab left open through a deploy keeps the
@@ -1612,8 +1636,8 @@ export function createGateway(opts = {}) {
   // The page the terminal is served, and a name for it that changes only when its bytes do.
   const termPage = () => {
     const html = ttydPage();
-    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP]))).slice(0, 22);
-    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP]) };
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]) };
   };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
