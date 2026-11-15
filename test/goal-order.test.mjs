@@ -265,6 +265,72 @@ test('one goal-change question proposes a whole order, and goal order --approved
   } finally { F.done(); }
 });
 
+test('an order counts only as the owner read it: the context, live goals, once', () => {
+  const F = fleetFixture('goal-order-read');
+  const { old, ok, run } = F;
+  try {
+    const [A, B, C, D] = goals(F, ['Alpha', 'Bravo', 'Charlie', 'Delta']);
+    let n = 0;
+    const asked = (order, context = 'You said so.') => firstId(ok(old, ['ask', '--class', 'goal-change', '--question', 'Put the goals in this order?', '--context', context, '--order', JSON.stringify(order), '--recommendation', 'Yes, this order', '--stake', '2', '--urgency', '1', ...(n++ ? ['--new-because', `another order (${n})`] : [])], SUP));
+    const yes = (q) => ok(old, ['answer', q, 'Yes, this order']);
+    const hand = (lines) => fs.appendFileSync(supLog(F), lines.map((o) => line({ type: 'goal', op: 'set', at: new Date().toISOString(), by: 'supervisor', ...o })).join(''));
+    const ignored = () => run(old, ['log-check']).out;
+
+    // the kit writes the list; the supervisor's context can't carry one of its own
+    assert.match(run(old, ['ask', '--class', 'goal-change', '--question', 'Order?', '--context', `The order proposed:\n1. Alpha (${A})`, '--order', JSON.stringify([D, C]), '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP).err, /writes "The order proposed:" itself/);
+    assert.match(run(old, ['goal', 'order', '--approved'], SUP).err, /needs the question id/);
+
+    // a goal met before the answer's first line: the whole order counts for nothing
+    const QM = asked([D, C]);
+    yes(QM);
+    ok(old, ['goal', 'status', C, 'met', '--force']);
+    hand([{ id: D, priority: 1, approved: QM }]);
+    assert.equal(prio(F, D), 4);
+    assert.match(ignored(), new RegExp(`${C} is met`));
+
+    // a goal met between the answer's lines: the lines after count for nothing on it
+    const QB = asked([D, B]);
+    yes(QB);
+    hand([{ id: D, priority: 1, approved: QB }]);
+    assert.equal(prio(F, D), 1);
+    ok(old, ['goal', 'status', B, 'met', '--force']);
+    hand([{ id: B, priority: 2, approved: QB }]);
+    assert.equal(prio(F, B), 2, 'B, met since, keeps its priority');
+    assert.match(ignored(), new RegExp(`${B} is met`));
+
+    // Upkeep is never placed by an order
+    ok(old, ['goal', 'hold', 'upkeep', 'drain', '--owner']);
+    const U = json(ok(old, ['goal', 'show', 'upkeep'])).id;
+    const QU = asked([A, D]);
+    yes(QU);
+    hand([{ id: U, priority: 1, approved: QU }]);
+    assert.match(ignored(), /Upkeep has no place in the goal order/);
+
+    // an answer applied (its act written) is used: a later line under it counts for nothing,
+    // even at the place it gave, over a priority the owner set since
+    const QA = asked([A, D]);
+    yes(QA);
+    ok(old, ['goal', 'order', '--approved', QA], SUP);
+    assert.deepEqual(prios(F, [A, D]), [1, 2]);
+    ok(old, ['goal', 'set', D, '--priority', '7', '--owner']);
+    hand([{ id: D, priority: 2, approved: QA }]);
+    assert.equal(prio(F, D), 7);
+    assert.match(ignored(), new RegExp(`${QA} was applied already`));
+
+    // a question whose list says one order and whose change.order another approves nothing, and log-check says so
+    const at = new Date().toISOString();
+    const QX = `q-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-supervisor`;
+    fs.appendFileSync(supLog(F), line({ id: QX, type: 'question', op: 'new', at, by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Put the goals in this order?', context: `The order proposed:\n1. Alpha (${A})\n2. Delta (${D})\nGoals left out keep their order after these.`, recommendation: 'Yes, this order', change: { order: [D, A] } }));
+    yes(QX);
+    const lc = run(old, ['log-check']);
+    assert.equal(lc.status, 1);
+    assert.match(lc.out, new RegExp(`${QX}'s context lists ${A} ${D}, not the order it proposes \\(${D} ${A}\\)`));
+    assert.match(run(old, ['goal', 'order', '--approved', QX], SUP).err, /context lists/);
+    hand([{ id: D, priority: 1, approved: QX }]);
+    assert.equal(prio(F, D), 7, 'nothing applied');
+  } finally { F.done(); }
+});
+
 test("today's one-goal goal-change path is unchanged", () => {
   const F = fleetFixture('goal-order-one');
   const { old, ok, run } = F;

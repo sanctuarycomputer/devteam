@@ -1322,6 +1322,9 @@ function fold(all) {
   const ignored = [];
   const goalApprovals = new Set();
   const orderPlans = new Map();
+  // when each order answer was applied: its first act (approved_by), made in the pass above
+  const orderApplied = new Map();
+  let orderAppliedRead = false;
   const aliases = new Map();
   for (const l of lines) {
     if (l.op !== 'new') continue;
@@ -1385,7 +1388,11 @@ function fold(all) {
     const orderQ = obj.type === 'goal' && cls === 'supervisor' && typeof l.approved === 'string' ? objects.get(l.approved) : null;
     const byOrder = orderQ?.type === 'question' && isObj(orderQ.change) && Array.isArray(orderQ.change.order);
     if (byOrder) {
-      const problem = goalOrderProblem(orderQ, obj, l, orderPlans, objects);
+      if (!orderAppliedRead) {
+        orderAppliedRead = true;
+        for (const o of objects.values()) if (o.type === 'act' && typeof o.approved_by === 'string' && !(orderApplied.get(o.approved_by) <= o.created_at)) orderApplied.set(o.approved_by, o.created_at);
+      }
+      const problem = goalOrderProblem(orderQ, obj, l, orderPlans, objects, orderApplied);
       if (problem) {
         ignored.push({ line: l, why: `the supervisor sets a goal's place only as the owner's answer to ${l.approved} gave it: ${problem}` });
         continue;
@@ -1941,11 +1948,15 @@ function goalOrderPlan(ids, goals) {
 // recommendation; l sets only priority, to the goal's place in that order's plan, once. The plan is
 // made once per answer, at its first line, from the goals as they stood then (made by that time, not
 // the fold's later ones); plans keeps it, and the goals already set under it.
-function goalOrderProblem(q, obj, l, plans, objects) {
+function goalOrderProblem(q, obj, l, plans, objects, appliedAt) {
   const v = questionView(q);
   if (v.class !== 'goal-change' || !v.order || v.order.length < 2) return `${v.id} proposes no goal order`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation ("${v.recommendation}")`;
+  const shown = orderContextProblem(v);
+  if (shown) return shown;
+  // the answer is used once its act is written: a line after that is not part of applying it
+  if (appliedAt.has(v.id) && appliedAt.get(v.id) < l.at) return `${v.id} was applied already`;
   const set = Object.keys(l).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__') && k !== 'approved');
   if (set.length !== 1 || set[0] !== 'priority') return `an order sets priority and nothing else (this sets ${set.join(', ') || 'nothing'})`;
   if (!plans.has(v.id)) {
@@ -1962,6 +1973,22 @@ function goalOrderProblem(q, obj, l, plans, objects) {
   p.done.add(obj.id);
   return null;
 }
+// Why order question v doesn't show the owner the order it proposes (null when it does): its context
+// ends with the kit's list (goalOrderText), "The order proposed:" then "<n>. <title> (<g-id>)" per
+// goal, and those ids are exactly change.order. The owner's Yes is to what they read; a question whose
+// list and order differ (a line written by hand) approves nothing.
+function orderContextProblem(v) {
+  const lines = String(v.context ?? '').split('\n');
+  const at = lines.lastIndexOf('The order proposed:');
+  if (at < 0) return `${v.id}'s context doesn't show the order it proposes (the kit's "The order proposed:" list)`;
+  const ids = [];
+  for (const ln of lines.slice(at + 1)) {
+    const m = /^(\d+)\. .*\((g-[^()\s]+)\)$/.exec(ln);
+    if (!m || Number(m[1]) !== ids.length + 1) break;
+    ids.push(m[2]);
+  }
+  return canonical(ids) === canonical(v.order) ? null : `${v.id}'s context lists ${ids.join(' ') || 'no goals'}, not the order it proposes (${v.order.join(' ')})`;
+}
 // The supervisor applying the owner's answer to a goal-change --order question: exactly the order
 // it proposed (ids, when given, must be it), once, on goals still live.
 function goalOrderApproved(qid, ids) {
@@ -1972,6 +1999,8 @@ function goalOrderApproved(qid, ids) {
   if (v.class !== 'goal-change' || !v.order || v.order.length < 2) die(`goal order --approved: ${qid} proposes no order (a one-goal change is goal set <g-id> --approved ${qid})`);
   if (v.status !== 'answered') die(`goal order --approved: ${qid} is not answered by the owner (${v.status})`);
   if (!v.matched) die(`goal order --approved: ${qid} was answered "${v.answer}", not its recommendation ("${v.recommendation}"); ask again for the order the owner wants`);
+  const shown = orderContextProblem(v);
+  if (shown) die(`goal order --approved: ${shown}; ask again`);
   if ((readLog().byType.get('goal') ?? []).some((g) => g.updates.some((u) => u.approved === qid)) || calls().some((a) => a.approved_by === qid)) die(`goal order --approved: ${qid} already authorised a change; ask again for another`);
   if (ids.length && canonical(ids) !== canonical(v.order)) die(`goal order --approved: ${ids.join(' ')} is not the order ${qid} proposed (${v.order.join(' ')}); give none to apply it`);
   const why = goalOrderRefusal(v.order, readLog().byType.get('goal') ?? []);
@@ -2268,6 +2297,8 @@ function cmdLogCheck() {
   for (const u of newer) out(`a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
+  // an order question shows the owner its order: its context's list is exactly change.order
+  for (const q of logObjects('question')) { const v = questionView(q); const p = v.order ? orderContextProblem(v) : null; if (p) fails.push(p); }
   for (const w of rw.warnings) out(`warn: ${w}`);
   fails.push(...rw.errors);
   // An applied default that approves nothing (defaultGap): applied before its deadline, or asked on
@@ -5334,6 +5365,7 @@ function goalOrderFlag(cls) {
   if (o.length < 2) die('--order puts at least two goals in order; one goal\'s priority is a goal-change with --goal and --change');
   const why = goalOrderRefusal(o, readLog().byType.get('goal') ?? []);
   if (why) die(`--order: ${why}`);
+  if (String(flagStr('context') ?? '').split('\n').includes('The order proposed:')) die('--order: the kit writes "The order proposed:" itself, from the order; leave it out of --context');
   if (!flagStr('recommendation')?.trim()) die('a goal-change --order question recommends the order (--recommendation "Yes, this order"): only the owner\'s answer with it approves');
   return o;
 }
@@ -10366,6 +10398,7 @@ function cmdGoal() {
   if (sub === 'order') {
     const ids = positional.slice(1);
     const approved = flagStr('approved') ?? null;
+    if (flags.approved !== undefined && !approved) die('goal order --approved needs the question id: goal order [<g-id> …] --approved <qid>');
     if (approved && /\s/.test(approved)) die('goal order --approved takes one question id: name any goals before it (goal order [<g-id> …] --approved <qid>)');
     if (approved) return goalOrderApproved(approved, ids);
     if (process.env.DEVTEAM_ROLE) die(`goal order is the owner's (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE}): the supervisor asks one goal-change --order question, then goal order --approved <qid>`);
