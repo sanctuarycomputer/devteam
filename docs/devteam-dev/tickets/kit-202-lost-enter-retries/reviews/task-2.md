@@ -22,7 +22,7 @@ Every assertion there still holds.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T2-1 | Minor | none (suggestion) | devteam.mjs ~2885, block comment | The reflowed comment leaves a short line, `// The text is never retyped. The record`, before the old wrap resumes. Cosmetic only; reflowing the paragraph's tail would tidy it. | |
+| T2-1 | Minor | none (suggestion) | devteam.mjs ~2885, block comment | The reflowed comment leaves a short line, `// The text is never retyped. The record`, before the old wrap resumes. Cosmetic only; reflowing the paragraph's tail would tidy it. | fixed in 76be28f: comment tail reflowed |
 
 The untested no-cut branch and tail window are test gaps, recorded as T1-1 and T1-2 in task-1.md. The code in both is as the spec designs it.
 
