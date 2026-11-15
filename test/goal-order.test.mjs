@@ -373,7 +373,7 @@ test("today's one-goal goal-change path is unchanged", () => {
   try {
     const [, , C, D] = goals(F, ['Alpha', 'Bravo', 'Charlie', 'Delta']);
     const Q = firstId(ok(old, ['ask', '--class', 'goal-change', '--goal', D, '--change', '{"priority":9}', '--question', 'Move Delta to 9?', '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP));
-    assert.equal(json(ok(old, ['questions', '--id', Q, '--json']))[0].order, null);
+    assert.ok(!('order' in json(ok(old, ['questions', '--id', Q, '--json']))[0]), 'no order key on a one-goal question: views print what they printed before (G1)');
     assert.match(run(old, ['goal', 'set', D, '--approved', Q], SUP).err, /is not answered by the owner/);
     ok(old, ['answer', Q, 'Yes']);
     assert.match(run(old, ['goal', 'set', C, '--approved', Q], SUP).err, new RegExp(`${Q} is about ${D}, not ${C}`));
