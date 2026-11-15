@@ -1416,7 +1416,7 @@ function fold(all) {
       ignored.push({ line: l, why: 'the question has no default' });
       continue;
     }
-    const rank = byOrder ? RANK.owner : RANK[cls];
+    const rank = RANK[cls];
     const changed = {};
     if (holdLine) {
       obj.hold = holdLine;
@@ -1425,11 +1425,14 @@ function fold(all) {
     }
     for (const [k, val] of Object.entries(l)) {
       if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold' || (notOwnTag && k === 'kit_lesson')) continue;
-      if ((obj.__rank[k] ?? -1) > rank) continue;
+      // an order line's priority is the owner's answer, at the owner's rank; its approved stays the
+      // supervisor's, so a later answer's approved still lands and is seen as used
+      const r = byOrder && k === 'priority' ? RANK.owner : rank;
+      if ((obj.__rank[k] ?? -1) > r) continue;
       // a question's rating as first asked, so its history can show what a later rate replaced
       if (obj.type === 'question' && QUESTION_RATING.includes(k) && !(k in (obj.__asked ??= {}))) obj.__asked[k] = obj[k];
       obj[k] = val;
-      obj.__rank[k] = rank;
+      obj.__rank[k] = r;
       changed[k] = val;
     }
     if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
@@ -1940,7 +1943,7 @@ function goalOrderPlan(ids, goals) {
 // the fold's later ones); plans keeps it, and the goals already set under it.
 function goalOrderProblem(q, obj, l, plans, objects) {
   const v = questionView(q);
-  if (v.class !== 'goal-change' || !v.order) return `${v.id} proposes no goal order`;
+  if (v.class !== 'goal-change' || !v.order || v.order.length < 2) return `${v.id} proposes no goal order`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation ("${v.recommendation}")`;
   const set = Object.keys(l).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__') && k !== 'approved');
@@ -1952,7 +1955,7 @@ function goalOrderProblem(q, obj, l, plans, objects) {
   }
   const p = plans.get(v.id);
   if (p.why) return p.why;
-  if (!orderableGoal(obj)) return `${obj.id} is ${obj.status === 'met' ? 'met' : 'let go'}`;
+  if (!orderableGoal(obj)) return obj.kind === 'upkeep' ? 'Upkeep has no place in the goal order' : `${obj.id} is ${obj.status === 'met' ? 'met' : 'let go'}`;
   if (!p.plan.has(obj.id)) return `the order leaves ${obj.id} where it is`;
   if (p.done.has(obj.id)) return `${v.id} already set ${obj.id}'s place`;
   if (l.priority !== p.plan.get(obj.id)) return `${obj.id}'s place in that order is ${p.plan.get(obj.id)}, not ${l.priority}`;
@@ -1966,7 +1969,7 @@ function goalOrderApproved(qid, ids) {
   const q = logGet(qid);
   if (q?.type !== 'question') die(`goal order --approved: ${qid} is not a question`);
   const v = questionView(q);
-  if (v.class !== 'goal-change' || !v.order) die(`goal order --approved: ${qid} proposes no order (a one-goal change is goal set <g-id> --approved ${qid})`);
+  if (v.class !== 'goal-change' || !v.order || v.order.length < 2) die(`goal order --approved: ${qid} proposes no order (a one-goal change is goal set <g-id> --approved ${qid})`);
   if (v.status !== 'answered') die(`goal order --approved: ${qid} is not answered by the owner (${v.status})`);
   if (!v.matched) die(`goal order --approved: ${qid} was answered "${v.answer}", not its recommendation ("${v.recommendation}"); ask again for the order the owner wants`);
   if ((readLog().byType.get('goal') ?? []).some((g) => g.updates.some((u) => u.approved === qid)) || calls().some((a) => a.approved_by === qid)) die(`goal order --approved: ${qid} already authorised a change; ask again for another`);

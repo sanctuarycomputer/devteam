@@ -68,7 +68,7 @@ test('the owner orders goals in one step: 1..n on the named ones, the rest after
     const supAct = run(old, ['act', '--class', 'goal-order', '--what', 'put the goals in order', '--refs', A], SUP);
     assert.notEqual(supAct.status, 0);
     assert.match(supAct.err, /goal-order is the owner's/);
-    const wat = new Date(Date.now() + 500).toISOString();
+    const wat = new Date().toISOString();
     const wid = `a-${wat.slice(0, 10).replace(/-/g, '')}-${wat.slice(11, 23).replace(/[:.]/g, '')}-kit-1`;
     const wfile = path.join(old, 'docs/devteam/run/log', 'kit-1.jsonl');
     fs.writeFileSync(wfile, line({ id: wid, type: 'act', op: 'new', at: wat, by: 'kit-1', class: 'goal-order', what: 'put the goals in order', refs: [A] }));
@@ -196,7 +196,7 @@ test('one goal-change question proposes a whole order, and goal order --approved
 
     const Q3 = asked([B, A]);
     ok(old, ['answer', Q3, 'Yes, this order']);
-    const at = new Date(Date.now() + 1000).toISOString();
+    const at = new Date().toISOString();
     fs.appendFileSync(supLog(F), [
       line({ id: B, type: 'goal', op: 'set', at, by: 'supervisor', priority: 7, approved: Q3 }),
       line({ id: A, type: 'goal', op: 'set', at, by: 'supervisor', priority: 2, title: 'Renamed', approved: Q3 }),
@@ -204,15 +204,47 @@ test('one goal-change question proposes a whole order, and goal order --approved
     ].join(''));
     assert.deepEqual(prios(F, [C, D, A, B]), [1, 2, 3, 4], 'none of the hand-written lines count: D, left out, belongs at 4');
     assert.equal(json(ok(old, ['goal', 'show', A, '--json'])).title, 'Alpha');
-    const at2 = new Date(Date.now() + 2000).toISOString();
+    const at2 = new Date().toISOString();
     fs.appendFileSync(supLog(F), [
       line({ id: B, type: 'goal', op: 'set', at: at2, by: 'supervisor', priority: 1, approved: Q3 }),
       line({ id: B, type: 'goal', op: 'set', at: at2, by: 'supervisor', priority: 2, approved: Q3 }),
     ].join(''));
     assert.equal(prio(F, B), 1, 'the first set under the answer counts, a second of the same goal does not');
+    // once means once, even at the right value: after the owner moves B, Q3's line for B again is nothing
+    ok(old, ['goal', 'set', B, '--priority', '5', '--owner']);
+    const at4 = new Date().toISOString();
+    fs.appendFileSync(supLog(F), line({ id: B, type: 'goal', op: 'set', at: at4, by: 'supervisor', priority: 1, approved: Q3 }));
+    assert.equal(prio(F, B), 5, "a second set of B under Q3, at B's place in it, still counts for nothing");
+    ok(old, ['goal', 'order', B, A, C, D]);
+
+    // lines under an order question still open, or answered otherwise, count for nothing
+    const QO = asked([D, C]);
+    const QN = asked([C, D]);
+    ok(old, ['answer', QN, 'No']);
+    const at5 = new Date().toISOString();
+    fs.appendFileSync(supLog(F), [
+      line({ id: D, type: 'goal', op: 'set', at: at5, by: 'supervisor', priority: 1, approved: QO }),
+      line({ id: C, type: 'goal', op: 'set', at: at5, by: 'supervisor', priority: 1, approved: QN }),
+    ].join(''));
+    assert.deepEqual(prios(F, [B, A, C, D]), [1, 2, 3, 4], 'an open or declined order approves nothing');
+
+    // an order's owner rank is its priority's alone: a one-goal answer after it is still used once
+    const one = (title) => { const q = firstId(ok(old, ['ask', '--class', 'goal-change', '--goal', C, '--change', JSON.stringify({ title }), '--question', `Rename Charlie to ${title}?`, '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP)); ok(old, ['answer', q, 'Yes']); ok(old, ['goal', 'set', C, '--approved', q], SUP); return q; };
+    const Q1 = one('Xray');
+    one('Yankee');
+    assert.match(run(old, ['goal', 'set', C, '--approved', Q1], SUP).err, new RegExp(`${Q1} already authorised a change`));
+    assert.equal(json(ok(old, ['goal', 'show', C])).title, 'Yankee', 'the later answer stands');
+
+    // a goal named in an approved order that is met before it is applied: refused with its status
+    const QM = asked([A, D]);
+    ok(old, ['answer', QM, 'Yes, this order']);
+    ok(old, ['goal', 'status', A, 'met', '--force']);
+    const gone = run(old, ['goal', 'order', '--approved', QM], SUP);
+    assert.equal(gone.status, 1);
+    assert.match(gone.err, new RegExp(`${A} is met`));
 
     // the schema: change.order is unique goal ids, two or more; a line otherwise fails log-check
-    const at3 = new Date(Date.now() + 3000).toISOString();
+    const at3 = new Date().toISOString();
     const qline = (id, order) => line({ id, type: 'question', op: 'new', at: at3, by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Order?', recommendation: 'Yes', change: { order } });
     const clean = fs.readFileSync(supLog(F), 'utf8');
     for (const bad of [[A, A], 'not a list', [A], [1, 2]]) {
@@ -272,11 +304,16 @@ test('the dashboard posts a goal order as the owner; the hub does not take one',
   const owned = fs.readdirSync(logDir).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).filter((l) => l.type === 'goal' && l.priority !== undefined && l.by === 'owner');
   assert.ok(owned.length >= 2 && owned.every((l) => l.channel === 'dashboard'), 'the owner, on the dashboard channel');
   for (const bad of [{ ids: 'x' }, { ids: [] }, { ids: ['not an id'] }, { ids: Array.from({ length: 51 }, () => A) }, {}]) assert.equal((await post(port, '/api/goal-order', bad)).status, 400, JSON.stringify(bad).slice(0, 60));
+  // only ids reach argv: a flag the command itself would take (--owner) is refused by the action
+  const flag = await post(port, '/api/goal-order', { ids: ['--owner', A, B] });
+  assert.equal(flag.status, 400);
+  assert.match(await flag.text(), /missing or invalid fields/, "the action's own check, not the command's");
+  assert.deepEqual([show(B), show(A)], [1, 2], 'nothing applied');
 
   // the hub's owner actions are the operator's threads only
   await until(async () => { try { return (await fetch(`http://127.0.0.1:${hub}/instances.json`)).ok; } catch { return false; } }, 'the hub');
   const h = await post(hub, '/operator/goal-order', { ids: [A, B] });
-  assert.ok(h.status >= 400, `the hub refuses it (${h.status})`);
+  assert.equal(h.status, 405, 'the hub takes only the operator\'s threads');
   assert.deepEqual([show(B), show(A)], [1, 2], 'nothing applied through the hub');
 });
 
