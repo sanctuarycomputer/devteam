@@ -39,6 +39,7 @@
 ## Rulings
 
 - approve-spec at dd09e1d (`m-20261115-065510452-supervisor`), which asks to keep the owner's running-text width rule for visible copy. The rule it cites (k-20261114-214208399) was replaced by k-20261114-214823656: running text no wider than half the 12-column grid at full desktop width, no ch cap. Both new lines (`[data-refused]`, `[data-links-moved]`) sit inside `.qcard`, already capped at `max-width: var(--measure)` (index.html ~230); neither adds its own width.
+- approve-plan at 7180f49 (`m-20261115-070641604-supervisor`): before the final review, attach dashboard screenshots in light and dark, at phone and desktop widths, of a refused answer staying visible on its card. They go in `screenshots/` in this folder, taken with headless Chrome over the same stubbed refusal as the test, and are named in verification.md.
 - From spec-2: the refusal line's Dismiss is the card's only Dismiss (F2); the test names Q1 (choices, refused) and Q2 (links_moved) by id (F3); review cards with moved links are a known gap, out of scope, follow-up offered in the merge request (F1).
 
 ---
