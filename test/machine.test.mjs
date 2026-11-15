@@ -390,7 +390,7 @@ test('tell and status find a project the machine recorded, outside any --in fold
   } finally { sup.kill(); fs.rmSync(path.join(home, '.devteam', `repos-${process.env.DEVTEAM_HUB_PORT}`, 'recorded.json')); }
 });
 
-// A kit run that isn't a project's own never records itself for the machine (o-20261115-080748314: a
+// A kit run that isn't a project's own never records itself for the machine (a
 // probe dashboard in a session's scratchpad showed on the owner's Overview). These run as the box
 // does, with no DEVTEAM_HUB_PORT, so the record is ~/.devteam/repos-4320, under a HOME of their own;
 // and with a TMPDIR of their own, beside that HOME and never holding it, so the HOME's code folder

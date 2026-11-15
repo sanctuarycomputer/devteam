@@ -8163,7 +8163,8 @@ File.write(path, YAML.dump(data))
 File.write(ENV.fetch("DEVTEAM_SECRET_DONE"), "ok")
 `;
 const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
-const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete e[k]; return e; };
+// DEVTEAM_HUB_RECORD too: a session's mark, so the tmux server or owner action it starts records as usual
+const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD']) delete e[k]; return e; };
 // Returns { ok, out, files }: files are the tracked paths a commit sink changed.
 function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
@@ -12758,7 +12759,7 @@ function cmdRecover() {
 // Named for the hub port, so a fixture has its own. One file each, so nothing there is shared.
 const machineRepoDir = () => path.join(os.homedir(), '.devteam', `repos-${HUB_PORT}`);
 // Only a project's own runs record it: never a kit run in the temp folder or a session's scratchpad
-// (a probe, a reviewer's check: o-20261115-080748314 showed one on the owner's Overview), nor one a
+// (a probe, a reviewer's check: one once showed on an owner's Overview as a project), nor one a
 // worker or planner started, nor any run with DEVTEAM_HUB_RECORD=off (what a session's dashboard
 // gives its tick, which runs as the supervisor). An explicit DEVTEAM_HUB_PORT is a fixture with a
 // hub of its own, whose projects all live in the temp folder: it records as before, unless told off.
