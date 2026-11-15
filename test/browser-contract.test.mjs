@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -294,6 +295,8 @@ test('the fixture site serves every page later tests browse', async (t) => {
     assert.equal(cookieOf(r, 'session'), undefined, 'no session after the first step');
     const pending = cookieOf(r, 'pending');
     assert.ok(pending, 'a pending cookie');
+    assert.match(pending, /HttpOnly/);
+    assert.doesNotMatch(pending, /expires|max-age/i, 'pending is session-only');
     return { location: r.headers.location, pending: `pending=${valueOf(pending)}` };
   };
   const a = await step1();
@@ -310,6 +313,7 @@ test('the fixture site serves every page later tests browse', async (t) => {
   const good = await post('/2fa', { cookie: a.pending, body: form({ code }) });
   assert.equal(good.status, 302);
   assert.equal(good.headers.location, '/account');
+  assert.match(cookieOf(good, 'pending') ?? '', /^pending=;.*Max-Age=0/, 'pending is cleared once spent');
   const sc = cookieOf(good, 'session');
   assert.ok(sc && !/expires|max-age/i.test(sc), `a session-only cookie: ${sc}`);
   const session = `session=${valueOf(sc)}`;
@@ -358,6 +362,11 @@ test('the fixture site serves every page later tests browse', async (t) => {
   assert.equal(redir.status, 302);
   assert.equal(redir.headers.location, to);
   assert.equal((await go('GET', '/redirect?to=http%3A%2F%2Fa.example%2F%0d%0aSet-Cookie%3A%20x%3D1')).status, 400);
+  assert.equal((await go('GET', '/redirect?to=%01')).status, 400);
+  const idn = await go('GET', `/redirect?to=${encodeURIComponent('http://例え.jp/パス?q=ü')}`);
+  assert.equal(idn.status, 302, 'a host Node can\'t put in a header raw is sent normalised');
+  assert.equal(idn.headers.location, new URL('http://例え.jp/パス?q=ü').href);
+  assert.equal((await go('GET', '/redirect?to=%2Faccount')).headers.location, `http://127.0.0.1:${port}/account`);
   assert.match((await go('GET', `/go?to=${encodeURIComponent(to)}`)).text, new RegExp(`href="/redirect\\?to=${encodeURIComponent(to).replace(/[.?*+^$()[\]{}|\\]/g, (x) => `\\${x}`)}"`));
   assert.match((await go('GET', '/instructions')).text, /run (this|the following) command/i);
 
@@ -368,9 +377,23 @@ test('the fixture site serves every page later tests browse', async (t) => {
   const rec = (await go('GET', '/record')).text;
   assert.match(rec, /<button/);
   assert.match(rec, /<input/);
+  // kit-66 drives this page through the live view: its script posts each click and each input
+  assert.match(rec, /fetch\('\/events', \{ method: 'POST'/);
+  assert.match(rec, /addEventListener\('click', \(e\) => send\(\{ kind: 'click', x: e\.pageX, y: e\.pageY \}\)\)/);
+  assert.match(rec, /addEventListener\('input', \(e\) => send\(\{ kind: 'input', value: e\.target\.value \}\)\)/);
+  const index = (await go('GET', '/')).text;
+  for (const p of ['/login', '/login?variant=page', '/account', '/oauth/authorize', '/instructions', '/record', '/go?to=', '/redirect?to=', '/posts', '/events'])
+    assert.ok(index.includes(`href="${p}`), `the index links ${p}`);
 
-  const big = await go('POST', '/login', { body: 'x='.padEnd(65 * 1024, 'a') }).catch((e) => ({ status: e.code }));
-  assert.ok([413, 'ECONNRESET', 'EPIPE'].includes(big.status), `a body over 64 KB: ${big.status}`);
+  // a raw socket: the 413 is read before any body is sent, so no reset can stand in for it
+  const big = await new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1', () => sock.write(`POST /login HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: ${65 * 1024}\r\n\r\n`));
+    let got = '';
+    sock.on('data', (b) => { got += b; if (got.includes('\r\n')) { sock.destroy(); resolve(got.split('\r\n')[0]); } });
+    sock.on('error', reject);
+    sock.setTimeout(10000, () => sock.destroy(new Error('no answer to a 65 KB POST in 10 s')));
+  });
+  assert.equal(big, 'HTTP/1.1 413 Payload Too Large');
   assert.equal((await go('GET', '/nope')).status, 404);
   assert.equal((await go('GET', '/')).status, 200, 'still serving');
 });

@@ -61,7 +61,9 @@ ${error ? `<p role="alert">${esc(error)}</p>` : ''}<form method="post" action="/
     'GET /': () => [200, page('Fixture site', `<h1>Fixture site</h1><ul>
 <li><a href="/login">Sign in</a></li><li><a href="/login?variant=page">Sign in (2FA answers with a page)</a></li>
 <li><a href="/account">Your account</a></li><li><a href="/oauth/authorize">Sign in with the provider</a></li>
-<li><a href="/instructions">Instructions</a></li><li><a href="/record">Record input</a></li></ul>`)],
+<li><a href="/instructions">Instructions</a></li><li><a href="/record">Record input</a></li>
+<li><a href="/go?to=%2Faccount">Continue to your account</a></li><li><a href="/redirect?to=%2Faccount">Redirect to your account</a></li>
+<li><a href="/posts">POST count</a></li><li><a href="/events">Recorded input</a></li></ul>`)],
     'GET /login': (req, url) => [200, loginForm(url.searchParams.get('variant') ?? '')],
     'POST /login': (req, url, body) => {
       const f = new URLSearchParams(body);
@@ -100,9 +102,13 @@ ${error ? `<p role="alert">${esc(error)}</p>` : ''}<form method="post" action="/
 <li><a href="/orders/482913/receipt">Order receipt</a></li>
 <li><a href="/magic/${pick(B32, 24)}">Magic link</a></li></ul>`)],
     'GET /redirect': (req, url) => {
+      // normalised by URL (an IDN host becomes punycode, odd characters percent-encoded), so the
+      // Location header can always be sent; CR, LF and other controls are refused outright
       const to = url.searchParams.get('to') ?? '';
-      if (!to || /[\r\n]/.test(to)) return [400, page('Bad redirect', '<h1>No usable to=</h1>')];
-      return [302, '', { location: to }];
+      let target = null;
+      if (to && !/[\u0000-\u001f\u007f]/.test(to)) try { target = new URL(to, `http://${req.headers.host}`).href; } catch {}
+      if (!target) return [400, page('Bad redirect', '<h1>No usable to=</h1>')];
+      return [302, '', { location: target }];
     },
     'GET /go': (req, url) => [200, page('Continue', `<h1>Continue</h1><p><a href="/redirect?to=${esc(encodeURIComponent(url.searchParams.get('to') ?? ''))}">Continue</a></p>`)],
     'GET /instructions': () => [200, page('Setup notes', `<h1>Setup notes</h1>
@@ -136,6 +142,7 @@ document.getElementById('i').addEventListener('input', (e) => send({ kind: 'inpu
       posts.posts++;
       posts.paths[url.pathname] = (posts.paths[url.pathname] ?? 0) + 1;
     }
+    if (Number(req.headers['content-length']) > BODY_MAX) return send(413, page('Too large', '<h1>Too large</h1>'), { connection: 'close' });
     let body = '';
     let size = 0;
     req.setEncoding('utf8');
@@ -149,7 +156,9 @@ document.getElementById('i').addEventListener('input', (e) => send({ kind: 'inpu
       const route = routes[`${req.method} ${url.pathname}`]
         ?? (req.method === 'GET' && /^\/(orders|magic)\//.test(url.pathname) ? () => [200, page('A page', '<h1>A page</h1>')] : null);
       if (!route) return send(404, page('Not found', '<h1>Not found</h1>'));
-      send(...route(req, url, body));
+      let answer;
+      try { answer = route(req, url, body); } catch (e) { answer = [500, page('Error', `<h1>${esc(e.message)}</h1>`)]; }
+      send(...answer);
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });

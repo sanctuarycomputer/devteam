@@ -479,7 +479,7 @@
             "maxLength": 500
           },
           "host": {
-            "description": "The refused host as asked (always there on a 403): a name, an IPv4 address or a bracketed IPv6 address, with no port.",
+            "description": "The refused host as asked (always there on a 403): a name, an IPv4 address or a bracketed IPv6 address, with its port when the request named one.",
             "type": "string",
             "pattern": "^[A-Za-z0-9._:\\[\\]-]{1,255}$"
           },
