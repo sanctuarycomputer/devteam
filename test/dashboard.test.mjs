@@ -537,11 +537,11 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     await soon(`document.activeElement?.id === 'tl-c-text'`, 'the composer');
     await hold();
     await p.type('first words');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     assert.match(await p.ev(`document.getElementById('tl-c-turns').textContent`), /first words/, 'drawn while held');
     assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sending…');
     await p.type('second words');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     assert.match(await p.ev(`document.getElementById('tl-c-turns').textContent`), /second words/);
     await letGo();
     const threads = () => JSON.parse(dt(['thread', 'list', '--json']));
@@ -2263,7 +2263,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     assert.deepEqual([s.slug, s.at, s.path, s.fp, s.anchor.selector, s.anchor.tag, s.anchor.text, s.anchor.point.x, s.anchor.point.y, s.point], ['pin-mock', 'main', 'index.html', fp, '#buy', 'button', 'Buy now', 60, 20, { x: 100, y: 140 }]);
     assert.equal(await p.ev('TL.draft.title'), 'button "Buy now"');
     await p.type('Make it green');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const th = await until(() => threads().find((x) => x.subject?.kind === 'artifact'), 'the thread');
     assert.deepEqual([th.title, th.subject.anchor.selector, th.turns[0].text], ['button "Buy now"', '#buy', 'Make it green']);
     await p.ev('tlClose()');
@@ -2392,7 +2392,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await p.ev(`document.querySelector('#tl-card details')?.setAttribute('open', ''); true`);
     assert.deepEqual(await p.ev(`[document.querySelectorAll('#tl img').length, window.__pwned ?? null]`), [0, null], 'its markup never became the page\'s');
     await p.type('Who wrote this');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const th = await until(() => threads().find((x) => x.subject?.slug === 'liar-mock'), 'the thread');
     assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
     assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
@@ -3101,6 +3101,20 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
+  // An Enter keyDown as a keyboard sends it, with its '\r' (p.key sends none), so a newline lands
+  // unless the page cancels the key: Shift, Ctrl, a key repeat, or 229 (the Enter that ends an IME's
+  // composition). Each arrives in window.__keys, so a check knows the key it meant reached the page.
+  const enter = async ({ shift = false, ctrl = false, repeat = false, code = 13 } = {}) => {
+    const k = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: code, modifiers: (shift ? 8 : 0) | (ctrl ? 2 : 0) };
+    await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...k, text: '\r', autoRepeat: repeat });
+    await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...k });
+  };
+  // a composition's Enter as the page sees it: CDP can't start one, so the event is made on the box
+  const composing = () => p.ev(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, isComposing: true, bubbles: true, cancelable: true }))`);
+  const lastKey = () => p.ev('window.__keys.at(-1)');
+  // what the owner sent, from the fixture's record of every POST: an answer or a thread's words
+  const posts = () => p.ev(`(window.__posts ?? []).filter((x) => /^\\/api\\/(answer|thread-say|thread-new|thread-reopen)$/.test(x.url)).length`);
+  const settle = () => new Promise((r) => setTimeout(r, 2500));
 
   await t.test('Shift and point: the pin cursor, the goal outlined, a chip naming it; Shift up, the cursor back', async () => {
     await still(async () => {
@@ -3179,12 +3193,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(threads().length, 0);
   });
 
-  await t.test('Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+  await t.test('Shift+Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
     await p.type('Narrow this to the EU launch');
     // a read of the threads begun before the send, answering after it: the card must stay the thread's
     await p.ev(`window.__threadsRead = false; window.__threadsLanded = false; window.__threadsHold = new Promise((r) => { window.__threadsLet = r; }); tlRefresh(); void 0`);
     await soon('window.__threadsRead', 'a read begun before the send');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const th = await until(() => threads().find((x) => x.turns[0]?.text === 'Narrow this to the EU launch'), 'the thread in the log');
     T = th.id;
     await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'the card the thread');
@@ -3225,7 +3239,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await t.test('a turn over 2,000 bytes is refused in the card, counted in bytes', async () => {
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.focus(); ta.value = '日'.repeat(700); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     assert.match(await p.ev(`document.getElementById('tl-c-bytes').textContent`), /2100 \/ 2000 bytes/);
-    await p.key('Enter');
+    await p.key('Enter', 8);
     await soon(`/At most 2000 bytes/.test(document.getElementById('e-tl').textContent)`, 'the refusal');
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
   });
@@ -3238,11 +3252,42 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       for (const w of ['First on a slow box', 'Second on a slow box']) {
         await p.ev("document.getElementById('tl-c-text').focus()");
         await p.type(w);
-        await p.key('Enter');
+        await p.key('Enter', 8);
         await until(() => threads().find((x) => x.id === T)?.turns.some((u) => u.text === w), `"${w}" in the log`);
         await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.owner')].some((e) => e.textContent.includes(${JSON.stringify(w)})) && document.getElementById('tl-c-text').value === '' && !TL.pend.length`, `"${w}" in the card, the composer free`);
       }
     } finally { await p.ev('window.__threadsDelay = 0'); }
+    await p.ev('document.activeElement.blur()');
+  });
+
+  await t.test('Shift+Enter in the thread box sends once; Enter, a repeat, composition and Ctrl+Shift+Enter add nothing', async () => {
+    await p.ev(`(() => { if (window.__keys) return; window.__keys = []; addEventListener('keydown', (e) => { const { key, shiftKey, ctrlKey, keyCode, isComposing, repeat } = e; window.__keys.push({ key, shiftKey, ctrlKey, keyCode, isComposing, repeat }); }, true); })()`);
+    const box = () => p.ev(`document.getElementById('tl-c-text').value`);
+    const turns = () => threads().find((x) => x.id === T).turns.length;
+    const n = turns(), sent = await posts();
+    await p.ev("document.getElementById('tl-c-text').focus()");
+    await p.type('kept line one');
+    await enter();
+    assert.equal(await box(), 'kept line one\n', 'Enter is a new line');
+    await enter({ shift: true, repeat: true });
+    assert.deepEqual([(await lastKey()).shiftKey, (await lastKey()).repeat], [true, true]);
+    assert.equal(await box(), 'kept line one\n', 'a repeat adds no line');
+    await composing();
+    assert.equal((await lastKey()).isComposing, true);
+    await enter({ shift: true, code: 229 });
+    assert.equal((await lastKey()).keyCode, 229);
+    // left alone, that key may have put its own line in: back to the words as they were
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = 'kept line one\\n'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    await enter({ shift: true, ctrl: true });
+    assert.equal((await lastKey()).ctrlKey, true);
+    await settle();
+    assert.deepEqual([turns(), await posts()], [n, sent], 'nothing sent');
+    await enter({ shift: true });
+    await enter({ shift: true, repeat: true });
+    await until(() => turns() === n + 1, 'the turn in the log');
+    await settle();
+    const t1 = threads().find((x) => x.id === T);
+    assert.deepEqual([t1.turns.length, t1.turns.at(-1).text, await posts(), await box()], [n + 1, 'kept line one', sent + 1, ''], 'sent once, the box cleared');
     await p.ev('document.activeElement.blur()');
   });
 
@@ -3290,7 +3335,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('What about onboarding?');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
     await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
@@ -3765,7 +3810,7 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     // the app's own words, as its lens passed them on: the capability cut, the bidi override gone
     assert.deepEqual(s.errors, ['Failed at [link removed] on purpose']);
     await p.type('Make it green');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const th = await until(() => threads().find((x) => x.subject?.kind === 'preview'), 'the thread');
     assert.deepEqual([th.title, th.subject.name, th.subject.route, th.subject.anchor.selector, th.subject.errors], ['button "Buy now"', name, '/', '#buy', ['Failed at [link removed] on purpose']]);
     await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'its pin');
@@ -3922,7 +3967,7 @@ test('Shift over a preview, through the relay: what the app has under the pointe
     await p.ev(`document.querySelector('#tl-card details')?.setAttribute('open', ''); true`);
     assert.deepEqual(await p.ev(`[document.querySelectorAll('#tl img').length, window.__pwned ?? null]`), [0, null], "its markup never became the page's");
     await p.type('Who wrote this');
-    await p.key('Enter');
+    await p.key('Enter', 8);
     const th = await until(() => threads().find((x) => x.subject?.route === '/liar'), 'the thread');
     assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
     assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
