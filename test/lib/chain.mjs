@@ -3269,6 +3269,12 @@ http.createServer((req, res) => {
       assert.equal(m.phase_usd.blocked, 0.22, 'and to the phase the ticket was in then');
       assert.equal(m.phase_usd['final-review'], 0.02, "the reviewer's to final review, not the supervisor");
       assert.equal(m.phase_usd.supervisor, 4, "the main checkout's sessions are the supervisor's");
+      // efficiency: ticket work only (the supervisor's $4 is overhead), and waiting is a cost
+      const tick = Object.entries(m.phase_usd).filter(([k]) => !['supervisor', 'planning', 'review'].includes(k));
+      const waitUsd = tick.filter(([k]) => ['awaiting-word', 'blocked', 'parked', 'starting'].includes(k)).reduce((a, [, v]) => a + v, 0);
+      assert.equal(m.efficiency.wait_usd_pct, Math.round((100 * waitUsd) / tick.reduce((a, [, v]) => a + v, 0)), 'the blocked dollars count as waiting; the supervisor\'s do not count at all');
+      assert.ok(m.efficiency.score === null || (m.efficiency.score >= 0 && m.efficiency.score <= 100));
+      assert.deepEqual(Object.keys(m.efficiency.first_pass_rejection), ['spec', 'plan', 'final']);
       assert.equal(m.cost.tokens.output, 1000 + 1000 + 70);
       assert.deepEqual(Object.keys(m.cost.unpriced_models), ['gpt-x']);
       assert.ok(m.findings.some((f) => f.kind === 'unpriced-model' && /gpt-x/.test(f.subject)), 'tokens with no price are said, not dropped');
