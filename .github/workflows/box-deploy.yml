@@ -5,9 +5,12 @@
 # not its work.
 #
 # The gate: the job runs in the GitHub environment "box", holds the hook there, and deploys only a
-# full release whose commit is on main and that changed something the image is built from. A
-# release runs this file as of its own commit, so only the environment is out of that commit's
-# reach; the README's "deploy gate" says what the rest relies on.
+# full release whose commit is on main, whose cloud/Dockerfile is stamped and pinned for its tag
+# (box-pins verify --release: the release-prep PR's box-pins bump), and that changed something the
+# image is built from. Each release-prep PR stamps the Dockerfile, so every release deploys, and the
+# box always runs the latest release's hub and kit. A release runs this file as of its own commit,
+# so only the environment is out of that commit's reach; the README's "deploy gate" says what the
+# rest relies on.
 name: box-deploy
 on:
   release:
@@ -28,20 +31,27 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # the stamp check runs the kit, on the image's node
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
       - name: Deploy the box at this release's commit
         shell: bash
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           SHA: ${{ github.sha }}
+          TAG: ${{ github.event.release.tag_name }}
           PUBLISHED: ${{ github.event.release.published_at }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          # first, so a run without the hook refuses too: a release cut without its release-prep PR
+          node docs/devteam/scripts/devteam.mjs box-pins verify --release "$TAG" || { echo "refusing $TAG: cloud/Dockerfile isn't stamped and pinned for it; run box-pins bump --release $TAG in a release-prep PR, merge it, and publish the release again"; exit 1; }
           [ -n "$HOOK" ] || { echo "no RENDER_DEPLOY_HOOK secret: no box to deploy"; exit 0; }
           # git answers 1 for "not on main" and 128 for "can't tell": either refuses
           git merge-base --is-ancestor "$SHA" origin/main || { echo "refusing $SHA: it isn't on main"; exit 1; }
-          # What the image is built from: cloud/Dockerfile's COPY sources, and the Dockerfile itself.
-          inputs=(cloud docs/devteam/dashboard/hub.html docs/devteam/process/operator.md)
+          # What the image is built from: every path cloud/Dockerfile copies (the kit whole), and the Dockerfile itself.
+          inputs=(cloud docs/devteam)
           # The release before this one, of those this gate would have let through: one off main
           # never deployed, so it can't stand for what the box is running.
           tags=$(gh release list --exclude-drafts --exclude-pre-releases -L 100 --json tagName,publishedAt \

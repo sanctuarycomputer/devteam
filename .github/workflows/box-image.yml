@@ -13,6 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
-      # the kit's own commands from the image's copy, with no repo and no tmux server: they say so, and never fail
+      # the kit's own commands from the image's copy, with no repo and no tmux server: they say so, and never fail;
+      # each tool installed at its pin (box-pins installed exits 1 naming one that isn't), and the image names its hub's port
       - run: |
-          docker run --rm --entrypoint sh box -ec 'box-recover --dry-run; box-status | grep -q "^machine: disk "; test "$(node /opt/devteam/kit/scripts/devteam.mjs machine pane-state %0)" = gone; if command -v box-supervisors; then exit 1; fi; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'
+          docker run --rm --entrypoint sh box -ec 'box-recover --dry-run; box-status | grep -q "^machine: disk "; test "$(node /opt/devteam/kit/scripts/devteam.mjs machine pane-state %0)" = gone; if command -v box-supervisors; then exit 1; fi; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md; node /opt/devteam/kit/scripts/devteam.mjs box-pins installed; test "$(echo $DEVTEAM_IMAGE_HUB)" = 4320'

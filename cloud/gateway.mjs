@@ -159,6 +159,24 @@ function publicUrl(raw = env.DEVTEAM_PUBLIC_URL) {
   if (/^\d+\.\d+\.\d+\.\d+$|^\[/.test(u.hostname)) throw new Error('DEVTEAM_PUBLIC_URL must be a name, not an IP address: each instance is a subdomain of it');
   return u.origin;
 }
+// What the box's image is, from its ENV (cloud/Dockerfile, last lines): the kit release it was cut at
+// and its tools' pins, name=version separated by spaces, in their order. Only values of the token form
+// are kept, since they go to a page and a log; null when neither is set (a laptop, an older image).
+// The one place the gateway reads them: /box.json and the start line both come through here.
+const BOX_TOKEN = /^[\w.+-]{1,64}$/;
+export function boxImage(e) {
+  const rel = String(e.DEVTEAM_KIT_RELEASE ?? '').trim();
+  const pins = String(e.DEVTEAM_BOX_TOOLS ?? '').trim();
+  if (!rel && !pins) return null;
+  const tools = new Map();
+  for (const pair of pins ? pins.split(/\s+/) : []) {
+    const i = pair.indexOf('=');
+    const [name, version] = [pair.slice(0, i), pair.slice(i + 1)];
+    if (i > 0 && BOX_TOKEN.test(name) && BOX_TOKEN.test(version) && !tools.has(name)) tools.set(name, version);
+  }
+  // own keys whatever the name (fromEntries defines them, so even __proto__ is a key, not a prototype)
+  return { release: BOX_TOKEN.test(rel) ? rel : null, tools: Object.fromEntries(tools) };
+}
 const gatewayDir = () => env.DEVTEAM_GATEWAY_DIR ?? path.join(env.HOME ?? '.', '.devteam-gateway');
 
 // The key the gateway signs the owner's thread presses with, for the hub (devteam.mjs,
@@ -850,6 +868,7 @@ export function dropNote(paths) {
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {
   const PUB = publicUrl(opts.publicUrl);
+  const BOX_IMAGE = boxImage(opts.env ?? env);
   const pubUrl = new URL(PUB);
   const NAME = pubUrl.hostname;
   const SECURE = pubUrl.protocol === 'https:';
@@ -1217,7 +1236,9 @@ export function createGateway(opts = {}) {
     // the whole answer, not only each pause in it: one sent a byte at a time would hold the poller
     deadline = setTimeout(() => { up.destroy(); none(); }, opts.hubDeadlineMs ?? 15000);
   });
-  const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
+  // No hub answering (nothing on the port, or an answer no list could be) is the empty list with
+  // down: true, which only this fallback ever sets: the page says the hub isn't answering.
+  const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [], down: true }));
   // The owner's threads with the box's operator (the Overview's dock): the hub keeps them and types
   // each owner turn into the operator's pane, so the box's name passes these few requests to it, after
   // the session check, as the hub's own page would send them on the machine. What comes back is JSON
@@ -2029,7 +2050,11 @@ export function createGateway(opts = {}) {
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey });
+      // /box.json, box: 1: { box, terminal, instance, passkeys, previews, push, image }. image is what the
+      // box's image says it is (boxImage, from the image's ENV: its release and its tools' pins):
+      // { release: 'vX.Y.Z' | null, tools: { name: version } } in the ENV's order, or null with neither
+      // set (a laptop, an older image). Versions only. An additive change keeps box: 1.
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey, image: BOX_IMAGE });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'GET' && p === '/operator/threads') return operatorThreads(req, res, null);
       if (req.method === 'POST' && p.startsWith('/operator/') && HUB_POSTS.includes(p.slice(10))) return operatorThreads(req, res, p.slice(10));
@@ -2430,6 +2455,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       sweep();
       setInterval(sweep, UPLOAD_SWEEP_MS);
       const port = Number(env.PORT ?? 8080);
+      process.stdout.write(`image: ${boxImage(env)?.release ?? 'none'}\n`);
       // every address, IPv6 too: a port left open on either family is one an agent could take
       const up = () => process.stdout.write(`gateway: ${pub} on :${port}\n`);
       const fallback = (e) => { if (e.code !== 'EAFNOSUPPORT' && e.code !== 'EADDRNOTAVAIL') throw e; server.listen(port, '0.0.0.0', up); };

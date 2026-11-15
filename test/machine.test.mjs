@@ -789,6 +789,153 @@ test('the box\'s boot forgets every repo\'s noted pane and its mark', () => {
   assert.deepEqual(fs.readdirSync(run).sort(), ['supervisor-up.json'], 'the pane and its mark gone; the up record kept');
 });
 
+// The image's hub, from cloud/Dockerfile's devteam-dev: its window (hub_window), the wait before the
+// dashboards (hub_wait), and the minute loop's line that brings the window back. Run under sh with a
+// tmux, curl and timeout of the test's own first on PATH: tmux notes each call's arguments, split by
+// \x1f, and answers has-session with $HAS_SESSION_EXIT and list-windows with $WINDOWS (failing when unset);
+// curl prints $BODY, or fails as a refused connection does (7) when it is unset.
+const devteamDev = () => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n');
+  const from = df.indexOf("COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev");
+  return df.slice(from + 1, df.indexOf('EOF', from));
+};
+const hubLine = (prefix) => { const l = devteamDev().find((x) => x.trim().startsWith(prefix)); assert.ok(l, `devteam-dev's line ${prefix}`); return l; };
+const hubFakes = path.join(tmp, 'hub-fakes');
+write(path.join(hubFakes, 'tmux'), '#!/bin/sh\n{ for a; do printf \'%s\\037\' "$a"; done; echo; } >> "$CALLS"\ncase $1 in\n  has-session) exit "${HAS_SESSION_EXIT:-1}" ;;\n  list-windows) [ -n "${WINDOWS+x}" ] || exit 1; printf \'%s\' "$WINDOWS" ;;\nesac\nexit 0\n');
+write(path.join(hubFakes, 'curl'), '#!/bin/sh\necho "$*" >> "$CURLS"\n[ -n "${BODY+x}" ] || exit 7\nprintf \'%s\' "$BODY"\n');
+write(path.join(hubFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+for (const f of ['tmux', 'curl', 'timeout']) fs.chmodSync(path.join(hubFakes, f), 0o755);
+const bootHub = (body, env = {}) => {
+  const h = fs.mkdtempSync(path.join(tmp, 'hub-boot-'));
+  const calls = path.join(h, '.calls');
+  const curls = path.join(h, '.curls');
+  const script = [hubLine('note() {'), hubLine('hub_window() {'), hubLine('hub_wait() {'), body].join('\n');
+  const t0 = Date.now();
+  const r = spawnSync('sh', ['-c', script], { cwd: h, encoding: 'utf8', env: { PATH: `${hubFakes}:/usr/bin:/bin`, HOME: h, CALLS: calls, CURLS: curls, DEVTEAM_IMAGE_HUB: '4320', ...env } });
+  const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8').split('\n').filter(Boolean) : []);
+  const boxLog = path.join(h, 'box.log');
+  return { ...r, ms: Date.now() - t0, home: h, calls: read(calls).map((l) => l.split('\x1f').slice(0, -1)), curls: read(curls), boxLog: fs.existsSync(boxLog) ? fs.readFileSync(boxLog, 'utf8') : null };
+};
+const made = (calls) => calls.filter((c) => c[0] === 'new-window' || c[0] === 'new-session');
+
+test('the box\'s boot starts the image\'s hub in home:hub, from the image\'s kit, with nothing from tmux\'s environment', () => {
+  const r = bootHub('hub_window', { HAS_SESSION_EXIT: '0', DEVTEAM_KIT_RELEASE: 'v1.2.3' });
+  assert.equal(r.status, 0, r.stderr);
+  const [w, ...more] = made(r.calls);
+  assert.equal(more.length, 0);
+  // =home: with the colon: a bare =home is first a window named home in the current session
+  assert.deepEqual(w.slice(0, -1), ['new-window', '-d', '-t', '=home:', '-n', 'hub', '-c', r.home], 'cwd $HOME, which is no checkout: the hub\'s children take no writer from a branch');
+  const cmd = w.at(-1);
+  assert.ok(cmd.startsWith('while :; do /usr/bin/env ') && cmd.endsWith('; sleep 1; done'), cmd);
+  for (const part of ['-u NODE_OPTIONS', '-u NODE_PATH', '-u NODE_REPL_EXTERNAL_MODULE', '-u DEVTEAM_HOME', '-u DEVTEAM_RUN', '-u DEVTEAM_PROJECT', '-u DEVTEAM_HUB_PORT', `HOME='${r.home}'`]) assert.ok(cmd.includes(` ${part} `), part);
+  assert.ok(cmd.includes(" PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release 'v1.2.3'; "), 'root\'s PATH, the image\'s node and kit, the image\'s release');
+  // no home session: one is made, with the hub as its window
+  const s = bootHub('hub_window', { HAS_SESSION_EXIT: '1', DEVTEAM_KIT_RELEASE: 'v1.2.3' });
+  const [n, ...none] = made(s.calls);
+  assert.equal(none.length, 0);
+  assert.deepEqual(n.slice(0, -1), ['new-session', '-d', '-s', 'home', '-n', 'hub', '-c', s.home]);
+  assert.equal(n.at(-1), cmd.replace(r.home, s.home));
+  // a release that isn't plainly vN.N.N goes as '': the hub says so and serves with none
+  for (const rel of ['v0.52.0-rc1', 'v1.2.3\nv1.2.3', 'v1.2.3\n', '1.2.3', 'v1.2', '', "v1.2.3'; touch x; '", 'vv1.2.3']) {
+    const o = bootHub('hub_window', { HAS_SESSION_EXIT: '0', DEVTEAM_KIT_RELEASE: rel });
+    assert.ok(made(o.calls)[0].at(-1).includes(" hub --release ''; "), JSON.stringify(rel));
+    assert.ok(!fs.existsSync(path.join(o.home, 'x')));
+  }
+});
+
+test('the boot waits for the hub at most DEVTEAM_HUB_WAIT_SECONDS, and notes it gave up', () => {
+  const r = bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: '1' });
+  assert.equal(r.stdout.trim(), 'rc=1', r.stderr);
+  assert.ok(r.ms < 5000, `${r.ms} ms`);
+  assert.ok(r.curls.length >= 1 && r.curls.length <= 3, `${r.curls.length} tries, a second apart`);
+  for (const c of r.curls) assert.match(c, / http:\/\/127\.0\.0\.1:4320\/instances\.json$/);
+  assert.match(r.boxLog, /^\S+Z hub: nothing answered hub 1 on 127\.0\.0\.1:4320 after 1s; going on \(see ~\/\.devteam\/hub-4320\.log\)\n$/);
+  const up = bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: '1', BODY: '{"hub":1,"kit":"v1.2.3","image":true,"instances":[]}' });
+  assert.equal(up.stdout.trim(), 'rc=0');
+  assert.equal(up.curls.length, 1);
+  assert.equal(up.boxLog, null, 'nothing noted');
+  assert.equal(bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: '1', BODY: '{"hub":12,"instances":[]}' }).stdout.trim(), 'rc=1', 'not hub 1');
+  // a wait that isn't a plain number (08 is no number to sh's arithmetic) is 15 s, never a shell that dies before the dashboards
+  for (const w of ['15s', '08', '010', '-1']) assert.equal(bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: w, BODY: '{"hub":1,"instances":[]}' }).stdout.trim(), 'rc=0', w);
+});
+
+test('the minute loop recreates home:hub only when it is gone', () => {
+  const line = hubLine('timeout 20 tmux list-windows -t =home');
+  const there = bootHub(line, { WINDOWS: 'operator\nshell\nhub\n', HAS_SESSION_EXIT: '0' });
+  assert.deepEqual(made(there.calls), []);
+  assert.deepEqual(there.calls[0].slice(0, 3), ['list-windows', '-t', '=home']);
+  const gone = bootHub(line, { WINDOWS: 'operator\nshell\nhubby\n', HAS_SESSION_EXIT: '0' });
+  assert.deepEqual(made(gone.calls).map((c) => c.slice(0, 6)), [['new-window', '-d', '-t', '=home:', '-n', 'hub']]);
+  const noSession = bootHub(line, { HAS_SESSION_EXIT: '1' });
+  assert.deepEqual(made(noSession.calls).map((c) => c.slice(0, 6)), [['new-session', '-d', '-s', 'home', '-n', 'hub']]);
+});
+
+test('the boot\'s hub lines sit where the boot needs them', () => {
+  assert.ok(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').includes('ENV DEVTEAM_IMAGE_HUB=4320'));
+  const d = devteamDev();
+  const at = (pred, what) => { const i = d.findIndex(pred); assert.ok(i >= 0, what); return i; };
+  const operator = at((l) => l.trim().startsWith('tmux new-session -d -s home -n operator'), 'the home session');
+  const defs = at((l) => l.startsWith('hub_window() {'), 'hub_window');
+  const call = at((l) => l === "timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window", 'the call, only if home has no hub yet');
+  const wait = at((l) => l === 'hub_wait || :', 'the wait');
+  const dash = at((l) => l === 'for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do', 'the dashboard loop');
+  assert.ok(operator < defs && defs < call && call < wait && wait < dash, [operator, defs, call, wait, dash].join(' '));
+  const minute = at((l) => l.startsWith('  timeout 20 tmux list-windows -t =home'), 'the minute loop\'s line');
+  assert.equal(d[minute].trim(), d[call], 'the same line at boot and each minute');
+  assert.equal(d[minute - 1], '  sleep 60');
+});
+
+test('hub_window makes home:hub on a real tmux even when another session has a window named home', { skip: !hasTmux }, async () => {
+  const swap = '/usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub';
+  const line = hubLine('hub_window() {');
+  assert.ok(line.includes(swap));
+  const kill = () => { tmuxSh(['kill-session', '-t', '=home']); tmuxSh(['kill-session', '-t', '=kit49-other']); };
+  kill();
+  try {
+    assert.equal(tmuxSh(['new-session', '-d', '-s', 'home', '-n', 'operator', 'sleep 600']).status, 0);
+    await new Promise((r) => setTimeout(r, 1100));
+    // made after home, so it is the session tmux reads a bare name in
+    assert.equal(tmuxSh(['new-session', '-d', '-s', 'kit49-other', '-n', 'home', 'sleep 600']).status, 0);
+    const order = tmuxSh(['list-sessions', '-F', '#{session_created} #{session_name}']).stdout.split('\n').filter((l) => / (home|kit49-other)$/.test(l)).sort().map((l) => l.split(' ')[1]);
+    assert.deepEqual(order, ['home', 'kit49-other']);
+    const h = fs.mkdtempSync(path.join(tmp, 'hub-real-'));
+    const r = spawnSync('sh', ['-c', `${line.replace(swap, 'sleep 600; :')}\nhub_window`], { cwd: h, encoding: 'utf8', env: { ...baseEnv, HOME: h, DEVTEAM_KIT_RELEASE: 'v1.2.3' } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(tmuxSh(['list-windows', '-t', '=home', '-F', '#{window_name}']).stdout.trim().split('\n'), ['operator', 'hub']);
+    assert.deepEqual(tmuxSh(['list-windows', '-t', '=kit49-other', '-F', '#{window_name}']).stdout.trim().split('\n'), ['home'], 'the other session left alone');
+  } finally { kill(); }
+});
+
+// box-deploy.yml's step, as a release runs it (Actions' bash flags), from this checkout (box-pins runs
+// only in the kit's own repo: a remote naming sanctuarycomputer/devteam, as CI's checkout has) and with no hook: the stamp is checked before the hook is read, so even a run without
+// the secret refuses a release cut without its release-prep PR.
+test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads the hook', () => {
+  const wf = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'box-deploy.yml'), 'utf8');
+  const lines = wf.split('\n');
+  const from = lines.indexOf('        run: |');
+  assert.ok(from > 0, 'the deploy step\'s run block');
+  const block = [];
+  for (const l of lines.slice(from + 1)) { if (l.trim() && !l.startsWith(' '.repeat(10))) break; block.push(l.slice(10)); }
+  const script = block.join('\n');
+  const stamp = /^ARG DEVTEAM_RELEASE=(v\S+)$/m.exec(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8'))[1];
+  const env = { ...process.env, HOOK: '' };
+  for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_TICKET', 'DEVTEAM_ROLE']) delete env[k];
+  const run = (tag) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], { cwd: REPO, encoding: 'utf8', env: { ...env, TAG: tag } });
+  const ok = run(stamp);
+  assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr} (box-pins needs this checkout's remote to name sanctuarycomputer/devteam)`);
+  assert.match(ok.stdout, /no RENDER_DEPLOY_HOOK/);
+  const bad = run('v0.0.1');
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+  assert.match(bad.stdout, /^refusing v0\.0\.1: .*box-pins bump --release v0\.0\.1/m);
+  assert.doesNotMatch(bad.stdout, /no RENDER_DEPLOY_HOOK/, 'refused before the hook is read');
+  // what the image is built from: every path the Dockerfile copies; and every rule there was
+  assert.match(script, /^inputs=\(cloud docs\/devteam\)$/m);
+  for (const rule of ["github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease", 'environment: box', 'git merge-base --is-ancestor "$SHA" origin/main', 'TAG: ${{ github.event.release.tag_name }}']) assert.ok(wf.includes(rule), rule);
+  const copies = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').filter((l) => l.startsWith('COPY ')).map((l) => l.split(/\s+/).slice(1).filter((w) => !w.startsWith('--'))[0]).filter((src) => !src.startsWith('<<'));
+  assert.ok(copies.length >= 3, copies.join(' '));
+  for (const src of copies) assert.ok(/^(cloud|docs\/devteam)(\/|$)/.test(src), `${src} is an input`);
+});
+
 test('after the first deploy, a supervisor only an older image\'s ages still named stays stopped', { skip: !hasTmux || skipOld() }, () => {
   const dir = path.join(tmp, 'box-code-fold');
   const kept = repo('fold-kept', { tag: 'v0.25.0', dir });
