@@ -77,4 +77,25 @@ test('an open question says when its linked page moved, once per log read', { ti
     // the Library's read, and one for the open question linking it: a second resolution makes it 3
     assert.deepEqual([reads['moved-mock'], reads['still-mock'], reads['gone-mock'] ?? 0], [2, 2, 0], `call ${n}: reads per slug`);
   }
+
+  // answer refuses it in today's words, written out
+  const said = F.run(F.old, ['answer', qm, 'Yes']);
+  assert.notEqual(said.status, 0, 'answer refuses the moved question');
+  assert.equal(said.err, `devteam: ${qm} links the artifact moved-mock, which changed since it was asked; ask again about the page as it is now`);
+
+  // metrics tells the supervisor, until the question is withdrawn
+  const changed = () => JSON.parse(F.sup(['metrics', '--json'])).findings.filter((f) => f.kind === 'question-link-changed');
+  let found = changed();
+  assert.deepEqual(found.map((f) => f.subject).sort(), [qg, qm].sort(), 'the moved and the gone question, not the still one');
+  for (const [id, text] of [[qm, MOVED], [qg, GONE]]) {
+    const f = found.find((x) => x.subject === id);
+    assert.equal(f.severity, 'medium');
+    assert.equal(f.detail, text);
+    assert.match(f.suggestion, new RegExp(`withdraw ${id}`));
+    assert.match(f.suggestion, /ask again/);
+  }
+  F.sup(['withdraw', qm, '--reason', 'its page changed']);
+  found = changed();
+  assert.deepEqual(found.map((f) => f.subject), [qg], 'withdrawn, its finding is gone');
+  assert.ok(!(await get()).data.questions.some((x) => x.id === qm), 'and it is no longer open');
 });

@@ -11317,6 +11317,9 @@ function collectMetrics(since) {
     // only once the supervisor has rated one: a project that hasn't taken up the rating sees nothing
     const firstRated = all.filter((q) => q.stake != null || q.urgency != null).map((q) => q.asked_at).sort()[0];
     if (firstRated) for (const q of open.filter((x) => (x.stake == null || x.urgency == null) && x.asked_at > firstRated)) add('medium', 'question-unrated', q.id, q.question.slice(0, 120), `rate it: rate ${q.id} --stake 1-3 --urgency 1-3 (supervisor.md §6)`);
+    // a page it links changed or went since it was asked, so answer refuses it: ask again (never
+    // answered, so not a W2 re-ask)
+    for (const q of open.filter((x) => x.links_moved)) add('medium', 'question-link-changed', q.id, q.links_moved, `withdraw ${q.id} --reason "its linked page changed since it was asked" and ask again about the page as it is now (ask … --links …)`);
     const rated = open.filter((q) => q.stake != null && q.urgency != null);
     for (const k of ['stake', 'urgency']) {
       const top = rated.filter((q) => q[k] === 3).length;
