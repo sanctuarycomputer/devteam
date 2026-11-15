@@ -64,6 +64,7 @@ async function startServer({ page = () => fs.readFileSync(PAGE) } = {}) {
   const attempts = []; // when each upgrade to /socket came, refused or not
   const srv = http.createServer((q, s) => {
     if (q.url === '/') { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); return s.end(page()); }
+    if (q.url === '/blank') { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); return s.end('<!doctype html><title>blank</title>'); }
     others++;
     s.writeHead(404); s.end();
   });
@@ -654,6 +655,8 @@ test('Ctrl+V on a non-Latin layout still pastes; a Cmd chord whose keyup never c
       await keyEvent(p, 'keyUp', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 });
     });
     assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'Backspace', code: 'Backspace' }, { t: 'key', type: 'up', key: 'Backspace', code: 'Backspace' }], 'one up, on blur');
+    got = await sent(c, async () => { await p.ev(`document.getElementById('screen').focus()`); await p.ev(`document.getElementById('screen').blur()`); });
+    assert.deepEqual(got, [], 'and none on the next blur');
   } finally { await shut(p); await srv.close(); }
 });
 
@@ -674,10 +677,17 @@ test('the address bar sends http and https entries as nav, and refuses every oth
       assert.deepEqual(got, [], `${bad} sends nothing`);
       assert.equal(await text(p, 'note'), 'Only http and https addresses open here.', `${bad} is refused in words`);
     }
-    let got = await sent(c, () => go(p, `https://shop.example/${'a'.repeat(2030)}`), 200);
-    assert.deepEqual(got, [], 'an address over 2048 characters sends nothing');
+    const at2048 = `https://shop.example/${'a'.repeat(2048 - 21)}`;
+    assert.equal(at2048.length, 2048);
+    let got = await sent(c, () => go(p, `${at2048}a`), 200);
+    assert.deepEqual(got, [], 'an address of 2049 characters sends nothing');
     assert.equal(await text(p, 'note'), 'That address is too long.');
-    for (const [typed, url] of [['shop.example/account', 'https://shop.example/account'], ['  localhost:8080/x ', 'https://localhost:8080/x'], ['http://a.example/', 'http://a.example/'], ['https://shop.example/account', 'https://shop.example/account']]) {
+    got = await sent(c, () => go(p, at2048.slice(8) + 'a'), 200);
+    assert.deepEqual(got, [], 'nor one that https:// in front makes 2049');
+    assert.equal(await text(p, 'note'), 'That address is too long.');
+    got = await sent(c, () => go(p, at2048), 200);
+    assert.deepEqual(got, [{ t: 'nav', url: at2048 }], '2048 characters go');
+    for (const [typed, url] of [['shop.example/account', 'https://shop.example/account'], ['  localhost:8080/x ', 'https://localhost:8080/x'], ['http://a.example/', 'http://a.example/'], ['https://shop.example/account', 'https://shop.example/account'], ['HTTPS://Shop.Example/a/../b', 'HTTPS://Shop.Example/a/../b'], ['a.example/?next=https://b.example', 'https://a.example/?next=https://b.example']]) {
       got = await sent(c, () => go(p, typed), 200);
       assert.deepEqual(got, [{ t: 'nav', url }], `${JSON.stringify(typed)} sends ${url}`);
       assert.equal(await text(p, 'note'), '', 'and the refusal line goes');
@@ -727,8 +737,190 @@ test('a url never overwrites what the owner is typing, and is shown as text', { 
     assert.equal(await value(), 'shop', 'the owner\'s edit stays while the field has focus');
     await p.ev(`document.getElementById('addr').blur()`);
     assert.equal(await value(), 'https://shop.example/other', 'the newest url shows on blur');
+    await p.ev(`document.getElementById('addr').focus()`);
+    c.send({ t: 'url', url: 'https://shop.example/third' });
+    await sleep(300);
+    await keyEvent(p, 'keyDown', 'Enter', 'Enter', { text: '\r', windowsVirtualKeyCode: 13 });
+    await keyEvent(p, 'keyUp', 'Enter', 'Enter', { windowsVirtualKeyCode: 13 });
+    await until(async () => (await value()) === 'https://shop.example/third', 'the waiting url, shown after a nav');
     c.send({ t: 'url', url: 'https://a.example/<i>hi<i>' });
     await until(async () => (await value()) === 'https://a.example/<i>hi<i>', 'the url with markup in it, as text');
     assert.equal(await p.ev(`document.querySelector('i')`), null, 'no element made of it');
   } finally { await shut(p); await srv.close(); }
+});
+
+// ----- Task 4: the connection's edges, and what typing may never reach ---------------------------
+test('bye shows its reason in words, closes the socket, and nothing reconnects until Show it again', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    c.send({ t: 'bye', why: 'The supervisor has the browser again.' });
+    await until(async () => !(await p.ev(`document.getElementById('bye').hidden`)), 'the bye panel');
+    assert.equal(await text(p, 'bye-why'), 'The supervisor has the browser again.');
+    await until(() => !c.open, 'the page to close its socket');
+    assert.equal(c.closedByPage, true, 'the page closed it');
+    await noHandBack(p);
+    await sleep(3000);
+    assert.equal(srv.conns.length, 1, 'no new socket by itself');
+    await p.click('#again');
+    await srv.waitConn(2);
+    await until(async () => (await p.ev(`document.getElementById('bye').hidden`)), 'the panel gone');
+    srv.last().send({ t: 'bye', why: '<b>x</b><img src=x>' });
+    await until(async () => (await text(p, 'bye-why')) === '<b>x</b><img src=x>', 'the reason, as text');
+    assert.equal(await p.ev(`document.querySelectorAll('b, img').length`), 0, 'no element made of it');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a message that isn\'t in the contract is ignored, and frames keep their order', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    c.send({ ...BIG, seq: 5 });
+    await sleep(300);
+    for (const m of ['not json', '[1]', 'null', { t: 'nope' }, { ...SMALL, seq: 6, w: 0 }, { ...SMALL, seq: 7, data: '/9j/AAAA' }, { ...SMALL, seq: 8, extra: 1 }, { t: 'held', qid: 'not-a-qid' }, { t: 'bye' }]) c.send(m);
+    await sleep(500);
+    assert.deepEqual([(await canvasState(p)).w, (await canvasState(p)).h], [320, 200], 'the last good frame stays');
+    assert.equal(await p.ev(`document.getElementById('bye').hidden`), true, 'a bye with no why is no bye');
+    assert.deepEqual(await p.ev('window.__seen'), [], 'no error');
+    c.send({ ...SMALL, seq: 9 });
+    await drawn(p, 160, 100);
+    c.send({ ...BIG, seq: 4 });
+    await sleep(500);
+    assert.equal((await canvasState(p)).w, 160, 'an older seq is dropped');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a key or a button held across a reconnect sends no up to the new socket', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    await keyEvent(p, 'rawKeyDown', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 });
+    const a = pt(s, 0.2, 0.2), b = pt(s, 0.6, 0.6);
+    await mouse(p, 'mouseMoved', a);
+    await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+    await mouse(p, 'mouseMoved', b, { button: 'left', buttons: 1 });
+    await until(() => c.got.some((m) => m.type === 'down' && m.t === 'mouse') && c.got.some((m) => m.type === 'down' && m.t === 'key'), 'both downs');
+    c.close();
+    await srv.waitConn(2);
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    const c2 = srv.last();
+    await mouse(p, 'mouseReleased', b, { button: 'left', buttons: 0, clickCount: 1 });
+    await keyEvent(p, 'keyUp', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 });
+    await sleep(400);
+    assert.deepEqual(c2.got.filter((m) => m.type === 'up'), [], 'no up for a down the new socket never saw');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('what the owner types goes nowhere else: not queued while down, not logged, stored or in the page', { skip, timeout: 90000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    await clip(p, srv, 'marker-pasted-7Q');
+    srv.refuse(true);
+    c.close();
+    await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'Reconnecting…');
+    await p.ev(`document.getElementById('screen').focus()`);
+    await p.type('marker-typed-7Q');
+    await ctrlV(p);
+    srv.refuse(false);
+    await srv.waitConn(2, 8000);
+    await sleep(1000);
+    assert.ok(srv.conns.every((k) => !k.raw.some((t) => t.includes('marker'))), 'nothing typed or pasted while down reached any socket');
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    await p.ev(`document.getElementById('screen').focus()`);
+    await p.type('marker-typed-7Q');
+    await ctrlV(p);
+    await until(() => srv.last().raw.some((t) => t.includes('marker-pasted-7Q')), 'the paste sent once connected');
+    const seen = JSON.stringify(await p.ev('window.__seen'));
+    assert.ok(!seen.includes('marker'), `nothing logged: ${seen}`);
+    assert.deepEqual(await p.ev(`(async () => [localStorage.length, sessionStorage.length, (await indexedDB.databases()).length, document.cookie, window.name])()`), [0, 0, 0, '', '']);
+    assert.equal(await p.ev(`[document.documentElement.outerHTML, ...[...document.querySelectorAll('input')].map((i) => i.value)].join(' ').includes('marker')`), false, 'nothing in the DOM');
+  } finally { await shut(p); await srv.close(); }
+});
+
+// Every string the page's own listeners can reach through their closures: a typed character kept in
+// a variable, a Set or a Map shows here (ruling m-20261115-034535632-supervisor).
+async function pageMemory(p) {
+  const strings = [];
+  const props = async (objectId) => (await p.send('Runtime.getProperties', { objectId, ownProperties: true }));
+  const walk = async (obj, depth) => {
+    if (!obj || depth > 4) return;
+    if (obj.type === 'string') return void strings.push(obj.value);
+    if (obj.type !== 'object' || !obj.objectId || obj.subtype === 'node' || obj.subtype === 'null' || obj.className === 'Window') return;
+    const r = await props(obj.objectId);
+    const members = [];
+    for (const d of r.result ?? []) if (d.value) { if (d.value.type === 'string') members.push(d.value.value); await walk(d.value, depth + 1); }
+    for (const d of r.internalProperties ?? []) {
+      if (d.name !== '[[Entries]]' || !d.value?.objectId) continue;
+      for (const e of (await props(d.value.objectId)).result ?? []) {
+        if (!e.value?.objectId) continue;
+        for (const kv of (await props(e.value.objectId)).result ?? []) { if (kv.value?.type === 'string') members.push(kv.value.value); await walk(kv.value, depth + 1); }
+      }
+    }
+    if (members.length) strings.push(members.join(''));
+  };
+  const { root } = await p.send('DOM.getDocument', { depth: -1 });
+  const nodes = [];
+  const collect = (n) => { if (n.nodeType === 1 || n.nodeType === 9) nodes.push(n.nodeId); for (const k of n.children ?? []) collect(k); };
+  collect(root);
+  const targets = [(await p.send('Runtime.evaluate', { expression: 'window', objectGroup: 'walk' })).result.objectId];
+  for (const nodeId of nodes) targets.push((await p.send('DOM.resolveNode', { nodeId, objectGroup: 'walk' })).object.objectId);
+  const listeners = [];
+  for (const objectId of targets) listeners.push(...(await p.send('DOMDebugger.getEventListeners', { objectId })).listeners);
+  // the page's own script is the one that listens on the canvas; the test's recorder is another
+  const canvasId = (await p.send('DOM.resolveNode', { nodeId: (await p.send('DOM.querySelector', { nodeId: root.nodeId, selector: '#screen' })).nodeId, objectGroup: 'walk' })).object.objectId;
+  const pageScript = (await p.send('DOMDebugger.getEventListeners', { objectId: canvasId })).listeners[0].scriptId;
+  const own = listeners.filter((l) => l.scriptId === pageScript && l.handler?.objectId);
+  assert.ok(own.length >= 10, `the page's listeners are found (${own.length})`);
+  for (const l of own) {
+    const scopes = ((await props(l.handler.objectId)).internalProperties ?? []).find((d) => d.name === '[[Scopes]]');
+    if (!scopes?.value?.objectId) continue;
+    for (const sc of (await props(scopes.value.objectId)).result ?? []) {
+      if (!sc.value?.objectId || /^Global/.test(sc.value.description ?? '')) continue;
+      for (const v of (await props(sc.value.objectId)).result ?? []) if (v.value) { if (v.value.type === 'string') strings.push(v.value.value); await walk(v.value, 1); }
+    }
+  }
+  await p.send('Runtime.releaseObjectGroup', { objectGroup: 'walk' });
+  return strings;
+}
+
+test('nothing typed is kept in page memory after it is sent', { skip, timeout: 90000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    await clip(p, srv, 'pasted-Щ');
+    await ctrlV(p);
+    await p.ev(`document.getElementById('screen').focus()`);
+    await p.type('kЖ'); // last, so no later key can overwrite what a page kept
+    await until(() => c.got.some((m) => m.t === 'paste' && m.text === 'pasted-Щ') && c.got.some((m) => m.t === 'key' && m.text === 'Ж'), 'both sent');
+    assert.deepEqual((await p.send('Runtime.globalLexicalScopeNames', {})).names, [], 'no top-level let, const or class');
+    const strings = await pageMemory(p);
+    assert.ok(strings.length > 0, 'the walk read something');
+    const kept = strings.filter((x) => x.includes('Ж') || x.includes('Щ'));
+    assert.deepEqual(kept, [], 'neither marker in any variable, Set, Map or array the page\'s listeners reach');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('nothing on the page is reachable from another origin', { skip, timeout: 60000 }, async () => {
+  const html = fs.readFileSync(PAGE, 'utf8');
+  for (const word of ['postMessage', 'localStorage', 'sessionStorage', 'indexedDB', 'document.cookie', 'window.name', 'document.domain']) assert.ok(!html.includes(word), `the page never uses ${word}`);
+  const srv = await startServer();
+  const framer = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end(`<!doctype html><iframe src="${srv.origin}/"></iframe>`); });
+  await new Promise((r) => framer.listen(0, '127.0.0.1', r));
+  let p = await open(srv, { url: `${srv.origin}/blank` });
+  try {
+    const blank = await p.ev('Object.keys(window)');
+    await shut(p);
+    p = await open(srv);
+    await srv.waitConn(1);
+    const added = (await p.ev('Object.keys(window)')).filter((k) => !blank.includes(k));
+    assert.deepEqual(added, [], 'the page adds no global');
+    const win = (await p.send('Runtime.evaluate', { expression: 'window', objectGroup: 'w' })).result.objectId;
+    const types = (await p.send('DOMDebugger.getEventListeners', { objectId: win })).listeners.map((l) => l.type);
+    assert.ok(!types.includes('message'), `no message listener (${types})`);
+    await shut(p);
+    p = await open(srv, { url: `http://127.0.0.1:${framer.address().port}/` });
+    await srv.waitConn(2);
+    assert.equal(await p.ev(`(() => { try { frames[0].document; return 'read'; } catch (e) { return e.name; } })()`), 'SecurityError', 'another origin that frames the page can\'t read it');
+  } finally { await shut(p); framer.close(); await srv.close(); }
 });

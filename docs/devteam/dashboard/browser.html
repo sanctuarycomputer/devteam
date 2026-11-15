@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fBy45L6HskBbQ3d+MTzzsavvc4Yj6sPhaQQ8ldTnR6M='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-8GoKaTCryy4Nv4PCB8CRLtl0MFBwDBDAVxrab20qHWo='; style-src 'sha256-GVxgpu86iiO/Fq2Ix0oobe9OQ1SvjErL2VDXknLRrCc='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -97,6 +97,7 @@
   let wait = 500;
   let timer = 0;
   let opened = false; // a socket has opened at least once
+  let ended = false; // the server said bye: no reconnect until the owner asks
 
   const chip = (s) => { $('chip').textContent = s; $('chip').classList.toggle('live', s === 'Live'); };
 
@@ -147,6 +148,14 @@
     if (!m || typeof m !== 'object' || Array.isArray(m)) return;
     if (m.t === 'frame') draw(m, sock);
     else if (m.t === 'url') { if (closed(m, ['t', 'url']) && typeof m.url === 'string' && MASKED.test(m.url)) showUrl(m.url); }
+    else if (m.t === 'bye') {
+      if (!closed(m, ['t', 'why']) || typeof m.why !== 'string' || m.why.length < 1 || m.why.length > 200) return;
+      ended = true;
+      $('bye-why').textContent = m.why;
+      $('bye').hidden = false;
+      $('chip').hidden = true;
+      sock.close();
+    }
     else if (m.t === 'held') {
       if (!closed(m, ['t', 'qid'])) return;
       if (m.qid === null) $('foot').textContent = 'The supervisor has the browser. You can watch.';
@@ -164,7 +173,11 @@
     s.addEventListener('close', () => {
       if (s !== socket) return;
       socket = null;
+      // what was held down went with that socket: its up must not go to the next one
+      press = null;
+      held.clear();
       area.classList.add('down');
+      if (ended) return;
       chip(opened ? 'Reconnecting…' : 'Connecting…');
       timer = setTimeout(connect, wait);
       wait = Math.min(wait * 2, 5000);
@@ -307,7 +320,7 @@
   const SCHEME = /^[a-z][a-z0-9+.-]*:(?!\d)/i;
   function toNav(typed) {
     const v = typed.trim();
-    const url = v.includes('://') || SCHEME.test(v) ? v : `https://${v}`;
+    const url = SCHEME.test(v) ? v : `https://${v}`;
     let u;
     try { u = new URL(url); } catch { return { refuse: 'Only http and https addresses open here.' }; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { refuse: 'Only http and https addresses open here.' };
@@ -324,6 +337,14 @@
     addr.blur();
   });
   $('back').addEventListener('click', () => send({ t: 'back' }));
+  $('again').addEventListener('click', () => {
+    ended = false;
+    $('bye').hidden = true;
+    $('chip').hidden = false;
+    chip('Connecting…');
+    wait = 500;
+    connect();
+  });
   const confirm = $('confirm');
   $('signout').addEventListener('click', () => confirm.showModal());
   $('cancel').addEventListener('click', () => confirm.close());
