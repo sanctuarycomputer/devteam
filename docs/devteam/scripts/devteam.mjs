@@ -11492,6 +11492,33 @@ function scoreWeeks(weeks) {
   }
   return { best };
 }
+const SPEND_FINDINGS = ['cost-hotspot', 'costly-ticket', 'low-cache-hit', 'cost-per-point-rising', 'unpriced-model'];
+// Orient: the open spend findings, each with the newest observation that recorded it (null until
+// observe-metrics logs one).
+function efficiencyWaste(m) {
+  const newest = new Map();
+  for (const o of logObjects('observation')) if (o.source_key?.startsWith('metrics:') && (!newest.has(o.source_key) || o.created_at >= newest.get(o.source_key).created_at)) newest.set(o.source_key, o);
+  return m.findings.filter((f) => SPEND_FINDINGS.includes(f.kind)).map((f) => ({ id: newest.get(`metrics:${f.kind}:${f.subject}`)?.id ?? null, kind: f.kind, subject: f.subject, detail: f.detail }));
+}
+// Act: the levers on trial: improvement-trial acts that cite a spend finding or name cost per point,
+// newest first; running until an outcome observation cites one, then kept or dropped by the newest.
+function efficiencyTrials(perPoint) {
+  const spendObs = new Set(logObjects('observation').filter((o) => SPEND_FINDINGS.includes(o.kind)).map((o) => o.id));
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const now = Date.now();
+  return logObjects('act').filter((a) => a.class === 'improvement-trial' && ((a.refs ?? []).some((r) => spendObs.has(r)) || /cost[- ]per[- ](merged )?point/i.test(a.what ?? '')))
+    .sort(byTime).reverse().map((a) => {
+      const since = Date.parse(a.created_at);
+      const last = outcomes.filter((o) => (o.refs ?? []).includes(a.id)).pop();
+      return {
+        id: a.id, what: a.what ?? '', since: a.created_at,
+        usd_per_point_start: perPoint(since - WEEK, since)?.usd_per_point ?? null, usd_per_point_now: perPoint(since, now + 1)?.usd_per_point ?? null,
+        escaped_defects_since: defects.filter((t) => t >= since).length,
+        state: !last ? 'running' : (last.valence ?? 0) >= 0 ? 'kept' : 'dropped',
+      };
+    });
+}
 function efficiencyData(m) {
   const { cycles, ticketUsd, perPoint, items } = m[METRICS_INTERNALS];
   const walk = ticketReviewWalk();
@@ -11519,7 +11546,9 @@ function efficiencyData(m) {
     };
   });
   const { best } = scoreWeeks(weeks);
-  return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, observe: null, waste: [], trials: [], suggestions: [] };
+  return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
+    observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
+    waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint), suggestions: [] };
 }
 
 function collectMetrics(since) {

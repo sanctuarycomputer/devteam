@@ -233,3 +233,77 @@ test('usd_per_point 0 scores spend 1', (t) => {
     assert.deepEqual([eff.weeks[5].score, eff.weeks[5].parts], [100, { spend: 1, time: 1, rework: 1 }]);
   } finally { E.done(); }
 });
+
+const obs = (E, o, atMs) => E.hand('supervisor', { type: 'observation', source: 'supervisor', severity: 2, valence: -1, ...o }, atMs);
+
+test('observe is the window\'s metrics plus tokens_by_phase', () => {
+  const E = effFixture('eff-observe');
+  try {
+    E.shipped('eff-10-a', 8, 0, { hours: 3, spends: [{ phase: 'build', usd: 2, input: 10, output: 20, cache_read: 30, cache_write: 40 }, { role: 'reviewer', phase: 'final-review', usd: 1, input: 1, output: 2, cache_read: 3, cache_write: 4 }] });
+    E.shipped('eff-10-b', 9, 0, { hours: 2, spends: [{ phase: 'build', usd: 3, input: 100, output: 200, cache_read: 300, cache_write: 400, model: 'claude-sonnet-5-5' }] });
+    E.land();
+    const d = E.data();
+    const o = d.efficiency.observe;
+    assert.deepEqual(o.phase_hours, d.metrics.phase_hours);
+    assert.deepEqual(o.phase_usd, d.metrics.phase_usd);
+    assert.deepEqual(o.by_model, d.metrics.cost.by_model);
+    assert.deepEqual(o.tokens, d.metrics.cost.tokens);
+    assert.deepEqual(o.tokens_by_phase, { build: { input: 110, output: 220, cache_read: 330, cache_write: 440 }, 'final-review': { input: 1, output: 2, cache_read: 3, cache_write: 4 } });
+  } finally { E.done(); }
+});
+
+// five merged S tickets at $1, and an open one (eff-20-k) at $20 whose recent spend mostly missed the
+// cache: metrics raises costly-ticket and low-cache-hit; an escaped defect raises a finding that
+// isn't about spend
+function spendFindings(name) {
+  const E = effFixture(name);
+  for (const i of [0, 1, 2, 3, 4]) E.shipped(`eff-20-m${i}`, 9, i, { spends: [{ usd: 1 }] });
+  E.addTicket('eff-20-k'); E.phase('eff-20-k', 'build', Date.now() - 3 * HOUR);
+  E.spend('eff-20-k', { usd: 20, input: 4e6, cache_read: 2e6, atMs: Date.now() - HOUR });
+  E.shipped('eff-20-n', 10, 0, { spends: [{ usd: 6 }] });
+  obs(E, { subject: 'eff', kind: 'escaped-defect', detail: 'found after merge', severity: 3 }, E.mergeAt(10, 5));
+  E.land();
+  return E;
+}
+
+test('waste is the open spend findings', () => {
+  const E = spendFindings('eff-waste');
+  try {
+    let d = E.data();
+    const kinds = (fs2) => fs2.map((f) => f.kind).sort();
+    assert.ok(kinds(d.metrics.findings).includes('escaped-defects'), 'a finding that is not about spend is open');
+    assert.deepEqual(kinds(d.efficiency.waste), ['costly-ticket', 'low-cache-hit']);
+    const want = (m, ids = {}) => m.metrics.findings.filter((f) => ['costly-ticket', 'low-cache-hit'].includes(f.kind)).map((f) => ({ id: ids[f.kind] ?? null, kind: f.kind, subject: f.subject, detail: f.detail }));
+    assert.deepEqual(d.efficiency.waste, want(d));
+    // once observed, each carries its newest observation's id
+    obs(E, { subject: 'eff-20-k', kind: 'costly-ticket', detector: 'metrics', source: 'metrics', detail: 'older', source_key: 'metrics:costly-ticket:eff-20-k' }, Date.now() - 2 * HOUR);
+    const newer = obs(E, { subject: 'eff-20-k', kind: 'costly-ticket', detector: 'metrics', source: 'metrics', detail: 'newer', source_key: 'metrics:costly-ticket:eff-20-k' }, Date.now() - 1000);
+    const cache = obs(E, { subject: 'prompt cache', kind: 'low-cache-hit', detector: 'metrics', source: 'metrics', detail: 'x', source_key: 'metrics:low-cache-hit:prompt cache' }, Date.now() - 900);
+    d = E.data();
+    assert.deepEqual(d.efficiency.waste, want(d, { 'costly-ticket': newer, 'low-cache-hit': cache }));
+    // set aside, it is no longer open
+    obs(E, { subject: 'low-cache-hit prompt cache', kind: 'finding-ack', detail: 'seen' }, Date.now() - 500);
+    assert.deepEqual(kinds(E.data().efficiency.waste), ['costly-ticket']);
+  } finally { E.done(); }
+});
+
+test('trials: spend trials and their state', () => {
+  const E = spendFindings('eff-trials');
+  try {
+    const since = E.weekStart(9) + 3 * DAY + 12 * HOUR;
+    const finding = obs(E, { subject: 'eff-20-k', kind: 'costly-ticket', detector: 'metrics', source: 'metrics', detail: 'x', source_key: 'metrics:costly-ticket:eff-20-k' }, since - HOUR);
+    const act = (what, refs, at, cls = 'improvement-trial') => E.hand('supervisor', { type: 'act', class: cls, what, refs, reversible: true }, at);
+    const t1 = act('Trial: resume sessions instead of relaunching them', [finding], since);
+    const t2 = act('Trial: cut cost per merged point with smaller specs', [], since + HOUR);
+    const t3 = act('Trial: lower the cost-per-point of reviews', [], since + 2 * HOUR);
+    act('Trial: faster gates', [], since + 3 * HOUR);
+    act('changed the plan to cut cost per point', [], since + 4 * HOUR, 'replan-within-feature');
+    obs(E, { subject: 'eff', kind: 'outcome', detail: 'kept', valence: 1, refs: [t2] }, since + 5 * HOUR);
+    obs(E, { subject: 'eff', kind: 'outcome', detail: 'looked good', valence: 1, refs: [t3] }, since + 6 * HOUR);
+    obs(E, { subject: 'eff', kind: 'outcome', detail: 'it did not hold', valence: -1, refs: [t3] }, since + 7 * HOUR);
+    const tr = E.data().efficiency.trials;
+    assert.deepEqual(tr.map((x) => [x.id, x.state]), [[t3, 'dropped'], [t2, 'kept'], [t1, 'running']], 'newest first; the newest outcome wins');
+    const one = tr.find((x) => x.id === t1);
+    assert.deepEqual(one, { id: t1, what: 'Trial: resume sessions instead of relaunching them', since: new Date(since).toISOString(), usd_per_point_start: 1, usd_per_point_now: 6, escaped_defects_since: 1, state: 'running' });
+  } finally { E.done(); }
+});

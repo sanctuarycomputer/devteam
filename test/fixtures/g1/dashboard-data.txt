@@ -402,7 +402,17 @@ exit 0
       "last_week": null
     },
     "parts": null,
-    "observe": null,
+    "observe": {
+      "phase_usd": {},
+      "by_model": {},
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "tokens_by_phase": {}
+    },
     "waste": [],
     "trials": [],
     "suggestions": []
