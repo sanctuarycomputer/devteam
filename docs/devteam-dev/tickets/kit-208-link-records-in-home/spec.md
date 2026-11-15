@@ -76,7 +76,9 @@ settings (`repo('home').settings.forge`), never the link's.
      and, once merged, reads home's main.
    - Park: the park message also says to commit and push the records worktree; `sessionSettled`
      and `fleet status` also require the records worktree clean and home's `ticket/<id>` pushed
-     (local = origin), so a fleet move can't leave records behind.
+     (local = origin), so a fleet move can't leave records behind. A records branch that has no
+     commit of its own yet (no origin branch, and its local head is in home's main) counts as
+     pushed: there is nothing to lose.
    - `worker <id> --remove` also removes `records-<id>` through home and prunes home's list; the
      tidy removes a `records-<id>` worktree on the same terms as the ticket's own.
    - With `records` unset or `"repo"`, every one of these does exactly what it does today (the
@@ -97,7 +99,16 @@ settings (`repo('home').settings.forge`), never the link's.
    `merged ticket/<id> at <link sha>; records at <records sha> in home`. If (b) fails after (a),
    merge exits non-zero: `the records of <id> landed in home at <sha12>; the code did not land in
    <link> (<why>): run merge <id> again`. A second `merge <id>` runs every check again, skips (a)
-   (already in home's main) and lands the link. No act is logged until the code lands.
+   and lands the link. No act is logged until the code lands.
+   **Records already landed** is recognized per home's forge, and then the open-PR checks of
+   acceptance 2 (open, draft, `BEHIND`/`DIRTY`, checks, head = fetched ref) don't apply: forge
+   `git`: the pinned sha (the fetched ref) is an ancestor of home's main; otherwise: the newest **merged** home
+   PR from `ticket/<id>` (`gh pr list --head ticket/<id> --state merged`) whose head is the fetched
+   ref, or any head when the branch is gone; that head becomes the pinned sha, fetched from
+   `refs/pull/<n>/head` (so a deleted head branch, or a squash or rebase merge, where that sha is
+   never an ancestor of main, still works). The records are still checked at that sha as in
+   acceptance 2, and nothing is landed in home again. When the branch exists and has moved past
+   every merged PR's head (a reopened ticket), the open-PR path applies as usual.
    `merged-without-merge` reads every `at <sha>` in a merge act's `what`, so the records merge on
    home's main is named by its act. (Between a failed (b) and the rerun, that finding fires on the
    records merge, which is true: records landed with no merge act.)
@@ -114,7 +125,9 @@ settings (`repo('home').settings.forge`), never the link's.
      final record with no `- Records:` line;
    - records first: console's origin refuses one push (a pre-receive hook); merge exits non-zero
      with the message, home's main has the records, no act; the hook removed, `merge` again lands
-     the code and logs the act;
+     the code and logs the act (the git-forge path; the GitHub path's merged-PR lookup is
+     exercised with a `gh` stub on PATH, as the suite's other forge tests do: a merged PR whose head
+     is the records sha lets the rerun skip the open-PR checks and land only the code);
    - default: with `records` unset, today's multirepo tests are unchanged;
    - where tmux is installed (as the suite's other `worker` launch tests are guarded), `worker`
      makes `records-<id>` on home's `ticket/<id>` and the prompt names it; `review-worktree`
