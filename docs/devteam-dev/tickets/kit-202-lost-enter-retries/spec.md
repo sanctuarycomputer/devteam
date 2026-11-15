@@ -8,24 +8,20 @@ The bottom 8 lines include the harness's own chrome, which changes by itself on 
 
 - the footer below the input box (`⏵⏵ bypass permissions on · 1 shell · ↓ to manage`, with `PR #671`, `2 shells`, etc. appearing and going);
 - the background-agent list below the footer (`◯ general-purpose  Re-review Task 2 fixes  20s · ↓ 46.1k tokens`, a ticking timer and token count);
-- the status line above the box (`✻ Cogitated for 20s · done 9:56 PM · 1 shell still running`).
+- the status line above the box (`✻ Cogitated for 20s · done 9:56 PM · 1 shell still running`, whose count changes or goes away when the shell ends).
 
 So the digest changes between ticks, the rescue drops its record after try 1, and the text stays stuck (operator report o-20261114-215952756, three times in one day; saved pane /data/home/tmp/sb-pane.txt). A long agent list can also push the input itself out of the bottom 8 lines, which reads as "submitted" and ends the rescue the same way.
 
 ## Design
 
-From the captured lines (`lines`, the last 15 non-empty trimmed lines, unchanged), the rescue works out the pane **body**, which is the pane without the harness chrome:
+From the captured lines (`lines`, the last 15 non-empty trimmed lines, unchanged), the rescue works out the pane's **body** and digests only that:
 
-1. **Cut the footer.** Find the last *rule line*: a line made only of box-drawing characters (U+2500–U+257F, the same range `squash` drops) and at least 8 long. That's the input box's bottom border (Claude Code draws `────` above and below the input; older versions draw `╰───╯`). Everything below it is footer and agent list, and is cut. But it is cut only when the tail of the typed text is *not* below that line: if the text sits below the last rule, there is no box under the input (another harness, or a horizontal rule in the output), and nothing is cut.
-2. **Drop chrome lines.** From what's left, drop lines that are harness status rather than content: `PANE_SHELL` (the existing "N shell(s) (still) running" pattern), and token counters (`↓ 46.1k tokens`, `↑ 2.4k tokens`). This covers the status line above the box, and the footer and agent lines of a harness with no box.
-3. **Body window.** `body = (the result).slice(-8)`.
+1. **Cut the footer.** Find the last *rule line*: a line made only of box-drawing characters (U+2500–U+257F, the range `squash` drops; whitespace ignored), at least 8 long. That's the input box's bottom border (Claude Code draws `────` above and below the input; older versions draw `╰───╯`). Everything below it (the footer and the agent list) is outside the body. But nothing is cut when the tail of the typed text is below that line: then there is no box under the input (another harness, or a horizontal rule in the output). Call what's left `above`.
+2. **Pick the body lines.** Walking up from the end of `above`, the body is the last 8 lines that aren't chrome. A line is chrome when it holds a token counter (`PANE_TOKENS`: `↓ 46.1k tokens`, `↑ 2.4k tokens`, `1.2M tokens`, which is the agent-list and spinner shape), or when it has nothing left once its shell-count phrases are taken out (a line that only says `1 shell running`). Chrome lines appearing or going don't shift the body.
+3. **Normalize for the digest.** In each body line, take out every `PANE_SHELL` phrase (`1 shell still running`, `· 2 shells ·`) and fold runs of whitespace and `·` into one space. So `✻ Cogitated for 20s · done 9:56 PM · 1 shell still running`, the same line with `2 shells`, and `✻ Cogitated for 20s · done 9:56 PM` all normalize to the same text. The **digest** is the sha1 of the normalized body lines.
+4. **Tail check** (is the text still there?): the tail is looked for in the *raw* lines of `above`, from the first body line to the end, chrome lines included. So typed text that itself mentions shells or tokens is still found.
 
-The rescue then uses `body` where it used `bottom`:
-
-- **tail check** (is the text still there?): `squash(body.join('')).includes(tail)`;
-- **digest** (stored at a press, compared before the next): sha1 of `body.join('\n')`.
-
-The **guards are kept and widened, never narrowed**: no Enter while `PANE_BUSY` or `Enter to confirm` shows on any line of the raw bottom 8 (`lines.slice(-8)`, as today, which is where Claude puts `esc to interrupt`: in the footer) *or* of `body`; `paneAsking(target)` and `clientActiveOn(target)` are unchanged. The caller's `PANE_WAITS` and trust checks are untouched.
+**The guards are kept and widened, never narrowed.** No Enter while `PANE_BUSY` or `Enter to confirm` shows on **any captured line**: all 15, unfiltered, where today only the bottom 8 are read. That covers Claude's footer `esc to interrupt` and a spinner above the box (`✻ Cogitating… (12s · ↓ 1.2k tokens · esc to interrupt)`) however long the agent list under the box is. `paneAsking(target)` and `clientActiveOn(target)` are unchanged, and the caller's `PANE_WAITS` and trust checks are untouched.
 
 Everything else is unchanged: `LOST_ENTER_SECONDS`, `LOST_ENTER_TRIES`, the claim/put-back protocol, the record shape (`bottom` still holds a digest), the log observation.
 
@@ -35,18 +31,23 @@ That test's pane is `> text`, `⏺ Done.`, rule, `❯ `, rule, footer. The cut d
 
 ## Acceptance checks (the done-whens)
 
-1. A pane whose input still holds the typed text, while only the footer, the status line's shell count and the agent list change between ticks, gets its second and third Enter. Test (in `test/accounts.supervisor.test.mjs`, built like /data/home/tmp/sb-pane.txt; the file itself isn't read or copied): (a) a Claude Code-shaped pane (content, `✻ … · 1 shell still running`, rule, `❯ <text>`, rule, `⏵⏵ bypass permissions on · 1 shell`, an agent line `◯ general-purpose … 20s · ↓ 46.1k tokens`) is redrawn between presses with `2 shells`, `· PR #671 ·`, another agent timer and tokens, and an extra agent line; three Enters in all, then it stops. (b) The same with a pane that has no box (another harness): `> <text>`, then a shell-count line and an agent token line that change; three Enters.
+1. A pane whose input still holds the typed text, while only the footer, the status line's shell count and the agent list change between ticks, gets its second and third Enter. The test goes in `test/accounts.supervisor.test.mjs` and is built like /data/home/tmp/sb-pane.txt (that file isn't read or copied). Each redraw restarts the stand-in, so each redraw's own keys are checked (`\r`), along with the record's `tries` (1, then 2, then the record is gone).
+   - (a) A Claude Code-shaped pane: content, then `✻ … · 1 shell still running`, rule, `❯ <text>`, rule, `⏵⏵ bypass permissions on · 1 shell`, and an agent line `◯ general-purpose … 20s · ↓ 46.1k tokens`. It is redrawn first with `2 shells`, `· PR #671 ·`, another timer and token count, and an extra agent line. Then it is redrawn with no shell at all: the status line becomes `✻ Cogitated for 20s · done 9:56 PM` and the footer loses its count. Three Enters in all, then it stops.
+   - (b) The same with a boxless pane (another harness): `> <text>`, then a `1 shell running` line and an agent token line, redrawn with those changed and then with the shell line gone. Three Enters.
 2. The existing reply-below test (`the echo of a submitted line, then the bottom changes after a press…`) passes with no edit to it.
-3. No Enter while a menu or busy marker shows: the existing "left alone" cases pass unchanged, plus one new case where the busy marker is only in the footer below the box (`⏵⏵ bypass permissions on · esc to interrupt`), which the raw-bottom guard catches.
+3. No Enter while a menu or busy marker shows. The existing "left alone" cases pass unchanged, plus two new cases:
+   - the busy marker is only in the footer below the box (`⏵⏵ bypass permissions on · esc to interrupt`);
+   - a busy spinner with a token count sits above the box (`✻ Cogitating… (12s · ↓ 1.2k tokens · esc to interrupt)`) and seven agent lines sit under it, so the spinner is outside the bottom 8.
 4. test.yml passes on every job at the PR head; no file is added (only devteam.mjs and accounts.supervisor.test.mjs change, plus this ticket's records).
 
 ## Edge cases
 
-- **Stored digest from the old kit**: a record pressed once by the old code holds an old-style digest; the first compare after the upgrade mismatches and the rescue ends, as it does today. A one-time loss, no wrong press.
+- **Stored digest from the old kit**: a record pressed once by the old code holds an old-style digest. The first compare after the upgrade mismatches and the rescue ends, as it does today. That is a one-time loss and never a wrong press.
 - **A rule in the output with no input box under it**: the text is below that rule, so nothing is cut (step 1's condition).
-- **The text is in an echo above the box and also nowhere below**: that's the reply-below shape; the cut is safe because the text is above the rule.
-- **A reply whose only change is a line matching a chrome pattern** (e.g. it prints "2 shells running"): not seen as a change. Any real reply also writes other lines, and the worst case is one extra Enter on an idle pane holding the same text, which is what the rescue is for.
-- **A long agent list** (more than 7 lines below the box): the body comes from above the cut, so the input stays in view as long as it is within the 15 captured lines.
+- **Typed text that mentions shells or tokens**: the tail check reads raw lines (step 4), so the text is still found.
+- **A reply whose only change is a shell-count phrase, or a new token-counter line**: not seen as a change. Any real reply also writes other lines. The worst case is one extra Enter on an idle pane that still holds the same text, which is what the rescue is for.
+- **More presses than today, on idle panes only.** The body reaches past the footer and the agent list. So a submitted line's echo with a short reply can stay in view where today it scrolled out of the bottom 8, and the rescue then gives the empty prompt its first Enter (later ones only if the pane stays the same). Enter on an empty idle prompt submits nothing. The existing echo test already accepts that first press. The guards above still rule out any press into a menu, a busy pane, or a pane someone is at.
+- **A long agent list** (more than 7 lines below the box): the body comes from above the cut, so the input stays in view while it is within the 15 captured lines.
 
 ## Contracts
 
@@ -56,7 +57,7 @@ None provided or consumed. The `run/sent/*.json` record shape is unchanged.
 
 - Capturing more than 15 lines, or a different capture for the supervisor's own pane (`resendSupervisorLostEnter` passes its lines through the same function and gets the fix for free).
 - Recognising other harnesses' footers by name; the rule-line cut and the chrome patterns are agent-agnostic.
-- Retyping text, or any change to when the first Enter is pressed.
+- Retyping text, or any change to when the first Enter is pressed beyond the window described above.
 
 ## Rulings
 
