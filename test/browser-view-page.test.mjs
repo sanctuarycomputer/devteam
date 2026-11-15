@@ -312,3 +312,214 @@ test('a page whose first socket never opens still says Connecting…', { skip, t
     await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
   } finally { await shut(p); await srv.close(); }
 });
+
+// ----- Task 2: the owner's input ----------------------------------------------------------------
+// A page with a frame drawn, the socket live and the canvas focused: what input tests start from.
+async function ready(srv, opts) {
+  const n = srv.conns.length;
+  const p = await open(srv, opts);
+  await srv.waitConn(n + 1);
+  const c = srv.last();
+  await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+  c.send({ ...BIG, seq: 1 });
+  const s = await drawn(p, 320, 200);
+  await p.ev(`document.getElementById('screen').focus()`);
+  assert.equal(await p.ev(`document.activeElement.id`), 'screen');
+  return { p, c, s };
+}
+// A point on the canvas, as a fraction of its on-screen box, and where that is in the frame.
+const pt = (s, fx, fy, w = s.w, h = s.h) => ({ x: s.left + s.width * fx, y: s.top + s.height * fy, fx: fx * w, fy: fy * h });
+const near = (m, want, what) => { assert.ok(Math.abs(m.x - want.fx) <= 1 && Math.abs(m.y - want.fy) <= 1, `${what}: (${m.x}, ${m.y}) is (${want.fx}, ${want.fy})`); };
+// What one action sent: every message after it, less the pointer's travel (button none) before it.
+async function sent(c, act, settle = 400) {
+  const n = c.got.length;
+  await act();
+  await sleep(settle);
+  const got = c.got.slice(n);
+  for (const m of got) valid(m);
+  const i = got.findIndex((m) => !(m.t === 'mouse' && m.type === 'move' && m.button === 'none'));
+  return i < 0 ? [] : got.slice(i);
+}
+const mouse = (p, type, at, extra = {}) => p.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, ...extra });
+const keyEvent = (p, type, key, code, extra = {}) => p.send('Input.dispatchKeyEvent', { type, key, code, ...extra });
+async function clip(p, srv, value) {
+  await p.send('Browser.grantPermissions', { origin: srv.origin, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+  await p.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  assert.equal(await p.ev(`navigator.clipboard.writeText(${JSON.stringify(value)}).then(() => 'ok', (e) => String(e))`), 'ok');
+  await p.ev(`document.getElementById('screen').focus()`);
+}
+const ctrlV = async (p) => {
+  await p.hold('Control', true);
+  await keyEvent(p, 'rawKeyDown', 'v', 'KeyV', { windowsVirtualKeyCode: 86, modifiers: 2, commands: ['paste'] });
+  await keyEvent(p, 'keyUp', 'v', 'KeyV', { windowsVirtualKeyCode: 86, modifiers: 2 });
+  await p.hold('Control', false);
+};
+
+test('a click, a double click and a Shift+click each send one click, at the frame\'s point', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    assert.notEqual(Math.round(s.width), 320, 'the canvas is shown at another size than the frame');
+    const a = pt(s, 0.25, 0.5);
+    let got = await sent(c, () => p.clickAt(a.x, a.y));
+    assert.equal(got.length, 1, JSON.stringify(got));
+    assert.equal(got[0].t, 'mouse'); assert.equal(got[0].type, 'click'); assert.equal(got[0].button, 'left'); assert.equal(got[0].clicks, 1);
+    assert.equal(got[0].mods, undefined);
+    near(got[0], a, 'the click');
+    await sleep(600); // past the double-click window
+    const b = pt(s, 0.75, 0.25);
+    got = await sent(c, async () => { await p.clickAt(b.x, b.y); await p.clickAt(b.x, b.y); });
+    got = got.filter((m) => !(m.type === 'move' && m.button === 'none')); // the helper's travel before its second press
+    assert.deepEqual(got.map((m) => [m.type, m.clicks]), [['click', 1], ['click', 2]], 'the page counts the second click of a double click');
+    near(got[1], b, 'the double click');
+    await sleep(600);
+    got = await sent(c, async () => { await p.hold('Shift', true); await p.clickAt(a.x, a.y, 8); await p.hold('Shift', false); });
+    assert.deepEqual(got.map((m) => [m.t, m.type, m.mods]), [['mouse', 'click', 8]], 'Shift itself sends nothing; the click carries it');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a drag sends down, moves with its button, and up; a Shift+drag carries Shift on each', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    const a = pt(s, 0.2, 0.2), b = pt(s, 0.6, 0.7);
+    const drag = (mods = 0) => async () => {
+      await mouse(p, 'mouseMoved', a, { modifiers: mods });
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1, modifiers: mods });
+      await mouse(p, 'mouseMoved', { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, { button: 'left', buttons: 1, modifiers: mods });
+      await sleep(50);
+      await mouse(p, 'mouseMoved', b, { button: 'left', buttons: 1, modifiers: mods });
+      await mouse(p, 'mouseReleased', b, { button: 'left', buttons: 0, clickCount: 1, modifiers: mods });
+    };
+    let got = await sent(c, drag());
+    assert.equal(got[0].type, 'down'); near(got[0], a, 'the down, at the press');
+    assert.equal(got.at(-1).type, 'up'); near(got.at(-1), b, 'the up, at the release');
+    const moves = got.slice(1, -1);
+    assert.ok(moves.length >= 1 && moves.every((m) => m.type === 'move' && m.button === 'left'), JSON.stringify(got));
+    assert.ok(got.every((m) => m.mods === undefined));
+    got = await sent(c, async () => { await p.hold('Shift', true); await drag(8)(); await p.hold('Shift', false); });
+    assert.deepEqual([got[0].type, got.at(-1).type], ['down', 'up']);
+    assert.ok(got.every((m) => m.t === 'mouse' && m.mods === 8), JSON.stringify(got));
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a wheel turn sends one wheel, and the page itself doesn\'t scroll', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    const a = pt(s, 0.5, 0.5);
+    const got = await sent(c, () => mouse(p, 'mouseWheel', a, { deltaX: 0, deltaY: 120 }));
+    assert.deepEqual(got.map((m) => [m.t, m.dx, m.dy]), [['wheel', 0, 120]]);
+    near(got[0], a, 'the wheel');
+    assert.ok((await p.ev('window.__prevented')).some((e) => e.t === 'wheel' && e.prevented));
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('typed text, Enter, AltGr, Backspace and Ctrl+A each send what the spec says', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    let got = await sent(c, () => p.type('ab'));
+    assert.deepEqual(got, [{ t: 'key', type: 'press', key: 'a', code: 'KeyA', text: 'a' }, { t: 'key', type: 'press', key: 'b', code: 'KeyB', text: 'b' }]);
+    got = await sent(c, async () => { await keyEvent(p, 'keyDown', 'Enter', 'Enter', { windowsVirtualKeyCode: 13 }); await keyEvent(p, 'keyUp', 'Enter', 'Enter', { windowsVirtualKeyCode: 13 }); });
+    assert.deepEqual(got, [{ t: 'key', type: 'press', key: 'Enter', code: 'Enter', text: '\r' }]);
+    // AltGr on Windows is Ctrl and Alt together: how @ is typed on many layouts
+    got = await sent(c, async () => { await keyEvent(p, 'keyDown', '@', 'KeyQ', { text: '@', modifiers: 3, windowsVirtualKeyCode: 81 }); await keyEvent(p, 'keyUp', '@', 'KeyQ', { modifiers: 3, windowsVirtualKeyCode: 81 }); });
+    assert.deepEqual(got, [{ t: 'key', type: 'press', key: '@', code: 'KeyQ', text: '@' }]);
+    got = await sent(c, async () => { await keyEvent(p, 'rawKeyDown', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 }); await keyEvent(p, 'keyUp', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 }); });
+    assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'Backspace', code: 'Backspace' }, { t: 'key', type: 'up', key: 'Backspace', code: 'Backspace' }]);
+    got = await sent(c, async () => { await p.hold('Control', true); await keyEvent(p, 'rawKeyDown', 'a', 'KeyA', { modifiers: 2, windowsVirtualKeyCode: 65 }); await keyEvent(p, 'keyUp', 'a', 'KeyA', { modifiers: 2, windowsVirtualKeyCode: 65 }); await p.hold('Control', false); });
+    assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'a', code: 'KeyA', mods: 2 }, { t: 'key', type: 'up', key: 'a', code: 'KeyA' }]);
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a real paste sends one paste and no key; a long one goes in whole pieces; too long or empty sends nothing', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    await clip(p, srv, 'owner@shop.example');
+    let got = await sent(c, () => ctrlV(p));
+    assert.deepEqual(got, [{ t: 'paste', text: 'owner@shop.example' }]);
+    assert.ok((await p.ev('window.__prevented')).some((e) => e.t === 'keydown' && e.key === 'v' && !e.prevented), 'Ctrl+V is left to the browser, so its paste fires');
+    const long = `${'x'.repeat(9999)}😀yz`; // the emoji sits over the 10 000-character cut
+    await clip(p, srv, long);
+    got = await sent(c, () => ctrlV(p));
+    assert.equal(got.length, 2, 'two pieces');
+    assert.ok(got.every((m) => m.t === 'paste' && m.text.length <= 10000));
+    assert.equal(got.map((m) => m.text).join(''), long, 'in order, nothing lost');
+    assert.ok(!/[\uD800-\uDBFF]$/.test(got[0].text), 'no piece ends in half an emoji');
+    await clip(p, srv, 'z'.repeat(100001));
+    got = await sent(c, () => ctrlV(p));
+    assert.deepEqual(got, [], 'over 100 000 characters sends nothing');
+    assert.equal(await text(p, 'note'), 'That paste is too long to send.');
+    const shown = await canvasState(p);
+    assert.ok(shown.bottom <= shown.vh, 'with the note line shown, the whole frame is still on screen');
+    await clip(p, srv, '');
+    got = await sent(c, () => ctrlV(p));
+    assert.deepEqual(got, [], 'an empty paste sends nothing');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('coordinates follow the newest frame\'s size', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv, { width: 700, height: 700 });
+  try {
+    c.send({ ...SMALL, seq: 2 });
+    let s = await drawn(p, 160, 100);
+    let a = pt(s, 0.5, 0.25);
+    let got = await sent(c, () => p.clickAt(a.x, a.y));
+    near(got[0], a, 'on the 160×100 frame');
+    await sleep(600);
+    c.send({ ...BIG, seq: 3 });
+    s = await drawn(p, 320, 200);
+    a = pt(s, 0.5, 0.25);
+    got = await sent(c, () => p.clickAt(a.x, a.y));
+    near(got[0], a, 'on the 320×200 frame');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('keys the page sends move nothing on it, and the canvas has no menu of its own', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv);
+  try {
+    await sent(c, async () => {
+      await keyEvent(p, 'keyDown', ' ', 'Space', { text: ' ', windowsVirtualKeyCode: 32 }); await keyEvent(p, 'keyUp', ' ', 'Space', { windowsVirtualKeyCode: 32 });
+      await keyEvent(p, 'rawKeyDown', 'ArrowDown', 'ArrowDown', { windowsVirtualKeyCode: 40 }); await keyEvent(p, 'keyUp', 'ArrowDown', 'ArrowDown', { windowsVirtualKeyCode: 40 });
+      await keyEvent(p, 'rawKeyDown', 'Tab', 'Tab', { windowsVirtualKeyCode: 9 }); await keyEvent(p, 'keyUp', 'Tab', 'Tab', { windowsVirtualKeyCode: 9 });
+      const a = pt(s, 0.5, 0.5);
+      await mouse(p, 'mousePressed', a, { button: 'right', buttons: 2, clickCount: 1 });
+      await mouse(p, 'mouseReleased', a, { button: 'right', buttons: 0, clickCount: 1 });
+    });
+    const seen = await p.ev('window.__prevented');
+    for (const k of [' ', 'ArrowDown', 'Tab']) assert.ok(seen.some((e) => e.t === 'keydown' && e.key === k && e.prevented), `${k} default-prevented`);
+    assert.ok(seen.some((e) => e.t === 'contextmenu' && e.prevented), 'the context menu prevented');
+    assert.equal(await p.ev(`document.activeElement.id`), 'screen', 'Tab kept the focus on the canvas');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('a lost pointer capture ends a drag with its up; a press not yet a drag sends nothing', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    const a = pt(s, 0.2, 0.2), b = pt(s, 0.5, 0.5);
+    const lose = () => p.ev(`document.getElementById('screen').dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 1 }))`);
+    let got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseMoved', b, { button: 'left', buttons: 1 });
+      await sleep(100);
+      await lose();
+      await mouse(p, 'mouseReleased', b, { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    assert.deepEqual(got.map((m) => m.type).filter((t) => t !== 'move'), ['down', 'up'], JSON.stringify(got));
+    near(got.at(-1), b, 'the up, at the last point');
+    await sleep(600);
+    got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await lose();
+      await mouse(p, 'mouseReleased', a, { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    assert.deepEqual(got, [], 'a press still waiting to be a click sends nothing once the capture is lost');
+  } finally { await shut(p); await srv.close(); }
+});

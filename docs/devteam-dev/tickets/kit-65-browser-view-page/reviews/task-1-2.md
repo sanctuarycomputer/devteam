@@ -6,7 +6,7 @@
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
 | T1-8 | Minor | `L-TEST-4` (no flakes) | `test/browser-view-page.test.mjs`, the backoff test | The test asserts wall-clock gaps between upgrade attempts (each gap must fall between 0.8x and 1.3x + 300 ms of 500/1000/2000/4000 ms), and after the reset it asserts the next try comes in under 1400 ms. The bounds are generous and the test passed on every run here (4 full runs under `nice`, concurrency 2). Still, timers in a background Chrome tab on a loaded CI box can be late. Watch it for flakes. If it ever fails, widen only the upper bound, because the lower bound is what catches a missing backoff. | |
-| T1-9 | Minor | spec, The address bar / canvas "never below the fold"; `L-TEST-1` | `browser.html` `note()` | The T1-5 fix adds `note()`, which sets `#note` and calls `fit()`. Nothing in T1 calls it and no test covers it, so the fix is untested so far. T2 and T3 will be the first callers. Their tests should check that the canvas bottom stays at or above `innerHeight` once `#note` has text, not only what `#note` says. | |
+| T1-9 | Minor | spec, The address bar / canvas "never below the fold"; `L-TEST-1` | `browser.html` `note()` | The T1-5 fix adds `note()`, which sets `#note` and calls `fit()`. Nothing in T1 calls it and no test covers it, so the fix is untested so far. T2 and T3 will be the first callers. Their tests should check that the canvas bottom stays at or above `innerHeight` once `#note` has text, not only what `#note` says. | fixed in T2: the paste-too-long test shows the note line and asserts the whole frame is still on screen |
 
 Pass 1 findings, checked against the diff:
 
