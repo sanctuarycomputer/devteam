@@ -397,11 +397,12 @@ fi
 # a pane gets the tmux server's environment, which anything on the box can change, so the release is
 # expanded from the image's own (and only when it is plainly vN.N.N; hub serves with none and says
 # so otherwise), and env drops what would load other code into node or point the hub at another
-# home or port. -t '=home:' with the colon: a bare =home is first a window named home in the
-# current session. hub_wait gives it ${DEVTEAM_HUB_WAIT_SECONDS:-15}s to answer, then goes on.
-hub_window() { case $DEVTEAM_KIT_RELEASE in *[!v0-9.]*) hub_rel= ;; *) hub_rel=$(printf '%s\n' "$DEVTEAM_KIT_RELEASE" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+') ;; esac; hub_cmd="while :; do /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE -u DEVTEAM_HOME -u DEVTEAM_RUN -u DEVTEAM_PROJECT -u DEVTEAM_HUB_PORT PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release '$hub_rel'; sleep 1; done"; if timeout 20 tmux has-session -t =home 2>/dev/null; then timeout 20 tmux new-window -d -t '=home:' -n hub -c "$HOME" "$hub_cmd"; else timeout 20 tmux new-session -d -s home -n hub -c "$HOME" "$hub_cmd"; fi; }
-hub_wait() { hub_w=${DEVTEAM_HUB_WAIT_SECONDS:-15}; case $hub_w in ''|*[!0-9]*) hub_w=15 ;; esac; hub_end=$(( $(date +%s) + hub_w )); while :; do curl -fsS --max-time 1 "http://127.0.0.1:$DEVTEAM_IMAGE_HUB/instances.json" 2>/dev/null | grep -q '"hub":1[,}]' && return 0; [ "$(date +%s)" -lt "$hub_end" ] || { note "hub: nothing answered hub 1 on 127.0.0.1:$DEVTEAM_IMAGE_HUB after ${hub_w}s; going on (see ~/.devteam/hub-$DEVTEAM_IMAGE_HUB.log)"; return 1; }; sleep 1; done; }
-hub_window
+# home or port, and sets HOME to dev's own. -t '=home:' with the colon: a bare =home is first a window named home in the
+# current session. Started only if home has no hub window yet (devteam-dev run again by hand), as
+# the minute loop does. hub_wait gives it ${DEVTEAM_HUB_WAIT_SECONDS:-15}s to answer, then goes on.
+hub_window() { case $DEVTEAM_KIT_RELEASE in *[!v0-9.]*) hub_rel= ;; *) hub_rel=$(printf '%s\n' "$DEVTEAM_KIT_RELEASE" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+') ;; esac; hub_cmd="while :; do /usr/bin/env -u NODE_OPTIONS -u NODE_PATH -u NODE_REPL_EXTERNAL_MODULE -u DEVTEAM_HOME -u DEVTEAM_RUN -u DEVTEAM_PROJECT -u DEVTEAM_HUB_PORT HOME='$HOME' PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release '$hub_rel'; sleep 1; done"; if timeout 20 tmux has-session -t =home 2>/dev/null; then timeout 20 tmux new-window -d -t '=home:' -n hub -c "$HOME" "$hub_cmd"; else timeout 20 tmux new-session -d -s home -n hub -c "$HOME" "$hub_cmd"; fi; }
+hub_wait() { hub_w=${DEVTEAM_HUB_WAIT_SECONDS:-15}; case $hub_w in ''|*[!0-9]*|0?*) hub_w=15 ;; esac; hub_end=$(( $(date +%s) + hub_w )); while :; do curl -fsS --max-time 1 "http://127.0.0.1:$DEVTEAM_IMAGE_HUB/instances.json" 2>/dev/null | grep -q '"hub":1[,}]' && return 0; [ "$(date +%s)" -lt "$hub_end" ] || { note "hub: nothing answered hub 1 on 127.0.0.1:$DEVTEAM_IMAGE_HUB after ${hub_w}s; going on (see ~/.devteam/hub-$DEVTEAM_IMAGE_HUB.log)"; return 1; }; sleep 1; done; }
+timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
 # The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
 # dialog (Enter would answer it), a usage limit, or into whatever else has the pane (a shell, vim, psql:
 # the kit's machine pane-state says which). Held back, it tries again each minute for 10 minutes, then

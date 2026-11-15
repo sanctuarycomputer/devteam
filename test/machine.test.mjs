@@ -827,7 +827,7 @@ test('the box\'s boot starts the image\'s hub in home:hub, from the image\'s kit
   assert.deepEqual(w.slice(0, -1), ['new-window', '-d', '-t', '=home:', '-n', 'hub', '-c', r.home], 'cwd $HOME, which is no checkout: the hub\'s children take no writer from a branch');
   const cmd = w.at(-1);
   assert.ok(cmd.startsWith('while :; do /usr/bin/env ') && cmd.endsWith('; sleep 1; done'), cmd);
-  for (const part of ['-u NODE_OPTIONS', '-u NODE_PATH', '-u NODE_REPL_EXTERNAL_MODULE', '-u DEVTEAM_HOME', '-u DEVTEAM_RUN', '-u DEVTEAM_PROJECT', '-u DEVTEAM_HUB_PORT']) assert.ok(cmd.includes(` ${part} `), part);
+  for (const part of ['-u NODE_OPTIONS', '-u NODE_PATH', '-u NODE_REPL_EXTERNAL_MODULE', '-u DEVTEAM_HOME', '-u DEVTEAM_RUN', '-u DEVTEAM_PROJECT', '-u DEVTEAM_HUB_PORT', `HOME='${r.home}'`]) assert.ok(cmd.includes(` ${part} `), part);
   assert.ok(cmd.includes(" PATH=/usr/local/bin:/usr/bin:/bin /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs hub --release 'v1.2.3'; "), 'root\'s PATH, the image\'s node and kit, the image\'s release');
   // no home session: one is made, with the hub as its window
   const s = bootHub('hub_window', { HAS_SESSION_EXIT: '1', DEVTEAM_KIT_RELEASE: 'v1.2.3' });
@@ -855,8 +855,8 @@ test('the boot waits for the hub at most DEVTEAM_HUB_WAIT_SECONDS, and notes it 
   assert.equal(up.curls.length, 1);
   assert.equal(up.boxLog, null, 'nothing noted');
   assert.equal(bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: '1', BODY: '{"hub":12,"instances":[]}' }).stdout.trim(), 'rc=1', 'not hub 1');
-  // a wait that isn't a number is 15 s, never a shell that dies before the dashboards
-  assert.equal(bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: '15s', BODY: '{"hub":1,"instances":[]}' }).stdout.trim(), 'rc=0');
+  // a wait that isn't a plain number (08 is no number to sh's arithmetic) is 15 s, never a shell that dies before the dashboards
+  for (const w of ['15s', '08', '010', '-1']) assert.equal(bootHub('hub_wait; echo rc=$?', { DEVTEAM_HUB_WAIT_SECONDS: w, BODY: '{"hub":1,"instances":[]}' }).stdout.trim(), 'rc=0', w);
 });
 
 test('the minute loop recreates home:hub only when it is gone', () => {
@@ -876,11 +876,12 @@ test('the boot\'s hub lines sit where the boot needs them', () => {
   const at = (pred, what) => { const i = d.findIndex(pred); assert.ok(i >= 0, what); return i; };
   const operator = at((l) => l.trim().startsWith('tmux new-session -d -s home -n operator'), 'the home session');
   const defs = at((l) => l.startsWith('hub_window() {'), 'hub_window');
-  const call = at((l) => l === 'hub_window', 'the call');
+  const call = at((l) => l === "timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window", 'the call, only if home has no hub yet');
   const wait = at((l) => l === 'hub_wait || :', 'the wait');
   const dash = at((l) => l === 'for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do', 'the dashboard loop');
   assert.ok(operator < defs && defs < call && call < wait && wait < dash, [operator, defs, call, wait, dash].join(' '));
-  const minute = at((l) => l.trim().startsWith('timeout 20 tmux list-windows -t =home'), 'the minute loop\'s line');
+  const minute = at((l) => l.startsWith('  timeout 20 tmux list-windows -t =home'), 'the minute loop\'s line');
+  assert.equal(d[minute].trim(), d[call], 'the same line at boot and each minute');
   assert.equal(d[minute - 1], '  sleep 60');
 });
 
@@ -905,8 +906,8 @@ test('hub_window makes home:hub on a real tmux even when another session has a w
   } finally { kill(); }
 });
 
-// box-deploy.yml's step, as a release runs it, from this checkout (box-pins runs only in the kit's
-// own repo) and with no hook: the stamp is checked before the hook is read, so even a run without
+// box-deploy.yml's step, as a release runs it (Actions' bash flags), from this checkout (box-pins runs
+// only in the kit's own repo: a remote naming sanctuarycomputer/devteam, as CI's checkout has) and with no hook: the stamp is checked before the hook is read, so even a run without
 // the secret refuses a release cut without its release-prep PR.
 test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads the hook', () => {
   const wf = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'box-deploy.yml'), 'utf8');
@@ -919,9 +920,9 @@ test('box-deploy refuses a release whose stamp isn\'t its tag, before it reads t
   const stamp = /^ARG DEVTEAM_RELEASE=(v\S+)$/m.exec(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8'))[1];
   const env = { ...process.env, HOOK: '' };
   for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_TICKET', 'DEVTEAM_ROLE']) delete env[k];
-  const run = (tag) => spawnSync('bash', ['-c', script], { cwd: REPO, encoding: 'utf8', env: { ...env, TAG: tag } });
+  const run = (tag) => spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], { cwd: REPO, encoding: 'utf8', env: { ...env, TAG: tag } });
   const ok = run(stamp);
-  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.equal(ok.status, 0, `${ok.stdout}${ok.stderr} (box-pins needs this checkout's remote to name sanctuarycomputer/devteam)`);
   assert.match(ok.stdout, /no RENDER_DEPLOY_HOOK/);
   const bad = run('v0.0.1');
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
