@@ -13,7 +13,7 @@ Pass-1 findings:
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| P2-1 | Minor | done-when 4, P1-3 | plan.md:122 (T3 step 3) | T3 step 3 makes the removal commit contain "nothing else" and says "`git show --stat` shows only the workflow". It then says to fill in verification.md's final-head rows "in the same commit", which puts a second file in that commit. A row can't record the sha of the commit it lands in, either. Pick one. Either fill the final-head rows in a separate commit just before the removal (the removal changes only the trigger lines, so actionlint at that commit holds), or allow verification.md in the removal commit and drop the "only the workflow" check. Then make spec check 4 say the same. | |
+| P2-1 | Minor | done-when 4, P1-3 | plan.md:122 (T3 step 3) | T3 step 3 makes the removal commit contain "nothing else" and says "`git show --stat` shows only the workflow". It then says to fill in verification.md's final-head rows "in the same commit", which puts a second file in that commit. A row can't record the sha of the commit it lands in, either. Pick one. Either fill the final-head rows in a separate commit just before the removal (the removal changes only the trigger lines, so actionlint at that commit holds), or allow verification.md in the removal commit and drop the "only the workflow" check. Then make spec check 4 say the same. | fixed |
 
 The fixes keep the TL;DR in step with the tasks. They add no new Critical or Important problem.
 
