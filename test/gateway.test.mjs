@@ -69,6 +69,10 @@ function authenticator(kind = 'es256') {
 
 // --- a gateway on a localhost URL, and requests with the headers a browser would send ----------
 const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
+// The box's ENV reaches every process on it, these tests included: a gateway or child that reads
+// the image's variables gets them only where a test means it to.
+const BOX_VARS = ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS'];
+const cleared = (extra = {}) => { const e = { ...process.env }; for (const k of BOX_VARS) delete e[k]; return Object.assign(e, extra); };
 async function gateway(name, extra = {}) {
   const port = await freePort();
   const publicUrl = `http://box.localhost:${port}`;
@@ -313,7 +317,7 @@ async function until(f, what) {
 }
 
 test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner actions, policies, the terminal', async () => {
-  const gw = await gateway('proxy');
+  const gw = await gateway('proxy', { env: cleared() });
   const base = fs.mkdtempSync(path.join(tmp, 'repos-'));
   const A = bareProject(base, 'alpha');
   const env = { ...process.env };
@@ -356,7 +360,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
     const boxJson = (await gw.req('GET', '/box.json')).json;
-    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push }, 'the hub learns where instances are');
+    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push, image: null }, 'the hub learns where instances are');
     assert.equal(Buffer.from(boxJson.push, 'base64url').length, 65, 'and the key that signs its notifications');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
@@ -485,13 +489,13 @@ test('whatever an agent binds to the hub\'s port, the box\'s name serves only th
     assert.equal(list.headers['content-security-policy'], undefined);
     assert.equal(list.body, '{"hub":1,"instances":[{"name":"x"}]}');
     huge = true;
-    assert.equal((await gw.req('GET', '/instances.json')).body, '{"hub":1,"instances":[]}', 'and no more of it than a list could be');
+    assert.equal((await gw.req('GET', '/instances.json')).body, '{"hub":1,"instances":[],"down":true}', 'and no more of it than a list could be');
     assert.equal((await gw.req('GET', '/anything')).status, 404);
   } finally { evil.close(); await gw.close(); }
   const gw2 = await gateway('nohub');
   try {
     assert.equal((await gw2.claim(authenticator())).status, 200);
-    await until(async () => (await gw2.req('GET', '/instances.json')).body === '{"hub":1,"instances":[]}', 'an empty list when nothing holds the port');
+    await until(async () => (await gw2.req('GET', '/instances.json')).body === '{"hub":1,"instances":[],"down":true}', 'an empty list when nothing holds the port');
     assert.equal((await gw2.req('GET', '/')).status, 200, 'and the page, with its Terminal tab, on first boot');
   } finally { await gw2.close(); }
 });
@@ -2852,4 +2856,73 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.deepEqual([(await get('/alpha/hello/')).status, (await get('/alpha/hello/', NAV, '')).status], [503, 503]);
     fs.writeFileSync(state, kept);
   } finally { await K.close().catch(() => {}); await gw.close(); await new Promise((res) => hub.srv.close(res)); }
+});
+
+// ----- what the box's image is: its release and its tools' pins, from its ENV (boxImage) ------------
+test('boxImage reads the image ENV: release and tools in order, or null', () => {
+  assert.equal(G.boxImage({}), null, 'a laptop, an older image');
+  assert.equal(G.boxImage({ DEVTEAM_KIT_RELEASE: '  ', DEVTEAM_BOX_TOOLS: '' }), null, 'spaces only are unset');
+  assert.deepEqual(G.boxImage({ DEVTEAM_KIT_RELEASE: 'v0.52.0' }), { release: 'v0.52.0', tools: {} });
+  assert.deepEqual(G.boxImage({ DEVTEAM_BOX_TOOLS: 'gh=2.83.0' }), { release: null, tools: { gh: '2.83.0' } });
+  const full = G.boxImage({ DEVTEAM_KIT_RELEASE: ' v0.52.0 ', DEVTEAM_BOX_TOOLS: ' claude-code=2.1.310\tgh=v2.83.0  uv=0.9.9 gh=9 bad=\u001b[31m x=y=z =1 n= \u001b[31m=1 <b>=2 a\u202eb=3 ' });
+  assert.deepEqual(full, { release: 'v0.52.0', tools: { 'claude-code': '2.1.310', gh: 'v2.83.0', uv: '0.9.9' } }, 'bad pairs dropped, the first of a name kept');
+  assert.deepEqual(Object.keys(full.tools), ['claude-code', 'gh', 'uv'], 'in the ENV\'s order');
+  const proto = G.boxImage({ DEVTEAM_BOX_TOOLS: '__proto__=1 gh=2' }).tools;
+  assert.deepEqual(Object.keys(proto), ['__proto__', 'gh'], 'a name is a key, whatever it is');
+  assert.equal(Object.getPrototypeOf(proto), Object.prototype);
+  for (const bad of ['\u001b[31mv1', 'v'.repeat(65), 'v 1', '<b>']) assert.equal(G.boxImage({ DEVTEAM_KIT_RELEASE: bad, DEVTEAM_BOX_TOOLS: 'gh=2' }).release, null, JSON.stringify(bad));
+});
+
+test('/box.json names the image: release and tools from the env the gateway is given', async () => {
+  const gw = await gateway('boximage', { env: cleared({ DEVTEAM_KIT_RELEASE: 'v9.9.9', DEVTEAM_BOX_TOOLS: 'claude-code=2.1.310 gh=2.83.0' }) });
+  try {
+    assert.equal((await gw.req('GET', '/box.json')).status, 403, 'unclaimed: no image either');
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const b = (await gw.req('GET', '/box.json')).json;
+    assert.deepEqual(b.image, { release: 'v9.9.9', tools: { 'claude-code': '2.1.310', gh: '2.83.0' } });
+    assert.deepEqual(Object.keys(b), ['box', 'terminal', 'instance', 'passkeys', 'previews', 'push', 'image'], 'every field it had, and image');
+    assert.equal(b.box, 1);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: '' })).status, 401, 'signed out: nothing');
+  } finally { await gw.close(); }
+});
+
+test('serve writes image: <release> at start, or image: none', { timeout: 60000 }, async () => {
+  const run = async (name, vars) => {
+    const home = fs.mkdtempSync(path.join(tmp, `serve-${name}-`));
+    const uploads = path.join(home, 'uploads');
+    fs.mkdirSync(uploads, { mode: 0o750 });
+    const port = await freePort();
+    const env = cleared({ HOME: home, DEVTEAM_GATEWAY_DIR: path.join(home, 'gw'), DEVTEAM_UPLOADS_DIR: uploads, DEVTEAM_PUBLIC_URL: `http://box.localhost:${port}`, PORT: String(port), DEVTEAM_TTYD_PORT: String(await freePort()), ...vars });
+    const c = spawn(process.execPath, [path.join(here, '..', 'cloud', 'gateway.mjs'), 'serve'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    c.stdout.on('data', (b) => { out += b; });
+    c.stderr.on('data', (b) => { out += b; });
+    try {
+      const started = Date.now();
+      while (!/^image: /m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
+      // written before it listens (the code's order): it comes ahead of the listen line
+      while (!/^gateway: .* on :/m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(out.indexOf('image: ') < out.search(/^gateway: .* on :/m), `the image line comes before the listen line: ${out}`);
+      return /^image: .*$/m.exec(out)?.[0] ?? `(no image line: ${out})`;
+    } finally {
+      if (c.exitCode === null && c.signalCode === null) await new Promise((r) => { c.once('exit', r); c.kill('SIGTERM'); });
+    }
+  };
+  assert.equal(await run('set', { DEVTEAM_KIT_RELEASE: 'v9.9.9', DEVTEAM_BOX_TOOLS: 'gh=2.83.0' }), 'image: v9.9.9');
+  assert.equal(await run('unset', {}), 'image: none');
+  assert.equal(await run('tools', { DEVTEAM_BOX_TOOLS: 'gh=2.83.0' }), 'image: none', 'no release is none, never null');
+});
+
+test('only boxImage reads DEVTEAM_KIT_RELEASE and DEVTEAM_BOX_TOOLS in gateway.mjs', () => {
+  const src = fs.readFileSync(path.join(here, '..', 'cloud', 'gateway.mjs'), 'utf8');
+  const fn = G.boxImage.toString();
+  const count = (s, w) => s.split(w).length - 1;
+  for (const w of ['DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS']) {
+    assert.ok(count(fn, w) >= 1, `boxImage reads ${w}`);
+    assert.equal(count(src, w), count(fn, w), `${w} appears nowhere else`);
+  }
+  assert.match(src, /const BOX_IMAGE = boxImage\(opts\.env \?\? env\);/, 'createGateway computes it once, from the env it is given');
+  assert.match(src.split('\n').find((l) => l.includes("p === '/box.json'")), /image: BOX_IMAGE/, '/box.json serves it');
+  const serve = src.slice(src.indexOf("if (cmd === 'serve')"), src.indexOf("else if (cmd === 'reclaim')"));
+  assert.match(serve, /image: \$\{boxImage\(env\)\?\.release \?\? 'none'\}/, 'the start line goes through it too');
 });
