@@ -1,0 +1,14 @@
+# kit-232-prompt-by-file: verification
+
+At commit `a72f45ab0e0dfd37e0e152c7c625e9448f7c351a` (later commits change only this ticket's records). Local runs on the box with Node 18.20.4, the touched test file alone at `--test-concurrency=2`, as the box rule says. CI runs the whole suite on Node 18, 20, 22 and 24.
+
+| # | Done-when | Command | Result |
+|---|---|---|---|
+| 1 | Worker, planner and every supervisor launch pass a short first message pointing at the prompt file (absolute path) instead of `"$(cat …)"`; the prompt file content is unchanged | `git diff origin/main...a72f45a -- docs/devteam/scripts/devteam.mjs`, then the new test below | `promptPointer` is used at the worker/planner launch (fresh and `--resume`) and at the fresh `recoverOne` and `legacyRecover` starts. The prompt files' `writeFileSync` lines are unchanged. The test finds the whole knowledge block (Lesson 0 to Lesson 63) in `run/prompts/plan-big.txt` |
+| 2 | A test launches with a 200 KB prompt through a fake agent; the agent receives the short message and can read the file; no argument exceeds 128 KB | `devteam.mjs gate test -- node --test --test-concurrency=2 --test-name-pattern='short pointer to the prompt file' test/kit.test.mjs` | pass 1, fail 0 (gate test passed). Prompt file over 200 × 1024 bytes; exactly one argument, under 1 KB, naming the file by absolute path; the agent read the whole file; fresh and resumed. RED first: before Task 2 it failed with the incident itself, `-bash: /usr/bin/env: Argument list too long`. Mutations (task-1, final-1 reviews): reverting the launch line fully, for `--resume` only, or making the path relative all fail the test |
+| 3 | Works for any agent_command (no Claude-specific flag); resume paths unchanged | the same test, plus a reading of recovery.test.mjs and machine.test.mjs | The stand-in agent is a plain node script, not `claude`, and the message is plain words with no flag. The supervisor's resume messages still go inline (the `id ?` branch), and the verbatim resume assertions in recovery.test.mjs and machine.test.mjs pass in CI (ruling m-20261115-064239382-supervisor) |
+| 4 | test.yml passes on every job; no file is added | `devteam.mjs gate ci -- gh run watch 43687186908 --exit-status`; `git diff --name-status origin/main...HEAD` | 8/8 jobs success at `a72f45a` (gate ci passed in 214.3 s, on the rerun). Outside `docs/devteam-dev/tickets/kit-232-prompt-by-file/`, only `M docs/devteam/scripts/devteam.mjs` and `M test/kit.test.mjs` |
+
+On the first attempt at `a72f45a`, `kit (20, chain)` failed in the incidents step (chain.mjs:1331: expected `verifying`, got `merged`). That step's verify window is 1.8 s (`verify_hours: 0.0005`), so a slow poll lands after the window has closed. The step is in code this ticket doesn't touch, it passed on Node 18, 22 and 24, and it passed when rerun (observation o-20261115-065722500, `flaky:incidents-verify-window`).
+
+Nothing is deferred to beta.

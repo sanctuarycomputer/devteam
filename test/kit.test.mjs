@@ -579,3 +579,66 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.sup(['thread', 'show', T]), /^ {2}tabbed words here$/m);
   });
 });
+
+// A prompt reaches the agent as a file it is told to read, never as one argument: Linux caps one
+// argument at 128 KB (MAX_ARG_STRLEN), and a worker whose knowledge block passed that never started.
+test('a launch hands its agent a short pointer to the prompt file, fresh and resumed, however large the prompt', { skip: hasTmux ? false : 'no tmux' }, async () => {
+  const F = threadsFixture('prompt-file');
+  try {
+    // a stand-in agent, not claude: it records what it was given and reads the file it was pointed at
+    const agent = path.join(F.base, 'agent.mjs');
+    const calls = path.join(F.base, 'calls.jsonl');
+    fs.writeFileSync(agent, `import fs from 'node:fs';
+const args = process.argv.slice(2);
+const named = /\\/\\S*?\\.txt/.exec(args[0] ?? '')?.[0];
+let read = null;
+try { read = named ? fs.readFileSync(named).length : null; } catch (e) { read = String(e); }
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ lens: args.map((a) => Buffer.byteLength(a)), first: Buffer.byteLength(args[0] ?? '') < 4096 ? args[0] : null, named, read }) + '\\n');
+setInterval(() => {}, 1e6);
+`);
+    const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+    const cmd = JSON.stringify(`${process.execPath} ${agent}`);
+    const was = fs.readFileSync(sf, 'utf8');
+    assert.ok(was.includes('"agent_command": "true", "resume_command": "true"'));
+    fs.writeFileSync(sf, was.replace('"agent_command": "true", "resume_command": "true"', `"agent_command": ${cmd}, "resume_command": ${cmd}`));
+    F.g(['commit', '-qm', 'settings', '--', 'docs/devteam/project/settings.md'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    // 64 accepted lessons of 3,500 bytes each: a prompt of over 200 KB
+    for (let i = 0; i < 64; i++) {
+      const statement = `Lesson ${i}: ${'keep every prompt readable. '.repeat(130)}`.slice(0, 3500);
+      F.hand('supervisor', { id: `k-20261101-100000${String(i).padStart(3, '0')}-supervisor`, type: 'knowledge', kind: 'lesson', statement, scope: 'all', status: 'accepted', evidence: [] }, 3600000 - i * 10);
+    }
+    const prompt = path.join(F.old, 'docs/devteam/run/prompts/plan-big.txt');
+    const lines = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+    const tmuxOut = (args) => spawnSync('tmux', args, { env: F.env(), encoding: 'utf8' }).stdout ?? '';
+    const started = async (n, target) => until(() => {
+      const pane = tmuxOut(['capture-pane', '-p', '-t', target]);
+      if (/Argument list too long/.test(pane)) assert.fail(`the shell refused the agent's command line:\n${pane}`);
+      return lines().length >= n;
+    }, `launch ${n} of the stand-in agent`);
+    const check = (call, how) => {
+      const size = fs.statSync(prompt).size;
+      assert.ok(size > 200 * 1024, `${how}: the prompt file holds the whole prompt (${size} bytes)`);
+      assert.match(fs.readFileSync(prompt, 'utf8'), /accepted knowledge\):\n- \[lesson\] Lesson 0: [\s\S]*Lesson 63: /);
+      assert.equal(call.lens.length, 1, `${how}: one argument`);
+      assert.ok(call.lens.every((n) => n < 131072), `${how}: no argument reaches the per-argument limit`);
+      assert.ok(call.lens[0] < 1024, `${how}: a short message (${call.lens[0]} bytes)`);
+      // the kit names the file from its own root, the real path (a temp dir may be a symlink: macOS's /var)
+      assert.ok([prompt, fs.realpathSync(prompt)].some((p) => call.first === `Your prompt for this session is in the file ${p}. Read all of it now, every part (a long file takes more than one read), and follow it.`), call.first);
+      assert.ok(path.isAbsolute(call.named));
+      assert.equal(call.read, size, `${how}: the agent read the whole file`);
+    };
+    const made = F.sup(['planner', 'big', '--goal', F.goal]);
+    const target = `=${/made planner plan-big in (\S+):plan-big/.exec(made)?.[1]}:plan-big`;
+    await started(1, target);
+    check(lines()[0], 'fresh');
+    // a resume rewrites the same full prompt: it gets the pointer too
+    spawnSync('tmux', ['kill-window', '-t', target], { env: F.env() });
+    assert.match(F.sup(['planner', 'big', '--resume']), /resumed planner plan-big/);
+    await started(2, target);
+    check(lines()[1], 'resumed');
+  } finally {
+    spawnSync('tmux', ['kill-server'], { env: F.env() });
+    F.done();
+  }
+});
