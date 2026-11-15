@@ -7,6 +7,6 @@ I read `git diff 3e55810 238be90` on devteam.mjs and test/goal-order.test.mjs in
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F4-1 | Suggestion | spec §2 | devteam.mjs `goalOrderText` (~5378) | JS `\s` does not match U+0085 (NEL) or zero-width and bidi controls, so these stay in a title. Few viewers draw NEL as a line break, so this is cosmetic, and the owner also sees the true list. Stripping `[\u0085​-‏‪-‮]` too would close it. | |
+| F4-1 | Suggestion | spec §2 | devteam.mjs `goalOrderText` (~5378) | JS `\s` does not match U+0085 (NEL) or zero-width and bidi controls, so these stay in a title. Few viewers draw NEL as a line break, so this is cosmetic, and the owner also sees the true list. Stripping `[\u0085​-‏‪-‮]` too would close it. | wont-fix: cosmetic (the owner still sees the true list on its own lines); a Suggestion, left for a later cleanup |
 
 Verdict: APPROVE 3594ea6d1ed15ba7bea9c3a17304c8c9d8ba1a2c
