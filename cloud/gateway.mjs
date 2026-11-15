@@ -168,13 +168,14 @@ export function boxImage(e) {
   const rel = String(e.DEVTEAM_KIT_RELEASE ?? '').trim();
   const pins = String(e.DEVTEAM_BOX_TOOLS ?? '').trim();
   if (!rel && !pins) return null;
-  const tools = {};
+  const tools = new Map();
   for (const pair of pins ? pins.split(/\s+/) : []) {
     const i = pair.indexOf('=');
     const [name, version] = [pair.slice(0, i), pair.slice(i + 1)];
-    if (i > 0 && BOX_TOKEN.test(name) && BOX_TOKEN.test(version) && !Object.hasOwn(tools, name)) tools[name] = version;
+    if (i > 0 && BOX_TOKEN.test(name) && BOX_TOKEN.test(version) && !tools.has(name)) tools.set(name, version);
   }
-  return { release: BOX_TOKEN.test(rel) ? rel : null, tools };
+  // own keys whatever the name (fromEntries defines them, so even __proto__ is a key, not a prototype)
+  return { release: BOX_TOKEN.test(rel) ? rel : null, tools: Object.fromEntries(tools) };
 }
 const gatewayDir = () => env.DEVTEAM_GATEWAY_DIR ?? path.join(env.HOME ?? '.', '.devteam-gateway');
 

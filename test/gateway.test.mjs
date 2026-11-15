@@ -2864,9 +2864,12 @@ test('boxImage reads the image ENV: release and tools in order, or null', () => 
   assert.equal(G.boxImage({ DEVTEAM_KIT_RELEASE: '  ', DEVTEAM_BOX_TOOLS: '' }), null, 'spaces only are unset');
   assert.deepEqual(G.boxImage({ DEVTEAM_KIT_RELEASE: 'v0.52.0' }), { release: 'v0.52.0', tools: {} });
   assert.deepEqual(G.boxImage({ DEVTEAM_BOX_TOOLS: 'gh=2.83.0' }), { release: null, tools: { gh: '2.83.0' } });
-  const full = G.boxImage({ DEVTEAM_KIT_RELEASE: ' v0.52.0 ', DEVTEAM_BOX_TOOLS: ' claude-code=2.1.310\tgh=v2.83.0  uv=0.9.9 gh=9 bad=\u001b[31m x=y=z =1 n= ' });
+  const full = G.boxImage({ DEVTEAM_KIT_RELEASE: ' v0.52.0 ', DEVTEAM_BOX_TOOLS: ' claude-code=2.1.310\tgh=v2.83.0  uv=0.9.9 gh=9 bad=\u001b[31m x=y=z =1 n= \u001b[31m=1 <b>=2 a\u202eb=3 ' });
   assert.deepEqual(full, { release: 'v0.52.0', tools: { 'claude-code': '2.1.310', gh: 'v2.83.0', uv: '0.9.9' } }, 'bad pairs dropped, the first of a name kept');
   assert.deepEqual(Object.keys(full.tools), ['claude-code', 'gh', 'uv'], 'in the ENV\'s order');
+  const proto = G.boxImage({ DEVTEAM_BOX_TOOLS: '__proto__=1 gh=2' }).tools;
+  assert.deepEqual(Object.keys(proto), ['__proto__', 'gh'], 'a name is a key, whatever it is');
+  assert.equal(Object.getPrototypeOf(proto), Object.prototype);
   for (const bad of ['\u001b[31mv1', 'v'.repeat(65), 'v 1', '<b>']) assert.equal(G.boxImage({ DEVTEAM_KIT_RELEASE: bad, DEVTEAM_BOX_TOOLS: 'gh=2' }).release, null, JSON.stringify(bad));
 });
 
@@ -2897,6 +2900,9 @@ test('serve writes image: <release> at start, or image: none', { timeout: 60000 
     try {
       const started = Date.now();
       while (!/^image: /m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
+      // before listening: the line is there even when the port can't be had
+      while (!/^gateway: .* on :/m.test(out) && c.exitCode === null && Date.now() - started < 10000) await new Promise((r) => setTimeout(r, 50));
+      assert.ok(out.indexOf('image: ') < out.search(/^gateway: .* on :/m), `the image line comes before the listen line: ${out}`);
       return /^image: .*$/m.exec(out)?.[0] ?? `(no image line: ${out})`;
     } finally {
       if (c.exitCode === null && c.signalCode === null) await new Promise((r) => { c.once('exit', r); c.kill('SIGTERM'); });
