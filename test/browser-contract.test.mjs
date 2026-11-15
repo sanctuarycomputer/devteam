@@ -4,9 +4,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { schema as S, check, validate, message, refusalOf } from './fixtures/browser/check.mjs';
+import { startSites } from './lib/sites.mjs';
 
 const dir = fileURLToPath(new URL('./fixtures/browser/', import.meta.url));
 const read = (f) => fs.readFileSync(path.join(dir, f), 'utf8');
@@ -228,5 +231,163 @@ test('the refusal names the guard\'s rules and ranges; state holds no lock', () 
   const st = S.$defs.shapes.state;
   assert.equal(st.additionalProperties, false);
   assert.deepEqual(Object.keys(st.properties).filter((k) => /lock|hold|held/.test(k)), []);
+  // ruling m-20261115-024248211-supervisor: the file's writer makes it 0600 and never prints the secret
+  assert.match(st.properties.control_secret.description, /creates it 0600.*no verb, log line, status, error or tmux window ever prints this value/);
   assert.deepEqual(check(st, { ...json('state.json'), held: null }, 'state'), ['state.held is not a field here']);
+});
+
+// One request over plain HTTP, cookies by hand: Node 18 has no fetch getSetCookie, and the site's
+// redirects must be seen, not followed.
+function req(port, method, p, { body, cookie, type } = {}) {
+  return new Promise((resolve, reject) => {
+    const headers = {};
+    if (cookie) headers.cookie = cookie;
+    if (body !== undefined) { headers['content-type'] = type ?? 'application/x-www-form-urlencoded'; headers['content-length'] = Buffer.byteLength(body); }
+    const r = http.request({ host: '127.0.0.1', port, method, path: p, headers }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, setCookies: res.headers['set-cookie'] ?? [], text }));
+    });
+    r.on('error', reject);
+    r.setTimeout(10000, () => r.destroy(new Error(`${method} ${p}: no answer in 10 s`)));
+    r.end(body);
+  });
+}
+const cookieOf = (res, name) => res.setCookies.find((c) => c.startsWith(`${name}=`));
+const valueOf = (c) => c?.split(';')[0].split('=').slice(1).join('=');
+const form = (o) => new URLSearchParams(o).toString();
+
+test('the fixture site serves every page later tests browse', async (t) => {
+  const site = await startSites();
+  t.after(() => site.close());
+  const { port, username, password, code } = site;
+  const go = (m, p, o) => req(port, m, p, o);
+  let posts = 0;
+  const post = (p, o) => { posts++; return go('POST', p, o); };
+  assert.equal(site.origin, `http://127.0.0.1:${port}`);
+  assert.match(password, /^pw-[a-z2-7]{20}$/);
+  assert.match(code, /^[A-Z][A-Z2-9]{9}$/);
+
+  const login = await go('GET', '/login');
+  assert.equal(login.status, 200);
+  assert.match(login.text, /<form[^>]*method="post"[^>]*action="\/login"/);
+  assert.match(login.text, /type="password"/);
+  assert.match(login.text, /<input[^>]*name="username"[^>]*>/);
+  assert.doesNotMatch(/<input[^>]*name="username"[^>]*>/.exec(login.text)[0], /autocomplete/);
+
+  const wrong = await post('/login', { body: form({ username, password: 'pw-nope' }) });
+  assert.equal(wrong.status, 200);
+  assert.match(wrong.text, /Wrong username or password/);
+  assert.equal(cookieOf(wrong, 'session'), undefined);
+
+  const step1 = async (extra = {}) => {
+    const r = await post('/login', { body: form({ username, password, ...extra }) });
+    assert.equal(r.status, 302);
+    assert.equal(cookieOf(r, 'session'), undefined, 'no session after the first step');
+    const pending = cookieOf(r, 'pending');
+    assert.ok(pending, 'a pending cookie');
+    return { location: r.headers.location, pending: `pending=${valueOf(pending)}` };
+  };
+  const a = await step1();
+  assert.equal(a.location, '/2fa');
+  assert.match((await go('GET', '/account', { cookie: a.pending })).text, /Not signed in/);
+  const twofa = await go('GET', '/2fa', { cookie: a.pending });
+  assert.match(twofa.text, /<form[^>]*method="post"[^>]*action="\/2fa"/);
+  assert.match(twofa.text, /autocomplete="one-time-code"/);
+  assert.equal((await go('GET', '/2fa')).headers.location, '/login');
+
+  const bad = await post('/2fa', { cookie: a.pending, body: form({ code: 'AAAAAAAAAA' }) });
+  assert.equal(bad.status, 200);
+  assert.equal(cookieOf(bad, 'session'), undefined);
+  const good = await post('/2fa', { cookie: a.pending, body: form({ code }) });
+  assert.equal(good.status, 302);
+  assert.equal(good.headers.location, '/account');
+  const sc = cookieOf(good, 'session');
+  assert.ok(sc && !/expires|max-age/i.test(sc), `a session-only cookie: ${sc}`);
+  const session = `session=${valueOf(sc)}`;
+  assert.ok(site.sessions().includes(valueOf(sc)));
+  for (const s of site.sessions()) assert.match(s, /^s-[a-z2-7]{32}$/);
+  assert.match((await go('GET', '/account', { cookie: session })).text, new RegExp(`Signed in as ${username}`));
+  const signedIn2fa = await go('GET', '/2fa', { cookie: session });
+  assert.equal(signedIn2fa.status, 200);
+  assert.match(signedIn2fa.text, /Signed in as/);
+  assert.match(signedIn2fa.text, /autocomplete="one-time-code"/);
+  assert.equal(cookieOf(await post('/2fa', { cookie: a.pending, body: form({ code }) }), 'session'), undefined, 'a used pending is spent');
+
+  const b = await step1({ remember: '1' });
+  const kept = cookieOf(await post('/2fa', { cookie: b.pending, body: form({ code }) }), 'session');
+  assert.match(kept, /Max-Age=86400/);
+
+  const c = await step1({ variant: 'page' });
+  assert.equal(c.location, '/2fa?variant=page');
+  const asPage = await post('/2fa', { cookie: c.pending, body: form({ code, variant: 'page' }) });
+  assert.equal(asPage.status, 200, 'the variant answers its POST with a page');
+  assert.match(asPage.text, /Signed in as/);
+  assert.ok(cookieOf(asPage, 'session'));
+
+  const counts = JSON.parse((await go('GET', '/posts')).text);
+  assert.equal(counts.posts, posts);
+  assert.equal(counts.paths['/login'], 4);
+  assert.equal(counts.paths['/2fa'], 5);
+
+  const auth = await go('GET', '/oauth/authorize');
+  assert.equal(auth.status, 302);
+  const m = /^\/oauth\/callback\?code=([^&#]+)&state=([^&#]+)#access_token=([^&]+)/.exec(auth.headers.location);
+  assert.ok(m, auth.headers.location);
+  const cb = await go('GET', '/oauth/callback?code=' + m[1] + '&state=' + m[2]);
+  assert.match(cb.text, /<title>Signed in with the provider<\/title>/);
+  for (const v of m.slice(1)) assert.ok(!cb.text.includes(v), 'the callback page echoes no code, state or token');
+  for (const [, text] of cb.text.matchAll(/<a [^>]*>([^<]*)<\/a>/g)) assert.ok(!text.includes('://'), `link text is words: ${text}`);
+  assert.ok(cb.text.includes(`href="https://user:pass@127.0.0.1:${port}/account"`));
+  const order = /href="(\/orders\/\d{4,}\/[^"]*)"/.exec(cb.text)?.[1];
+  const magic = /href="(\/magic\/[A-Za-z0-9]{20,})"/.exec(cb.text)?.[1];
+  assert.ok(order && magic);
+  assert.equal((await go('GET', order)).status, 200);
+  assert.equal((await go('GET', magic)).status, 200);
+
+  const to = 'http://127.0.0.1:9/x';
+  const redir = await go('GET', `/redirect?to=${encodeURIComponent(to)}`);
+  assert.equal(redir.status, 302);
+  assert.equal(redir.headers.location, to);
+  assert.equal((await go('GET', '/redirect?to=http%3A%2F%2Fa.example%2F%0d%0aSet-Cookie%3A%20x%3D1')).status, 400);
+  assert.match((await go('GET', `/go?to=${encodeURIComponent(to)}`)).text, new RegExp(`href="/redirect\\?to=${encodeURIComponent(to).replace(/[.?*+^$()[\]{}|\\]/g, (x) => `\\${x}`)}"`));
+  assert.match((await go('GET', '/instructions')).text, /run (this|the following) command/i);
+
+  const ev = { kind: 'click', x: 1, y: 2 };
+  assert.equal((await post('/events', { body: JSON.stringify(ev), type: 'application/json' })).status, 204);
+  assert.deepEqual(JSON.parse((await go('GET', '/events')).text).at(-1), ev);
+  assert.deepEqual(site.events().at(-1), ev);
+  const rec = (await go('GET', '/record')).text;
+  assert.match(rec, /<button/);
+  assert.match(rec, /<input/);
+
+  const big = await go('POST', '/login', { body: 'x='.padEnd(65 * 1024, 'a') }).catch((e) => ({ status: e.code }));
+  assert.ok([413, 'ECONNRESET', 'EPIPE'].includes(big.status), `a body over 64 KB: ${big.status}`);
+  assert.equal((await go('GET', '/nope')).status, 404);
+  assert.equal((await go('GET', '/')).status, 200, 'still serving');
+});
+
+test('the fixture site runs from a shell, and says each session it issues', async (t) => {
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./lib/sites.mjs', import.meta.url))], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill('SIGKILL'));
+  let out = '';
+  let err = '';
+  child.stderr.on('data', (b) => { err += b; });
+  // one listener for the child's whole life: output that came while nobody waited is kept
+  const waiting = new Set();
+  child.stdout.on('data', (b) => { out += b; for (const w of waiting) w(); });
+  const line = (n) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { waiting.delete(look); reject(new Error(`no line ${n} in 10 s; stderr: ${err.slice(0, 400)}`)); }, 10000);
+    const look = () => { const lines = out.split('\n'); if (lines.length > n) { clearTimeout(timer); waiting.delete(look); resolve(lines[n - 1]); } };
+    waiting.add(look);
+    look();
+  });
+  const first = JSON.parse(await line(1));
+  assert.ok(first.port > 0 && first.password && first.code && first.username);
+  const s1 = await req(first.port, 'POST', '/login', { body: form({ username: first.username, password: first.password }) });
+  const pending = `pending=${valueOf(cookieOf(s1, 'pending'))}`;
+  const s2 = await req(first.port, 'POST', '/2fa', { cookie: pending, body: form({ code: first.code }) });
+  const said = JSON.parse(await line(2));
+  assert.equal(said.session, valueOf(cookieOf(s2, 'session')));
 });

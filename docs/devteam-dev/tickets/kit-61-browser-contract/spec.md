@@ -138,4 +138,6 @@ Anything that runs Chrome; the guard, daemon, verbs, view and handover themselve
 
 ## Rulings
 
-None yet.
+- m-20261115-023841206-supervisor: spec approved.
+- m-20261115-024008432-supervisor: plan approved; send the contract for the stage word once T1 is committed.
+- m-20261115-024248211-supervisor: stage word, browser@1 approved at 22a785a; build T2. Because `state` carries `control_secret`, the contract says whoever writes `state.json` (kit-63/64) creates it 0600 and never prints the secret: added to `control_secret`'s description (a description change only; the shape is unchanged, still `browser: 1`).

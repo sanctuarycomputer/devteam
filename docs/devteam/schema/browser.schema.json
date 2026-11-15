@@ -355,7 +355,7 @@
             "maximum": 65535
           },
           "control_secret": {
-            "description": "The per-start random secret every verb sends the control socket: 32 random bytes as hex.",
+            "description": "The per-start random secret every verb sends the control socket: 32 random bytes as hex. Whoever writes state.json creates it 0600 from the start (never chmod after writing), and no verb, log line, status, error or tmux window ever prints this value.",
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"
           },
