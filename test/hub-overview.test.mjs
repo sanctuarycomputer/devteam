@@ -400,3 +400,20 @@ test('the hub runs with another home\'s DEVTEAM_RUN in its env, and writes nothi
   assert.ok(h.alive(), `the hub was refused: ${h.out()}`);
   assert.deepEqual(fs.readdirSync(elsewhere), [], 'nothing in that run folder');
 });
+
+// A dashboard run against a project by a kit that isn't that project's own checkout (the image's, or
+// another copy) never names the project's release as the hub's.
+test('a dashboard\'s hub run by a kit outside its project names no release', { timeout: 240000 }, async (t) => {
+  const HUB = PORTS + 35;
+  const M = hubMachine(t, 'hub-dash-foreign', HUB);
+  const A = bareProject(M.base, 'alpha');
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
+  const p = spawn(process.execPath, [imageKit(t), 'dashboard'], { cwd: A, env: M.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  let o = '';
+  p.stdout.on('data', (b) => { o += b; });
+  p.stderr.on('data', (b) => { o += b; });
+  t.after(() => (p.exitCode === null && p.signalCode === null ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  const list = await until(() => hubList(HUB), `the foreign kit's dashboard hub (${o})`);
+  assert.equal(list.kit, null);
+  assert.equal('image' in list, false);
+});

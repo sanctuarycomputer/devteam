@@ -11805,8 +11805,8 @@ function ownerActionEnv(channel) {
 // holds the port, and never exits for it.
 // The list, /instances.json: { hub: 1, kit, image?, instances }. kit is the release serving the hub,
 // fixed when it starts: hub --release's, with image: true (only the box's boot passes it, so no other
-// hub can claim the image's release); else the running kit's own version (kitVersion()), or null where
-// it has no project. No hub reads DEVTEAM_KIT_RELEASE: the box's ENV reaches every process there.
+// hub can claim the image's release); else the running kit's own version (kitVersion()) when it is its
+// project's own checkout, or null (no project, or a kit run against someone else's: ownKitVersion). No hub reads DEVTEAM_KIT_RELEASE: the box's ENV reaches every process there.
 // The rule for the list: an additive change keeps hub: 1; anything else bumps it.
 const HUB_BODY_MAX = 20000;
 // The hub's owner actions, each the arguments of the owner's command or null: checked here before
@@ -14738,7 +14738,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: kitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
