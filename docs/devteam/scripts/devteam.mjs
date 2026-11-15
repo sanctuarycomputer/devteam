@@ -424,8 +424,8 @@ function remoteKeyAt(r, base) {
 // init (which adopts) and help, and, in the kit's own repo, its views (KIT_VIEWS).
 const cwdCommon = commonOf(process.cwd());
 // The kit's own repo (a remote of it is the kit's upstream) has no project of its own, but its
-// views run there as they always did, over no tickets: nothing in them writes but `box-pins bump`,
-// which rewrites only cloud/Dockerfile's pins (the release-prep PR's change, made in that checkout).
+// views run there, over no tickets: nothing in them writes but `box-pins bump`, which rewrites only
+// the pin ARGs of the Dockerfile it is given (cloud/Dockerfile unless --dockerfile names another).
 const KIT_UPSTREAM = 'sanctuarycomputer/devteam';
 const KIT_VIEWS = ['status', 'whoami', 'validate', 'links', 'box-pins'];
 const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.url$'], root) ?? '').split('\n').some((l) => l && remoteKeyAt(l.slice(l.indexOf(' ') + 1), root) === KIT_UPSTREAM);
@@ -19502,7 +19502,7 @@ The log
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
-  box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]   [--dockerfile p]   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
+  box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
   box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
   hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
 `;
