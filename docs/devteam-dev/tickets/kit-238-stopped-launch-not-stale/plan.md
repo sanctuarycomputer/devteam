@@ -22,7 +22,9 @@ test. Not tmux-gated as a whole: the no-session checks run everywhere; the windo
    four tickets in component `web`, no dependencies: `w-01-held`, `w-02-stopped`, `w-03-stuck`,
    `w-04-held-stopped`.
 2. Hand-write a `starting` line for 01, 02 and 04, and `starting` then `build` for 03, with
-   `F.hand(id, { id: `h-<stamp>-${id}`, type: 'phase', from, to }, ago)`. The id is explicit
+   `F.hand(id, { id: `h-<stamp>-${id}`, type: 'phase', from, to }, ago, `${id}.jsonl`)`. The file
+   is the ticket's own log file (`logFileFor`): `hand`'s default, `<by>-<yyyy-mm>.jsonl`, names
+   another writer, and the reader drops lines whose `by` doesn't match it. The id is explicit
    because `hand` has no prefix for phase lines (it would write `undefined-…`, which the reader
    drops); `<stamp>` is the same `yyyymmdd-hhmmssmmm` of `Date.now() - ago` that `hand` uses (a
    small `phaseLine(id, from, to, ago)` helper in the test). 03's two lines are 2 h 1 min and 2 h
