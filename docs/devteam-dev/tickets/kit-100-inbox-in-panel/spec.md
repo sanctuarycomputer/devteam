@@ -29,7 +29,7 @@ The owner chose, after using the mock, to answer the supervisor in the side pane
 - **The heading goes.** `<h2>Inbox <span class="sub">…</span></h2>` is removed. The tab's label already says Inbox, the mock draws no heading, and the design drops heading sub-lines (Everywhere: Obvious copy goes). The empty states ("Nothing needs you right now…", "Nothing answered yet.") stay as today. Shortening them to "None" is kit-95's sweep.
 - **On the shell.** `#th-inbox` is not `no-shell`, so the block's rules and the measure judge it. kit-87 marked the old section `no-shell` until its page ticket ports it, and this ticket is that port.
 - **One column, the panel's width.** Cards in `#th-inbox` take the slot's full width, which is `--threads-w` minus 2 × `--panel-pad`, so 348px above 900px and the window minus 32px below. A card's inner rows wrap rather than overflow: the why chips (`.qcard .why { flex-wrap: wrap }`, as in the mock), the choices, the secrets rows and the row of buttons. No card grid inside it. Spacing between cards is `--gap`.
-- **Shown when its tab is.** `#th-inbox` is shown only while the panel is open on the Inbox tab. In that case `#th-pane` is empty and `#th-card-slot` holds no in-panel card. On the Threads tab it is `hidden`.
+- **Shown when its tab is.** `#th-inbox` is shown only while the panel is open on the Inbox tab. In that case `#th-pane` is empty and `#th-card-slot` holds no in-panel card. It is `hidden` on the Threads tab, and also whenever the panel is closed. A closed panel is only `visibility: hidden` and moved off-screen, so it would keep client rects, and the layer would draw a pin past the window's right edge (spec-1 S4).
 
 ### 2.2 The tab
 
@@ -39,7 +39,7 @@ The owner chose, after using the mock, to answer the supervisor in the side pane
   - The `#n-questions` element goes with the nav item. `count('n-questions', …)` and `inboxTitle`'s write to it are removed.
 - **Red.** `tabBar` draws `waiting` counts blue. The Inbox count is not drawn as `waiting`, and a page rule colours it red: `#th-tabs [data-tab="inbox"] .n { color: var(--red) }`. The block doesn't change.
 - **`render(el)`** empties `el` (`#th-pane`) and returns. Showing `#th-inbox` belongs to the pane draw (below), so a throw in the tab's render can't hide the Inbox.
-- **The pane draw.** kit-89 draws the pane for the selected tab on a change of view and on a refresh. This ticket adds one step to that draw: `#th-inbox.hidden = selected !== 'inbox'`. The card slot is left empty on the Inbox tab (§2.3).
+- **The pane draw.** kit-89 draws the pane for the selected tab on a change of view and on a refresh. This ticket adds one step to that draw: `#th-inbox.hidden = !open || selected !== 'inbox'`, where `open` is whether the head in force has `th`. The card slot is left empty on the Inbox tab (§2.3).
 - **Selecting a tab** goes through kit-89's `thGo` like any other Threads change (a history entry, or `withPage` under a link head):
   - Inbox gives `th=inbox`;
   - Threads gives `th=open`;
@@ -51,6 +51,8 @@ The owner chose, after using the mock, to answer the supervisor in the side pane
 - **`th=inbox` with a `t`.**
   - A floating `t` (for example a thread on a question card, §2.6) stays, and its card opens beside its subject.
   - An in-panel `t` (no subject, or a subject not drawn) is shown only on Threads. On a route whose head has `th=inbox` and an in-panel `t`, the router rewrites `th` to `open` by stamped `replaceState`, so the thread shows.
+  - That rewrite is one of kit-89's decisions that need the threads: it waits for the first `/api/threads` read (`TL.have > 0`). Until then the head is kept as it is, so a cold `#overview?th=inbox&t=<S>` isn't misjudged.
+  - A thread whose home is the Inbox (`tlInboxHome`, §2.6) is never in-panel, so `th=inbox` with its `t` stays as it is.
 - **The top-right Inbox button** (`.tt`, and kit-88's mirror `#tt-peek`, whose click is `.tt`'s) opens the panel on the Inbox tab: `thGo({ th: 'inbox' })`. kit-89 opened it on Threads. Its counts and hiding while open are kit-89's, unchanged.
 - **Remembered.** `devteam.threads.open` stores `th=inbox` as it stores `open` and `resolved` (kit-89 §2.5). It never stores a `t` with `inbox`: an in-panel `t` forces `open`, and a floating `t` isn't stored.
 - **Focus.** Opening the panel from the button moves the focus to the selected tab, Inbox (kit-89's rule).
@@ -89,14 +91,18 @@ kit-87's extra lookup also goes: it followed a page head carrying other keys plu
 ### 2.6 Threads whose home is the Inbox
 
 - **A thread pinned to a question** (an item subject `question:<id>`). Its home is the panel's Inbox tab.
-  - `T_HOME.question` and `tlHome` point there. `tlHome` looks for a question's element in `#th-inbox` (`#th-inbox [data-subject="question:<id>"]`) before its fallback (`main [data-subject=…]`, today's), not in `main #inbox`. Other kinds keep looking in `main #<page>`.
+  - `T_HOME.question` and `tlHome` point there.
+    - `tlHome` looks for a question's open card in the Inbox tab (`#th-inbox #questions [data-subject="question:<id>"]`), not in `main #inbox`. If none is there, it uses today's fallback (`main [data-subject=…]`).
+    - The Answered list's copy (`#answered`, a collapsed `<details>`) is never a home: an answered question's thread follows it to wherever `main` draws it (a Decide row), or loses its subject (spec-1 S1).
+    - Other kinds keep looking in `main #<page>`.
   - **Floating.** A question in the Inbox is drawn, so by kit-89's `tlInPanel` rule its thread floats rather than opening in the panel.
-  - **The pin** sits on the question's card in the panel while the Inbox tab shows. The layer draws pins from the card's box, and the box is inside the panel.
-    - The `#tl` layer's pins and floating card for a subject inside `#threads` are drawn above the panel: a page rule gives `#tl` a `z-index` above `.threads`.
-    - Scrolling `#th-body` re-places them, as a page scroll does: the layer's scroll listener also listens on `#th-body`, or is already capturing.
+  - **The pin** sits on the question's card in the panel while the Inbox tab shows. Today's layer places pins and the floating card in document coordinates (adding `scrollX`/`scrollY`), re-places them only on `resize`, and keeps them under the panel (`.tl-pins` z 10, `.threads` z 22). A subject inside the fixed panel doesn't scroll with the page, so its pin and card are placed differently (spec-1 S2, S3):
+    - **Fixed, viewport coordinates.** A pin whose subject is inside `#threads` gets the class `in-threads` and is `position: fixed`, placed from the card's viewport rect without `scrollX`/`scrollY`. The floating card of such a thread gets `in-threads` too, `position: fixed`, placed the same way. A page scroll then doesn't move them.
+    - **Only these are lifted.** A page rule gives `.pin.in-threads` and `.tl-card.in-threads` a `z-index` above `.threads`. Every other pin and card keeps its z-index, so where the panel covers the page (900px and below) the page's pins stay under it, as today.
+    - **Re-placed** on a `#th-body` scroll (a listener on `#th-body`, `passive`), on the panel's `transitionend` (the slide open ends after the first placement), on a tab change and on `resize`. A pin whose card's rect falls outside `#th-body`'s visible box is hidden, so it never floats over the tab bar or past the panel.
   - **Its floating card** opens beside the card, just outside the panel.
     - Above 900px with the panel open, the card's right edge is 10px left of the panel's left edge, at the card's top, clamped to the window. `tPlace` is called with the subject's rect clipped to the panel's left edge. kit-89 passes the window narrowed by `--threads-w`, and `tPlace` itself is unchanged.
-    - At 900px and below the panel covers the page. kit-89 hides every floating card while the panel is open there. A card whose subject is inside `#threads` is the exception: it shows over the panel, placed by `tPlace` in the full window, and as today's bottom sheet below 640px.
+    - At 900px and below the panel covers the page. kit-89 hides every floating card while the panel is open there. A card whose subject is inside `#threads` is the exception: it shows over the panel, placed by `tPlace` in the full window, and as today's bottom sheet below 640px. Between 640px and 900px the 360px card therefore covers part of the question card rather than sitting beside it. That is intended: the panel is the whole window, and no room is left beside it (spec-1 S12).
   - **Hidden subject.** While the Inbox tab isn't shown, the card's subject has no box, so an open card sits in kit-89's corner place (`.tl-card.in-dock`) and no pin is drawn. The row in Threads still lists the thread with its pin number and "Inbox" (`T_WHERE`).
 - **Opening it.** A row click, a pin, or a `#talk/<id>` link, cold or clicked, opens the panel's Inbox tab at the card and opens the card beside it. kit-87's `subjectHead(s)` for a subject inside `#th-inbox` gives the page head in force plus `th=inbox` (cold: `#overview?th=inbox`), with `t=<id>`, not a page.
   - So kit-89's floating-row rule ("the subject's page head with `t`, `th` kept above 900px, dropped below") keeps `th=inbox` at every width for these threads. Below 900px the card shows over the panel (above).
@@ -108,7 +114,9 @@ kit-87's extra lookup also goes: it followed a page head carrying other keys plu
 - **A thread pinned to a spot on the old Inbox page** (a `page` subject whose `view` is `#inbox` or `#questions`, or any view the redirects send to `th=inbox`). It stays listed in Threads, labelled "Inbox" (`T_SECTIONS.inbox`, kept for these old subjects).
   - Opening it, by row or link, opens the Inbox tab over the page in force and opens its card with no pin. The spot was on a page that no longer exists.
   - The card sits in the corner place beside the panel above 900px, and over the panel at 900px and below, as for a question thread.
-  - This needs `subjectHead` to read the view through `parseHead` (kit-87 already does), and kit-89's `tlInPanel` to treat such a page subject as floating. Its view's page (`overview`) exists, so it already does.
+  - **This ticket owns the rule.** `tlInboxHome(t)` is true for a thread whose subject is a question drawn in `#th-inbox #questions`, or a page subject whose view `parseHead` sends to `state.th === 'inbox'`. kit-89's `tlInPanel(t)` returns `false` for such a thread, before its other cases. kit-89 judges a page subject by whether its section exists, and no `#inbox` element exists after this ticket (spec-1 S5).
+    - The `th` rewrite (§2.3), `subjectHead`, the store (§2.3) and kit-89's floating-row rule all read `tlInboxHome`.
+    - A page subject that is Inbox-home has no rect, so it draws no pin, and its card takes the corner place.
 
 ### 2.7 Keeping what the owner types
 
@@ -118,6 +126,7 @@ kit-89 makes the panel the layer's own for three things that are wrong for the I
 - `render()`'s draft keeping (`textarea[data-q]`, `input[data-reason]`, `input[data-overrule]`, `input[data-rulebox]`, `input[data-auto]`) reads fields in `#th-inbox` as it read the page's. It skips the in-panel card (`#th-card-slot`) and `#tl`.
   - The same question asked in a thread is drawn twice, in the Inbox tab and in the thread's in-panel card. The two copies never overwrite each other's half-typed words: only one shows at a time, and only the Inbox copy is kept by `render()`. The card's copy is the layer's (kit-89).
 - A press inside `#th-inbox` is a page press (`PRESSED`), not the layer's (`TL.pressed`).
+- **Escape** (kit-89 §2.9: focus in `#threads` closes the in-panel thread or the panel). With the focus in a text field inside `#th-inbox` (`textarea`, `input[type=text]`), Escape is left to the field and closes nothing, so a half-typed answer isn't hidden by a stray key (spec-1 S10). With the focus anywhere else in `#th-inbox` (a button, a choice), Escape closes the panel, as it does elsewhere in the panel.
 
 ### 2.8 Reviews and the full viewer
 
@@ -135,9 +144,13 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
 
 **Its fixture** is a project built with the kit's CLI as the supervisor would build it. It holds:
 
-- three open questions: a plain choice question with a standing-rule box; an owner-action (Done / Can't right now); one with a secret to post;
-- one review-page question (`ask --kind review`, with a page and data checked in);
-- one lesson for the owner;
+- six open questions:
+  - `q1`, a choice question with a standing-rule box (`Q`'s subject);
+  - `q2`, a choice question (the Shift+click target, then the typing check and a note Send);
+  - `q3`, an owner-action (Done);
+  - `q4`, `q5` and `q6`, one secret each (Post, Reply, Can't right now);
+- one review-page question `r` (`ask --kind review`, with a page and data checked in);
+- two lessons for the owner, `L1` and `L2`;
 - one answered question, one defaulted question and one withdrawn question;
 - a goal;
 - a thread `Q` pinned to the first open question (subject `question:<id>`);
@@ -145,12 +158,16 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
 - a subjectless thread `S`;
 - the terminal's waiting prompt, faked as kit-89's tests fake it.
 
+The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the review question). AC1 to AC4 and AC7's screenshots run first, on the fixture as built. AC5, which answers questions and changes the count, runs last. The fixture builder is `inboxFixture` in `test/lib/kit.mjs`, so the measure test can seed a project with it too.
+
 1. **The tab and the button** (done-when 1).
-   - `threadsTabs.list()` ids are `['inbox', 'threads', 'supervisor', 'shell']`. `#th-tabs`'s first tab reads "Inbox" with a count equal to the open questions plus the owner lesson, and that count's colour is `--red`.
+   - `threadsTabs.list()` ids are `['inbox', 'threads', 'supervisor', 'shell']`. `#th-tabs`'s first tab reads "Inbox" with the count 9, and that count's colour is `--red`.
    - Clicking `.pagebar .tt` makes the hash `#overview?th=inbox`, opens the panel and selects the Inbox tab. `#th-inbox` is shown inside `#threads`. It holds `#ask-inbox` (the terminal's card), every open question's card (`#questions [data-qcard]`), the review card, the lesson card, the secrets form and `#answered-wrap` (collapsed, "Answered (n)").
    - `.tt`'s red count equals the tab's.
    - Choosing Threads makes the hash `…?th=open` and hides `#th-inbox`. Choosing Inbox brings it back, with `th=inbox`.
    - A reload of `#goals?th=inbox` shows Goals with the panel on Inbox.
+   - `#th-inbox` is not inside a `.no-shell` element.
+   - Closing the panel by `#th-close` hides `#th-inbox`. With the panel closed on every page, no `[data-tl-pin="<Q>"]` is drawn and `document.documentElement.scrollWidth === innerWidth`.
 2. **The nav and the roads** (done-when 2).
    - The nav has no `a[href="#inbox"]`, and its Project group reads Overview, Goals, Progress, Board, Library.
    - `SHELL_ROUTES.pages` has no `inbox`.
@@ -163,29 +180,35 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
    - `#board?goal=<g>&th=inbox` opens Board, keeps `goal`, and opens the panel on Inbox. `SHELL_ROUTES.redirects` has no key ending `?th=inbox`.
    - Thread `P` is listed under Threads, with "Inbox" as its subject line. Clicking its row opens the Inbox tab (`th=inbox&t=<P>`) with `P`'s card open and no `[data-tl-pin="<P>"]` drawn.
 4. **A thread on a question** (done-when 4). `T_HOME.question` and `tlHome` are checked in `vm` and in the page: `tlHome({ kind: 'item', ref: 'question:<id>' })` is inside `#th-inbox`.
-   - At 1440x900, on Overview with the panel on Inbox, `Q`'s pin is drawn and its centre lies inside the question's card. The element at the pin's centre is the pin, so it is above the panel.
+   - At 1440x900, on Overview with the panel on Inbox, `Q`'s pin is drawn and its centre lies inside `q1`'s card. The element at the pin's centre is the pin, so it is above the panel.
+   - Still inside `q1`'s card (±1px) after `window.scrollTo(0, 400)` on a page tall enough to scroll, and after `#th-body` is scrolled by 100px. Hidden once `#th-body` scrolls `q1`'s card out of its visible box.
    - Clicking the pin opens `Q`'s card. Its right edge is at most the panel's left edge, and its top is within the window.
    - From `#goals?th=open`, clicking `Q`'s row gives `#goals?th=inbox&t=<Q>`: the panel is on Inbox, the card is in view and the floating card is open beside it.
    - A cold load of `#talk/<Q>` opens `#overview?th=inbox&t=<Q>` with the card open beside the question's card.
    - At 720x800, `Q`'s row keeps the panel open on Inbox and the floating card shows (it is visible, and the element at its centre is in `#tl-card`).
    - Shift+click on the second open question's card in the Inbox tab starts a draft card beside it. Sending words makes a thread listed with subject `question:<id>`.
    - Shift held over the Inbox tab's tab bar shows no pin.
+   - At 720x800 on Goals with `G`, a thread on the goal's card, and the panel open on Inbox: the element at `G`'s pin's former centre is inside `#threads`, so the page's pins stay under the panel.
+   - Once `q1` is answered (by the API, then one redraw), no pin is drawn inside `#th-inbox`, and `tlInboxHome(Q)` is false.
 5. **Every control works from the panel** (done-when 5), each on a fresh question of the fixture where it posts:
    - pick a choice and Answer (its `POST /api/answer` lands, and the card leaves);
    - type a note and Send;
-   - Reply on the secrets card, and Can't right now on it;
+   - Done on the owner-action `q3`;
+   - Post on `q4`'s secret, Reply on `q5`'s and Can't right now on `q6`'s;
    - Overrule on the defaulted question's Answered card (`#answered-wrap` opened);
-   - Keep it on one lesson, then Retire it on a second (each `POST /api/knowledge`);
+   - Keep it on `L1`, then Retire it on `L2` (each `POST /api/knowledge`);
    - the standing-rule box, checked, rides on the answer;
    - the lesson's note box rides on Keep it;
    - the terminal card's numbered option sends.
-   - Words typed into a note box survive a 10-second redraw and a threads poll, with the focus kept and the caret position kept.
+   - Words typed into a note box survive a 10-second redraw and a threads poll, with the focus kept and the caret position kept. The test waits for a redraw to arrive and be held (`HELD` set), not for `render()`, which a working hold never runs. After blur, the held draw lands, and the words are kept in the drafts.
+   - Escape with the focus in that note box leaves the panel open.
    - Open the review shows `#review-view` wider than the panel, with the hash `#review/<qid>`. Closing it returns to the page with the panel on Inbox.
 6. **The measure** (done-when 6). `test/dashboard-measure.test.mjs` gets these entries:
-   - Overview with the panel on Inbox (`#overview?th=inbox`, the fixture's cards drawn and `#answered-wrap` open), at 1440x900, 720x800 and 390x844, on every check shell.md §9 names.
+   - Settings with the panel on Inbox (`#settings?th=inbox`, the fixture's cards drawn and `#answered-wrap` open), at 1440x900, 720x800 and 390x844, on every check shell.md §9 names. Settings is on the shell from kit-87, so `page-top` is judged. Overview isn't ported until kit-90, which waits on this ticket (spec-1 S6). If, at merge, another page under the panel suits better and is on the shell, the build may use it and says so in `verification.md`.
      - `opts.inbox` points at nothing, as kit-89's entries do, since the button hides while the panel is open.
      - So the overflow check judges the Inbox's own boxes (`measure.mjs` skips anything inside a scrolling container), the entry's `ready` sets `#th-body`'s `overflow` to `visible` and fixes its width to its own content width with the scrollbar. The Inbox is then laid out at its real width, and nothing else changes. `measure.mjs` doesn't change.
-     - The checks then judge the Inbox: `prose` (running text within `--measure`), `overflow` (nothing sticking out of its parent), `head-h` and `head-end` (card heads `--head-h` tall, their last item at the right edge), and `tab-motion` (the panel's tab bar). They judge the page under it for `page-top` and `header-pad`.
+     - The checks then judge the Inbox: `prose` (running text within `--measure`), `overflow` (nothing sticking out of its parent), `head-h` and `head-end` (card heads `--head-h` tall, their last item at the right edge), and `tab-motion` (the panel's tab bar). They judge the page under it, Settings, for `page-top` and `header-pad`.
+     - One choice's detail in the measure fixture is a 120-character unbroken link, so a long string at 390 wide is judged.
      - `uneven` excludes cards inside `.threads` by design, and the Inbox has no cards side by side.
    - kit-87's interim `#inbox` page entry is removed.
 7. **Nothing lost** (done-when 7). The final review checks each item of the mock's Inbox inventory one by one, against the panel:
@@ -209,18 +232,19 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
 
    `verification.md` carries the checklist, each item with where the test or a screenshot shows it.
 8. **Existing tests.** `test/dashboard.test.mjs` and the other touched test files pass, with every `#inbox` page read and navigation moved to the panel and every assertion about the cards unchanged. kit-89's `test/dashboard-threads-sidebar.test.mjs`, kit-87's `test/dashboard-pages.test.mjs` and `test/dashboard-shell.test.mjs`, and kit-88's `test/dashboard-peek.test.mjs` change only where they assert the interim this ticket ends, as ruled into touches (`m-20261115-225154606-supervisor`).
+9. **The `/view/` tab** (ruling `m-20261115-230458641-supervisor`). At `/view/artifact/<slug>`, clicking `#tt-peek` opens `#threads` on Threads. `threadsTabs.list()` ids are the same four. The Inbox tab's count equals hello's `inbox`. Choosing it shows one link, "Answer questions on the dashboard.", whose `href` is `/#overview?th=inbox`. `/api/data` is never asked.
 
 ## 4. Edge cases
 
 - **No questions at all.** The tab shows no count, the button shows no red count, and `#questions` shows today's empty line. The panel still opens on Inbox.
-- **A question answered in another tab** while this one shows it. The 10-second redraw removes the card as today. If `t` named a thread on it, the card is no longer drawn, so the thread's subject is gone: kit-89's " · subject gone" applies, and the thread becomes in-panel.
+- **A question answered in another tab** while this one shows it. The 10-second redraw removes the card from `#questions`, as today. Its thread is no longer Inbox-home: its subject is found where `main` draws the question (a Decide row, so the thread floats there), or nowhere, which makes it kit-89's " · subject gone", in-panel. No pin is left in the panel (§2.6, AC4).
 - **The panel open on Inbox, then a nav click.** kit-89's remembered store carries `th=inbox` to the next page.
 - **A cold load of `#overview?th=inbox` before `/api/data` answers.** The panel opens on Inbox, and `#th-inbox` shows today's loading state (`main.waiting` doesn't cover the panel). The cards come with the first `render()`. Neither `#q/<id>` nor `#talk/<Q>` scrolls until the card exists: the scroll waits for the first render, at most one redraw.
 - **A `#q/<id>` link for an open question not yet loaded** (cold). It waits for the first `/api/data`, as today, to know the status: open opens the Inbox tab, anything else opens the peek.
 - **`th=inbox&t=<in-panel id>`.** Rewritten to `th=open` (§2.3).
 - **Shift+click on the Inbox tab's empty space.** No subject, so it gives a page subject only if the layer gives one for empty page space today. The panel has no page view, so the layer gives none here.
 - **Below 900px** the panel is the full width, the cards are the window's width minus 32px, and their rows wrap. Below 640px a question thread's card is the bottom sheet over the panel.
-- **The `/view/` tab** (kit-89 §2.8) has no `render()` and no Inbox data. Its panel registers the same tabs, so the Inbox tab is there with no cards. Its pane shows one line, "Answer questions on the dashboard.", linking to `/#overview?th=inbox`. Its count is hello's `inbox`, which `thDraw()` already reads.
+- **The `/view/` tab** (kit-89 §2.8) has no `render()` and no Inbox data. Its panel registers the same tabs, so the Inbox tab is there with no cards. Its pane shows one line, "Answer questions on the dashboard.", linking to `/#overview?th=inbox`. Its count is hello's `inbox`, which `thDraw()` already reads. The `/view/` button (`#tt-peek` there) opens the panel on Threads, as kit-89 has it, since that tab is about the artifact's threads (ruling `m-20261115-230458641-supervisor`). AC9 tests both.
 - **Reduced motion.** Nothing here animates beyond kit-89's panel.
 
 ## 5. Out of scope
@@ -238,7 +262,7 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
    - Seven test files assert the interim this ticket ends: `test/dashboard-shell.test.mjs`, `test/dashboard-pages.test.mjs`, `test/dashboard-threads-sidebar.test.mjs`, `test/dashboard-peek.test.mjs`, `test/pane-question.answer.test.mjs`, `test/next-step.strategy.test.mjs` and `test/browser/dev-links.mjs`.
    - Two more, `test/dashboard-answers.test.mjs` and `test/dashboard-owner-action.test.mjs`, need navigation-only edits, and only if the `#questions` redirect isn't enough.
    - Recommendation: add all.
-2. **The `/view/` tab's Inbox tab** (§4). The panel's tabs are registered once for both stages, and the `/view/` tab has no Inbox data. Recommendation: the tab shows there with hello's count and one line linking to the dashboard's Inbox. The other choice, leaving the tab out there, makes the two stages' tab bars differ. Taken as written unless ruled otherwise.
+2. **The `/view/` tab's Inbox tab** (§4), asked in `m-20261115-230453850-kit-100-inbox-in-panel`, ruled `m-20261115-230458641-supervisor`: as recommended. The tab shows there with hello's count and one line linking to the dashboard's Inbox, and the `/view/` button opens the panel on Threads.
 
 ## 7. Names this builds on (from kit-87, kit-88, kit-89's approved records)
 
@@ -273,4 +297,5 @@ The new browser test is `test/dashboard-inbox-panel.test.mjs` (headless Chrome, 
 
 ## 8. Rulings
 
+- `m-20261115-230458641-supervisor` (on `m-20261115-230453850`): in `/view/` keep the Inbox tab with hello's count and "Answer questions on the dashboard." linking to `/#overview?th=inbox`; the button opens the panel on Threads. In the spec, and tested (AC9).
 - `m-20261115-225154606-supervisor` (on `m-20261115-225124449`): all nine files in `touches-request.md` are in touches (the seven, plus `test/dashboard-answers.test.mjs` and `test/dashboard-owner-action.test.mjs` for navigation only). Change only the interim-Inbox assertions in them.

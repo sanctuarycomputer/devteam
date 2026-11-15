@@ -41,7 +41,7 @@
 ## Review Focus
 
 1. **Half-typed words in an Inbox note while the 10-second redraw and the threads poll run.** Expected: words, caret and focus kept. Test: T5 step 1.
-2. **A question answered elsewhere while a thread on it is open.** Expected: the card goes, and the thread becomes in-panel with " · subject gone", with no stale pin left floating over the panel. Test: T4 step 1, last bullet.
+2. **A question answered elsewhere while a thread on it is open.** Expected: the card leaves `#questions`, the thread is no longer Inbox-home (the Answered copy is never a home), and no stale pin is left in the panel. Test: T4 step 1, last bullet.
 3. **An Inbox link clicked inside a peek.** Expected: the peek stays open, and the panel opens beside it with `history.state.page` carrying `th=inbox`. Test: T3 step 1.
 4. **A cold `#talk/<Q>` or `#q/<id>` before `/api/data` lands.** Expected: no throw and no scroll to a missing card; it scrolls once the card exists. Test: T3 step 1 (cold `#q`), T4 step 1 (cold `#talk`).
 5. **390px wide: a long choice detail, secret name or link in a card.** Expected: nothing sticks out of the column. Test: T6 measure entry at 390x844 with the fixture's longest strings.
@@ -85,7 +85,7 @@
 
   In `dashboard-pages.test.mjs`, the nav groups become `[['Project',['Overview','Goals','Progress','Board','Library']], …]`, and the per-nav-link loop no longer visits Inbox.
 - [ ] **Step 2:** Run both files. Expected: FAIL on the table and the nav.
-- [ ] **Step 3:** Edit `SHELL_ROUTES` (spec §2.5): drop `inbox` from `pages` and the `PAGES.map(… '?th=inbox' …)` entries; set the two redirects; remove the `until kit-100` comments. Remove the Inbox nav item (its `registerPage` or markup) and `#n-questions`. Delete the router's `state.th === 'inbox'` lookup branch.
+- [ ] **Step 3:** Edit `SHELL_ROUTES` (spec §2.5): drop `inbox` from `pages` and the `PAGES.map(… '?th=inbox' …)` entries; set the two redirects; remove the `until kit-100` comments. Remove the Inbox nav item (its `registerPage` or markup). Keep the `#n-questions` element, moved into a `hidden` holder outside the nav, until T2 replaces its readers with `inboxCount()` and removes it, so `inboxTitle`, `count('n-questions')` and kit-87's copy into `#inbox-btn-n` don't throw in between. Delete the router's `state.th === 'inbox'` lookup branch.
 - [ ] **Step 4:** Run both files. Expected: PASS. Then run `dashboard-threads-sidebar.test.mjs`: expect only its `th=inbox → Inbox page` assertion to fail, which T2 changes.
 - [ ] **Step 5:** Commit `kit-100 T1: inbox leaves pages and nav; #inbox and #questions redirect to the panel`. Write the task review record `reviews/task-1.md`.
 
@@ -93,7 +93,8 @@
 
 **Files:**
 - Modify: `index.html`: the `#inbox` section markup → `#th-inbox` in `#th-body`; the `threadsTabs.register` calls; kit-89's pane draw; `.tt` click; kit-89's `th` value check; the `count('n-questions')` and `inboxTitle` writes; a CSS rule for the red count and the column.
-- Create: `test/dashboard-inbox-panel.test.mjs` (fixture plus AC1).
+- Create: `test/dashboard-inbox-panel.test.mjs` (AC1).
+- Modify: `test/lib/kit.mjs`, which gets `inboxFixture` (shared by the measure test, as kit-88's `peekFixture` is).
 - Modify: `test/dashboard-threads-sidebar.test.mjs` (AC1: `th=inbox` now opens the Inbox tab; `threadsTabs.list()` four ids; `.tt` → `th=inbox`, then click the Threads tab where it expected `th=open`), `test/pane-question.answer.test.mjs` (open the panel and pick Threads before reading `#ask-threads`), `test/browser/dev-links.mjs` (click the Threads tab after `.tt`).
 
 **Interfaces:**
@@ -102,9 +103,9 @@
   - `inboxCount(): number` (open questions not in `ANSWERED` + `ownerLesson` lessons);
   - the element `#th-inbox`;
   - `th=inbox` accepted by the router;
-  - the fixture builder `inboxFixture(base, env)` in the new test file, returning `{ root, Q, P, S, open: [q1, q2, q3], review, lesson, lesson2, answered, defaulted, withdrawn, goal }`.
+  - the fixture builder `inboxFixture(root, env)` in `test/lib/kit.mjs`, returning `{ Q, P, S, G, q: { q1, q2, q3, q4, q5, q6 }, r, L1, L2, answered, defaulted, withdrawn, goal, goal2 }`. `G` is a thread on `goal`'s card, and `goal2` has none.
 
-- [ ] **Step 1: Failing test.** Write `test/dashboard-inbox-panel.test.mjs`, set up as `dashboard-threads-sidebar.test.mjs` is (own `HOME`, ports from `PORTS`, `DEVTEAM_*` removed, `canDrive` skip, `cleanup`). Its fixture is spec §3, built with the kit CLI:
+- [ ] **Step 1: Failing test.** Write `test/dashboard-inbox-panel.test.mjs`, set up as `dashboard-threads-sidebar.test.mjs` is (own `HOME`, ports from `PORTS`, `DEVTEAM_*` removed, `canDrive` skip, `cleanup`). Its fixture is spec §3, built by `inboxFixture` with the kit CLI:
   - `ask` for the questions, `ask --kind review` with the page committed, a candidate lesson `for_owner`;
   - `answer` for the answered question, a past-deadline question let default, `withdraw`;
   - `thread new --subject question:<q1>` for `Q`;
@@ -114,20 +115,22 @@
   
   Subtest "the tab and the button" asserts AC1 exactly:
   - `threadsTabs.list().map(t=>t.id)` deep-equals `['inbox','threads','supervisor','shell']`;
-  - the first tab's text starts "Inbox" and its `.n` equals `open.length + 2` (two owner lessons), with computed colour equal to `--red` resolved;
-  - `.tt` click → `location.hash === '#overview?th=inbox'`, `#th-inbox` visible inside `#threads`, `#ask-inbox .ask` present, `#questions [data-qcard]` count `open.length + 1` (with the review), lesson card present, `[data-secret]` present, `#answered-wrap` not `open` with summary `Answered (n)`;
+  - the first tab's text starts "Inbox" and its `.n` is `9` (six open questions, the review question and two owner lessons), with computed colour equal to `--red` resolved;
+  - `.tt` click → `location.hash === '#overview?th=inbox'`, `#th-inbox` visible inside `#threads`, `#ask-inbox .ask` present, `#questions [data-qcard]` count 7 (with the review), lesson card present, `[data-secret]` present, `#answered-wrap` not `open` with summary `Answered (n)`;
   - `.tt .n.q` text equals the tab's count;
   - the Threads tab → hash ends `th=open` and `#th-inbox.hidden`; the Inbox tab → `th=inbox`;
-  - `Page.reload` of `#goals?th=inbox` → Goals shown, panel on Inbox.
+  - `Page.reload` of `#goals?th=inbox` → Goals shown, panel on Inbox;
+  - `!$('th-inbox').closest('.no-shell')`;
+  - `#th-close` → `#th-inbox.hidden`. Then on Overview and Goals, with the panel closed: no `[data-tl-pin="<Q>"]`, and `document.documentElement.scrollWidth === innerWidth`.
 - [ ] **Step 2:** Run. Expected: FAIL (no Inbox tab).
 - [ ] **Step 3: Implement** spec §2.1–§2.3:
-  - move the markup;
+  - move the markup, dropping kit-87's `no-shell` from it;
   - register Inbox before kit-89's Threads registration;
-  - the pane draw sets `#th-inbox.hidden`;
-  - the router accepts `inbox` and rewrites `th=inbox` + in-panel `t` to `th=open` (stamped `replaceState`);
+  - the pane draw sets `#th-inbox.hidden = !open || selected !== 'inbox'` (`open`: the head in force has `th`);
+  - the router accepts `inbox`. It rewrites `th=inbox` with an in-panel `t` to `th=open` (stamped `replaceState`), only once `TL.have > 0`, as kit-89's other thread decisions wait;
   - `.tt` → `thGo({ th: 'inbox' })`;
   - tab select → `thGo({ th: id === 'inbox' ? 'inbox' : 'open' })`, dropping an in-panel `t`;
-  - `#inbox-btn-n`, the tab count and `inboxTitle` read `inboxCount()`;
+  - `#inbox-btn-n`, the tab count and `inboxTitle` read `inboxCount()`. Then remove `#n-questions` (T1's hidden holder) and `count('n-questions', …)`;
   - CSS: `#th-tabs [data-tab="inbox"] .n { color: var(--red) }`, `#th-inbox { display: flex; flex-direction: column; gap: var(--gap) }`, `#th-inbox .card { margin: 0 }`, `#th-inbox .qcard .why { flex-wrap: wrap }`;
   - remove the `h2`.
 - [ ] **Step 4:** Run the new test, `dashboard-threads-sidebar.test.mjs` and `pane-question.answer.test.mjs`. Expected: PASS.
@@ -143,7 +146,7 @@
 - Consumes: kit-89's `thGo(next: { th?, t? })`, which pushes or applies `withPage` under a link head.
 - Produces: `inboxGo(opts?: { scrollTo?: string })`: `thGo({ th: 'inbox' })`, then, once `#th-inbox` is shown and the target element exists (the next `render()` at most), `el.scrollIntoView({ block: 'center' })` inside `#th-body`.
 
-- [ ] **Step 1: Failing subtests** "the nav and the roads" and "th=inbox". They assert AC2 and AC3's first bullet, plus:
+- [ ] **Step 1: Failing subtests** "the nav and the roads" and "th=inbox". They assert AC2 and AC3's first bullet. Board draws no `#q/` link for this fixture, so the test appends `<a id="probe-q" href="#q/<q2>">` into Board's section and clicks it: the routing under test is the page's, whatever drew the anchor. They also assert:
   - from a lesson's peek over Loop, clicking "Keep or retire it in the Inbox" leaves `#drawer` open, `history.state.page === '#loop?th=inbox'`, and the panel on Inbox;
   - a cold load of `#q/<open id>` in a new tab, before `/api/data`, throws nothing (no `Runtime.exceptionThrown`) and ends with `#q-<id>` in `#th-body`'s box;
   - the `redirects` object is found between the `/* shell-routes start */` and `/* shell-routes end */` markers of the file text, after `/* devteam-shell-js end */`.
@@ -176,15 +179,20 @@
 
 - [ ] **Step 1: Failing subtest** "a thread on a question". It asserts AC3's `P` bullet and AC4 exactly, at the sizes named, plus:
   - a cold `#talk/<Q>` in a new tab throws nothing;
-  - after `q1` is answered through the API and a redraw passes, no `[data-tl-pin="<Q>"]` is drawn, and `Q`'s row reads " · subject gone".
+  - `Q`'s pin is still inside `q1`'s card (±1px) after `window.scrollTo(0, 400)` (Goals, made tall by the fixture) and after `$('th-body').scrollTop += 100`, and it is hidden once `q1`'s card is scrolled out of `#th-body`'s box;
+  - at 720x800 on Goals with the panel on Inbox, `elementFromPoint` at `G`'s pin's centre is inside `#threads`;
+  - `P` opened by its row stays on `th=inbox` (no rewrite to `open`) and draws no pin;
+  - after `q1` is answered through the API and a redraw passes, no pin is drawn inside `#th-inbox`, and `tlInboxHome(Q)` is `false`.
 - [ ] **Step 2:** Run. Expected: FAIL.
 - [ ] **Step 3: Implement** spec §2.6:
-  - `tlHome` looks in `#th-inbox` for `T_HOME[k] === 'inbox'`;
+  - `tlHome` looks in `#th-inbox #questions` for `T_HOME[k] === 'inbox'`, never in `#answered`;
+  - `tlInPanel(t)` returns `false` first when `tlInboxHome(t)`;
   - `tlOwn` and `tlHitAt` carve out `#th-inbox`;
-  - the page rule `#tl { z-index: <above .threads' merged value> }` applies for pins and the card;
+  - pins and the floating card of a subject inside `#threads` get `in-threads`: `position: fixed`, placed from the viewport rect without `scrollX`/`scrollY`, with the page rule `.pin.in-threads, .tl-card.in-threads { z-index: <above .threads' merged value> }`. Other pins are untouched;
+  - such a pin is hidden when its card's rect is outside `#th-body`'s visible box;
   - the placement call clips the rect: `if (inInbox(el)) r = { ...r, left: panelLeft, right: panelLeft }` where `panelLeft = $('threads').getBoundingClientRect().left`;
   - kit-89's ≤900px hide skips cards where `tlInboxHome(t)`;
-  - `#th-body` scroll re-places pins (add a listener if the layer's isn't capturing);
+  - re-place pins and the card on `#th-body`'s `scroll` (passive listener), on `#threads`' `transitionend`, on a tab change and on `resize`;
   - `subjectHead` returns the page head in force plus `th=inbox` (cold `#overview?th=inbox`) for `tlInboxHome`;
   - the floating-row rule keeps `th=inbox` at every width for `tlInboxHome`;
   - `P` opens with no pin (`tlInboxHome` page subjects draw none);
@@ -203,11 +211,12 @@
 - Produces: `layerField(el)`, which is `!!el?.closest('#tl, #threads') && !inInbox(el)`. It is used by `holding()` and by the draft filters (`!layerField(el)`, replacing kit-89's `!el.closest('#tl, #threads')`).
 
 - [ ] **Step 1: Failing subtest** "every control from the panel": AC5 in full, each control on its own fixture question.
+  - Its controls are, in order: `q1` choice + rule box + Answer; `q2` note Send; `q3` Done; `q4` Post; `q5` Reply; `q6` Can't right now; the defaulted question's Overrule; `L1` with a note, Keep it; `L2` Retire it; the terminal card's option 1.
   - It intercepts `/api/answer`, `/api/knowledge` and the secrets post as `dashboard-owner-action.test.mjs` does (`Fetch.enable` or the server's log), and asserts each request's body: the rule box `rule: true` and the note text.
-  - The typing check: type "half a thought" into `q2`'s `textarea[data-q]`, place the caret at 4, then wait for one threads poll and one 10-second `render()` (await `DATA.generated_at` changing). Assert `document.activeElement` is the same textarea, its value is unchanged and `selectionStart === 4`.
+  - The typing check: type "half a thought" into `q2`'s `textarea[data-q]`, place the caret at 4, then wait until a redraw has arrived and been held (`HELD !== null`, up to 15 s) and one threads poll has landed. Assert `document.activeElement` is the same textarea, its value is unchanged and `selectionStart === 4`. Escape there leaves the panel open. Then blur, wait for `HELD === null`, and assert the redrawn textarea still holds "half a thought".
   - The review: click `[data-open-review]`; the hash is `#review/<id>`; `#review-view`'s width is greater than `#threads`' width; then close it, and the panel is on Inbox.
 - [ ] **Step 2:** Run. Expected: FAIL at least on typing (kit-89's `#threads` exception drops the hold).
-- [ ] **Step 3: Implement** spec §2.7 with `layerField`. Make `#review-view` sit above `.threads` (a page z-index rule) if the merged z-order puts it under.
+- [ ] **Step 3: Implement** spec §2.7 with `layerField`. In kit-89's Escape handler, a focus on a `textarea` or text `input` inside `#th-inbox` returns before closing anything. Make `#review-view` sit above `.threads` (a page z-index rule) if the merged z-order puts it under.
 - [ ] **Step 4:** Run the new test and `test/dashboard-answers.test.mjs`. Expected: PASS.
 - [ ] **Step 5:** Commit `kit-100 T5: the Inbox's fields hold redraws in the panel; reviews open full size`. Write `reviews/task-5.md`.
 
@@ -216,8 +225,8 @@
 **Files:**
 - Modify: `test/dashboard-measure.test.mjs`, `test/dashboard.test.mjs`, `test/next-step.strategy.test.mjs`. If T0's grep lists them, also `test/gateway.test.mjs`, `test/multirepo-views.test.mjs`, `test/ooda-learning.test.mjs`, `test/ooda-lineage.test.mjs`, `test/plain-questions.test.mjs`, `test/fleet-park.test.mjs`, `test/multirepo-landing.test.mjs`, `test/lib/kit.mjs` and `test/lib/chain.mjs`. Navigation-only, if needed: `test/dashboard-answers.test.mjs`, `test/dashboard-owner-action.test.mjs`.
 
-- [ ] **Step 1: The measure entry.** Remove kit-87's `#inbox` page entry. Add `{ hash: '#overview?th=inbox', ready, opts }` on a second project seeded with T2's fixture builder (as kit-88 and kit-89 did, so earlier entries keep their data):
-  - `opts: { inbox: '#no-such-button' }`, plus kit-87's `view` override for Overview if Overview is still unported at merge;
+- [ ] **Step 1: The measure entry.** Remove kit-87's `#inbox` page entry. Add `{ hash: '#settings?th=inbox', ready, opts }` on a second project seeded with `inboxFixture` from `test/lib/kit.mjs` (as kit-88 and kit-89 did, so earlier entries keep their data). Settings is on the shell from kit-87, so `page-top` is judged:
+  - `opts: { inbox: '#no-such-button' }`, with no `view` override;
   - `ready` is true once `#th-inbox [data-qcard]` exists. It sets `#answered-wrap.open = true`, then sets `const b = $('th-body'); b.style.width = getComputedStyle(b).width; b.style.overflowY = 'visible'`, so the measured width includes the scrollbar's loss (spec AC6);
   - a fixture string, a 120-character unbroken link, in one choice's detail (Review Focus 5).
   
@@ -236,8 +245,9 @@
 - Test: `test/dashboard-inbox-panel.test.mjs`.
 
 - [ ] **Step 1: Failing subtest** "/view/". At `/view/artifact/<slug>`:
-  - click `#tt-peek` → the panel opens on Inbox;
-  - `#th-pane` holds one link with text "Answer questions on the dashboard." and `href` `/#overview?th=inbox`;
+  - click `#tt-peek` → the panel opens on Threads (ruling `m-20261115-230458641-supervisor`);
+  - `threadsTabs.list()` ids are the four;
+  - choosing the Inbox tab → `#th-pane` holds one link with text "Answer questions on the dashboard." and `href` `/#overview?th=inbox`;
   - the tab's count equals hello's `inbox`;
   - `/api/data` is never requested.
 - [ ] **Step 2:** Run. Expected: FAIL.
@@ -245,11 +255,11 @@
   - the Inbox tab's `render(el)` writes `<p><a class="linkish" href="/#overview?th=inbox">Answer questions on the dashboard.</a></p>`;
   - `count()` returns hello's `inbox` (the value `thDraw()` already reads), or `null`;
   - `#th-inbox` stays hidden there (no data);
-  - the `/view/` button opens on `TH.th = 'inbox'`.
+  - the `/view/` button keeps kit-89's `TH.th = 'open'`; choosing the Inbox tab sets `TH.th = 'inbox'`.
 - [ ] **Step 4:** Run. Expected: PASS.
 - [ ] **Step 5:** Commit `kit-100 T7: the /view/ tab's Inbox points to the dashboard`. Write `reviews/task-7.md`.
 
 ### Verification and finish
 
-- [ ] **`verification.md`:** one row per done-when, with the exact command and its result at a named commit, CI run links included. Then the inventory checklist (spec AC7), each item with the subtest or the screenshot that shows it. Screenshots go in `project/tickets/kit-100-inbox-in-panel/shots/`: light and dark, 1440 and 390, the panel on Inbox.
+- [ ] **`verification.md`:** one row per done-when, with the exact command and its result at a named commit, CI run links included. Then the inventory checklist (spec AC7), each item with the subtest or the screenshot that shows it. Screenshots go in `docs/devteam-dev/tickets/kit-100-inbox-in-panel/shots/`: light and dark, 1440 and 390, the panel on Inbox.
 - [ ] **Finish:** follow worker.md §8: merge `origin/main`, push, the PR, `reviews/final-1.md` from a fresh reviewer, `check-ticket`, then `merge-request`.
