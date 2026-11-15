@@ -182,3 +182,7 @@ Every entry carries `history.state = { page, depth, openedHere }`:
 `measureAt(page, url, opts)` loads a URL at 1440×900, 720×800 and 390×844 and measures each. The options name the page's own selectors: `view` (default `.page`), `bar` (`.pagebar`), `title` (`.pagebar h1`), `inbox` (`.pagebar .tt`), `prose`, `ignore` (left out of every check: overlays, code, hidden elements, and `.no-shell` regions, which aren't on the shell yet).
 
 The fixture `test/fixtures/dashboard-shell.html` is a page built only from the two blocks; every check passes on it at all three sizes, and each fails on a broken copy (`test/dashboard-shell.test.mjs`). The page lists are `test/dashboard-measure.test.mjs` (added to only by the `index.html` tickets) and `test/hub-measure.test.mjs` (only by the hub's): each page ticket adds its pages, peeks and threads.
+
+## History
+
+- **@1** (`kit-83`): the two blocks, the router's table (`SHELL_ROUTES`), the measure check and its fixture. The block took the name `goalSteps` for the shared step bar, so the dashboard's own step bar, `goalSteps(g, s, R)`, became `goalStepper(g, s, R)`, with the same output; the goal-page ticket (`kit-90`) moves its callers to the block's `goalSteps`. The hub's `STATES` became the block's `PULSE_STATES`.

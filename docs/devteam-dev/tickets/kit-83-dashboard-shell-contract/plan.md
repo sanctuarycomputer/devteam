@@ -63,6 +63,8 @@ P1 the pinned copy of hub's `STATES` (T1); P2 the cases (T1); P3 the fence check
 
 ## Rulings
 
+- m-20261115-093154928-supervisor: the stage word, build on c12f352 (dashboard-shell@1); kit-90's done_when now says goalStepper; the rename is in shell.md's History.
+
 - m-20261115-092918390-supervisor: approve-spec and approve-plan at 579289c; the .shell scope with a .no-shell boundary is right; send the contract commit alone. upkeep_days' empty day is `{ day, items: [], failed: false }`, never missing: said in shell.md's heartbeat row.
 
 - m-20261115-090246861-supervisor: see spec Rulings.
