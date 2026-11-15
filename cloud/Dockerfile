@@ -18,7 +18,8 @@
 #   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
 #   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
-#   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
+#   accepting only v* tags, with no approval step: every release deploys by itself, the owner's
+#   choice; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
 #   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
 #   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
