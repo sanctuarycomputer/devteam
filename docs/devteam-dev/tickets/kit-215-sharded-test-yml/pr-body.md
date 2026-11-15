@@ -18,8 +18,8 @@ Branch protection on main requires no status checks, so the renamed jobs break n
 ## How to verify
 
 - `actionlint .github/workflows/test.yml` exits 0.
-- `sh docs/devteam-dev/tickets/kit-215-sharded-test-yml/coverage-step.sh`, in devteam-dev, runs the workflow's own coverage step on lists built the way the jobs build them. It passes on the real lists and fails on a duplicated file, a missing file and a missing major.
-- The run at the head: 17 jobs, all green. A deliberately failing commit on this branch, later reverted, showed `tests` red. The records are in devteam-dev's `docs/devteam-dev/tickets/kit-215-sharded-test-yml/verification.md`.
+- `sh docs/devteam-dev/tickets/kit-215-sharded-test-yml/coverage-step.sh` runs the workflow's own coverage step on lists built the way the jobs build them. It passes on the real lists and fails on a duplicated file, a missing file and a missing major.
+- The run at the head: 17 jobs, all green, the whole run in 4.4 minutes, and no job over 4.3. A deliberately failing commit on this branch (64d1f21, reverted by 8f3a318) showed `kit (18, chain)` and `tests` red, and both merge gates refusing it. Every done-when, with its command and result, is in `docs/devteam-dev/tickets/kit-215-sharded-test-yml/verification.md`.
 
 ## One-way doors
 
