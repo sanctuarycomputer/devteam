@@ -145,15 +145,15 @@ function tmuxGate(F) {
   fs.mkdirSync(dir);
   const real = spawnSync('sh', ['-c', 'command -v tmux'], { env: F.env(), encoding: 'utf8' }).stdout.trim();
   assert.ok(real, 'a tmux to pass the calls to');
-  // waits under 8 s: the dashboard gives a tmux call 10 s; a gate that gives up says so in gave-up
+  // waits 6 to 7 s by the clock at most: the dashboard gives a tmux call 10 s; a gate that gives up says so in gave-up
   fs.writeFileSync(path.join(dir, 'tmux'), `#!/bin/sh
 keys=0; lit=0
 for a in "$@"; do [ "$a" = send-keys ] && keys=1; [ "$a" = -l ] && lit=1; done
 if [ $keys = 1 ] && [ $lit = 1 ] && rm "$GATE/armed" 2>/dev/null; then
   : > "$GATE/waiting"
-  i=0
+  end=$(($(date +%s) + 7))
   while [ ! -e "$GATE/go" ]; do
-    i=$((i + 1)); if [ $i -gt 160 ]; then : > "$GATE/gave-up"; break; fi
+    if [ "$(date +%s)" -ge $end ]; then : > "$GATE/gave-up"; break; fi
     sleep 0.05
   done
 fi
@@ -170,7 +170,7 @@ test('a question that goes as the key is sent: the digit in the input box is not
   later(() => F.done());
   const pane = menuPane(F);
   const gate = tmuxGate(F);
-  later(() => gate.go()); // never left holding a call
+  later(() => gate.go()); // let go after the dashboard's stop (which ends any call held) for good measure
   const D = await dash(later, F, pane, gate.env);
   const q = await D.question();
   F.run(F.old, ['send', 'supervisor', 'held meanwhile', '--owner'], { DEVTEAM_SUPERVISOR: pane.target });
