@@ -17,6 +17,6 @@ The revision adds no Critical or Important problem. One Minor wording leftover i
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F2-1 | Minor | Plan consistent with itself | "On main …" paragraph after Task 1 step 6 | The paragraph still says that on main "the wait times out". Since the F4 fix, the wait stops early and fails with the pane's `Argument list too long` text, so the paragraph should say that. It does not block building the plan. | |
+| F2-1 | Minor | Plan consistent with itself | "On main …" paragraph after Task 1 step 6 | The paragraph still says that on main "the wait times out". Since the F4 fix, the wait stops early and fails with the pane's `Argument list too long` text, so the paragraph should say that. It does not block building the plan. | wont-fix the plan stays as approved; the red run on main recorded in verification.md shows the early failure with the pane text |
 
 Verdict: APPROVE d54762c9df84b164d8449149d8b2f49eb1b8b166
