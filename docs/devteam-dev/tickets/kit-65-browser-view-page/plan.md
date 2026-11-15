@@ -97,6 +97,13 @@
 
 Verification (`verification.md`, a row per done-when at a named commit), merge `origin/main`, push, PR, `check-ticket`, two final reviews from other sessions (`review-request` to the supervisor), merge request.
 
+## Spec review 2's Minor points, settled here
+
+- **M1 (`bye` wording):** read as Provided item 6 and check 4 say it: on `bye` the page closes its socket at once; Show it again only opens a new one.
+- **M2 (small frames):** the canvas scales **up** as well as down: CSS `width: 100%` of the screen area, `height: auto`, with `max-height` the viewport less the bars (then `width: auto`), aspect kept. T2's test sets the window to 700×700 (`Emulation.setDeviceMetricsOverride`) and asserts the canvas's on-screen width isn't 320 before it clicks, so a page that never scales its coordinates fails.
+- **M3 (the down-socket race):** in check 5's first step the fake server refuses upgrades (answers 503) until the test has typed and pasted, and the test waits for the chip to read "Reconnecting…" before typing; then it lets upgrades through.
+- **M4 (modifiers on drags):** every `mouse` message (`down`, `move`, `up`, `click`) and every `wheel` carries `mods` when any is held. T2 adds a Shift+drag test: `down`, `move`, `up` each with `mods: 8`.
+
 ## Rulings
 
 None yet.
