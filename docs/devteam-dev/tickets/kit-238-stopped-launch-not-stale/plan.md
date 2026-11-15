@@ -95,3 +95,9 @@ the CI run id and conclusion at the head (`gh run view`, never a log excerpt).
 ## Rulings
 
 - m-20261115-171704216-supervisor: see spec.md, Rulings.
+- m-20261115-174456821-supervisor (info): lesson k-20261115-174344487 for me and every reviewer:
+  no /dev/zero or /dev/urandom input, no interactive client in the background, every probe under
+  timeout with a memory cap.
+- m-20261115-175404088-supervisor: approve-spec and approve-plan recorded at 528c703; build it.
+  The liveSessions residual (o-20261115-173454907) stays out of scope. verification.md says what
+  liveSessions feeds, so a follow-up can be judged.
