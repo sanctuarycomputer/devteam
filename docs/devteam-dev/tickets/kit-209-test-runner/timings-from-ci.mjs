@@ -5,8 +5,9 @@
 // top-level test of that name (a string literal, or a template whose ${…} parts match anything).
 // A file's weight is the sum of its top-level tests' duration_ms (tests in a file run one after
 // another), in seconds, the largest across the logs given. On stderr: names it can't match, names
-// two files declare (ambiguous: given to neither), and files it has no time for. Node 24's log uses
-// the spec reporter, with no duration_ms: its jobs add nothing.
+// two files declare (ambiguous: given to neither), and files it has no time for; any of them makes
+// it exit 1, so a refresh redirected into test/timings.json can't pass unread. Node 24's log uses
+// the spec reporter, whose per-test times aren't in the duration_ms form read here: its jobs add nothing.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -49,5 +50,6 @@ for (const n of unmatched) console.error(`unmatched: ${n}`);
 for (const [n, o] of ambiguous) console.error(`ambiguous: ${n} (${o.join(', ')})`);
 const missing = files.filter((f) => !(f in best));
 for (const f of missing) console.error(`no timing: ${f}`);
-const out = { run, source: `sum of each file's top-level test durations (duration_ms), largest across the Node 18, 20 and 22 jobs (24's log has none), from test.yml run ${run} on main; a file not listed weighs the median`, files: Object.fromEntries(files.filter((f) => f in best).map((f) => [f, Math.round(best[f] * 10) / 10])) };
+const out = { run, source: `sum of each file's top-level test durations (duration_ms), largest across the Node 18, 20 and 22 jobs (24's spec-reporter log has no duration_ms lines), from test.yml run ${run} on main; a file not listed weighs the median`, files: Object.fromEntries(files.filter((f) => f in best).map((f) => [f, Math.round(best[f] * 10) / 10])) };
 process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+if (unmatched.size || ambiguous.size || missing.length) process.exitCode = 1;
