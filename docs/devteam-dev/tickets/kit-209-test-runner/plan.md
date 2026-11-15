@@ -58,7 +58,7 @@
 
 - [ ] **Step 1: write the failing tests** in `test/run.test.mjs`:
   - `ports.mjs keeps its locks in DEVTEAM_TEST_SHARED_TMP`: make fresh dirs `S` and `T`. Spawn `node --input-type=module -e "<import LOCK_DIR and PORTS from the ports.mjs file URL; print { LOCK_DIR, PORTS, pid, lock: the text of LOCK_DIR/<(PORTS-20000)/100>.lock }>"` with `DEVTEAM_TEST_SHARED_TMP=S` and `TMPDIR=T`. Assert `LOCK_DIR === S/devteam-kit-ports`, that the lock held the child's pid, and that `T/devteam-kit-ports` doesn't exist.
-  - `cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP` (skipped unless `module.enableCompileCache` exists): spawn a node with `DEVTEAM_TEST_SHARED_TMP=S` that imports `lib/cli.mjs` and calls `runNode(<a one-line script in S>, [], { env: { ...process.env, TMPDIR: T2 } })`. Assert `S/devteam-kit-compile-cache` exists and `T2/devteam-kit-compile-cache` doesn't.
+  - `cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP` (skipped unless `module.enableCompileCache` exists): spawn a node with `DEVTEAM_TEST_SHARED_TMP=S` and `DEVTEAM_TEST_COLD` removed from its env (it would bypass the warm runner) that imports `lib/cli.mjs` and calls `runNode(<a one-line script in S>, [], { env: { ...process.env, TMPDIR: T2 } })`. Assert `S/devteam-kit-compile-cache` exists and `T2/devteam-kit-compile-cache` doesn't.
   - Each spawn is `spawnSync` with `timeout: 30000`.
 - [ ] **Step 2:** run them. Both fail: there is no `LOCK_DIR`, and the cache lands under `T2`.
 - [ ] **Step 3:** make the two changes.
@@ -88,7 +88,7 @@
 - [ ] **Step 1: write the failing tests**:
   - `groups by rule`: `groupOf` over the real sources puts `kit.test.mjs` in chain, `bounds.test.mjs` in alone, `dashboard.test.mjs` in chrome and `search.test.mjs` in rest. A source with `import('./lib/chrome.mjs')` is chrome; one naming it only in a comment (`// see ./lib/chrome.mjs`) is rest. `planRun({ groups: ['chain', 'alone'] })` over all files gives exactly `test/bounds.test.mjs` and `test/kit.test.mjs`, bounds first.
   - `shards cover each file once and balance`: weights `{a:10, b:9, c:5, d:4, e:1}` into 2 shards give `[[a, d, e], [b, c]]`. For n = 1..4 over the real file list and the real `test/timings.json` (`{}` until T5), the shards' union equals the list, with no duplicates. An unlisted file gets the median of the listed weights.
-  - `parseArgs`: `--shard 0/2`, `--shard 3/2`, `--shard 1/5`, `--group nope`, `--concurrency 0`, `--bogus` and a missing file each throw `UsageError`. Concurrency is 2 by default, 3 with `DEVTEAM_TEST_CONCURRENCY=3`, and 4 with `--concurrency 4` over that. `./test/search.test.mjs`, its absolute path and its path through a symlink to the root all give `test/search.test.mjs`, once (Review Focus 1, 2).
+  - `parseArgs`: `--shard 0/2`, `--shard 3/2`, `--shard 1/5`, `--group nope`, `--concurrency 0`, `--bogus` and a missing file each throw `UsageError`. `--group chain,alone` gives `groups: ['chain', 'alone']`. Concurrency is 2 by default, 3 with `DEVTEAM_TEST_CONCURRENCY=3`, and 4 with `--concurrency 4` over that. `./test/search.test.mjs`, its absolute path and its path through a symlink to the root all give `test/search.test.mjs`, once (Review Focus 1, 2).
   - `timeouts and rows`: `timeoutOf` gives 600 for chain and for dashboard, 300 for search, and 7 for any file with an override of 7. `rowFor` with seconds 251 and timeout 300 has `near timeout`; with 249 it doesn't; with `repeat: 3, run: 2` it has `(run 2)`.
   - `lastFinished`: over a TAP sample with nested subtests, a `# SKIP` line and a wrapper line naming the file, it gives the description of the last finished line in output order. With no `ok` lines it gives null.
   - `childArgs` is exactly `['--test', '--test-reporter=tap', f]`.
@@ -111,18 +111,18 @@
   - `sharedDir(env) -> string`: `env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir()`.
   - `scratchDir() -> string`: `mkdtempSync('/tmp/dtr-')` when `/tmp` is a writable directory, else `mkdtempSync(path.join(os.tmpdir(), 'dtr-'))`.
   - `realTmux(PATH) -> string`: the first `tmux` on PATH that is an executable file without the marker, or `''`.
-  - `ensureShim(shared, PATH) -> dir`. The dir is `<shared>/devteam-test-tmux-shim-run-<uid>-<sha1(text), 12 hex>`, and the shim is `tmux` in it, with the spec's text and the real tmux path (or `tmux-not-installed`). It is written to a temp name in the dir with mode 0755, then renamed. An existing dir and shim are reused only when both are owned by `process.getuid()`, neither is writable by group or others, and the shim holds the marker. Otherwise the runner exits 2 with `unsafe shim at <path>: not this user's, or writable by others` (it never writes elsewhere, so it never leaks).
+  - `ensureShim(shared, PATH) -> dir`. The dir is `<shared>/devteam-test-tmux-shim-run-<uid>-<sha1(text), 12 hex>`, and the shim is `tmux` in it, with the spec's text and the real tmux path (or `tmux-not-installed`). The dir is made with `mkdirSync(dir, { mode: 0o755 })` then `chmodSync(dir, 0o755)` (a umask of 002 would leave it group-writable), and the shim is written to a temp name in it, `chmodSync(tmp, 0o755)`, then renamed. An existing dir and shim are reused only when both are owned by `process.getuid()`, neither is writable by group or others, and the shim holds the marker. Otherwise the runner exits 2 with `unsafe shim at <path>: not this user's, or writable by others` (it never writes elsewhere, so it never leaks).
   - `socketsUnder(dir) -> string[]`: a hand walk. `readdirSync(d, { withFileTypes: true })` descends only into `isDirectory()` entries (Dirent's type is never a followed symlink) and collects `isSocket()` entries whose `realpathSync` starts with `realpathSync(dir) + '/'`.
   - `drain(stream, ms) -> Promise<void>`: it resolves on the stream's `end` or `close`, or after `ms`, whichever comes first.
-  - `cleanupAfter(entry)` (steps 2 and 3): for each socket, `spawnSync(realTmux, ['-S', s, 'kill-server'], { timeout: 5000 })`, then `rmSync(entry.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })`.
+  - `cleanupAfter(entry)` (steps 2 and 3): when `realTmux` is `''`, step 2 is skipped; otherwise for each socket, `spawnSync(realTmux, ['-S', s, 'kill-server'], { timeout: 5000 })`, then `rmSync(entry.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })`.
   - A running file is `{ file, run, child, dir, out: Buffer[], start, exited: false, timer }`.
 - Fixtures read `DTR_FIXTURE_OUT` (a folder the test makes) for their outputs; the runner passes its env through.
-- In `run.test.mjs`: `runRunner(args, { env, cwd, deadline = 60000, detached = true }) -> Promise<{ code, signal, stdout, stderr, child }>` spawns `process.execPath test/run.mjs …`. If the deadline passes, it kills the runner's group (`process.kill(-child.pid, 'SIGKILL')`, only while `child.exitCode === null && child.signalCode === null`) and rejects. `env` defaults to `process.env` with `DTR_FIXTURE_OUT` set.
+- In `run.test.mjs`: `runRunner(args, { env, cwd, deadline = 60000, detached = true, umask })` -> Promise<{ code, signal, stdout, stderr, child }>` spawns `process.execPath test/run.mjs …`. If the deadline passes, it kills the runner's group (`process.kill(-child.pid, 'SIGKILL')`, only while `child.exitCode === null && child.signalCode === null`) and rejects. `env` defaults to `process.env` with `DTR_FIXTURE_OUT` set.
 
 - [ ] **Step 1: write the failing tests:**
   - `a passing file`: `run.mjs test/search.test.mjs` exits 0. It prints its TAP after a `# test/search.test.mjs` header, then a summary with `concurrency 2` and the row `test/search.test.mjs  <s>  ok` (done-when 1).
   - `exit codes`: `fail.mjs`, `throws.mjs` and `exit-nonzero.mjs` (every test passes, then `process.exitCode = 3`) each exit 1, with `failed: test/fixtures/run/<f>.mjs (…)`. `pass.mjs` alone exits 0, and `pass.mjs fail.mjs` together exits 1 (done-when 2).
-  - `per-file temp and the shim`: `env.mjs` imports `lib/kit.mjs`, then `put`s its `TMPDIR`, `DEVTEAM_TEST_SHARED_TMP` and `PATH`. Run with a fresh `S` as `DEVTEAM_TEST_SHARED_TMP`: `TMPDIR` starts with `/tmp/dtr-` (when `/tmp` is writable) and is gone afterwards. The shared value is `S`. PATH's first entry is kit's shim (under `TMPDIR`), and its second is `S/devteam-test-tmux-shim-run-<uid>-…`, whose `tmux` holds the marker. A second run reuses that dir (done-whens 3, 4).
+  - `per-file temp and the shim`: `env.mjs` imports `lib/kit.mjs`, then `put`s its `TMPDIR`, `DEVTEAM_TEST_SHARED_TMP` and `PATH`. Run with a fresh `S` as `DEVTEAM_TEST_SHARED_TMP`: `TMPDIR` starts with `/tmp/dtr-` (when `/tmp` is writable) and is gone afterwards. The shared value is `S`. PATH's first entry is kit's shim (under `TMPDIR`), and its second is `S/devteam-test-tmux-shim-run-<uid>-…`, whose `tmux` holds the marker. A second run reuses that dir, and so does a third started under `umask 002` (`runRunner`'s `umask` option runs it through `sh -c 'umask 002; exec "$0" "$@"'`) (done-whens 3, 4).
   - `the default shared dir`: with `DEVTEAM_TEST_SHARED_TMP` removed from the env and `TMPDIR=X` (a fresh dir), `env.mjs` sees `X` as the shared dir.
   - `two files at once claim distinct port blocks`: `ports.mjs`, and `ports-2.mjs` (one line, `import './ports.mjs'`), run at `--concurrency 2` with `S` shared. Each `put`s `{ LOCK_DIR, PORTS, pid }` under its own pid and waits until `S/devteam-kit-ports` holds two locks (up to 10 s). Both report `LOCK_DIR = S/devteam-kit-ports` and distinct `PORTS`, and neither scratch folder has a `devteam-kit-ports` (done-when 3).
   - `a file that ends on its own`: `tmux-ends.mjs` (skipped without tmux) starts `tmux new-session -d -s e 'sleep 60'` with `TMUX_TMPDIR` set to its own `mkdtemp(os.tmpdir()/dt-tmux-)`, which kit's exit hook doesn't know. It `put`s the server pid, the socket and its `os.tmpdir()`, and exits 0. Afterwards the pid is dead (polled, below) and the folder is gone (done-when 6, part).
@@ -140,7 +140,7 @@
   - `clearTimeout(timer)`;
   - awaits `drain` of both pipes (2000 ms), then `destroy()`s them;
   - runs `cleanupAfter`;
-  - records the seconds and the result (`ok`, `failed (exit N)`, `failed (signal SIGx)`);
+  - records the seconds and the result (`ok`, `failed (exit N)`, `failed (signal SIGx)`), unless the watchdog or an interrupt already set it (`entry.result`, kept: a killed file stays `timed out`, never `failed (signal SIGKILL)`);
   - prints the header and the output.
 
   Then it prints the summary (`summary: <n> files, concurrency <c>`, or `no files`), each `rowFor`, the `failed:` lines and the `--timings` file, and sets the exit code.
@@ -166,19 +166,21 @@
     loop (at most 2 s after the first round with no new pid):
       snap = snapshot()
       fresh = pids in snap whose ppid is in stopped and that aren't in stopped yet
-      stop each fresh pid, append it to stopped; if fresh was non-empty, continue
-      if every stopped pid present in snap has a stat starting with 'T': break
+      stop each fresh pid, append it to stopped, remember its ppid; if fresh was non-empty, continue
+      if every stopped pid present in snap has a stat starting with 'T' or 'Z': break
       sleep(20)
     final = the last snap
-    killed = reversed(stopped) filtered to pids present in final with a stat starting with 'T'; SIGKILL each in that order
-    unstopped = stopped pids present in final without a 'T' stat (reported in the runner's output, never killed)
+    killed = reversed(stopped) filtered to pids present in final with a stat starting with 'T'
+             and the same ppid as when stopped (the root: any); SIGKILL each in that order
+    unstopped = stopped pids present in final with a stat starting with neither 'T' nor 'Z'
+                (reported in the runner's output, never killed); a zombie has already exited
     ```
 - The watchdog: `entry.timer = setTimeout(…, timeout × 1000)` when a file starts. When it fires: `cleanup`, the result `timed out`, and the `timed out: …` line from `lastFinished(out, file)`.
 - Signals: handlers for `SIGINT`, `SIGTERM` and `SIGHUP`. Each stops scheduling, runs `cleanup` on every running file, prints `interrupted`, and calls `process.exit(128 + os.constants.signals[sig])`.
 - Test teardown (P2-2): `pids.json` records, for each pid, the `args` that `ps -o args= -p <pid>` showed when it started. A `t.after` hook kills a pid only if it is alive and `ps -o args=` still shows those exact args. It kills a socket's server with `<realTmux> -S <socket> kill-server` only when the socket is under `/tmp/dtr-` or the test's `S`. It kills the runner's group only as `runRunner` does.
 
 - [ ] **Step 1: write the failing tests:**
-  - `stopTree with scripted snapshots`: the pids are 9,000,001 and up, above Linux's limit of 4,194,304, and the signal stub records calls and never calls `process.kill`. The root R has child A; B, A's child, first appears in snapshot 2; A shows `S` in snapshot 2 and `Tl` in snapshot 3. The log is SIGSTOP R, A, B, all before any SIGKILL, then SIGKILL B, A, R. A pid whose parent was never stopped is never signalled. A stopped pid missing from the final snapshot, or one showing `Ss` there, is never killed and is listed in `unstopped` when present. `stopTree(1, { snapshot })` without `signal` throws.
+  - `stopTree with scripted snapshots`: the pids are 9,000,001 and up, above Linux's limit of 4,194,304, and the signal stub records calls and never calls `process.kill`. The root R has child A; B, A's child, first appears in snapshot 2; A shows `S` in snapshot 2 and `Tl` in snapshot 3. The log is SIGSTOP R, A, B, all before any SIGKILL, then SIGKILL B, A, R. A pid whose parent was never stopped is never signalled. A stopped pid missing from the final snapshot, one showing `Ss` there (listed in `unstopped`), one showing `Z` (not listed, and the walk doesn't spin its 2 s on it) and one whose ppid changed since it was stopped are never killed. `stopTree(1, { snapshot })` without `signal` throws.
   - `a hung file is killed with its tree, and a survivor is refused tmux`: `hang.mjs` runs a passing test, `first passes`. Its second test:
     - imports `lib/kit.mjs`;
     - spawns `node -e "setTimeout(()=>{},60000)//dtr-fixture"` with `detached: true`;
@@ -187,8 +189,8 @@
     - `put`s `pids.json`: `{ file, detached, server, socket, scratch: os.tmpdir() }`, each pid with its args;
     - waits, exiting by itself after 60 s.
 
-    The survivor waits for its `TMPDIR` to go (polling, giving up after 30 s), runs `tmux -V` with its env, `put`s `survivor.json` (`{ status, stderr }`) and exits. Run with `--file-timeout 5` and `DTR_SURVIVOR=1`. The run exits 1 well within its deadline. It prints `timed out: test/fixtures/run/hang.mjs after 5 s (last test finished: first passes)`. The file, detached and server pids are dead (`deadSoon`). `tmux -S <socket> has-session` fails. The scratch folder is gone. `survivor.json` appears within 10 s with status 1 and `tmux refused` in its stderr (done-whens 4, 5).
-  - `SIGINT to the runner's group` and `SIGTERM to the runner`: `runRunner` starts the runner `detached: true`. Once `pids.json` exists, the test sends `process.kill(-runner.pid, 'SIGINT')` (in the other test, `process.kill(runner.pid, 'SIGTERM')`). The run prints `interrupted` and exits 130 (143). The file, detached and server pids are dead, and the folder is gone (done-when 6).
+    The survivor waits for its `TMPDIR` to go (polling, giving up after 30 s), runs `tmux -V` with its env, `put`s `survivor.json` (`{ status, stderr }`) and exits. Run with `--file-timeout 5` and `DTR_SURVIVOR=1`. The run exits 1 well within its deadline. It prints `timed out: test/fixtures/run/hang.mjs after 5 s (last test finished: first passes)`, and the summary's row for it says `timed out`. The file, detached and server pids are dead (`deadSoon`). `tmux -S <socket> has-session` fails. The scratch folder is gone. `survivor.json` appears within 10 s with status 1 and `tmux refused` in its stderr (done-whens 4, 5).
+  - `SIGINT to the runner's group` and `SIGTERM to the runner`: `runRunner` starts the runner `detached: true`. Once `pids.json` exists, and only while the runner hasn't exited (else the test fails), the test sends `process.kill(-runner.pid, 'SIGINT')` (in the other test, `process.kill(runner.pid, 'SIGTERM')`). The run prints `interrupted` and exits 130 (143). The file, detached and server pids are dead, and the folder is gone (done-when 6).
 - [ ] **Step 2:** they fail. `runRunner`'s deadline and the teardown clean up the fixtures while there is no watchdog yet.
 - [ ] **Step 3:** implement.
 - [ ] **Step 4:** they pass on Node 18, 20, 22 and 24, and `run.test.mjs` takes under 45 s here on each (time it, note it).
@@ -202,7 +204,7 @@
 
 - [ ] **Step 1:** find the newest green `test.yml` push run on main that has every `test/*.test.mjs` at the merge base (`gh run list -R sanctuarycomputer/devteam -w test.yml -b main -e push -s success`), and download every job's log to the scratchpad (`gh run view --job <id> --log`).
 - [ ] **Step 2:** the script also lists each name declared at top level in two files as `ambiguous: <name> (<files>)`, and assigns it to neither.
-- [ ] **Step 3:** run `node …/timings-from-ci.mjs <run> . <logs…> > test/timings.json`. stderr must list no unmatched name, no ambiguous name (or each one gets a verification row with its time) and no file without a time.
+- [ ] **Step 3:** make a scratch checkout of the merge base (`git worktree add --detach <scratchpad>/base origin/main`, removed after), run `node …/timings-from-ci.mjs <run> <scratchpad>/base <logs…> > test/timings.json`. stderr must list no unmatched name, no ambiguous name (or each one gets a verification row with its time) and no file without a time.
 - [ ] **Step 4:** T2's shard test now runs over the real weights. `node test/run.mjs --list --shard i/2` for i = 1 and 2 shows the split; note each shard's total weight in verification.md.
 - [ ] **Step 5:** commit, then the review `reviews/task-5.md`.
 
@@ -221,4 +223,6 @@ Each binds the task named.
 - **A5 (P1-9, P2-6).** The survivor runs inside the timed-out hang run. The time budget is 45 s (the spec said 40 s), and the time on each major is recorded from CI.
 - **A6 (P1-10, P2-6; T3).** The shim's dir name carries the uid, `devteam-test-tmux-shim-run-<uid>-<hash>`. The runner reuses an existing shim only when it is this user's and not writable by others, and otherwise refuses with exit 2.
 - **A7 (P1-1, P2-2; T3, T4).** Every runner spawn in the tests has a 60 s deadline. Teardown kills a pid only when its args still match the fixture's, and the runner's group only while the runner hasn't exited. Fixtures end by themselves within 60 s.
+- **A9 (P3-1; T5).** "Every `test/*.test.mjs` at main" is read at the merge base: `test/timings.json` lists every file there. `test/run.test.mjs`, which this PR adds, gets the median weight until kit-217 refreshes the file from a run on main that has it (the design: "a file not listed gets the median weight").
+- **A10 (P3-2, P3-3, P3-4, P3-5, P3-6; T3, T4).** The shim's dir and file get explicit modes. A watchdog's `timed out` is never overwritten. Step 2 is skipped without tmux. A zombie counts as stopped for the loop, but is never killed or reported. The final kill also needs the ppid recorded at stop.
 - **A8 (P1-2).** That `lib/kit.mjs` is unchanged is a verification row, never a test.
