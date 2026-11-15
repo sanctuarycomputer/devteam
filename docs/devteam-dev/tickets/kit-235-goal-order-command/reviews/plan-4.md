@@ -7,6 +7,6 @@ Read the plan diff since 01f8e46 against plan-3.md and its dispositions and the 
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F4-1 | Minor | spec-4 F4-1 | Task 2 implement ("`ask` appends the order in words to the context") | Say that the order text is joined after `askPlainChecks`, or that the checks see only the supervisor's own `--context`. Otherwise every order question warns about the kit ids the kit wrote itself. A test asserting that ask's stderr has no `names a kit id` warning would pin it. | |
+| F4-1 | Minor | spec-4 F4-1 | Task 2 implement ("`ask` appends the order in words to the context") | Say that the order text is joined after `askPlainChecks`, or that the checks see only the supervisor's own `--context`. Otherwise every order question warns about the kit ids the kit wrote itself. A test asserting that ask's stderr has no `names a kit id` warning would pin it. | fixed in build: the order text is added after askPlainChecks, so only the supervisor's own --context is checked; Task 2's test asserts no kit-id warning |
 
 Verdict: APPROVE 09db04fe16f8b6205eb1b7c840619e2c0c682677
