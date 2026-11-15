@@ -875,3 +875,75 @@ test('status names the hub\'s kit, or says it is no hub, or down', async () => {
     if (open) srv.close();
   }
 });
+
+// ===== box-pins: the box image's tool pins in cloud/Dockerfile =====
+// verify, check and bump run a copy of the kit in a repo that is the kit's own (so they run as KIT_VIEWS
+// do, on a fork's CI too), against a copy of the Dockerfile whose pins are set to the values below: a
+// real bump or hold in cloud/Dockerfile never changes what these tests expect.
+const FIXED = { CLAUDE_CODE: '2.1.307', CLAUDE_SWAP: '1.0.0', GH: '2.104.0', TTYD: '1.7.7', MISE: 'v2026.10.17', UV: '0.13.7' };
+const FIXED_RELEASE = 'v0.52.0';
+const fixedSum = (arg) => crypto.createHash('sha256').update(arg).digest('hex');
+const pinsRepo = path.join(tmp, 'pins-kit');
+fs.mkdirSync(pinsRepo);
+execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: pinsRepo });
+execFileSync('git', ['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git'], { cwd: pinsRepo });
+fs.cpSync(kit, path.join(pinsRepo, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+let pinsCopies = 0;
+function pinsCopy(edit = (t) => t) {
+  let t = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8')
+    .replace(/^ARG ([A-Z_]+?)_VERSION=.*$/gm, (l, p) => (p in FIXED ? `ARG ${p}_VERSION=${FIXED[p]}` : l))
+    .replace(/^ARG ([A-Z_]+_SHA256_(?:X86_64|AARCH64))=.*$/gm, (l, a) => `ARG ${a}=${fixedSum(a)}`)
+    .replace(/^ARG DEVTEAM_RELEASE=.*$/m, `ARG DEVTEAM_RELEASE=${FIXED_RELEASE}`)
+    .split('\n').filter((l) => !/^\s*#\s*hold\b/i.test(l)).join('\n');
+  t = edit(t);
+  const f = path.join(tmp, 'pins', `Dockerfile.${++pinsCopies}`);
+  write(f, t);
+  return f;
+}
+const PINS_CLEARED = ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS', 'DEVTEAM_PINS_NPM', 'DEVTEAM_PINS_PYPI', 'DEVTEAM_PINS_GITHUB', 'DEVTEAM_BOX_BIN', 'GH_TOKEN', 'GITHUB_TOKEN', 'UV_TOOL_DIR'];
+const pinsEnv = (extra = {}) => { const e = { ...baseEnv }; for (const k of PINS_CLEARED) delete e[k]; return { ...e, ...extra }; };
+const pinsKit = path.join(pinsRepo, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+const pins = (args, env = {}) => spawnSync(process.execPath, [pinsKit, 'box-pins', ...args], { cwd: pinsRepo, encoding: 'utf8', env: pinsEnv(env) });
+const pinsAsync = (args, env = {}) => new Promise((resolve) => execFile(process.execPath, [pinsKit, 'box-pins', ...args], { cwd: pinsRepo, encoding: 'utf8', env: pinsEnv(env) }, (err, stdout, stderr) => resolve({ status: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr })));
+
+test('box-pins verify: ok on the kit\'s own Dockerfile; exit 2 with none', () => {
+  const ok = pins(['verify', '--dockerfile', path.join(REPO, 'cloud/Dockerfile')]);
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.match(ok.stdout, /^box-pins verify: ok, 6 tools, release v\d+\.\d+\.\d+$/m);
+  assert.equal(pins(['verify', '--dockerfile', pinsCopy()]).status, 0, 'the fixed copy is a good file');
+  const none = pins(['verify']);
+  assert.equal(none.status, 2, none.stderr + none.stdout);
+  assert.match(none.stdout + none.stderr, /no cloud\/Dockerfile at .*cloud\/Dockerfile/);
+});
+
+test('box-pins verify names each problem and exits 1', () => {
+  const cases = [
+    [(t) => t.replace(/^(ARG TTYD_SHA256_X86_64=)\w+$/m, '$1ABC'), /TTYD_SHA256_X86_64 is not 64 lowercase hex/],
+    [(t) => t.replace(/^ARG GH_SHA256_AARCH64=\w+\n/m, ''), /gh has no GH_SHA256_AARCH64/],
+    [(t) => t.replace(/^ARG DEVTEAM_RELEASE=.*$/m, 'ARG DEVTEAM_RELEASE=0.52'), /DEVTEAM_RELEASE 0\.52 is not vX\.Y\.Z/],
+  ];
+  for (const [edit, re] of cases) { const r = pins(['verify', '--dockerfile', pinsCopy(edit)]); assert.equal(r.status, 1, String(re)); assert.match(r.stdout, re); }
+  const url = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace('download/v$GH_VERSION/gh_${GH_VERSION}_linux', `download/v${FIXED.GH}/gh_${FIXED.GH}_linux`))]);
+  assert.equal(url.status, 1); assert.match(url.stdout, /gh's version 2\.104\.0 is written outside its ARG \(line \d+: /);
+  const rel = pins(['verify', '--release', 'v1.2.3', '--dockerfile', pinsCopy()]);
+  assert.equal(rel.status, 1); assert.match(rel.stdout, /DEVTEAM_RELEASE is v0\.52\.0, not v1\.2\.3/);
+  assert.equal(pins(['verify', '--release', FIXED_RELEASE, '--dockerfile', pinsCopy()]).status, 0);
+});
+
+test('verify does not count another tool\'s own ARG as a stray literal', () => {
+  const f = pinsCopy((t) => t.replace(/^ARG TTYD_VERSION=.*$/m, `ARG TTYD_VERSION=${FIXED.CLAUDE_SWAP}`));
+  const r = pins(['verify', '--dockerfile', f]);
+  assert.equal(r.status, 0, r.stdout);
+  const g = pinsCopy((t) => t.replace(/^(# ttyd, the web terminal)$/m, `$1 ${FIXED.CLAUDE_SWAP}`));
+  assert.match(pins(['verify', '--dockerfile', g]).stdout, /claude-swap's version 1\.0\.0 is written outside its ARG/);
+});
+
+test('verify takes a hold above the _VERSION ARG, and refuses one with no reason, misplaced or misspelled', () => {
+  assert.equal(pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^ARG MISE_VERSION=/m, '# hold: waiting on a fix\n$&'))]).status, 0);
+  const r = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^ARG MISE_VERSION=/m, '# hold:\n$&'))]);
+  assert.equal(r.status, 1); assert.match(r.stdout, /mise's hold has no reason/);
+  const far = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^# ttyd, the web terminal$/m, '# hold: bad build\n$&'))]);
+  assert.equal(far.status, 1); assert.match(far.stdout, /the hold on line \d+ is not directly above a _VERSION ARG/);
+  const odd = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^ARG MISE_VERSION=/m, '# Hold: x\n$&'))]);
+  assert.equal(odd.status, 1); assert.match(odd.stdout, /line \d+ looks like a hold but is not "# hold: <reason>"/);
+});
