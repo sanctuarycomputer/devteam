@@ -5,8 +5,8 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | spec Out of scope (dashboard rendering) | docs/devteam/dashboard/index.html | Still holds at this head (final-1 F1): the dashboard's own workers-active stat counts every row not done or parked, so a held ticket or a stopped launch still reads there as a worker, while `ready` and `metrics` now leave them out. Outside touches and out of scope by the spec, so it does not block; the follow-up observation covers it. | |
-| F2 | Suggestion | none | docs/devteam/scripts/devteam.mjs:11461 | A held ticket whose worker crashed (phase build, window gone) now raises nothing: stale-worker skips it for the hold, and agent-exited needs a window. This is what the spec asks (held, unconditionally) and the supervisor held it on purpose, so it is noted only as a residual for whoever lifts the hold. | |
+| F1 | Minor | spec Out of scope (dashboard rendering) | docs/devteam/dashboard/index.html | Still holds at this head (final-1 F1): the dashboard's own workers-active stat counts every row not done or parked, so a held ticket or a stopped launch still reads there as a worker, while `ready` and `metrics` now leave them out. Outside touches and out of scope by the spec, so it does not block; the follow-up observation covers it. | wont-fix dashboard/index.html is outside the ticket touches; already a follow-up observation (o-20261115-181926506). |
+| F2 | Suggestion | none | docs/devteam/scripts/devteam.mjs:11461 | A held ticket whose worker crashed (phase build, window gone) now raises nothing: stale-worker skips it for the hold, and agent-exited needs a window. This is what the spec asks (held, unconditionally) and the supervisor held it on purpose, so it is noted only as a residual for whoever lifts the hold. | wont-fix the spec makes held unconditional: a held ticket is deliberately left, and its reason is on the record; noted in the merge request for whoever lifts a hold. |
 
 Checked:
 
