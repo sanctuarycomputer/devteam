@@ -17,6 +17,6 @@ Plan F3-2 is resolved. T4 now says the first relaunch has up to 100 s and a late
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F4-1 | Minor | accuracy | plan.md T4 ("the first relaunch of a tick has up to 100 s; when its repo has a `worktree_setup`, a later one ...") | As the sentence is written, "its repo" reads as the first relaunch's repo. The rule (spec, T3 `hasSetup(name, ...)`) is about the later session's own repo. When writing §11, say "a later one whose repo has a `worktree_setup` starts only if the full 100 s are left". | |
+| F4-1 | Minor | accuracy | plan.md T4 ("the first relaunch of a tick has up to 100 s; when its repo has a `worktree_setup`, a later one ...") | As the sentence is written, "its repo" reads as the first relaunch's repo. The rule (spec, T3 `hasSetup(name, ...)`) is about the later session's own repo. When writing §11, say "a later one whose repo has a `worktree_setup` starts only if the full 100 s are left". | fixed in T4: supervisor.md will say a later one whose repo has a worktree_setup starts only with the full 100 s |
 
 Verdict: APPROVE cac6c29c33c121751807621ddb6b2a181e9dbd65
