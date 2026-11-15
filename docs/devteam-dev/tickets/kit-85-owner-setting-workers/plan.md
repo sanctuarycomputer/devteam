@@ -12,6 +12,8 @@
 - Task 0 waits for `kit-84` to merge and merges main, then reuses its `CLASS_WORDS`, `mainRef()` and settings view. Then six tasks: allowlist and pin; the act; the route and the gateway; `settings set`; the finding and the label; verification and the PR.
 - Tests: `test/owner-setting.test.mjs` (new) and `test/gateway.test.mjs`. Run each alone with `--test-concurrency=2`; CI is the gate.
 
+## Overview
+
 **Goal:** implement the spec at `docs/devteam-dev/tickets/kit-85-owner-setting-workers/spec.md`.
 
 **Architecture:** all kit logic lives in `docs/devteam/scripts/devteam.mjs`, beside the code it extends:
