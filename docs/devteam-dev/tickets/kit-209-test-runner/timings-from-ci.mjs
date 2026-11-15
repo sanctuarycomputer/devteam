@@ -4,7 +4,9 @@
 // each top-level test ("ok N - <name>" at column 0) is matched to the test file that declares a
 // top-level test of that name (a string literal, or a template whose ${…} parts match anything).
 // A file's weight is the sum of its top-level tests' duration_ms (tests in a file run one after
-// another), in seconds, the largest across the logs given; unmatched names are listed on stderr.
+// another), in seconds, the largest across the logs given. On stderr: names it can't match, names
+// two files declare (ambiguous: given to neither), and files it has no time for. Node 24's log uses
+// the spec reporter, with no duration_ms: its jobs add nothing.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -22,7 +24,8 @@ for (const f of files) {
   }
   decl.set(f, pats);
 }
-const owner = (name) => { for (const [f, pats] of decl) if (pats.some((p) => (typeof p === 'string' ? p === name : p.test(name)))) return f; return null; };
+const owners = (name) => [...decl].filter(([, pats]) => pats.some((p) => (typeof p === 'string' ? p === name : p.test(name)))).map(([f]) => f);
+const ambiguous = new Map();
 const best = {};
 const unmatched = new Set();
 for (const log of logs) {
@@ -34,14 +37,17 @@ for (const log of logs) {
     let ms = null;
     for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) { const d = /^ {2}duration_ms: ([\d.]+)/.exec(lines[j]); if (d) { ms = Number(d[1]); break; } }
     if (ms === null) continue;
-    const f = owner(m[1]);
-    if (!f) { unmatched.add(m[1]); continue; }
+    const o = owners(m[1]);
+    if (!o.length) { unmatched.add(m[1]); continue; }
+    if (o.length > 1) { ambiguous.set(m[1], o); continue; }
+    const f = o[0];
     sums[f] = (sums[f] ?? 0) + ms / 1000;
   }
   for (const [f, s] of Object.entries(sums)) best[f] = Math.max(best[f] ?? 0, s);
 }
 for (const n of unmatched) console.error(`unmatched: ${n}`);
+for (const [n, o] of ambiguous) console.error(`ambiguous: ${n} (${o.join(', ')})`);
 const missing = files.filter((f) => !(f in best));
 for (const f of missing) console.error(`no timing: ${f}`);
-const out = { run, source: `sum of each file's top-level test durations (duration_ms), largest across jobs, from test.yml run ${run}`, files: Object.fromEntries(files.filter((f) => f in best).map((f) => [f, Math.round(best[f] * 10) / 10])) };
+const out = { run, source: `sum of each file's top-level test durations (duration_ms), largest across the Node 18, 20 and 22 jobs (24's log has none), from test.yml run ${run} on main; a file not listed weighs the median`, files: Object.fromEntries(files.filter((f) => f in best).map((f) => [f, Math.round(best[f] * 10) / 10])) };
 process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);

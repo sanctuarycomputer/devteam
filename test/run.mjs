@@ -91,7 +91,9 @@ export function parseArgs(argv, env, root = ROOT) {
 }
 
 const CHROME_STATIC = /^\s*import\b[^;]*?['"]\.\/lib\/chrome\.mjs['"]/m;
-// a dynamic import with no quote before it on its line, so one named inside a string isn't one
+// A dynamic import with no quote before it on its line, so one named inside a string isn't one.
+// What that gives up: a dynamic import after a quote on the same line (`if (x === '1') await
+// import(...)`) groups as rest. Put such an import on a line of its own; no kit file has one.
 const CHROME_DYNAMIC = /^[^'"`\n]*\bimport\(\s*['"]\.\/lib\/chrome\.mjs['"]\s*\)/m;
 export function groupOf(rel, src) {
   if (rel === 'test/kit.test.mjs') return 'chain';

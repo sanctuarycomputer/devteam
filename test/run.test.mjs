@@ -78,6 +78,9 @@ test('groups by rule', () => {
   assert.equal(R.groupOf('test/x.test.mjs', "// see './lib/chrome.mjs' for how\nimport fs from 'node:fs';\n"), 'rest');
   assert.equal(R.groupOf('test/x.test.mjs', "const s = \"import('./lib/chrome.mjs')\";\n"), 'rest', 'a dynamic import inside a string');
   assert.equal(R.groupOf('test/run.test.mjs', src('test/run.test.mjs')), 'rest', 'this file names chrome.mjs only in strings');
+  // the rule's known cost (run.mjs, CHROME_DYNAMIC): a quote earlier on the line hides the import
+  assert.equal(R.groupOf('test/x.test.mjs', "if (x === '1') await import('./lib/chrome.mjs');\n"), 'rest');
+  assert.equal(R.groupOf('test/x.test.mjs', "if (x) {\n  await import('./lib/chrome.mjs');\n}\n"), 'chrome');
   const plan = R.planRun({ files: [], groups: ['chain', 'alone'], shard: null }, root);
   assert.deepEqual(plan.map((p) => p.file), ['test/bounds.test.mjs', 'test/kit.test.mjs']);
 });
