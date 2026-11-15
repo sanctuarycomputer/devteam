@@ -53,7 +53,12 @@ async function shoot(label) {
   // the clock and the polls held still, so both runs draw the same moment
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.setInterval = () => 0;' });
   const shots = {};
-  const settle = async (ready) => { for (let i = 0; i < 400; i++) { if (await p.ev(ready).catch(() => false)) break; await new Promise((r) => setTimeout(r, 50)); } await new Promise((r) => setTimeout(r, 800)); };
+  // ready, and then the page's element count steady for a second (the first load draws in steps)
+  const settle = async (ready) => {
+    for (let i = 0; i < 400; i++) { if (await p.ev(ready).catch(() => false)) break; await new Promise((r) => setTimeout(r, 50)); }
+    let last = -1, same = 0;
+    for (let i = 0; i < 100 && same < 4; i++) { await new Promise((r) => setTimeout(r, 250)); const n = await p.ev("document.querySelectorAll('*').length"); same = n === last ? same + 1 : 0; last = n; }
+  };
   for (const s of [...SECTIONS, `q/${Q}`]) {
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#${s}` });
     await settle("!document.querySelector('main.waiting')");
