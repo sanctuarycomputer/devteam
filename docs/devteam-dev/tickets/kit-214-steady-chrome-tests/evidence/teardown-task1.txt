@@ -1,0 +1,41 @@
+TAP version 13
+# Subtest: cleanup(t): every step runs, last registered first, each on its own; the first error is thrown after
+ok 1 - cleanup(t): every step runs, last registered first, each on its own; the first error is thrown after
+  ---
+  duration_ms: 1.677376
+  type: 'test'
+  ...
+# Subtest: a test that throws mid-page leaves no Chrome: its group is gone once the file exits
+ok 2 - a test that throws mid-page leaves no Chrome: its group is gone once the file exits
+  ---
+  duration_ms: 845.088445
+  type: 'test'
+  ...
+# Subtest: a Chrome slow to stop (stopped before the throw) is still gone, and the file goes on to its next test
+ok 3 - a Chrome slow to stop (stopped before the throw) is still gone, and the file goes on to its next test
+  ---
+  duration_ms: 3797.412318
+  type: 'test'
+  ...
+# Subtest: a Chrome whose exit is never reported: close() ends at its bound, and the file goes on
+ok 4 - a Chrome whose exit is never reported: close() ends at its bound, and the file goes on
+  ---
+  duration_ms: 8550.207126
+  type: 'test'
+  ...
+# Subtest: a removal that throws first skips no stop: the dashboard, Chrome, a child and a server are gone (by pid)
+ok 5 - a removal that throws first skips no stop: the dashboard, Chrome, a child and a server are gone (by pid)
+  ---
+  duration_ms: 1318.690341
+  type: 'test'
+  ...
+1..5
+# tests 5
+# suites 0
+# pass 5
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 14604.781378
+devteam: gate test passed in 14.7s
