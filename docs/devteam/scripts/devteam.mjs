@@ -1209,9 +1209,10 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
-    // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish) and
-    // of answering what the supervisor's terminal asked (pane answer). Nobody else writes those
-    // classes: an agent can't make the log say the owner published, or gave a tool their yes.
+    // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
+    // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
+    // (goal order). Nobody else writes those classes: an agent can't make the log say the owner
+    // published, gave a tool their yes, or ordered the goals.
     if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
     if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
@@ -1974,8 +1975,9 @@ function goalOrderApproved(qid, ids) {
   if (why) die(`goal order --approved: ${why}, so the order ${qid} proposed can't be applied as approved; ask again`);
   return out(applyGoalOrder(v.order, 'supervisor', qid));
 }
-// The order written: one goal line per planned goal, then one act (class goal-change, the owner's
-// class: the owner's own record of it, or the supervisor's applying the owner's answer).
+// The order written: one goal line per planned goal, then one act: the owner's own record of it
+// (goal-order, never a call), or the supervisor's applying the owner's answer (goal-change, the
+// owner-only class the answer was asked in, with approved_by).
 function applyGoalOrder(ids, by, approved = null) {
   const goals = [...(readLog().byType.get('goal') ?? [])];
   const plan = goalOrderPlan(ids, goals);
@@ -19715,7 +19717,7 @@ Goals and retros
   goal [list|check|show|forecast|add|set|order|decide|approve|status|reading|hold|park-sessions|impact] …
   goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
-  goal order <g-id> <g-id> …   owner: put the goals in order, 1..n; the goals left out keep their order after them (one line per goal moved, one goal-order act)
+  goal order <g-id> <g-id> …   owner: put the goals in order, 1..n; the goals left out keep their order after them (a line per goal named and per goal left out that moves, one goal-order act)
   goal order [<g-id> …] --approved <qid>   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]

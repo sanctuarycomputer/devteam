@@ -39,6 +39,7 @@ test('the owner orders goals in one step: 1..n on the named ones, the rest after
     const L = goals(F, ['Let go one'])[0];
     ok(old, ['goal', 'decide', L, 'let-go']);
     const before = lines(F).length;
+    const callsBefore = json(ok(old, ['dashboard-data'])).ooda.learning_totals.calls;
 
     const out = ok(old, ['goal', 'order', C, A]);
     assert.match(out, new RegExp(`1 ${C}.*\\n.*2 ${A}`, 's'), 'it prints the new order');
@@ -59,6 +60,7 @@ test('the owner orders goals in one step: 1..n on the named ones, the rest after
     // nor correctable; and only the owner writes that class
     const X = acts[0].id;
     const d = json(ok(old, ['dashboard-data']));
+    assert.equal(d.ooda.learning_totals.calls, callsBefore, 'the calls total leaves it out');
     assert.ok(!d.ooda.acts.some((a) => a.id === X), 'not in the act feed');
     assert.ok(!d.ooda.decisions.some((r) => r.id === X || (r.refs ?? []).includes(X) || (r.acts ?? []).includes(X)), 'nor among the calls');
     assert.ok(!JSON.stringify(json(ok(old, ['trust', '--json']))).includes(X), 'nor in trust');
@@ -70,6 +72,7 @@ test('the owner orders goals in one step: 1..n on the named ones, the rest after
     const wid = `a-${wat.slice(0, 10).replace(/-/g, '')}-${wat.slice(11, 23).replace(/[:.]/g, '')}-kit-1`;
     const wfile = path.join(old, 'docs/devteam/run/log', 'kit-1.jsonl');
     fs.writeFileSync(wfile, line({ id: wid, type: 'act', op: 'new', at: wat, by: 'kit-1', class: 'goal-order', what: 'put the goals in order', refs: [A] }));
+    // a worker writes no act at all, so not this one either
     const wc = run(old, ['log-check']);
     assert.equal(wc.status, 1, "a worker's goal-order act fails log-check");
     assert.match(wc.out + wc.err, /ticket may not create act lines|goal-order is the owner's/);
@@ -98,6 +101,28 @@ test('the owner orders goals in one step: 1..n on the named ones, the rest after
     assert.equal(sup.status, 1);
     assert.match(sup.err, /goal-change --order/);
     assert.deepEqual(prios(F, [D, C, B, A]), [1, 2, 3, 4]);
+  } finally { F.done(); }
+});
+
+test('the goals left out: ties keep the order they were made in, a goal with no priority keeps none, Upkeep has no place', () => {
+  const F = fleetFixture('goal-order-rest');
+  const { old, ok, run } = F;
+  try {
+    const mk = (title, p) => firstId(ok(old, ['goal', 'add', '--title', title, ...(p ? ['--priority', String(p)] : [])], SUP));
+    const A = mk('Alpha', 1);
+    const T1 = mk('Tie first', 2);
+    const T2 = mk('Tie second', 2);
+    const N = mk('No priority');
+    const Z = mk('Zulu', 3);
+    ok(old, ['goal', 'order', Z, A]);
+    assert.deepEqual(prios(F, [Z, A, T1, T2]), [1, 2, 3, 4], 'the tie by when each was made');
+    assert.equal(prio(F, N), undefined, 'a goal with no priority is given none');
+    ok(old, ['goal', 'hold', 'upkeep', 'drain', '--owner']);
+    const U = json(ok(old, ['goal', 'show', 'upkeep'])).id;
+    assert.match(U, /^g-/);
+    const r = run(old, ['goal', 'order', U, A]);
+    assert.equal(r.status, 1);
+    assert.match(r.err, /Upkeep has no place in the goal order/);
   } finally { F.done(); }
 });
 
