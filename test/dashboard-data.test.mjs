@@ -198,11 +198,13 @@ test('each blocked item names the question holding it', { timeout: 300000 }, asy
   F.sup(['ask', '--blocks', 'app-05-e', '--question', 'Should e keep the old receipts?', '--recommendation', 'keep them', '--stake', '1', '--urgency', '2']);
   assert.equal(heldBy('app-05-e'), null, 'a question on a let-go goal holds nothing');
 
-  // the planner: once its question is withdrawn (answer refuses a goal approval), a blocked message raises it
-  F.sup(['withdraw', qg, '--reason', 'test']);
-  assert.equal(read(() => data(F)).planners.find((p) => p.feature === 'hb-plan').held_by, null, 'the planner holds nothing');
+  // the planner: not blocked yet; then blocked while its goal's open question holds it: no finding (F2)
   assert.deepEqual(bwq('plan-hb-plan'), [], 'not blocked yet');
   handLine(F, 'plan-hb-plan', { type: 'message', kind: 'blocked', to: 'supervisor', text: 'need a ruling' }, 60000);
+  assert.deepEqual(bwq('plan-hb-plan'), [], 'blocked, but held by its goal\'s open question');
+  // once its question is withdrawn (answer refuses a goal approval), the unanswered blocked message raises it
+  F.sup(['withdraw', qg, '--reason', 'test']);
+  assert.equal(read(() => data(F)).planners.find((p) => p.feature === 'hb-plan').held_by, null, 'the planner holds nothing');
   const [p] = bwq('plan-hb-plan');
   assert.ok(p, 'blocked-without-question for plan-hb-plan');
   assert.equal(p.severity, 'medium');
@@ -405,6 +407,22 @@ test('the governance listing, read-only, with what changed here', { timeout: 300
   notWritten(row(files, 'docs/elsewhere/strategy.md'), 'docs/elsewhere/strategy.md', 'Strategy');
   notWritten(row(files, 'docs/elsewhere/exterior.md'), 'docs/elsewhere/exterior.md', 'Exterior');
   assert.deepEqual(logAt(B.root), beforeB, 'the reads wrote nothing to the log');
+  // its first sync, which changes only worker.md: worker.md is the release's, and every file older
+  // than the sync has no known release to compare with (F1)
+  const sfB = path.join(B.proj, 'settings.md');
+  const nullBase = fs.readFileSync(sfB, 'utf8');
+  assert.match(nullBase, /"upstream_base": null/);
+  fs.writeFileSync(sfB, nullBase.replace('"upstream_base": null', '"upstream_base": "v0.1.0"'));
+  fs.appendFileSync(path.join(B.root, 'docs/devteam/process/worker.md'), '\nFrom the first release.\n');
+  commit(B.root, 'chore-devteam-sync-v0.1.0: kit files verbatim from the tag; upstream_base v0.1.0');
+  files = gov(B);
+  assert.equal(row(files, 'docs/devteam/process/worker.md').differs, false, 'the sync brought it');
+  assert.equal(row(files, 'docs/devteam/process/worker.md').state, null);
+  for (const r of files.filter((x) => x.group !== 'project' && x.path !== 'docs/devteam/process/worker.md')) {
+    assert.equal(r.differs, null, `${r.path}: older than every sync`);
+    assert.equal(r.state, null, `${r.path}: not changed here`);
+  }
+  assert.ok(row(files, 'docs/devteam/governance/constitution.md'), 'constitution among them');
 
   // D: a shallow clone of A
   const neu = path.join(F.base, 'gov-shallow');

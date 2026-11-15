@@ -5156,8 +5156,11 @@ function strategyState() {
 // outside the repo, from the working tree, with no history. One first-parent walk of main over the
 // listed files and settings.md: a file's first appearance is its newest commit, and the settings.md
 // commits are the sync candidates. A sync commit is one where upstream_base became a different
-// release tag. A sync PR that also carried a local edit to a file reads false for that file: the
-// walk can't tell the two apart, and that is accepted (spec §1).
+// release tag. A file whose newest commit is a sync reads false; one touched after a sync, true; one
+// whose newest commit is older than every sync (the kit was committed before its base was first set)
+// reads null, as with no sync at all: no known release to compare it with. A sync PR that also
+// carried a local edit to a file reads false for that file: the walk can't tell the two apart, and
+// that is accepted (spec §1).
 function governanceView() {
   const main = projectInRepo ? mainRef() : null;
   const at = (p) => (main ? git(['show', `${main}:${p}`], projectRoot) : readText(path.join(projectRoot, p)));
@@ -5170,6 +5173,8 @@ function governanceView() {
   const settingsRel = `${projectRel}/settings.md`;
   const newest = new Map();
   const syncs = new Set();
+  // the oldest sync's place in the walk (newest first): a file whose newest commit is past it predates every sync
+  let oldestSync = -1;
   let shallow = new Set();
   if (main) {
     const paths = [...kit, ...project].map((r) => r.path);
@@ -5178,11 +5183,11 @@ function governanceView() {
       const [head, ...names] = chunk.split('\n').filter(Boolean);
       const [sha, iso] = head.split(' ');
       return { sha, iso, names };
-    });
+    }).map((c, i) => ({ ...c, i }));
     for (const c of commits) for (const p of c.names) if (!newest.has(p)) newest.set(p, c);
     for (const c of commits.filter((x) => x.names.includes(settingsRel))) {
       const base = settingsAt(c.sha, { orNull: true })?.upstream_base;
-      if (releaseParts(base) && base !== (settingsAt(`${c.sha}^1`, { orNull: true })?.upstream_base ?? null)) syncs.add(c.sha);
+      if (releaseParts(base) && base !== (settingsAt(`${c.sha}^1`, { orNull: true })?.upstream_base ?? null)) { syncs.add(c.sha); oldestSync = Math.max(oldestSync, c.i); }
     }
     const sf = git(['rev-parse', '--git-path', 'shallow'], projectRoot);
     const text = sf && readText(path.resolve(projectRoot, sf));
@@ -5195,7 +5200,7 @@ function governanceView() {
     const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
     const c = newest.get(p);
     const known = c && !shallow.has(c.sha);
-    const differs = group === 'project' || !syncs.size || !known ? null : !syncs.has(c.sha);
+    const differs = group === 'project' || !syncs.size || !known || c.i > oldestSync ? null : !syncs.has(c.sha);
     return {
       group,
       path: p,
