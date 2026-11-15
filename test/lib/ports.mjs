@@ -1,6 +1,6 @@
 // Each test process owns a block of 100 ports between 20000 and 32699 (below 32768, where Linux
 // starts handing out ephemeral ports; macOS starts at 49152). A block is claimed with a lock file in
-// the temp dir, so the suite's files running side by side, and another checkout's suite, never share
+// the shared temp dir (DEVTEAM_TEST_SHARED_TMP, else the temp dir), so the suite's files running side by side, and another checkout's suite, never share
 // one. The lock goes when the process exits; one left by a process that died is cleared once it is
 // an hour old.
 //
@@ -24,7 +24,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const dir = path.join(os.tmpdir(), 'devteam-kit-ports');
+// test/run.mjs runs each file with a TMPDIR of its own and names the real temp dir in
+// DEVTEAM_TEST_SHARED_TMP: the locks must be where every file sees them.
+export const LOCK_DIR = path.join(process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir(), 'devteam-kit-ports');
+const dir = LOCK_DIR;
 const BLOCKS = 127;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 function claim() {
