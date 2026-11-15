@@ -102,6 +102,7 @@ RUN case "$(uname -m)" in \
  && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
 
 # mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
+# hold: mise v2026.11.8's stricter npm trust check refuses vercel@65.16.0 (no-downgrade on @vercel/*), breaking the box's mise install
 ARG MISE_VERSION=v2026.10.17
 ARG MISE_SHA256_X86_64=fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a
 ARG MISE_SHA256_AARCH64=e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b
@@ -114,9 +115,9 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
-ARG UV_VERSION=0.13.7
-ARG UV_SHA256_X86_64=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
-ARG UV_SHA256_AARCH64=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc
+ARG UV_VERSION=0.13.8
+ARG UV_SHA256_X86_64=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
+ARG UV_SHA256_AARCH64=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
 RUN case "$(uname -m)" in \
       x86_64) sum=$UV_SHA256_X86_64 ;; \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
@@ -126,12 +127,12 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
 
 # claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume
-ARG CLAUDE_SWAP_VERSION=1.0.0
+ARG CLAUDE_SWAP_VERSION=1.1.0
 RUN UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.12 "claude-swap==$CLAUDE_SWAP_VERSION" \
  && chmod -R a+rX /opt/uv
 
 # Claude Code (its own updater can't write to /usr/local)
-ARG CLAUDE_CODE_VERSION=2.1.307
+ARG CLAUDE_CODE_VERSION=2.1.325
 RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
@@ -540,7 +541,7 @@ ENV DEVTEAM_IMAGE_HUB=4320
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.52.0
+ARG DEVTEAM_RELEASE=v0.54.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
