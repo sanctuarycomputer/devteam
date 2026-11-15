@@ -521,6 +521,8 @@ try {
   .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
   .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
   .av-bar a.av-btn:hover { background: var(--hover); }
+  /* the artifact changed since the frame loaded it; a keyboard's focus ring still shows over it */
+  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
@@ -3540,7 +3542,7 @@ const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at 
 // pointer events, the last reply, and where the lens says each pinned anchor is now (keyed by a
 // thread's id). A preview's: its name, the lens's origin, and its app's route, viewport and last
 // errors as the lens said them; the session that offered it and whether it answers, for the bar.
-const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
 // What the lens was asked and has not answered, let go: a waiting click hears it is gone (the page it
 // pointed at is no longer there, so it starts nothing), and no reply to a question from before is taken.
 function tsForget() {
@@ -3551,8 +3553,9 @@ function tsForget() {
 }
 function tsSet(kind, info = {}) {
   tsForget();
-  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null }, info);
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, fpNow: null, mainFpNow: null, path: null, name: null, route: null, viewport: null, errors: [], origin: null, session: null, up: null, target: '*', ready: false, watch: '', last: null }, info);
   for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
+  avHint();
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
@@ -3566,13 +3569,33 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('av-note').hidden = !note;
   $('av-note').textContent = note ?? '';
   $('av-tab').href = artViewer(slug, at);
-  if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp });
-  else Object.assign(TS, { fp, mainFp });
+  // fp and mainFp are what the frame loads now; on the stage already shown its frame isn't loaded
+  // again, so what it loaded stays, and what is given is only the latest seen
+  if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp, fpNow: fp, mainFpNow: mainFp });
+  else Object.assign(TS, { fpNow: fp ?? TS.fpNow, mainFpNow: mainFp ?? TS.mainFpNow });
   $('pv-frame').hidden = true;
   $('pv-frame').removeAttribute('src');
   $('av-frame').hidden = false;
   if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
   $('artifact-view').hidden = false;
+  avHint();
+}
+// The reload button says when the artifact on the stage changed since its frame loaded it (the
+// latest fingerprint seen is another), until a press loads it. Never a reload by itself: kit-106's
+// live reload of drafts is to take over from this.
+function avHint() {
+  const stale = TS.kind === 'artifact' && !!TS.fp && !!TS.fpNow && TS.fp !== TS.fpNow;
+  const b = $('av-reload');
+  b.classList.toggle('stale', stale);
+  b.title = stale ? 'A newer version is ready: reload to see it' : 'Load the page again';
+}
+// The fingerprints just seen for an artifact there (null: not known), taken only while the stage
+// shows it; a published tree never changes, so it is never checked.
+function avFpSeen(fp, mainFp, slug, at) {
+  if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at || String(at).startsWith('tree:')) return;
+  if (fp) TS.fpNow = fp;
+  if (mainFp) TS.mainFpNow = mainFp;
+  avHint();
 }
 // A preview's viewer, in a tab of its own.
 const pvViewer = (name) => `/view/preview/${encodeURIComponent(name)}`;
@@ -3644,7 +3667,12 @@ function openArtifact(raw) {
   if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   const arts = DATA?.library?.artifacts ?? [];
-  showArtifact(slug, at, { note, fp: arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null });
+  const mainFp = arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null;
+  // a draft the Library doesn't list while main's is listed is the same as main's; only for a new
+  // stage, as one gone while it was shown is listed nowhere either
+  const fresh = TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at;
+  const fp = arts.find((x) => x.slug === slug && x.at === at)?.fp ?? (fresh && at !== 'main' && !String(at).startsWith('tree:') ? mainFp : null);
+  showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
@@ -3666,7 +3694,14 @@ function closeArtifact() {
 // a viewer tab has nothing to go back to: it never closes
 function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
 $('av-close').addEventListener('click', leaveArtifact);
-$('av-reload').addEventListener('click', () => { const f = tsFrame(), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
+$('av-reload').addEventListener('click', () => {
+  const f = tsFrame(), src = f.getAttribute('src');
+  if (!src) return;
+  f.removeAttribute('src');
+  f.src = src;
+  // the frame now loads the latest seen
+  if (TS.kind === 'artifact') { if (TS.fpNow) TS.fp = TS.fpNow; if (TS.mainFpNow) TS.mainFp = TS.mainFpNow; avHint(); }
+});
 // a question's link to a changed artifact says so in the viewer's header
 document.addEventListener('click', (e) => { const a = e.target.closest?.('a[data-av-note]'); if (a) AV_NOTE = a.dataset.avNote || null; });
 
@@ -5323,6 +5358,11 @@ async function loadNow() {
   document.querySelector('main').classList.remove('waiting');
   drawOrHold(d);
   staleNote();
+  // the stage's artifact as this read lists it, held from the page or drawn (a missing row says nothing)
+  if (TS.kind === 'artifact') {
+    const row = (at) => (d.library?.artifacts ?? []).find((a) => a.slug === TS.slug && a.at === at)?.fp ?? null;
+    avFpSeen(row(TS.at), row('main'), TS.slug, TS.at);
+  }
 }
 // The server answers a slow read with the last data it had, marked stale: say so where it shows on
 // any screen, with the time of what is drawn (not of a read held while the owner types), until a
