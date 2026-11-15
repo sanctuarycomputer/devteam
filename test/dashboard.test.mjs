@@ -497,7 +497,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
       await soon(`/Answered: No — not this week/.test(${card(Q2)}?.textContent ?? '')`, 'the card answered while the post is held');
       dt(['withdraw', Q2, '--reason', 'moot'], SUP);
       await letGo();
-      await soon(`/Not saved:/.test(document.getElementById('e-${Q2}')?.textContent ?? '')`, 'the refusal, on the card');
+      await soon(`/Not saved:/.test(${card(Q2)}?.querySelector('[data-refused]')?.textContent ?? '')`, 'the refusal, on the card');
       assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]').value`), 'not this week', 'the note back');
       assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] input[data-pick][value="No"]').checked`), true, 'the pick back');
     } finally { await p.ev('window.__open?.(); window.__gate = null; window.__let?.(); window.__postHold = null; void 0'); }
