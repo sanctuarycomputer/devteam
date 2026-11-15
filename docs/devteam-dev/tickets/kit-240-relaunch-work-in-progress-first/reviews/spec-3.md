@@ -7,6 +7,6 @@ Pass-2 checks. F2-1 is resolved: no claim is ever given back, so every relaunch 
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F3-1 | Minor | accuracy | spec.md header ("Depends on `kit-202-lost-enter-retries` (not merged yet: build waits for it)") | The new ruling adds kit-239 and kit-86 to depends_on, and the plan says to wait for all three and the supervisor's word. The header still names only kit-202. Make it match the ruling. | |
+| F3-1 | Minor | accuracy | spec.md header ("Depends on `kit-202-lost-enter-retries` (not merged yet: build waits for it)") | The new ruling adds kit-239 and kit-86 to depends_on, and the plan says to wait for all three and the supervisor's word. The header still names only kit-202. Make it match the ruling. | fixed: the header names kit-202, kit-239 and kit-86 |
 
 Verdict: APPROVE 05a9473df5ccf90a248fbfa93ee99176fb30ff2e
