@@ -102,9 +102,10 @@ RUN case "$(uname -m)" in \
  && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
 
 # mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
-ARG MISE_VERSION=v2026.11.8
-ARG MISE_SHA256_X86_64=32b6abe844efa43d37d7ac4ed21d2ec41e9479d66feb19b0db8d2c548cd6e36d
-ARG MISE_SHA256_AARCH64=0de1450dcc3f838e372e05e8c5231423760ad3f22d14275ef340bc0a250303ce
+# hold: mise v2026.11.8's stricter npm trust check refuses vercel@65.16.0 (no-downgrade on @vercel/*), breaking the box's mise install
+ARG MISE_VERSION=v2026.10.17
+ARG MISE_SHA256_X86_64=fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a
+ARG MISE_SHA256_AARCH64=e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b
 RUN case "$(uname -m)" in \
       x86_64) arch=x64; sum=$MISE_SHA256_X86_64 ;; \
       aarch64) arch=arm64; sum=$MISE_SHA256_AARCH64 ;; \
