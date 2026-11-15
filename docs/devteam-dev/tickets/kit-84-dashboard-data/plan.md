@@ -477,3 +477,10 @@ Helpers at the top of the file, written in T1 and reused after:
 - m-20261115-195732788-supervisor: the settings scope, as Task 6.
 - m-20261115-201932691-supervisor: approve-spec at e3d2a80. done_when 5: recurring checks move to kit-168. done_when 6: `settings_all` covers every setting the kit reads, 44 today, taken from loadSettings' own list (`SETTINGS_KEYS`, T6).
 - m-20261115-201425507-supervisor: `test/fixtures/g1/dashboard-data.txt` is in the touches. Re-record only the new fields; the PR's diff of it shows additions only, and the final reviewers check that (Task 7).
+- m-20261115-204216783-supervisor: approve-plan at 848d307; build once kit-208 merges.
+- m-20261115-214159708-supervisor: review rounds are capped. After a second round, Minor findings are fixed and disposed with no further pass; a third pass only confirms a Critical or Important fix.
+- m-20261115-221458499-supervisor: kit-208 merged (284d9ad); build, merging origin/main first.
+- m-20261115-222112817-supervisor: `test/ooda-learning.test.mjs` is in the touches, for its one rung-label line (T1's plain words).
+- m-20261115-225737345-supervisor: in the governance listing, init's strategy template reads "not written yet" (the same test as `strategyState`); `exterior.md` keeps "written when it exists".
+
+Build calls made by the worker, recorded in the ledger and the task reviews: T5 doesn't add `governance` to `OPERATOR_READS` (T5's own text); `/api/hello` forwards `threads` (T3-1), asserted in T5's one dashboard test; T5's `/api/data` check gained `settings_all` in T6; in `settings_all`, a local and a main value that are both withheld show `local` only when their raw values differ (only that they differ shows).
