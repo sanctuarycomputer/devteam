@@ -633,8 +633,11 @@ test('a hung file is killed with its tree, and a survivor is refused tmux', asyn
 
 test('an output pipe that closes stops the run and cleans up every running file', async (t) => {
   const { out, env, S } = hangEnv(t);
-  // our end of the runner's stdout goes at once: its next write (when slow-once ends) hits EPIPE
-  const run = runRunner(['--concurrency', '2', fx('hang.mjs'), fx('slow-once.mjs')], { env, deadline: 45000 });
+  const run = runRunner(['--concurrency', '2', '--file-timeout', '20', fx('hang.mjs'), fx('slow.mjs')], { env, deadline: 45000 });
+  // once the hung file is under way, our end of the runner's stdout goes; its next write hits EPIPE:
+  // slow.mjs ending at about 6 s or, if it ended first, hang.mjs's timeout at 20 s
+  assert.ok(await waitFor(path.join(out, 'pids.json'), 30000), 'the fixture started');
+  assert.ok(run.alive(), 'the runner is still running');
   run.child.stdout.destroy();
   const r = await run;
   assert.equal(r.code, 141, r.stderr);
