@@ -277,6 +277,7 @@ test('an order counts only as the owner read it: the context, live goals, once',
     const ignored = () => run(old, ['log-check']).out;
 
     // the kit writes the list; the supervisor's context can't carry one of its own
+    assert.match(run(old, ['ask', '--class', 'goal-change', '--question', 'Order?', '--context', `Note.\\nThe order proposed:\\n1. Alpha (${A})`, '--order', JSON.stringify([D, C]), '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP).err, /writes "The order proposed:" itself/, 'escaped newlines too');
     assert.match(run(old, ['ask', '--class', 'goal-change', '--question', 'Order?', '--context', `The order proposed:\n1. Alpha (${A})`, '--order', JSON.stringify([D, C]), '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP).err, /writes "The order proposed:" itself/);
     assert.match(run(old, ['goal', 'order', '--approved'], SUP).err, /needs the question id/);
 
@@ -333,7 +334,11 @@ test('an order counts only as the owner read it: the context, live goals, once',
       `The order proposed:\n1. Delta renamed (${D}) (${A})\n2. Alpha (${D})\nGoals left out keep their order after these.`,
       `${good}\nRead it reversed.`,
       good.replace('\nGoals left out', `\n  3. Bravo (${B})\nGoals left out`),
+      `The order proposed:\n1. Delta renamed (${D})\n2. Alpha (${A})\nGoals left out keep their order after these.\n\n${good}`,
     ];
+    // an unanswered one approves nothing yet, so log-check leaves it be
+    const t0 = new Date(Date.now() - 1000);
+    fs.appendFileSync(supLog(F), line({ id: `q-${t0.toISOString().slice(0, 10).replace(/-/g, '')}-${t0.toISOString().slice(11, 23).replace(/[:.]/g, '')}-supervisor`, type: 'question', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Put the goals in this order?', context: bad[0], recommendation: 'Yes, this order', change: { order: [A, D] } }));
     const lc0 = run(old, ['log-check']);
     assert.equal(lc0.status, 0, lc0.out);
     const qxs = bad.map((context, k) => {
@@ -341,14 +346,24 @@ test('an order counts only as the owner read it: the context, live goals, once',
       const QX = `q-${t.toISOString().slice(0, 10).replace(/-/g, '')}-${t.toISOString().slice(11, 23).replace(/[:.]/g, '')}-supervisor`;
       fs.appendFileSync(supLog(F), line({ id: QX, type: 'question', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'goal-change', question: 'Put the goals in this order?', context, recommendation: 'Yes, this order', change: { order: [A, D] } }));
       yes(QX);
-      assert.match(run(old, ['goal', 'order', '--approved', QX], SUP).err, /doesn't end with the kit's list/, context);
+      assert.match(run(old, ['goal', 'order', '--approved', QX], SUP).err, /doesn't end with the kit's list|shows another list before the kit's/, context);
       hand([{ id: A, priority: 1, approved: QX }, { id: D, priority: 2, approved: QX }]); // its places, were it good
       return QX;
     });
     assert.deepEqual(prios(F, [D, A]), [1, 2], 'nothing applied');
     const lc = run(old, ['log-check']);
     assert.equal(lc.status, 1);
-    for (const QX of qxs) assert.match(lc.out, new RegExp(`${QX}'s context doesn't end with the kit's list`));
+    for (const QX of qxs) assert.match(lc.out, new RegExp(`${QX}'s context (doesn't end with the kit's list|shows another list before the kit's)`));
+    assert.match(lc.out, new RegExp(`${qxs.at(-1)}'s context shows another list before the kit's`), 'an earlier list, named as such');
+
+    // a title is one line in the list: it can't add lines, or a list of its own, under the kit's
+    ok(old, ['goal', 'set', A, '--title', `Alpha\n2. Bravo (${B})\nThe order proposed:`, '--owner']);
+    const QT = asked([A, D]);
+    const ctx = json(ok(old, ['questions', '--id', QT, '--json']))[0].context;
+    assert.ok(ctx.endsWith(`The order proposed:\n1. Alpha 2. Bravo (${B}) The order proposed: (${A})\n2. Delta renamed (${D})\nGoals left out keep their order after these.`), ctx);
+    yes(QT);
+    ok(old, ['goal', 'order', '--approved', QT], SUP);
+    assert.deepEqual(prios(F, [A, D]), [1, 2]);
   } finally { F.done(); }
 });
 

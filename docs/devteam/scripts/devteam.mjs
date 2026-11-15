@@ -1983,6 +1983,8 @@ function orderContextProblem(v, goals) {
   const byId = new Map(goals.map((g) => [g.id, g]));
   const shown = goalOrderText(v.order, (id) => goalTitleAt(byId.get(id), v.asked_at) ?? id);
   const ctx = String(v.context ?? '');
+  // one list only: another before the kit's would show the owner two orders
+  if (ctx.slice(0, Math.max(0, ctx.length - shown.length)).includes('The order proposed:')) return `${v.id}'s context shows another list before the kit's`;
   return ctx === shown || ctx.endsWith(`\n\n${shown}`) ? null : `${v.id}'s context doesn't end with the kit's list of the order it proposes (${v.order.join(' ')}), titled as the goals were when it was asked`;
 }
 // A goal's title at time at: its latest title set by then, else the title it was made with.
@@ -5367,12 +5369,13 @@ function goalOrderFlag(cls) {
   if (o.length < 2) die('--order puts at least two goals in order; one goal\'s priority is a goal-change with --goal and --change');
   const why = goalOrderRefusal(o, readLog().byType.get('goal') ?? []);
   if (why) die(`--order: ${why}`);
-  if (String(flagStr('context') ?? '').split('\n').includes('The order proposed:')) die('--order: the kit writes "The order proposed:" itself, from the order; leave it out of --context');
+  if (String(ownerText(flagStr('context')) ?? '').includes('The order proposed:')) die('--order: the kit writes "The order proposed:" itself, from the order; leave it out of --context');
   if (!flagStr('recommendation')?.trim()) die('a goal-change --order question recommends the order (--recommendation "Yes, this order"): only the owner\'s answer with it approves');
   return o;
 }
 // The order in the owner's words, written into the question's context (which its hash covers).
-const goalOrderText = (ids, titleOf = (id) => logGet(id)?.title ?? id) => ['The order proposed:', ...ids.map((id, i) => `${i + 1}. ${titleOf(id)} (${id})`), 'Goals left out keep their order after these.'].join('\n');
+// Each title on one line: a title can't add lines (or a list of its own) to what the owner reads.
+const goalOrderText = (ids, titleOf = (id) => logGet(id)?.title ?? id) => ['The order proposed:', ...ids.map((id, i) => `${i + 1}. ${String(titleOf(id)).replace(/\s+/g, ' ').trim()} (${id})`), 'Goals left out keep their order after these.'].join('\n');
 // --stake and --urgency on ask and rate: 1, 2 or 3 each; undefined when not given.
 function ratingFlags() {
   const r = {};
