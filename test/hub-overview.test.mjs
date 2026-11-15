@@ -14,6 +14,92 @@ import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 
+// t.after runs hooks in the order they were added and skips the rest once one throws, so a folder's
+// removal added before the dashboards writing into it ran first, could fail, and left them running:
+// their pipes then held this file open until the job was cancelled. A test's cleanup goes through
+// defer instead: the last step added runs first, every step runs, each within ms (a ref'd timer: an
+// unref'd one lets Node 22 cancel the hook before it fires), and the first error is the one thrown.
+async function runSteps(steps, ms = 30000) {
+  let first = null;
+  for (const step of [...steps].reverse()) {
+    let timer;
+    const limit = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`cleanup step did not settle in ${ms / 1000} s`)), ms); });
+    try { await Promise.race([Promise.resolve().then(step), limit]); } catch (e) { first ??= e; } finally { clearTimeout(timer); }
+  }
+  return first;
+}
+// A step added while run() runs starts at once and run() waits for it; one added after starts at once
+// too, and its error can only be told on stderr: the test has ended.
+function cleanup(ms = 30000) {
+  const steps = [];
+  const late = [];
+  let state = 'open';
+  return {
+    add(fn) {
+      if (state === 'open') return void steps.push(fn);
+      const p = runSteps([fn], ms);
+      if (state === 'running') late.push(p);
+      else p.then((e) => { if (e) process.stderr.write(`cleanup after the test: ${e.message}\n`); });
+    },
+    async run() {
+      state = 'running';
+      let first = await runSteps(steps, ms);
+      for (let i = 0; i < late.length; i++) { const e = await late[i]; first ??= e; }
+      state = 'done';
+      if (first) throw first;
+    },
+  };
+}
+// One cleanup per test, run by a single t.after. A test's first defer must come before its hooks
+// start (a t.after added after that never runs): every test here calls it at its start.
+const cleanups = new WeakMap();
+function defer(t, fn) {
+  let c = cleanups.get(t);
+  if (!c) { c = cleanup(); cleanups.set(t, c); t.after(() => c.run()); }
+  c.add(fn);
+}
+
+test('cleanup: last added runs first, every step runs, the first error is the one thrown', async () => {
+  const order = [];
+  const steps = [() => { order.push('A'); throw new Error('a'); }, () => { order.push('B'); }, () => { order.push('C'); throw new Error('c'); }];
+  const err = await runSteps(steps);
+  assert.deepEqual(order, ['C', 'B', 'A']);
+  assert.equal(err?.message, 'c');
+  const c = cleanup();
+  for (const s of steps) c.add(s);
+  await assert.rejects(c.run(), /^Error: c$/);
+});
+
+test('cleanup: a step that never settles is bounded and the rest still run', async () => {
+  const order = [];
+  const started = Date.now();
+  const err = await runSteps([() => order.push(1), () => new Promise(() => {})], 50);
+  assert.ok(Date.now() - started < 1000, 'bounded');
+  assert.match(err?.message ?? '', /did not settle/);
+  assert.deepEqual(order, [1]);
+});
+
+test('cleanup: a step added while cleanup runs is awaited and its error counts', async () => {
+  const c = cleanup();
+  c.add(() => c.add(() => { throw new Error('late'); }));
+  await assert.rejects(c.run(), /late/);
+  // and when a step before it failed: run still waits for it, and the earlier error is the one thrown
+  const d = cleanup();
+  let lateDone = false;
+  d.add(() => { d.add(() => new Promise((r) => setTimeout(() => { lateDone = true; r(); }, 100))); throw new Error('first'); });
+  await assert.rejects(d.run(), /^Error: first$/);
+  assert.equal(lateDone, true, 'the late step finished before run did');
+});
+
+test('cleanup: a step added after cleanup ran still runs', async () => {
+  const c = cleanup();
+  await c.run();
+  let ran = false;
+  c.add(() => { ran = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(ran, true);
+});
+
 test('hello carries a pulse: idle, moving, fully and partly blocked, building', () => {
   const F = fleetFixture('hub-pulse');
   const { old, ok } = F;
@@ -199,7 +285,7 @@ test('the Overview draws the box line from box.json and the latest list', () => 
 // by frame-ancestors), never in the viewer, never opened on its own.
 test('the Overview in Chrome: Park by keyboard, Park all and Resume all through each dashboard; nothing but the hub above a dashboard is heard', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-ov-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  defer(t, () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const HUB = PORTS + 60;
   const P = PORTS + 61;
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(P), DEVTEAM_HUB_RETRY_MS: '500', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
@@ -209,15 +295,15 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   // the fleet's mode as the project itself says it now (the hub's list is up to 10 s behind)
   const mode = (root) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'hello', '--json', '--no-kit'], { cwd: root, env, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return json(r.stdout).fleet.mode; };
   const a = startDashboard(A, env);
-  t.after(() => a.stop());
+  defer(t, () => a.stop());
   await until(() => a.out().includes(`127.0.0.1:${P}`), "alpha's dashboard");
   const b = startDashboard(B, env);
-  t.after(() => b.stop());
+  defer(t, () => b.stop());
   await until(async () => { try { const l = (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances; return l.length === 2 && l.every((x) => x.pulse); } catch { return false; } }, 'both projects listed with a pulse');
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  defer(t, () => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  defer(t, () => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Page.navigate', { url: `http://127.0.0.1:${HUB}/` });
@@ -271,9 +357,9 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   // another page on this machine can't hold a dashboard at all, so it has no frame to ask
   const other = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(`<!doctype html><iframe id="d" src="http://127.0.0.1:${P + 1}/"></iframe><script>const f = document.getElementById('d'); f.addEventListener('load', () => { window.loaded = true; }); setInterval(() => f.contentWindow.postMessage(${ask('aaaaaaaa03')}, '*'), 200);</script>`); });
   await new Promise((r) => other.listen(PORTS + 90, '127.0.0.1', r));
-  t.after(() => other.close());
+  defer(t, () => other.close());
   const q = await chrome.newPage();
-  t.after(() => q.close());
+  defer(t, () => q.close());
   await q.send('Page.enable');
   await q.send('Runtime.enable');
   await q.send('Page.navigate', { url: `http://127.0.0.1:${PORTS + 90}/` });
@@ -298,14 +384,14 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
 const BOX_VARS = ['DEVTEAM_IMAGE_HUB', 'DEVTEAM_KIT_RELEASE', 'DEVTEAM_BOX_TOOLS'];
 function imageKit(t) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-image-kit-'));
-  t.after(() => fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  defer(t, () => fs.rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   fs.cpSync(kit, d, { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
   return path.join(d, 'scripts', 'devteam.mjs');
 }
 // A machine of its own: a home, a folder to run in, and the env (hub port as given).
 function hubMachine(t, name, hubPort, extra = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${name}-`));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  defer(t, () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const home = path.join(base, 'home');
   const cwd = path.join(base, 'cwd');
   fs.mkdirSync(home);
@@ -322,7 +408,7 @@ function startHubCmd(t, script, cwd, env, args = []) {
   p.stdout.on('data', (b) => { o += b; });
   p.stderr.on('data', (b) => { o += b; });
   const alive = () => p.exitCode === null && p.signalCode === null;
-  t.after(() => (alive() ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  defer(t, () => (alive() ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
   return { p, alive, out: () => o };
 }
 const hubList = async (port) => { try { const r = await fetch(`http://127.0.0.1:${port}/instances.json`); return r.status === 200 ? await r.json() : null; } catch { return null; } };
@@ -337,7 +423,7 @@ test('hub --release, from a folder that is no repo: the list with the image\'s r
   const A = bareProject(M.base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
   const d = startDashboard(A, M.env);
-  t.after(() => d.stop());
+  defer(t, () => d.stop());
   const list = await until(async () => { const l = await hubList(HUB); return l?.instances?.some((x) => x.root === fs.realpathSync(A)) ? l : null; }, 'alpha listed by the image\'s hub');
   assert.deepEqual([list.hub, list.kit, list.image], [1, 'v9.9.9', true]);
   assert.ok(h.alive(), 'still serving');
@@ -365,7 +451,7 @@ test('a dashboard\'s hub names its project\'s kit and no image, whatever DEVTEAM
   const A = bareProject(M.base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
   const d = startDashboard(A, M.env);
-  t.after(() => d.stop());
+  defer(t, () => d.stop());
   const list = await until(() => hubList(HUB), "the dashboard's hub");
   const hello = json(spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'hello', '--json'], { cwd: A, env: M.env, encoding: 'utf8' }).stdout);
   assert.equal(typeof list.kit, 'string');
@@ -376,7 +462,7 @@ test('a dashboard\'s hub names its project\'s kit and no image, whatever DEVTEAM
 
 test('the hub waits out another hub and a non-hub, logging the non-hub once, and takes the port', { timeout: 120000 }, async (t) => {
   const script = imageKit(t);
-  const holder = (port, body) => new Promise((r) => { const s = http.createServer((q, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }); s.listen(port, '127.0.0.1', () => r(s)); });
+  const holder = (port, body) => new Promise((r) => { const s = http.createServer((q, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }); defer(t, () => s.listening && new Promise((c) => s.close(c))); s.listen(port, '127.0.0.1', () => r(s)); });
   // another hub holds it: the image's hub stays up, retrying, and takes it when that one goes
   const A = PORTS + 30;
   const M1 = hubMachine(t, 'hub-wait', A);
@@ -423,6 +509,7 @@ test('a dashboard leaves the hub to the image only when DEVTEAM_IMAGE_HUB names 
     const A = bareProject(M.base, 'alpha');
     execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
     const d = startDashboard(A, M.env);
+    defer(t, () => d.stop());
     try {
       await until(() => /dashboard on http/.test(d.out()), 'the dashboard');
       return { d, logOf: () => readOr(path.join(A, 'docs/devteam/run/dashboard.log')) };
@@ -452,7 +539,7 @@ test('a non-hub that answers slowly now and then is still logged once', { timeou
   let n = 0;
   const s = http.createServer((q, res) => { const slow = n++ % 2 === 1; setTimeout(() => { if (!res.destroyed) res.end('ok'); }, slow ? 2500 : 0); });
   await new Promise((r) => s.listen(HUB, '127.0.0.1', r));
-  t.after(() => new Promise((r) => { s.closeAllConnections?.(); s.close(r); }));
+  defer(t, () => new Promise((r) => { s.closeAllConnections?.(); s.close(r); }));
   const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
   await until(() => n >= 6, `six asks of the holder (${h.out()})`);
   assert.ok(h.alive());
@@ -465,7 +552,7 @@ test('the hub runs with another home\'s DEVTEAM_RUN in its env, and writes nothi
   const HUB = PORTS + 34;
   const elsewhere = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-other-home-')), 'docs', 'devteam', 'run');
   fs.mkdirSync(elsewhere, { recursive: true });
-  t.after(() => fs.rmSync(path.dirname(path.dirname(path.dirname(elsewhere))), { recursive: true, force: true }));
+  defer(t, () => fs.rmSync(path.dirname(path.dirname(path.dirname(elsewhere))), { recursive: true, force: true }));
   const M = hubMachine(t, 'hub-run', HUB, { DEVTEAM_RUN: elsewhere });
   const h = startHubCmd(t, imageKit(t), M.cwd, M.env, ['--release', 'v9.9.9']);
   await until(async () => (await hubList(HUB))?.kit === 'v9.9.9' || !h.alive(), 'the hub, or its exit');
@@ -484,7 +571,7 @@ test('a dashboard\'s hub run by a kit outside its project names no release', { t
   let o = '';
   p.stdout.on('data', (b) => { o += b; });
   p.stderr.on('data', (b) => { o += b; });
-  t.after(() => (p.exitCode === null && p.signalCode === null ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
+  defer(t, () => (p.exitCode === null && p.signalCode === null ? new Promise((r) => { p.once('exit', r); try { process.kill(-p.pid, 'SIGKILL'); } catch { r(); } }) : undefined));
   const list = await until(() => hubList(HUB), `the foreign kit's dashboard hub (${o})`);
   assert.equal(list.kit, null);
   assert.equal('image' in list, false);

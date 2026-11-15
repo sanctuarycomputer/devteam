@@ -131,6 +131,7 @@ exit 0
       "declined": null,
       "allow_partial": null,
       "result_status": null,
+      "links_moved": null,
       "goal_hold": null,
       "rank": {
         "score": 4,

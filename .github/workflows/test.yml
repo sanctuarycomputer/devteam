@@ -5,6 +5,8 @@ on:
     branches: [main]
 jobs:
   kit:
+    # named as before: the test_timeout below would otherwise join the name on 20, 22 and 24
+    name: kit (${{ matrix.node }}, ${{ matrix.part }})
     # Projects run the kit on whatever Node they pin, so test every supported major. Each major
     # runs in two jobs side by side: the "devteam kit" chain (and the forks it starts), and every
     # other test file.
@@ -13,6 +15,21 @@ jobs:
       matrix:
         node: [18, 20, 22, 24]
         part: [chain, rest]
+        # A hung test file ends its step in minutes, not at the job's limit. --test-timeout is
+        # 600000 (above dashboard.test.mjs, the longest file at about 400 s):
+        # - Node 18 rejects the flag (bad option), so it gets none;
+        # - on 20 and 22 it caps each whole file, killed and named as "not ok - <file>" if that
+        #   comes before the step's own limit;
+        # - on 24 it caps each top-level test only, and never ends a file held open after its tests.
+        # So every test step also has timeout-minutes: 12 (the slowest healthy step is about 7),
+        # and the last step lists what is still running.
+        include:
+          - node: 20
+            test_timeout: --test-timeout=600000
+          - node: 22
+            test_timeout: --test-timeout=600000
+          - node: 24
+            test_timeout: --test-timeout=600000
     runs-on: ubuntu-latest
     # the kit won't start a worker while the machine's memory is over its ceiling: the tests read a
     # machine of their own (or none), never the runner's
@@ -44,11 +61,20 @@ jobs:
       # test files are *.test.mjs directly under test/; test/lib holds helpers, which node --test's
       # own discovery would also pick up
       - if: matrix.part == 'chain'
-        run: node --test --test-concurrency=8 test/kit.test.mjs
+        timeout-minutes: 12
+        run: node --test ${{ matrix.test_timeout }} --test-concurrency=8 test/kit.test.mjs
       # bounds.test.mjs times the kit's code against a bound: alone, so nothing else's load counts
       - if: matrix.part == 'rest'
-        run: node --test test/bounds.test.mjs
+        timeout-minutes: 12
+        run: node --test ${{ matrix.test_timeout }} test/bounds.test.mjs
       - if: matrix.part == 'rest'
         env:
           DEVTEAM_TEST_GITLEAKS: '1'
-        run: node --test --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')
+        timeout-minutes: 12
+        run: node --test ${{ matrix.test_timeout }} --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')
+      # Names a hung file. A step's timeout signals only its shell, so the node --test runner, the
+      # hung file's own process (its path names the file) and what it started (a dashboard's or
+      # hub's tmp folder names its test) are all still running here; when Node's per-file limit
+      # fired first instead, its "not ok - <file>" line above names it.
+      - if: failure()
+        run: ps -eww -o pid,ppid,etimes,args

@@ -10,6 +10,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
@@ -17,3 +21,136 @@ jobs:
       # each tool installed at its pin (box-pins installed exits 1 naming one that isn't), and the image names its hub's port
       - run: |
           docker run --rm --entrypoint sh box -ec 'box-recover --dry-run; box-status | grep -q "^machine: disk "; test "$(node /opt/devteam/kit/scripts/devteam.mjs machine pane-state %0)" = gone; if command -v box-supervisors; then exit 1; fi; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md; node /opt/devteam/kit/scripts/devteam.mjs box-pins installed; test "$(echo $DEVTEAM_IMAGE_HUB)" = 4320'
+      # Then the built image boots, with its real entrypoint, and is checked from inside: the hub its boot
+      # starts from the image's kit, a current dashboard beside it leaving the hub's port alone, the
+      # versions the image says it is, and the hub coming back when it dies and when its window closes.
+      # The checks shared by the steps below are written once, to box.sh on the runner; the ones that run
+      # in the box are the text IN_BOX, which each runs there. Every check reads a command's whole output
+      # first, then matches it: under pipefail, a grep -q that stops early would fail what writes to it.
+      - name: boot the built image
+        run: |
+          set -euo pipefail
+          docker volume create box-data >/dev/null
+          docker run -d --name box -e DEVTEAM_PUBLIC_URL=https://box.test -v box-data:/data -p 127.0.0.1:8080:8080 box >/dev/null
+          end=$((SECONDS + 120))
+          until curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:8080/healthz 2>/dev/null; do
+            [ "$(docker inspect -f '{{.State.Running}}' box)" = true ] || { echo "the box stopped before /healthz answered"; exit 1; }
+            [ "$SECONDS" -lt "$end" ] || { echo "timed out after 120s: /healthz"; exit 1; }
+            sleep 1
+          done
+          REL=$(docker exec box printenv DEVTEAM_KIT_RELEASE)
+          TOOLS=$(docker exec box printenv DEVTEAM_BOX_TOOLS)
+          [[ $REL =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "DEVTEAM_KIT_RELEASE is '$REL', not vX.Y.Z"; exit 1; }
+          [ -n "$TOOLS" ] || { echo "DEVTEAM_BOX_TOOLS is empty"; exit 1; }
+          { echo "REL=$REL"; echo "TOOLS=$TOOLS"; echo "BOX_SH=$RUNNER_TEMP/box.sh"; } >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/box.sh" <<'EOF'
+          set -euo pipefail
+          # as dev, the owner's user and every agent's, with dev's home
+          dx() { docker exec -u dev -e HOME=/data/home -e REL="$REL" box "$@"; }
+          # until_ok <seconds> <what> <command…>: the command, each second, until it passes
+          until_ok() {
+            local s=$1 what=$2; shift 2
+            local end=$((SECONDS + s))
+            until "$@"; do
+              [ "$SECONDS" -lt "$end" ] || { echo "timed out after ${s}s: $what"; return 1; }
+              sleep 1
+            done
+          }
+          # In the box. list_in [root]: the list answers hub 1 with kit $REL and image true (and names the
+          # instance at root). holder_in: the one pid listening on 4320 runs the image's kit's hub; prints it.
+          IN_BOX='
+          list_in() {
+            local j
+            j=$(curl -fsS --max-time 2 http://127.0.0.1:4320/instances.json 2>/dev/null) || return 1
+            J="$j" ROOT="${1:-}" /usr/local/bin/node -e "const j = JSON.parse(process.env.J); process.exit(j.hub === 1 && j.kit === process.env.REL && j.image === true && (process.env.ROOT === \"\" || (j.instances ?? []).some((i) => i.root === process.env.ROOT)) ? 0 : 1)"
+          }
+          holder_in() {
+            local p argv
+            p=$(lsof -nP -iTCP:4320 -sTCP:LISTEN -t 2>/dev/null) || return 1
+            [[ $p =~ ^[0-9]+$ ]] || return 1
+            mapfile -d "" -t argv < "/proc/$p/cmdline" || return 1
+            [ "${argv[1]:-}" = /opt/devteam/kit/scripts/devteam.mjs ] && [ "${argv[2]:-}" = hub ] || return 1
+            echo "$p"
+          }
+          '
+          list_ok() { dx bash -c "$IN_BOX"'
+          list_in "$@"' _ "$@"; }
+          holder() { dx bash -c "$IN_BOX"'
+          holder_in' _; }
+          has_hub_window() { local out; out=$(dx tmux list-windows -t =home -F '#{window_name}') || return 1; grep -qxF hub <<<"$out"; }
+          EOF
+      - name: the image's hub answers, in window home:hub, from the image's kit
+        run: |
+          . "$BOX_SH"
+          until_ok 60 "the hub answers hub 1, kit $REL, image true" list_ok
+          has_hub_window || { echo "no tmux window home:hub"; exit 1; }
+          HUBPID=$(holder) || { echo "4320's holder is not the image's hub"; exit 1; }
+          echo "HUBPID=$HUBPID" >> "$GITHUB_ENV"
+      - name: a dashboard on the image's kit leaves the hub's port alone
+        run: |
+          . "$BOX_SH"
+          dx bash -ec '
+            mkdir -p /data/home/code/e2e && cd /data/home/code/e2e
+            git init -q -b main
+            mkdir -p docs
+            cp -R /opt/devteam/kit docs/devteam
+            /usr/local/bin/node docs/devteam/scripts/devteam.mjs init --name e2e
+            git add -A
+            git -c user.name=e2e -c user.email=e2e@box.test commit -qm e2e'
+          # as the boot starts one: in a tmux window, with the tmux server's environment (the image's ENV)
+          dx tmux new-window -d -t '=home:' -n e2e-dash -c /data/home/code/e2e 'while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done'
+          log=/data/home/code/e2e/docs/devteam/run/dashboard.log
+          started() { local t; t=$(dx cat "$log" 2>/dev/null) || return 1; grep -qF 'started on' <<<"$t"; }
+          until_ok 60 'the e2e dashboard starts' started
+          # each line is "<time> [<pid>] <message>"; this one comes just after "started on"
+          left() {
+            local t l
+            t=$(dx cat "$log" 2>/dev/null) || return 1
+            while IFS= read -r l; do [ "${l#*] }" != 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)' ] || return 0; done <<<"$t"
+            return 1
+          }
+          until_ok 5 "dashboard.log says 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)'" left || { dx cat "$log"; exit 1; }
+          [ "$(holder)" = "$HUBPID" ] || { echo "4320 is no longer held by the image's hub (pid $HUBPID)"; exit 1; }
+          until_ok 15 'the list names /data/home/code/e2e' list_ok /data/home/code/e2e
+      - name: the versions show (the gateway's start line, box-status)
+        run: |
+          . "$BOX_SH"
+          logs=$(docker logs box 2>&1)
+          grep -qxF "image: $REL" <<<"$logs" || { echo "docker logs has no line 'image: $REL'"; exit 1; }
+          st=$(dx box-status)
+          echo "$st"
+          read -ra pins <<<"$TOOLS"
+          tools=
+          for p in "${pins[@]}"; do tools+="${tools:+, }${p%%=*} ${p#*=}"; done
+          for want in "machine: hub 4320 up, kit $REL (image)" "machine: box $REL: $tools"; do
+            grep -qxF "$want" <<<"$st" || { echo "box-status has no line '$want'"; exit 1; }
+          done
+      - name: the hub comes back when it dies and when its window closes
+        run: |
+          . "$BOX_SH"
+          # killed: its window's loop starts it again; timed in the box, so docker's own start-up isn't counted
+          dx env HUBPID="$HUBPID" bash -c "$IN_BOX"'
+            kill "$HUBPID"
+            end=$(( $(date +%s%N) + 5000000000 ))
+            while [ "$(date +%s%N)" -lt "$end" ]; do
+              if list_in && p=$(holder_in) && [ "$p" != "$HUBPID" ] && [ "$(date +%s%N)" -lt "$end" ]; then echo "the hub is back as pid $p"; exit 0; fi
+              sleep 0.2
+            done
+            echo "the hub was not back within 5s of its kill"; exit 1'
+          # its window closed: the minute loop makes it again
+          dx tmux kill-window -t '=home:hub'
+          if has_hub_window; then echo "home:hub is still there after kill-window"; exit 1; fi
+          until_ok 90 'the minute loop brings back home:hub' has_hub_window
+          until_ok 15 "the hub answers hub 1, kit $REL, image true again" list_ok
+          holder >/dev/null || { echo "4320's holder is not the image's hub"; exit 1; }
+      - name: what the box said
+        if: failure()
+        run: |
+          docker logs box 2>&1 || true
+          for f in /data/home/box.log /data/home/.devteam/hub-4320.log /data/home/code/e2e/docs/devteam/run/dashboard.log; do echo "== $f"; docker exec box cat "$f" || true; done
+          docker exec -u dev -e HOME=/data/home box tmux list-windows -a || true
+      - name: clean up
+        if: always()
+        run: |
+          docker rm -f box >/dev/null 2>&1 || true
+          docker volume rm box-data >/dev/null 2>&1 || true
