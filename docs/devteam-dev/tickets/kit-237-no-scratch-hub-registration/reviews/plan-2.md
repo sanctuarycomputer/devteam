@@ -15,7 +15,7 @@ Nothing in the fixes contradicts the spec or the other tasks. One thing outside 
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| N1 | Nit | test hygiene: ordering | Task 1, test 2 finally | The dashboard is killed and then its record is removed. An `accounts-tick` child spawned before the kill can outlive the dashboard and rewrite the record after the `rmSync`, because ticks run every 200 ms. This is harmless: pass 1 found no assertion that the record breaks, and the existing test has the same order. Still, waiting for the dashboard's `exit` and for one tick period before removing the file would make F1's fix hold every time. | |
-| N2 | Nit | spec fidelity | Task 2, tempDirs() | "an ancestor of it" should say by whole path segments, as scratchRootWhy does. Otherwise `TMPDIR=/data/ho` would count as an ancestor of `/data/home` and be dropped. Share one segment-wise `under(a, b)` helper for both checks. | |
+| N1 | Nit | test hygiene: ordering | Task 1, test 2 finally | The dashboard is killed and then its record is removed. An `accounts-tick` child spawned before the kill can outlive the dashboard and rewrite the record after the `rmSync`, because ticks run every 200 ms. This is harmless: pass 1 found no assertion that the record breaks, and the existing test has the same order. Still, waiting for the dashboard's `exit` and for one tick period before removing the file would make F1's fix hold every time. | taken into the plan: wait for the dashboard to exit before removing the record |
+| N2 | Nit | spec fidelity | Task 2, tempDirs() | "an ancestor of it" should say by whole path segments, as scratchRootWhy does. Otherwise `TMPDIR=/data/ho` would count as an ancestor of `/data/home` and be dropped. Share one segment-wise `under(a, b)` helper for both checks. | taken into the plan: one whole-segment helper for both checks |
 
 Verdict: APPROVE fbd0b775166b40380a4f84d48316fbfde778cfef
