@@ -74,7 +74,7 @@ test('box-pins verify names each problem and exits 1', () => {
   ];
   for (const [edit, re] of cases) { const r = pins(['verify', '--dockerfile', pinsCopy(edit)]); assert.equal(r.status, 1, String(re)); assert.match(r.stdout, re); }
   const url = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace('download/v$GH_VERSION/gh_${GH_VERSION}_linux', 'download/v2.104.0/gh_2.104.0_linux'))]);
-  assert.equal(url.status, 1); assert.match(url.stdout, /gh's version 2\.104\.0 is written outside its ARG \(line \d+\)/);
+  assert.equal(url.status, 1); assert.match(url.stdout, /gh's version 2\.104\.0 is written outside its ARG \(line \d+: /);
   const rel = pins(['verify', '--release', 'v1.2.3', '--dockerfile', pinsCopy()]);
   assert.equal(rel.status, 1); assert.match(rel.stdout, /DEVTEAM_RELEASE is v\d+\.\d+\.\d+, not v1\.2\.3/);
 });
@@ -90,12 +90,14 @@ test('verify takes a hold above the _VERSION ARG, and refuses one with no reason
   assert.equal(r.status, 1); assert.match(r.stdout, /mise's hold has no reason/);
   const far = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^# ttyd, the web terminal$/m, '# hold: bad build\n$&'))]);
   assert.equal(far.status, 1); assert.match(far.stdout, /the hold on line \d+ is not directly above a _VERSION ARG/);
+  const odd = pins(['verify', '--dockerfile', pinsCopy((t) => t.replace(/^ARG MISE_VERSION=/m, '# Hold: x\n$&'))]);
+  assert.equal(odd.status, 1); assert.match(odd.stdout, /line \d+ looks like a hold but is not "# hold: <reason>"/);
 });
 ```
 
 - [ ] **Step 2: Run them to see them fail** (script file running the gate command of Global Constraints with `--test-name-pattern 'box-pins verify|verify '`). Expected: FAIL, `unknown command "box-pins"`.
 
-- [ ] **Step 3: Implement** `BOX_TOOLS`, `readPins`, `pinForm`, `versionParts`, `newer`, `pinsFile`, `cmdBoxPins` (`verify` only so far; `check`/`bump`/`installed` arms say `not yet` until their tasks), and the dispatch: `'box-pins'` added to `KIT_VIEWS`; `machineWide` and the `DEVTEAM_RUN` exemption gain `(command === 'box-pins' && positional[0] === 'installed')`; `COMMANDS['box-pins'] = cmdBoxPins`. The stray-literal scan (spec verify 4): skip every pin `ARG` line of the table, `ARG DEVTEAM_RELEASE=` and `# hold:` lines; in the rest, a version (without its `v`) matches `(?<![\d.])<escaped>(?!\.?\d)`, a sum `(?<![0-9a-fA-F])<sum>(?![0-9a-fA-F])`. A line matching `/^#\s*hold\b/i` not directly above a `_VERSION` ARG is a problem. `DEVTEAM_BOX_TOOLS` is the one line matching `^\s*(?:ENV\s+)?DEVTEAM_BOX_TOOLS="([^"]*)"`, whose pairs must be exactly the six `<name>=$<P>_VERSION`. Problem wording, exactly: `<name> has no <P>_VERSION`, `<name>'s <P>_VERSION is given <n> times`, `<name> has no <ARG>`, `<ARG> is not 64 lowercase hex`, `<name>'s version <v> is written outside its ARG (line <n>)`, `<name>'s <ARG> sum is written outside its ARG (line <n>)`, `no DEVTEAM_RELEASE`, `DEVTEAM_RELEASE <r> is not vX.Y.Z`, `DEVTEAM_RELEASE is <r>, not <given>`, `DEVTEAM_BOX_TOOLS does not name <name>=$<P>_VERSION`, `DEVTEAM_BOX_TOOLS names <pair>, which is no tool's`, `no DEVTEAM_BOX_TOOLS` / `DEVTEAM_BOX_TOOLS is given <n> times`, `<name>'s hold has no reason`, `the hold on line <n> is not directly above a _VERSION ARG`. Values in a message pass through the `^[\w.+-]{1,64}$` filter.
+- [ ] **Step 3: Implement** `BOX_TOOLS`, `readPins`, `pinForm`, `versionParts`, `newer`, `pinsFile`, `cmdBoxPins` (`verify` only so far; `check`/`bump`/`installed` arms say `not yet` until their tasks), and the dispatch: `'box-pins'` added to `KIT_VIEWS`; `machineWide` and the `DEVTEAM_RUN` exemption gain `(command === 'box-pins' && positional[0] === 'installed')`; `COMMANDS['box-pins'] = cmdBoxPins`. The stray-literal scan (spec verify 4): skip every pin `ARG` line of the table, `ARG DEVTEAM_RELEASE=` and `# hold:` lines; in the rest, a version (without its `v`) matches `(?<![\d.])<escaped>(?!\.?\d)`, a sum `(?<![0-9a-fA-F])<sum>(?![0-9a-fA-F])`. A line matching `/^#\s*hold\b/i` not directly above a `_VERSION` ARG is a problem. `DEVTEAM_BOX_TOOLS` is the one line matching `^\s*(?:ENV\s+)?DEVTEAM_BOX_TOOLS="([^"]*)"`, whose pairs must be exactly the six `<name>=$<P>_VERSION`. Problem wording, exactly: `<name> has no <P>_VERSION`, `<name>'s <P>_VERSION is given <n> times`, `<name> has no <ARG>`, `<ARG> is not 64 lowercase hex`, `<name>'s version <v> is written outside its ARG (line <n>: <matched text>)`, `<name>'s <ARG> sum is written outside its ARG (line <n>: <matched text>)`, `no DEVTEAM_RELEASE`, `DEVTEAM_RELEASE <r> is not vX.Y.Z`, `DEVTEAM_RELEASE is <r>, not <given>`, `DEVTEAM_BOX_TOOLS does not name <name>=$<P>_VERSION`, `DEVTEAM_BOX_TOOLS names <pair>, which is no tool's`, `no DEVTEAM_BOX_TOOLS` / `DEVTEAM_BOX_TOOLS is given <n> times`, `<name>'s hold has no reason`, `the hold on line <n> is not directly above a _VERSION ARG`, `line <n> looks like a hold but is not "# hold: <reason>"`. Values in a message pass through the `^[\w.+-]{1,64}$` filter.
 
 - [ ] **Step 4: Run to pass**, then the whole file (existing tests unchanged). Expected: PASS.
 
@@ -120,7 +122,7 @@ test('check sends GH_TOKEN to the GitHub API only', async () => { /* GH_TOKEN=fa
 test('check on a broken file exits 2 with its problems, in --json too', async () => { /* TTYD_SHA256_X86_64 removed → status 2, `box-pins check: ttyd has no TTYD_SHA256_X86_64`; --json → { box_pins: 1, problems: [ … ] }, status 2 */ });
 ```
 
-The fixture serves assets under `/assets/…` (outside `/gh`, the `DEVTEAM_PINS_GITHUB` base), distinct bytes per asset. Each test spawns asynchronously (`execFile` promisified), since the fixture server lives in the test process.
+The fixture's `browser_download_url`s are `/dl/…`, answered with a 302 to `/assets/…` (both outside `/gh`, the `DEVTEAM_PINS_GITHUB` base), distinct bytes per asset. Each test spawns asynchronously (`execFile` promisified), since the fixture server lives in the test process.
 
 - [ ] **Step 2: Run, see fail** (`not yet`).
 - [ ] **Step 3: Implement** `latestOf` (npm `GET <base>/<pkg with / as %2f>/latest` → `.version`; PyPI `GET <base>/pypi/<pkg>/json` → `.info.version`; GitHub `GET <base>/repos/<repo>/releases?per_page=30`, filter `!draft && !prerelease && versionParts(tag_name)`, max by `newer`; headers `accept: application/vnd.github+json`, `user-agent: devteam-box-pins`, `authorization: Bearer $GH_TOKEN` only here and only when set; `AbortSignal.timeout(15000)`; a non-2xx is `HTTP <status>`, a fetch error `unreachable (<code or name>)`, a version that fails `versionParts` `not a release: <safe(v)>`), `checkPins`, and the `check` arm (`--json`; exit 1 if any stale, else 3 if any unknown, else 0; `readPins` problems → exit 2 as the spec says).
