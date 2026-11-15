@@ -16,6 +16,6 @@ Nothing new broke: the real Dockerfile still verifies (`ok, 6 tools, release v0.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | quality.md §3 (tests that fail against a wrong implementation) | test/machine.test.mjs, 'verify names what it found, where', comment "a stamp or a hold naming a version is no stray" | The comment names two cases but only the hold is tested. No test sets a tool's version equal to DEVTEAM_RELEASE's bare version (e.g. a tool at `0.52.0`) to show that the `ARG DEVTEAM_RELEASE=` line is skipped by the stray scan. The code does skip it (`rel.forEach((i) => pinLines.add(i))`). Add that case, or trim the comment. | |
+| F1 | Suggestion | quality.md §3 (tests that fail against a wrong implementation) | test/machine.test.mjs, 'verify names what it found, where', comment "a stamp or a hold naming a version is no stray" | The comment names two cases but only the hold is tested. No test sets a tool's version equal to DEVTEAM_RELEASE's bare version (e.g. a tool at `0.52.0`) to show that the `ARG DEVTEAM_RELEASE=` line is skipped by the stray scan. The code does skip it (`rel.forEach((i) => pinLines.add(i))`). Add that case, or trim the comment. | fixed: a case with a tool at the stamp's number (UV 0.52.0, release v0.52.0) verifies ok |
 
 Verdict: APPROVE 5d960025dc4ec26121936c592b3c96375f2f1409

@@ -974,6 +974,10 @@ test('verify names what it found, where (task-1 review)', () => {
   assert.match(run((t) => t.replace(' uv=$UV_VERSION', '')).r.stdout, /DEVTEAM_BOX_TOOLS does not name uv=\$UV_VERSION/);
   assert.match(run((t) => t.replace(' uv=$UV_VERSION', ' uv=$UV_VERSION node=$NODE_VERSION')).r.stdout, /DEVTEAM_BOX_TOOLS names node=\$NODE_VERSION, which is no tool's/);
   assert.match(run((t) => t.replace(/^\s*DEVTEAM_BOX_TOOLS=.*$/m, '    DEVTEAM_X=1')).r.stdout, /no DEVTEAM_BOX_TOOLS/);
+  // a pin that isn't a plain version could never be compared: a problem, so check and bump refuse it
+  assert.match(run((t) => t.replace(/^ARG UV_VERSION=.*$/m, 'ARG UV_VERSION=0.13.7-rc1')).r.stdout, /uv's UV_VERSION 0\.13\.7-rc1 is not a plain version/);
+  // the stamp's line is no stray for a tool at the same number
+  assert.equal(run((t) => t.replace(/^ARG UV_VERSION=.*$/m, 'ARG UV_VERSION=0.52.0')).r.status, 0);
   // a --release that isn't vX.Y.Z is a usage error
   const bad = pins(['verify', '--release', 'v1.2', '--dockerfile', pinsCopy()]);
   assert.equal(bad.status, 1); assert.match(bad.stderr, /--release "v1\.2" is not vX\.Y\.Z/); assert.match(bad.stderr, /usage: box-pins verify/);
@@ -997,9 +1001,12 @@ async function upstream(t) {
     state.hits.push({ path: u.pathname, headers: req.headers });
     const json = (o, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(typeof o === 'string' ? o : JSON.stringify(o)); };
     let m;
+    if (u.pathname.startsWith('/npm/') && !req.url.includes('%2f')) return json({}, 404);
+    if (u.pathname.startsWith('/gh/') && (u.searchParams.get('per_page') !== '30' || req.headers.accept !== 'application/vnd.github+json')) return json({}, 400);
+    if (state.hang?.(u.pathname)) return;
     if ((m = /^\/npm\/(.+)\/latest$/.exec(u.pathname))) { const v = state.npm[decodeURIComponent(m[1])]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ version: v }); }
     if ((m = /^\/pypi\/pypi\/([^/]+)\/json$/.exec(u.pathname))) { const v = state.pypi[m[1]]; return v === undefined ? json({}, 404) : v.status ? json({}, v.status) : json({ info: { version: v } }); }
-    if ((m = /^\/gh\/repos\/([^/]+\/[^/]+)\/releases$/.exec(u.pathname))) { const v = state.releases[m[1]]; return v === undefined ? json([], 404) : v.status ? json({}, v.status) : json(v); }
+    if ((m = /^\/gh\/repos\/([^/]+\/[^/]+)\/releases$/.exec(u.pathname))) { const v = state.releases[m[1]]; return v === undefined ? json([], 404) : v.status ? json({}, v.status) : v.raw !== undefined ? json(v.raw) : json(v); }
     if ((m = /^\/dl\/(.+)$/.exec(u.pathname))) { res.writeHead(302, { location: `/assets/${m[1]}` }); return res.end(); }
     if ((m = /^\/assets\/(.+)$/.exec(u.pathname))) { const a = state.assets[m[1]]; if (!a || a.status) { res.writeHead(a?.status ?? 404); return res.end(); } res.writeHead(200); return res.end(a.body); }
     res.writeHead(404); res.end();
@@ -1069,6 +1076,21 @@ test('check reports an unreachable upstream as unknown, and junk as unknown, nev
   assert.ok(!r.stdout.includes('\u001b'));
   u.state.releases['jdx/mise'] = { status: 500 };
   assert.match((await pinsAsync(['check', '--dockerfile', pinsCopy()], upEnv(u))).stdout, /^mise: unknown HTTP 500$/m);
+});
+
+test('check: stale wins over unknown; no release, bad JSON and a timeout are unknown (task-2 review)', async (t) => {
+  const u = await upstream(t);
+  u.state.releases['tsl0922/ttyd'] = [u.release('ttyd', '1.9.0', { prerelease: true })];
+  u.state.releases['jdx/mise'] = { raw: 'not json' };
+  u.state.hang = (p) => p.includes('astral-sh/uv');
+  const r = await pinsAsync(['check', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
+  assert.equal(r.status, 1, 'a stale pin decides the exit, whatever else is unknown');
+  assert.match(r.stdout, /^gh: stale /m);
+  assert.match(r.stdout, /^ttyd: unknown no release$/m);
+  assert.match(r.stdout, /^mise: unknown bad JSON$/m);
+  assert.match(r.stdout, /^uv: unknown unreachable \(timed out\)$/m);
+  const j = await pinsAsync(['check', '--json', '--dockerfile', pinsCopy()], { ...upEnv(u), DEVTEAM_PINS_TIMEOUT_MS: '500' });
+  assert.equal(j.status, 1);
 });
 
 test('check sends GH_TOKEN to the GitHub API, and nowhere else', async (t) => {

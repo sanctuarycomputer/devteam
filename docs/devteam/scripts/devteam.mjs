@@ -13925,6 +13925,8 @@ function readPins(text) {
       p.versionLine = v[0];
       p.version = lines[v[0]].slice(`ARG ${tool.prefix}_VERSION=`.length);
       if (!p.version) problems.push(`${tool.name}'s ${tool.prefix}_VERSION is empty`);
+      // a pin that isn't a plain version can't be compared with upstream, so check and bump would never move it
+      else if (!versionParts(p.version)) problems.push(`${tool.name}'s ${tool.prefix}_VERSION ${safe(p.version)} is not a plain version`);
     }
     for (const [arch, suffix] of Object.entries(tool.assets ? BOX_ARCHES : {})) {
       const name = `${tool.prefix}_SHA256_${suffix}`;
@@ -14000,11 +14002,17 @@ const releaseFlag = () => {
 // a newer line is not taken for the latest). Throws an Error whose message is the why, in our words.
 // GitHub is read anonymously, or with GH_TOKEN, which goes to the API only: never with a download.
 const pinsBase = (k, dflt) => (process.env[k] || dflt).replace(/\/+$/, '');
+// one deadline for the answer and its body (DEVTEAM_PINS_TIMEOUT_MS only for tests)
+const timedOut = (e) => e?.name === 'TimeoutError' || e?.name === 'AbortError';
+const unreachable = (e) => new Error(`unreachable (${timedOut(e) ? 'timed out' : safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.name)})`);
 async function upstreamJson(url, headers = {}) {
+  const signal = AbortSignal.timeout(Number(process.env.DEVTEAM_PINS_TIMEOUT_MS) || 15000);
   let res;
-  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins', ...headers }, signal: AbortSignal.timeout(15000) }); } catch (e) { throw new Error(`unreachable (${safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? (e?.name === 'TimeoutError' ? 'timed out' : e?.name))})`); }
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins', ...headers }, signal }); } catch (e) { throw unreachable(e); }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  try { return await res.json(); } catch { throw new Error('bad JSON'); }
+  let body;
+  try { body = await res.text(); } catch (e) { throw unreachable(e); }
+  try { return JSON.parse(body); } catch { throw new Error('bad JSON'); }
 }
 const notRelease = (v) => new Error(`not a release: ${safe(v)}`);
 async function latestOf(tool) {
