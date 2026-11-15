@@ -18,6 +18,6 @@ How each pass-1 finding stands:
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| P2-1 | Minor | none | plan.md Task 1, run note | The note says that on today's code the boxless case also fails at step 2. The test is one `test()` that stops at its first failed assertion, so on today's code case 1 fails at step B and case 2 never runs. The red run still proves the fix is needed. Only the expectation is worded too strongly. | |
+| P2-1 | Minor | none | plan.md Task 1, run note | The note says that on today's code the boxless case also fails at step 2. The test is one `test()` that stops at its first failed assertion, so on today's code case 1 fails at step B and case 2 never runs. The red run still proves the fix is needed. Only the expectation is worded too strongly. | wont-fix plan.md left as approved: the red run stops at the boxed case first, as noted; verification.md records the red run as it is |
 
 Verdict: APPROVE f38b5ea7f5e078d98e08bc8e8af0337bbacc8e19
