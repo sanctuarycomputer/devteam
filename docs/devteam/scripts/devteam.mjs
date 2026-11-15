@@ -3970,7 +3970,8 @@ function parseReview(file, text) {
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
   // A records-in-home ticket's final review names the home commit of the records it reviewed too.
-  const recordsRaw = text.match(/^-[ \t]*Records:[ \t]*(\S+)[ \t]*$/m)?.[1] ?? null;
+  // the last such line counts, as the last verdict line does
+  const recordsRaw = [...text.matchAll(/^-[ \t]*Records:[ \t]*(\S+)[ \t]*$/gm)].pop()?.[1] ?? null;
   // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
   const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
@@ -5118,6 +5119,16 @@ function pinRecords(id) {
 // run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
 // (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
 // add a fallback to home there. null, or why it didn't land.
+// Every records head of a ticket merged into home's main by landRecords (its subject, "<id>:
+// records"): a half-done merge's first landing, and a later one after the records branch moved.
+// The merge act names them all, so none reads as a merge no act made.
+function landedRecordsHeads(id) {
+  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+  mainRefCache = undefined;
+  const main = mainRef();
+  if (!main) return [];
+  return (git(['log', main, '--first-parent', '--merges', '--format=%P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')[1]).filter((h) => /^[0-9a-f]{40}$/.test(h ?? ''));
+}
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
   const HS = HR.settings;
@@ -5419,7 +5430,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home${landedRecordsHeads(id).filter((h) => h !== rec.sha).map((h) => `, and earlier at ${h}`).join('')}` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
@@ -15989,17 +16000,18 @@ function removeWorkerWorktree(id) {
   }
   stopPreviewsOf(id, { keepRecords: false });
   const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
-  if (fs.existsSync(wt)) {
-    R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
-    out(`removed ${wt} (a worktree of ${R.name})`);
-  }
-  R.gitOrDie(['worktree', 'prune'], R.root);
-  // records in home: its records worktree goes too, through home
+  // records in home: its records worktree goes too, through home, and first, so one git refuses
+  // (uncommitted records) before anything is removed
   if (recordsInHomeId(id)) {
     const rw = recordsWorktreePath(id);
     if (fs.existsSync(rw)) { gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), rw], mainRoot); out(`removed ${rw} (a worktree of home)`); }
     gitOrDie(['worktree', 'prune'], mainRoot);
   }
+  if (fs.existsSync(wt)) {
+    R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
+    out(`removed ${wt} (a worktree of ${R.name})`);
+  }
+  R.gitOrDie(['worktree', 'prune'], R.root);
   out(`pruned ${R.name}'s worktree list; now close its window`);
 }
 // The tick's tidy (observe-metrics, at most every 30 minutes): a worktree under home's .worktrees

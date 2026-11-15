@@ -469,3 +469,31 @@ test('records in home: a parked worker is settled only once its records are comm
     assert.match(problems().join('\n'), /records: home's ticket\/console-01-a here \(\w{12}\) is not what origin has/);
   } finally { F.done(); }
 });
+
+test('records in home: a half-done merge, then a review record added on home\'s ticket/<id>: the retry lands the new head and its act names both records merges', () => {
+  const F = recordsFixture('records-moved');
+  const { old, g, okIn, runIn } = F;
+  const id = 'console-01-a';
+  const T = `docs/devteam/project/tickets/${id}`;
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id };
+  try {
+    const r = readyInHome(F, id);
+    const hook = path.join(F.consoleOrigin, 'hooks', 'pre-receive');
+    write(hook, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+    assert.notEqual(runIn(old, ['merge', id], SUP).status, 0);
+    // a record added since (a dispose, another track): the verdicts still hold, so the retry lands it
+    const later = homeRecords(F, id, { 'reviews/task-9.md': review('late-reviewer', r.code) });
+    fs.rmSync(hook);
+    assert.match(okIn(old, ['merge', id], SUP), new RegExp(`landed the records of ${id} at ${later.sha.slice(0, 12)} in home`));
+    const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
+    assert.match(act.what, new RegExp(`; records at ${later.sha} in home, and earlier at ${r.head}`));
+    const f = json(okIn(old, ['metrics', '--json'])).findings;
+    assert.ok(!f.some((x) => ['merged-without-merge', 'records-without-code'].includes(x.kind)), 'both records merges are named by the act');
+    // --remove: a dirty records worktree refuses before anything is removed
+    okIn(r.w, ['phase', 'done'], W);
+    write(path.join(r.rw, `${T}/notes.md`), 'uncommitted\n');
+    assert.notEqual(runIn(old, ['worker', id, '--remove'], SUP).status, 0);
+    assert.ok(fs.existsSync(r.w) && fs.existsSync(r.rw), 'neither worktree removed');
+  } finally { F.done(); }
+});
