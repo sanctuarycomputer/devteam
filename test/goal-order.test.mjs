@@ -109,7 +109,9 @@ test('one goal-change question proposes a whole order, and goal order --approved
     const M = goals(F, ['Met one'])[0];
     ok(old, ['goal', 'status', M, 'met', '--force']);
     const ask = (order, more = []) => run(old, ['ask', '--class', 'goal-change', '--question', 'Put the goals in this order?', '--context', 'You said Delta first.', '--order', JSON.stringify(order), '--recommendation', 'Yes, this order', '--stake', '2', '--urgency', '1', ...more], SUP);
-    const asked = (order) => { const r = ask(order); assert.equal(r.status, 0, r.err); return firstId(r.out); };
+    // a question asked again after the owner's answer says what changed (the kit refuses a repeat otherwise)
+    let n = 0;
+    const asked = (order) => { const r = ask(order, n++ ? ['--new-because', `the owner asked for another order (${n})`] : []); assert.equal(r.status, 0, r.err); assert.doesNotMatch(r.err, /names no --goal|names a kit id/, 'no warning for the order the kit wrote'); return firstId(r.out); };
 
     // the question: one, with its order, about no one goal
     const Q = asked([D, C, A]);
@@ -117,6 +119,9 @@ test('one goal-change question proposes a whole order, and goal order --approved
     assert.deepEqual(qv.order, [D, C, A]);
     assert.equal(qv.goal, null);
     assert.equal(qv.class, 'goal-change');
+    assert.equal(qv.change, null, "no 'Approving sets on <goal>' card for a question about no goal");
+    assert.match(qv.context, new RegExp(`The order proposed:\\n1\\. Delta \\(${D}\\)\\n2\\. Charlie \\(${C}\\)\\n3\\. Alpha \\(${A}\\)\\nGoals left out keep their order after these\\.`), 'the order in words, in what the owner reads and the hash covers');
+    assert.match(qv.context, /^You said Delta first\./, "the supervisor's own context first");
     assert.match(ask([D, C], ['--goal', D]).err, /--order .*no --goal/);
     assert.match(ask([D, C], ['--change', '{"priority":1}']).err, /--order .*no --change|--change belongs/);
     assert.match(run(old, ['ask', '--class', 'goal-definition', '--question', 'Order?', '--order', JSON.stringify([D, C]), '--recommendation', 'Yes', '--stake', '1', '--urgency', '1'], SUP).err, /--order belongs on a goal-change question/);
@@ -136,10 +141,10 @@ test('one goal-change question proposes a whole order, and goal order --approved
     const Q2 = asked([D, C, A]);
     ok(old, ['answer', Q2, 'Yes, this order']);
     // an order other than the one proposed is refused; none given, or the same, applies it
-    assert.match(run(old, ['goal', 'order', '--approved', Q2, C, D, A], SUP).err, /not the order .* proposed/);
-    assert.match(run(old, ['goal', 'order', '--approved', Q2, D, C], SUP).err, /not the order .* proposed/);
+    assert.match(run(old, ['goal', 'order', C, D, A, '--approved', Q2], SUP).err, /not the order .* proposed/);
+    assert.match(run(old, ['goal', 'order', D, C, '--approved', Q2], SUP).err, /not the order .* proposed/);
     const before = lines(F).length;
-    ok(old, ['goal', 'order', '--approved', Q2, D, C, A], SUP);
+    ok(old, ['goal', 'order', D, C, A, '--approved', Q2], SUP);
     assert.deepEqual(prios(F, [D, C, A, B]), [1, 2, 3, 4]);
     // a goal added later, at the top, doesn't undo the applied order on a later read
     const E = firstId(ok(old, ['goal', 'add', '--title', 'Echo', '--priority', '1'], SUP));
