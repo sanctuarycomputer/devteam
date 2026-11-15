@@ -7,6 +7,6 @@ Since final-1's approval at 70a27ea the branch adds four files and changes nothi
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Suggestion | quality.md §3 (evidence at the head) | verification.md, CI row | The CI row cites run 43694762625 at 70a27ea, not the head. Run 43695866052 at 18108de is 8/8 green on its first attempt, so a line naming it would tie the record to the commit that merges. | |
+| F1 | Suggestion | quality.md §3 (evidence at the head) | verification.md, CI row | The CI row cites run 43694762625 at 70a27ea, not the head. Run 43695866052 at 18108de is 8/8 green on its first attempt, so a line naming it would tie the record to the commit that merges. | wont-fix: recorded here instead, so verification.md stays as reviewed: the head run 43695866052 passed 8/8 on its first attempt |
 
 Verdict: APPROVE 18108de714114eb555792c3e31a1466fcc7b07e0
