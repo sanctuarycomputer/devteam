@@ -1,0 +1,21 @@
+{
+  "browser": 1,
+  "resets": [
+    {
+      "qid": "q-20261114-221030455-supervisor",
+      "outcome": "declined",
+      "reset": true,
+      "at": "2026-11-14T22:14:09.311Z"
+    },
+    {
+      "qid": "q-20261115-034017880-supervisor",
+      "outcome": "done",
+      "reset": false,
+      "at": "2026-11-15T03:41:52.006Z",
+      "reopened": [
+        "https://shop.example/account",
+        "https://shop.example/settings/billing"
+      ]
+    }
+  ]
+}

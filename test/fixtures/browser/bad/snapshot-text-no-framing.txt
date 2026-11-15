@@ -1,0 +1,2 @@
+heading "Sign in to your account"
+e1 textbox "Email" = owner@shop.example

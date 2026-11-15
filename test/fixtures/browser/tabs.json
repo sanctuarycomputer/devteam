@@ -1,0 +1,17 @@
+{
+  "browser": 1,
+  "tabs": [
+    {
+      "n": 1,
+      "url": "https://shop.example/account/login?next=•••",
+      "title": "Sign in · Shop",
+      "active": true
+    },
+    {
+      "n": 2,
+      "url": "https://docs.example/orders/•••/receipt",
+      "title": "Receipt",
+      "active": false
+    }
+  ]
+}

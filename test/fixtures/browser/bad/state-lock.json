@@ -1,0 +1,12 @@
+{
+  "browser": 1,
+  "daemon_pid": 48121,
+  "chrome_pid": 48160,
+  "control_port": 41873,
+  "control_secret": "0000000000000000000000000000000000000000000000000000000000000000",
+  "cdp_port": 39227,
+  "guard_port": 40551,
+  "view_port": 43109,
+  "preview": "browser-2",
+  "lock": "q-20261115-031502114-supervisor"
+}
