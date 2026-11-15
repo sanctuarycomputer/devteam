@@ -8,7 +8,7 @@
 - T3: `bump --release vX.Y.Z [--dry-run]`: new versions, sums from hashing the downloaded assets (cross-checked against GitHub's `digest`), all-or-nothing write.
 - T4: `installed`: each tool by its absolute image path (`DEVTEAM_BOX_BIN` for tests), claude-swap through `UV_TOOL_DIR=/opt/uv/tools uv tool list`, compared with `DEVTEAM_BOX_TOOLS`.
 - T5: help lines and the amended `KIT_VIEWS` comment; the whole machine test file and CI.
-- Every task test-first; every new test passes an env with `DEVTEAM_IMAGE_HUB`, `DEVTEAM_KIT_RELEASE`, `DEVTEAM_BOX_TOOLS` deleted, setting only what it means to.
+- Every task test-first; every new test spawns the kit with `pinsEnv(…)`, which deletes `DEVTEAM_IMAGE_HUB`, `DEVTEAM_KIT_RELEASE`, `DEVTEAM_BOX_TOOLS` (and the tokens), setting only what it means to; the test Dockerfile's pins are fixed values, so a real bump never breaks the tests.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:executing-plans (native: the five tasks build one command in one file, each on the last one's helpers). Steps use checkbox (`- [ ]`) syntax. A fresh subagent reviews each task (`reviews/task-<n>.md`).
 
@@ -22,7 +22,7 @@
 
 ## Global Constraints
 
-- `devteam.mjs` stays one file, Node built-ins only, no relative imports; works on Node 18 (global `fetch`, `AbortSignal.timeout`, `res.arrayBuffer()`; no `Response.body` async iteration).
+- `devteam.mjs` stays one file, Node built-ins only, no relative imports; works on Node 18 (global `fetch`, `AbortSignal.timeout`, `res.arrayBuffer()`; no `Response.body` async iteration). So a download is hashed from its buffered body (`arrayBuffer()`, assets ≤ ~30 MB), not streamed as the spec's bump step 2 says: same hash, simpler on Node 18; a plan-level departure, stated here for the supervisor.
 - No network in any test: `DEVTEAM_PINS_NPM`, `DEVTEAM_PINS_PYPI`, `DEVTEAM_PINS_GITHUB` point at one in-process `http` server on `127.0.0.1:0`.
 - Exact strings (spec): `<name>: current <pinned>`, `<name>: stale <pinned> -> <latest>`, `<name>: held <reason>`, `<name>: unknown <why>`; `box-pins verify: ok, <n> tools, release <r>`; `box-pins: no cloud/Dockerfile at <path> (box-pins works on the kit's own checkout, or --dockerfile <path>)` (exit 2); `box-pins bump: <tool>: <why>; nothing written`; `box-pins installed: DEVTEAM_BOX_TOOLS is not set (not the box image?)` (exit 2); `--json` shape `{ box_pins: 1, tools: [...] }` (or `{ box_pins: 1, problems: [...] }`); check exits 1 if any stale, else 3 if any unknown, else 0, and 2 for a missing or broken file; `box-pins bump: --release <r> is older than DEVTEAM_RELEASE <cur>`.
 - The hold line is `# hold: <reason>` directly above `ARG <P>_VERSION=` (m-20261115-004401439-supervisor).
@@ -53,7 +53,12 @@
   - `pinForm(v, pinned) -> string` (strip a leading `v`, add one back iff `pinned` starts with `v`); `versionParts(v) -> number[]|null` (`^v?\d+(\.\d+)+$` only); `newer(a, b) -> boolean` (a > b by parts).
   - `pinsFile() -> { file, text }` (reads `--dockerfile` or `<repoRoot>/cloud/Dockerfile`; missing → the exit-2 line).
   - `cmdBoxPins()` dispatching on `positional[0]`: `verify`, `check`, `bump`, `installed`; else the usage line and exit 1.
-- Test helpers produced (for T2–T4): `pinsRepo()` (a temp git repo, origin `git@github.com:sanctuarycomputer/devteam.git`, a copy of `docs/devteam` without `project/` and `run/`, no `cloud/`), `pinsCopy(edit = (t) => t)` (writes `edit(<real cloud/Dockerfile>)` to a fresh temp file, returns its path), `pins(args, env = {})` (spawns the copied kit's `devteam.mjs box-pins …` with cwd `pinsRepo()`, env `pinsEnv(env)`), `pinsEnv(extra)` (`baseEnv` with `DEVTEAM_IMAGE_HUB`, `DEVTEAM_KIT_RELEASE`, `DEVTEAM_BOX_TOOLS`, `DEVTEAM_PINS_*`, `DEVTEAM_BOX_BIN`, `GH_TOKEN`, `GITHUB_TOKEN` deleted, then `extra`).
+  - `safe(s) -> string` (the `^[\w.+-]{1,64}$` filter, else `?`), used by T1's messages and T2–T4.
+- Test helpers produced (for T2–T5):
+  - `FIXED = { CLAUDE_CODE: '2.1.307', CLAUDE_SWAP: '1.0.0', GH: '2.104.0', TTYD: '1.7.7', MISE: 'v2026.10.17', UV: '0.13.7' }`, `FIXED_RELEASE = 'v0.52.0'`, and fixed sums `fixedSum(arg) = sha256(arg)` hex. `pinsCopy(edit = (t) => t)` reads the real `cloud/Dockerfile`, rewrites every `ARG <P>_VERSION=`, `_SHA256_*=` and `DEVTEAM_RELEASE=` line to those fixed values, then applies `edit`, writes it to a fresh temp file and returns its path. So every expected string in the tests below comes from `FIXED`, never from today's pins, and the release-prep bump of the real file never breaks a test (plan-1 F1). Only the "ok on the kit's own Dockerfile" case reads the real file, with no value hard-coded.
+  - `pinsRepo` (made once: a temp git repo, origin `git@github.com:sanctuarycomputer/devteam.git`, a copy of `docs/devteam` without `project/` and `run/`, no `cloud/`).
+  - `pinsEnv(extra = {})`: `baseEnv` with `DEVTEAM_IMAGE_HUB`, `DEVTEAM_KIT_RELEASE`, `DEVTEAM_BOX_TOOLS`, `DEVTEAM_PINS_NPM`, `DEVTEAM_PINS_PYPI`, `DEVTEAM_PINS_GITHUB`, `DEVTEAM_BOX_BIN`, `GH_TOKEN`, `GITHUB_TOKEN`, `UV_TOOL_DIR` deleted, then `extra`.
+  - `pins(args, env = {})`: `spawnSync` of the copied kit's `devteam.mjs box-pins …`, cwd `pinsRepo`, env `pinsEnv(env)`. `pinsAsync(args, env = {}) -> Promise<{ status, stdout, stderr }>`: the same with `execFile`, resolving on a non-zero exit (status from `err.code`), never rejecting on one; T2–T3 use it because the fixture server lives in the test process (plan-1 F6).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -95,7 +100,7 @@ test('verify takes a hold above the _VERSION ARG, and refuses one with no reason
 });
 ```
 
-- [ ] **Step 2: Run them to see them fail** (script file running the gate command of Global Constraints with `--test-name-pattern 'box-pins verify|verify '`). Expected: FAIL, `unknown command "box-pins"`.
+- [ ] **Step 2: Run them to see them fail** (script file running the gate command of Global Constraints with `--test-name-pattern 'box-pins verify|verify '`). Expected: FAIL, `no docs/devteam/project/settings.md here` (before `box-pins` is in `KIT_VIEWS`, startup refuses first; plan-1 F9).
 
 - [ ] **Step 3: Implement** `BOX_TOOLS`, `readPins`, `pinForm`, `versionParts`, `newer`, `pinsFile`, `cmdBoxPins` (`verify` only so far; `check`/`bump`/`installed` arms say `not yet` until their tasks), and the dispatch: `'box-pins'` added to `KIT_VIEWS`; `machineWide` and the `DEVTEAM_RUN` exemption gain `(command === 'box-pins' && positional[0] === 'installed')`; `COMMANDS['box-pins'] = cmdBoxPins`. The stray-literal scan (spec verify 4): skip every pin `ARG` line of the table, `ARG DEVTEAM_RELEASE=` and `# hold:` lines; in the rest, a version (without its `v`) matches `(?<![\d.])<escaped>(?!\.?\d)`, a sum `(?<![0-9a-fA-F])<sum>(?![0-9a-fA-F])`. A line matching `/^\s*#\s*hold\b/i` that is not exactly `# hold: <reason>`, or not directly above a `_VERSION` ARG, is a problem (spec problem 8, so check and bump refuse on it too). `DEVTEAM_BOX_TOOLS` is the one line matching `^\s*(?:ENV\s+)?DEVTEAM_BOX_TOOLS="([^"]*)"`, whose pairs must be exactly the six `<name>=$<P>_VERSION`. Problem wording, exactly: `<name> has no <P>_VERSION`, `<name>'s <P>_VERSION is given <n> times`, `<name> has no <ARG>`, `<ARG> is not 64 lowercase hex`, `<name>'s version <v> is written outside its ARG (line <n>: <matched text>)`, `<name>'s <ARG> sum is written outside its ARG (line <n>: <matched text>)`, `no DEVTEAM_RELEASE`, `DEVTEAM_RELEASE <r> is not vX.Y.Z`, `DEVTEAM_RELEASE is <r>, not <given>`, `DEVTEAM_BOX_TOOLS does not name <name>=$<P>_VERSION`, `DEVTEAM_BOX_TOOLS names <pair>, which is no tool's`, `no DEVTEAM_BOX_TOOLS` / `DEVTEAM_BOX_TOOLS is given <n> times`, `<name>'s hold has no reason`, `the hold on line <n> is not directly above a _VERSION ARG`, `line <n> looks like a hold but is not "# hold: <reason>"`. Values in a message pass through the `^[\w.+-]{1,64}$` filter.
 
@@ -110,15 +115,15 @@ test('verify takes a hold above the _VERSION ARG, and refuses one with no reason
 **Interfaces:**
 - Consumes: T1's `BOX_TOOLS`, `readPins`, `pinForm`, `versionParts`, `newer`, `pinsFile`.
 - Produces: `async latestOf(tool, pinned) -> { version, release? }` (throws `Error(why)`; `release` is the chosen GitHub release object, for T3's assets); `async checkPins(pins) -> [{ name, pinned, status, latest?, reason?, why? }]`; `safe(s) -> string` (the `^[\w.+-]{1,64}$` filter, else `?`).
-- Test helper produced: `upstream()` → `{ url, state, close }`, an `http` server whose `state` holds `npm`, `pypi`, `releases` (by repo) and `assets` (by path → `{ status?, body }`); every request counted in `state.hits` by path. `upEnv(u)` → the three `DEVTEAM_PINS_*` vars at `u.url + '/npm'`, `'/pypi'`, `'/gh'`. Fixture default: every tool one release newer than the real pins, plus a newer prerelease on `tsl0922/ttyd`.
+- Test helper produced: `async upstream(t)` → `{ url, state }`, an `http` server on `127.0.0.1:0`, `unref()`'d and closed in `t.after` (so a failed assertion can't hang the file; plan-1 F8), whose `state` holds `npm` (by package → version), `pypi` (by package → version), `releases` (by repo → the list) and `assets` (by path → `{ status?, body }`); every request is pushed to `state.hits` as `{ path, headers }` (plan-1 F5). `upEnv(u)` → the three `DEVTEAM_PINS_*` vars at `u.url + '/npm'`, `'/pypi'`, `'/gh'`. Fixture default: every tool one release newer than `FIXED`, each GitHub release listing both arch assets with `browser_download_url` `/dl/<repo>/<name>` (answered 302 to `/assets/<repo>/<name>`), bytes `<repo>/<name>/<version>` (distinct per asset), and a `digest` of their real sha256.
 
 - [ ] **Step 1: Failing tests**
 
 ```js
 test('box-pins check: one line per tool; stale exits 1; held, current; --json the same', async () => { /* stale for all six → status 1, lines `ttyd: stale 1.7.7 -> 1.7.8` …; a hold on gh → `gh: held <reason>`, no hit on cli/cli; fixture latest == pins and gh held → status 0, `current` lines; --json parses to the same statuses with box_pins: 1 */ });
-test('check ignores a GitHub prerelease and takes the highest release, not the newest entry', async () => { /* ttyd list: [1.8.0-rc prerelease:true, 1.6.9, 1.7.8] → `ttyd: stale 1.7.7 -> 1.7.8` */ });
+test('check ignores a GitHub prerelease and a draft, and takes the highest release, not the newest entry', async () => { /* ttyd list: [{tag 1.9.0, prerelease: true}, {tag 2.0.0, draft: true}, {tag 1.6.9}, {tag 1.7.8}] (plain tags, so only the flags exclude them; plan-1 F2) → `ttyd: stale 1.7.7 -> 1.7.8` */ });
 test('check reports an unreachable upstream as unknown, and junk as unknown, never raw', async () => { /* DEVTEAM_PINS_NPM at a closed port → `claude-code: unknown …` and exit 3 when nothing else is stale; pypi version '1.2.3\u001b[2J' → `claude-swap: unknown not a release: ?`; stdout has no \u001b */ });
-test('check sends GH_TOKEN to the GitHub API only', async () => { /* GH_TOKEN=fake-token: every hit under /gh carries `authorization: Bearer fake-token`; then a bump: no hit under /assets carries an authorization header */ });
+test('check sends GH_TOKEN to the GitHub API, and nowhere else', async () => { /* GH_TOKEN=fake-token: every hit under /gh has headers.authorization === 'Bearer fake-token'; no hit under /npm or /pypi has an authorization header */ });
 test('check on a broken file exits 2 with its problems, in --json too', async () => { /* TTYD_SHA256_X86_64 removed → status 2, `box-pins check: ttyd has no TTYD_SHA256_X86_64`; --json → { box_pins: 1, problems: [ … ] }, status 2 */ });
 ```
 
@@ -141,8 +146,10 @@ The fixture's `browser_download_url`s are `/dl/…`, answered with a 302 to `/as
 
 ```js
 test('box-pins bump --release v9.9.9 sets each unheld tool to latest with the assets\' real sums', async () => { /* hold on uv; after bump: each ARG _VERSION == fixture latest in pin form; each _SHA256_* == sha256 of the fixture asset bytes for that arch; UV lines identical to before; DEVTEAM_RELEASE=v9.9.9; `verify --release v9.9.9` exits 0 */ });
-test('bump --dry-run prints the change and leaves the file byte-identical', async () => { /* stdout has `TTYD_VERSION 1.7.7 -> 1.7.8` and `--dry-run: nothing written`; file sha equal before/after */ });
+test('bump --dry-run prints the change and leaves the file byte-identical', async () => { /* stdout has `TTYD_VERSION ${FIXED.TTYD} -> <fixture latest>` and `--dry-run: nothing written`; file sha equal before/after */ });
 test('bump writes nothing when an upstream fails, or a digest disagrees', async () => { /* gh's arm64 asset answers 500 → exit 1, `box-pins bump: gh: …; nothing written`, file byte-identical; a second run with mise's asset digest 'sha256:' + '0'.repeat(64) → exit 1, names mise */ });
+test('bump sends no token with a download', async () => { /* GH_TOKEN=fake-token, bump --release v9.9.9: hits under /gh carry the token; no hit under /dl, /assets, /npm or /pypi has an authorization header (plan-1 F4, F5) */ });
+test('bump keeps the file\'s mode, and writes nothing when nothing changes', async () => { /* copy chmod 0o640 → after bump, mode & 0o777 === 0o640; then fixture latest == the new pins and --release the same v9.9.9 → stdout `unchanged`, mtimeMs and bytes the same (plan-1 F12) */ });
 test('bump and check refuse a malformed hold', async () => { /* `# Hold: x` above ARG MISE_VERSION: bump --release v9.9.9 → exit 1, file byte-identical, no upstream hit; check → exit 2 */ });
 test('bump refuses a --release older than the stamp', async () => { /* --release v0.1.0 → exit 1, `--release v0.1.0 is older than DEVTEAM_RELEASE`, no upstream hit, file unchanged */ });
 test('bump downloads nothing for a tool already current', async () => { /* ttyd's fixture latest = 1.7.7 and its assets answer 500 → exit 0, no hit on ttyd's asset paths, TTYD lines unchanged */ });
@@ -161,7 +168,7 @@ test('bump downloads nothing for a tool already current', async () => { /* ttyd'
 - Consumes: T1's `BOX_TOOLS` (`run`, `parse`), `pinForm`, `safe`.
 - Produces: the `installed` arm.
 
-- [ ] **Step 1: Failing tests** (fake binaries are `#!/bin/sh` scripts written with the file's `write`; the kit is a copy of `docs/devteam` in a temp folder that is no repo; cwd `nowhere`):
+- [ ] **Step 1: Failing tests** (fake binaries are `#!/bin/sh` scripts written with the file's `write`, then `fs.chmodSync(f, 0o755)` (plan-1 F10); the kit is a copy of `docs/devteam` in a temp folder that is no repo; cwd `nowhere`; env `pinsEnv({ DEVTEAM_BOX_BIN, DEVTEAM_BOX_TOOLS, PATH })`, so the three image vars are cleared and only `DEVTEAM_BOX_TOOLS` set (plan-1 F3)):
 
 ```js
 const TOOLS_ENV = 'claude-code=2.1.307 claude-swap=1.0.0 gh=2.104.0 ttyd=1.7.7 mise=v2026.10.17 uv=0.13.7';
@@ -185,10 +192,11 @@ test('installed without DEVTEAM_BOX_TOOLS exits 2', () => { /* `DEVTEAM_BOX_TOOL
 
 **Files:** Modify `docs/devteam/scripts/devteam.mjs` (HELP "Dashboard and releases" ~19190; the comments above `KIT_VIEWS` ~424-428); Test `test/machine.test.mjs`.
 
-- [ ] **Step 1: Failing test** `help names box-pins and says only the top package of npm and PyPI tools is pinned`: `machine(['help'])` stdout matches `/box-pins verify/`, `/box-pins check/`, `/box-pins bump --release vX\.Y\.Z/`, `/box-pins installed/`, `/only the top package/`.
+- [ ] **Step 1: Failing test** `help names box-pins and says only the top package of npm and PyPI tools is pinned`: `spawnSync(process.execPath, [KIT, 'help'], { cwd: nowhere, encoding: 'utf8', env: pinsEnv() })` stdout matches `/box-pins verify/`, `/check \[--json\]/`, `/bump --release vX\.Y\.Z/`, `/box-pins installed/`, `/only the top package/`.
 - [ ] **Step 2–4:** add the help lines: `box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] [--dockerfile p]   the box image's tool pins in cloud/Dockerfile, in the kit's own checkout: offline stamp check, which are behind upstream, and the release-prep bump (fresh sums); only the top package of the npm and PyPI tools is pinned, their dependencies resolve at build` and `box-pins installed   inside the box image: what each tool reports at its image path, against DEVTEAM_BOX_TOOLS`. Amend the comments: "its read-only views run there … nothing in them writes" becomes "its views run there as they always did, over no tickets: nothing in them writes but `box-pins bump`, which rewrites only cloud/Dockerfile's pins". Run the whole file through the gate; push; CI green on every job.
 - [ ] **Step 5: Commit** `kit-48 T5: help and the KIT_VIEWS comment`.
 
 ## Rulings
 
 - m-20261115-004401439-supervisor: hold line above `_VERSION`; the env-cleared test command.
+- m-20261115-011227101-supervisor: spec approved at c989c4a, its calls beyond the done-whens included (check exits 3 on unknown-and-none-stale and 2 on a broken file; bump refuses an older --release; verify checks DEVTEAM_BOX_TOOLS). The supervisor reads the whole plan once its review passes (risk high).
