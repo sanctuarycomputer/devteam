@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-eO/ehTQDTrh8uoCrE8hMEn1E2Ia6pjZcwjBPylQnpr4='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vwmVqBfghr4Ds8Z1QMS4kLSjpiHzwS/LHX3GxEerQ1I='; style-src 'sha256-Nn83zLhI9VY2kN7GbsPO/qWy3ijCRPZW6ddv+qGFZkQ='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -208,6 +208,8 @@
     if (!press || BUTTONS[e.button] !== press.button) return;
     const p = press;
     press = null;
+    // released further than 4 px from the press with no move between: a drag all the same
+    if (!p.down && Math.hypot(e.clientX - p.cx, e.clientY - p.cy) > 4) { p.down = true; send(withMods({ t: 'mouse', type: 'down', x: p.x, y: p.y, button: p.button, clicks: 1 }, e)); }
     if (p.down) { flush(); send(withMods({ t: 'mouse', type: 'up', ...toFrame(e), button: p.button, clicks: 1 }, e)); return; }
     const now = performance.now();
     const again = lastClick && lastClick.button === p.button && now - lastClick.at <= 500 && Math.hypot(p.cx - lastClick.cx, p.cy - lastClick.cy) <= 4;
@@ -232,11 +234,13 @@
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // Keys. A modifier alone sends nothing (it rides as mods on what it modifies); a paste chord is
-  // left to the browser so its paste event fires. held keeps the physical key (its code) of each
-  // down this socket saw until its up, so no up goes to a socket that never saw the down.
+  // left to the browser so its paste event fires. held maps the physical key (its code) of each
+  // down this socket saw to its key name, until its up, so no up goes to a socket that never saw
+  // the down. Only keys sent as down are in it: never a typed character or a paste.
   const MODIFIERS = new Set(['Shift', 'Control', 'Alt', 'Meta', 'AltGraph', 'CapsLock', 'Fn', 'FnLock', 'Hyper', 'Super', 'Symbol', 'SymbolLock', 'NumLock', 'ScrollLock', 'OS']);
-  const held = new Set();
-  const pasteChord = (e) => ((e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey) && !e.altKey) || (e.key === 'Insert' && e.shiftKey);
+  const held = new Map(); // code → { key, code?, meta }
+  // by its key or, on a layout whose V types something else, by its place on the keyboard
+  const pasteChord = (e) => ((e.key === 'v' || e.key === 'V' || e.code === 'KeyV') && (e.ctrlKey || e.metaKey) && !e.altKey) || (e.key === 'Insert' && e.shiftKey);
   const altGr = (e) => e.getModifierState('AltGraph') || (e.ctrlKey && e.altKey);
   const named = (e) => (e.code && e.code.length <= 32 ? { key: e.key, code: e.code } : { key: e.key });
   canvas.addEventListener('keydown', (e) => {
@@ -250,11 +254,15 @@
       if (e.shiftKey) m.mods = 8;
       return send(m);
     }
-    held.add(e.code || e.key);
+    held.set(e.code || e.key, { ...named(e), meta: e.metaKey });
     send(withMods({ t: 'key', type: 'down', ...named(e) }, e));
   });
   canvas.addEventListener('keyup', (e) => {
-    if (!held.delete(e.code || e.key)) return;
+    // macOS sends no keyup for a key pressed while Cmd was held: its up goes when Cmd does
+    if (e.key === 'Meta') for (const [id, k] of held) if (k.meta) { held.delete(id); send({ t: 'key', type: 'up', key: k.key, ...(k.code ? { code: k.code } : {}) }); }
+    const k = held.get(e.code || e.key);
+    if (!k) return;
+    held.delete(e.code || e.key);
     e.preventDefault();
     send({ t: 'key', type: 'up', ...named(e) });
   });
@@ -266,6 +274,7 @@
     const text = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
     if (!text) return;
     if (text.length > 100000) return note('That paste is too long to send.');
+    note('');
     for (let i = 0; i < text.length;) {
       let j = Math.min(text.length, i + 10000);
       const c = text.charCodeAt(j - 1);

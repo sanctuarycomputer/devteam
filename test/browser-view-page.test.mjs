@@ -31,6 +31,12 @@ const RECORDER = `(() => {
   addEventListener('unhandledrejection', (e) => seen.push('rejection: ' + text(e.reason)));
   const prevented = []; Object.defineProperty(window, '__prevented', { value: prevented });
   for (const t of ['keydown', 'wheel', 'contextmenu']) addEventListener(t, (e) => prevented.push({ t, key: e.key, prevented: e.defaultPrevented }));
+  // animation frames the test can hold and then run by hand, to see what the page throttles
+  const raf = requestAnimationFrame.bind(window), caf = cancelAnimationFrame.bind(window);
+  let holding = false, next = 1e9; const held = new Map();
+  window.requestAnimationFrame = (f) => { if (!holding) return raf(f); held.set(++next, f); return next; };
+  window.cancelAnimationFrame = (id) => { if (!held.delete(id)) caf(id); };
+  Object.defineProperty(window, '__raf', { value: { hold: () => { holding = true; }, run: () => { holding = false; const fs = [...held.values()]; held.clear(); for (const f of fs) f(performance.now()); return fs.length; } } });
 })();`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -331,12 +337,13 @@ async function ready(srv, opts) {
 const pt = (s, fx, fy, w = s.w, h = s.h) => ({ x: s.left + s.width * fx, y: s.top + s.height * fy, fx: fx * w, fy: fy * h });
 const near = (m, want, what) => { assert.ok(Math.abs(m.x - want.fx) <= 1 && Math.abs(m.y - want.fy) <= 1, `${what}: (${m.x}, ${m.y}) is (${want.fx}, ${want.fy})`); };
 // What one action sent: every message after it, less the pointer's travel (button none) before it.
-async function sent(c, act, settle = 400) {
+async function sent(c, act, settle = 400, { all = false } = {}) {
   const n = c.got.length;
   await act();
   await sleep(settle);
   const got = c.got.slice(n);
   for (const m of got) valid(m);
+  if (all) return got;
   const i = got.findIndex((m) => !(m.t === 'mouse' && m.type === 'move' && m.button === 'none'));
   return i < 0 ? [] : got.slice(i);
 }
@@ -452,6 +459,13 @@ test('a real paste sends one paste and no key; a long one goes in whole pieces; 
     got = await sent(c, () => ctrlV(p));
     assert.deepEqual(got, [], 'over 100 000 characters sends nothing');
     assert.equal(await text(p, 'note'), 'That paste is too long to send.');
+    await clip(p, srv, 'short');
+    got = await sent(c, () => ctrlV(p));
+    assert.deepEqual(got, [{ t: 'paste', text: 'short' }]);
+    assert.equal(await text(p, 'note'), '', 'a paste that goes clears the line');
+    await clip(p, srv, 'z'.repeat(100001));
+    await ctrlV(p);
+    await until(async () => (await text(p, 'note')) !== '', 'the line again');
     const shown = await canvasState(p);
     assert.ok(shown.bottom <= shown.vh, 'with the note line shown, the whole frame is still on screen');
     await clip(p, srv, '');
@@ -521,5 +535,116 @@ test('a lost pointer capture ends a drag with its up; a press not yet a drag sen
       await mouse(p, 'mouseReleased', a, { button: 'left', buttons: 0, clickCount: 1 });
     });
     assert.deepEqual(got, [], 'a press still waiting to be a click sends nothing once the capture is lost');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('the 4 px rule: a press that moves 3 px is a click at the press; one that moves 6 px, or is released 10 px off, is a drag', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    const a = pt(s, 0.3, 0.3);
+    const off = (dx) => ({ x: a.x + dx, y: a.y });
+    let got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseMoved', off(3), { button: 'left', buttons: 1 });
+      await mouse(p, 'mouseReleased', off(3), { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    assert.deepEqual(got.map((m) => m.type), ['click'], JSON.stringify(got));
+    near(got[0], a, 'the click is where the press was');
+    await sleep(600);
+    got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseMoved', off(6), { button: 'left', buttons: 1 });
+      await mouse(p, 'mouseReleased', off(6), { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    assert.deepEqual(got.map((m) => m.type).filter((t) => t !== 'move'), ['down', 'up'], JSON.stringify(got));
+    await sleep(600);
+    got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseReleased', off(10), { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    assert.deepEqual(got.map((m) => m.type).filter((t) => t !== 'move'), ['down', 'up'], `released 10 px off: ${JSON.stringify(got)}`);
+    near(got[0], a, 'the down at the press');
+    near(got.at(-1), { fx: got.at(-1).x, fy: got.at(-1).y }, 'the up');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('moves wait for an animation frame, one per frame, and a waiting one goes before the up', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 700, height: 700 });
+  try {
+    const at = (fx, fy) => pt(s, fx, fy);
+    await p.ev('__raf.hold()');
+    let got = await sent(c, async () => { for (let i = 1; i <= 5; i++) await mouse(p, 'mouseMoved', at(0.1 * i, 0.5)); }, 200, { all: true });
+    assert.deepEqual(got, [], 'no move before its frame');
+    let ran;
+    got = await sent(c, async () => { ran = await p.ev('__raf.run()'); }, 200, { all: true });
+    assert.equal(got.length, 1, `one move for five in one frame: ${JSON.stringify(got)} (${ran} frames held)`);
+    near(got[0], at(0.5, 0.5), 'the newest');
+    await p.ev('__raf.hold()');
+    got = await sent(c, async () => { await p.hold('Shift', true); await mouse(p, 'mouseMoved', at(0.6, 0.6), { modifiers: 8 }); await p.hold('Shift', false); await p.ev('__raf.run()'); }, 200, { all: true });
+    assert.deepEqual(got.map((m) => [m.type, m.button, m.mods]), [['move', 'none', 8]], 'a hover move carries Shift');
+    await p.ev('__raf.hold()');
+    const a = at(0.2, 0.2), b = at(0.7, 0.7);
+    got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', a);
+      await mouse(p, 'mousePressed', a, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseMoved', b, { button: 'left', buttons: 1 });
+      await mouse(p, 'mouseReleased', b, { button: 'left', buttons: 0, clickCount: 1 });
+    }, 200);
+    assert.deepEqual(got.map((m) => m.type), ['down', 'move', 'up'], `the waiting move goes before the up: ${JSON.stringify(got)}`);
+    near(got[1], b, 'the move');
+    got = await sent(c, () => p.ev('__raf.run()'), 200, { all: true });
+    assert.deepEqual(got, [], 'and nothing after it');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('the wheel scales line and page turns to pixels and clamps them; a drag released off the canvas ends at its edge', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c, s } = await ready(srv, { width: 1200, height: 500 });
+  try {
+    const a = pt(s, 0.5, 0.5);
+    const wheel = (dy, mode) => p.ev(`document.getElementById('screen').dispatchEvent(new WheelEvent('wheel', { deltaY: ${dy}, deltaMode: ${mode}, clientX: ${a.x}, clientY: ${a.y}, bubbles: true, cancelable: true }))`);
+    for (const [dy, mode, want] of [[3, 1, 48], [1, 2, 200], [1e6, 0, 100000], [-1e6, 0, -100000]]) {
+      const got = await sent(c, () => wheel(dy, mode), 200);
+      assert.deepEqual(got.map((m) => [m.t, m.dy]), [['wheel', want]], `deltaY ${dy} in mode ${mode}`);
+    }
+    assert.ok(s.left > 60, 'the canvas has room beside it in a wide window');
+    const from = pt(s, 0.8, 0.5);
+    const out = { x: s.left + s.width + 40, y: s.top - 30 };
+    const got = await sent(c, async () => {
+      await mouse(p, 'mouseMoved', from);
+      await mouse(p, 'mousePressed', from, { button: 'left', buttons: 1, clickCount: 1 });
+      await mouse(p, 'mouseMoved', out, { button: 'left', buttons: 1 });
+      await mouse(p, 'mouseReleased', out, { button: 'left', buttons: 0, clickCount: 1 });
+    });
+    const up = got.at(-1);
+    assert.equal(up.type, 'up', JSON.stringify(got));
+    assert.deepEqual([up.x, up.y], [320, 0], 'the up, clamped to the frame');
+  } finally { await shut(p); await srv.close(); }
+});
+
+test('Ctrl+V on a non-Latin layout still pastes; a Cmd chord whose keyup never comes gets its up when Cmd goes', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    await clip(p, srv, 'привет');
+    let got = await sent(c, async () => {
+      await p.hold('Control', true);
+      await keyEvent(p, 'rawKeyDown', 'м', 'KeyV', { windowsVirtualKeyCode: 86, modifiers: 2, commands: ['paste'] });
+      await keyEvent(p, 'keyUp', 'м', 'KeyV', { windowsVirtualKeyCode: 86, modifiers: 2 });
+      await p.hold('Control', false);
+    });
+    assert.deepEqual(got, [{ t: 'paste', text: 'привет' }], 'the paste, and no key for it');
+    // macOS sends no keyup for a key pressed while Cmd is held
+    got = await sent(c, async () => {
+      await keyEvent(p, 'rawKeyDown', 'Meta', 'MetaLeft', { windowsVirtualKeyCode: 91, modifiers: 4 });
+      await keyEvent(p, 'rawKeyDown', 'a', 'KeyA', { windowsVirtualKeyCode: 65, modifiers: 4 });
+      await keyEvent(p, 'keyUp', 'Meta', 'MetaLeft', { windowsVirtualKeyCode: 91 });
+    });
+    assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'a', code: 'KeyA', mods: 4 }, { t: 'key', type: 'up', key: 'a', code: 'KeyA' }]);
   } finally { await shut(p); await srv.close(); }
 });
