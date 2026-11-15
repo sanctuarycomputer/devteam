@@ -2,9 +2,9 @@ Shift+Enter now submits the box being edited, and plain Enter is a new line in e
 
 - **A question card's note box** (the Inbox copy and a thread's copy): Shift+Enter presses that card's own button. On most cards that is Answer, so typed words with no choice picked still get kit-203's which-choice step. A review card's note presses Send it back, a secret card's presses Reply, and a sensor's card, which has neither, keeps its new line.
 - **The thread box** (a reply, and the owner's new thread): Shift+Enter sends. **Plain Enter no longer sends there**; it makes a new line, as in every other box (ruled one rule everywhere, m-20261115-033958803-supervisor). The placeholder now says "Shift+Enter sends; Enter is a new line."
-- Nothing is sent while an IME composition is active (`isComposing`, or `keyCode` 229), with Ctrl, Alt or Meta held, or on a key repeat: holding Shift+Enter posts once.
+- Nothing is sent while an IME composition is active (`isComposing`, or `keyCode` 229) or with Ctrl, Alt or Meta held, and a key repeat sends nothing more, so holding Shift+Enter posts once.
 
-One `document` keydown listener and `submitOf(el)` in `docs/devteam/dashboard/index.html` replace the old Enter-sends listener. The ten existing tests that sent from the thread box with Enter now use Shift+Enter.
+One `document` keydown listener and `submitOf(el)` in `docs/devteam/dashboard/index.html` replace the old Enter-sends listener. The ten existing tests that sent from the thread box with Enter now use Shift+Enter, and so does `test/browser/dev-links.mjs`'s `enter()` (the hand-run real-Chrome harness; added to touches by m-20261115-041857004-supervisor).
 
 Records: `docs/devteam-dev/tickets/kit-207-shift-enter-submits/` (spec, plan, reviews, verification).
 

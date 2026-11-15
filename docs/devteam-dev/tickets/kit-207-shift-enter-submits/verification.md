@@ -14,4 +14,4 @@ At commit `ee2ced6d7ff8b1af0692a1578f74ca8ecfda1b4c`, final-1's fixes (later com
 
 Nothing is deferred to beta.
 
-Not driven by a test, read by the reviewers: a review card's note box presses Send it back, a secret card's presses Reply, (task-2).
+Not driven by a test, read by the reviewers: a review card's note box presses Send it back, and a secret card's presses Reply (task-2).
