@@ -122,8 +122,9 @@ function cleanup(t) {
 export { agentProgram,`],
     ['test/lib/operator-threads-fixture.mjs', ` box, GW_PUBLIC, KIT,`, ` box, cleanup, GW_PUBLIC, KIT,`],
     ['test/operator-threads.hub.test.mjs', `async function hubFixture(t, name, { box: boxed = false } = {}) {`, `async function hubFixture(later, name, { box: boxed = false } = {}) {`],
-    ['test/operator-threads.hub.test.mjs', `  t.after(async () => { await dash.stop(); tmuxSh(['kill-session', '-t', \`=devteam-home-\${HUB}\`]); });`, `  later(() => dash.stop());
-  later(() => tmuxSh(['kill-session', '-t', \`=devteam-home-\${HUB}\`]));`],
+    ['test/operator-threads.hub.test.mjs', `  t.after(async () => { await dash.stop(); tmuxSh(['kill-session', '-t', \`=devteam-home-\${HUB}\`]); });`, `  // last registered runs first: the dashboard stops, then its operator's session, as before
+  later(() => tmuxSh(['kill-session', '-t', \`=devteam-home-\${HUB}\`]));
+  later(() => dash.stop());`],
     ['test/operator-threads.hub.test.mjs', `= await hubFixture(t, `, `= await hubFixture(later, `, 3],
     ['test/operator-threads.hub.test.mjs', `  const F = await hubFixture(later, 'routes');`, `  const later = cleanup(t);
   const F = await hubFixture(later, 'routes');`],

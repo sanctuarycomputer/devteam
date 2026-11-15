@@ -34,8 +34,9 @@ async function hubFixture(later, name, { box: boxed = false } = {}) {
   const A = bareProject(base, 'alpha');
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: A });
   const dash = startDashboard(A, env);
-  later(() => dash.stop());
+  // last registered runs first: the dashboard stops, then its operator's session, as before
   later(() => tmuxSh(['kill-session', '-t', `=devteam-home-${HUB}`]));
+  later(() => dash.stop());
   await until(async () => { try { return (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.pulse); } catch { return false; } }, 'the hub, listing alpha with its pulse');
   const own = { origin: `http://127.0.0.1:${HUB}`, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' };
   const dir = boxed ? path.join(home, 'operator') : path.join(home, '.devteam', `operator-${HUB}`);
