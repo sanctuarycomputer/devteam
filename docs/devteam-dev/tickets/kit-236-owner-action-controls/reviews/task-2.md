@@ -7,6 +7,6 @@ I checked T2 against spec §4 and plan T2. isOa(q) holds only for an owner-actio
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | governance/quality.md §3 Stages ("task (before the next task)"); plan "Review records" | commit e5d916b7979b58f756c44090c76bb3e641ad4043 | T2, T3 and T4 landed in one commit, so no task review could happen between them as the stages require. It also leaves no point at which T3 stood on its own (plan-3 P3's reason for the oaAnyway stub). These reviews read the three tasks at the one head. Nothing in the code follows from it. Record it so the next ticket commits per task. | |
+| F1 | Minor | governance/quality.md §3 Stages ("task (before the next task)"); plan "Review records" | commit e5d916b7979b58f756c44090c76bb3e641ad4043 | T2, T3 and T4 landed in one commit, so no task review could happen between them as the stages require. It also leaves no point at which T3 stood on its own (plan-3 P3's reason for the oaAnyway stub). These reviews read the three tasks at the one head. Nothing in the code follows from it. Record it so the next ticket commits per task. | wont-fix: process note; T2 to T4 landed together because the test went green in one step; each task has its own record |
 
 Verdict: APPROVE e5d916b7979b58f756c44090c76bb3e641ad4043
