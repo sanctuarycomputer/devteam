@@ -24,6 +24,7 @@
 - Every file changed is in the ticket's touches: `docs/devteam/dashboard/index.html`, `test/dashboard-efficiency.test.mjs`, `test/dashboard-measure.test.mjs`, `test/lib/kit.mjs` (others in touches only if a merge from main makes them need a line).
 - No change to the `devteam-layout` CSS block or the `devteam-shell-js` block (shell.md@1 frozen until kit-95); no change to `shell.md`.
 - No kind id or raw suggestion kind in owner-facing words (strategy R2); phase and model keys are shown as the kit's own labels.
+- Trust's card is the **Trust Score** (owner rename, `m-20261115-234501821-supervisor`): no owner-facing text on the page says "Autonomy Score", even where the mock does.
 - Running text within `--measure`; nothing sticks out of its parent at 1440x900, 720x800, 390x844.
 - Null in any weekly field is a gap in a chart and "–" in a number; the score axis is 0 to 100.
 - Tests run on the box one file at a time: `node '/data/home/code/devteam-dev/docs/devteam/scripts/devteam.mjs' gate test -- node --test --test-concurrency=2 <file>`, never the full suite; judge by the gate's exit code, never a piped excerpt.
@@ -82,7 +83,7 @@ The ported helpers sit in index.html's page script outside the `devteam-shell-js
 
 - [ ] **Step 1: Failing tests** in `dashboard-efficiency.test.mjs`:
   - `nav: Efficiency right after Trust, counting the score`: the Autonomy group's links in order have `#efficiency` immediately after `#trust`; its count text is `31%` (defect fixture).
-  - `one card, four sections, no OODA, no trials`: `#efficiency .card` count 1 with head text containing `Efficiency Score`; `.sec .lbl` texts deep-equal `['Score', 'Where it goes', 'Waste', 'Suggestions']`; no element text exactly `Observe`, `Orient`, `Decide`, `Act`; no `table` inside the card.
+  - `one card, four sections, no OODA, no trials`: `#efficiency .card` count 1 with head text containing `Efficiency Score`; `.sec .lbl` texts deep-equal `['Score', 'Where it goes', 'Waste', 'Suggestions']`; no element text exactly `Observe`, `Orient`, `Decide`, `Act`; no `table` inside the card. The card's text never contains `Autonomy Score`.
   - `where it goes`: the five headings in order `Tokens by phase`, `Hours by phase`, `USD by phase`, `USD by model`, `Tokens`; bar labels include `build`, `final-review`; `observe` is preferred: no block shows `metrics-only-phase` or `metrics-only-model`, and Tokens' output reads `3.1M`; the source line contains `Measured from the agents' own session logs` and `Unpriced: gpt-x`; with `efficiencyFixture({ source: 'reported' })` it reads `Nothing measured: spend shows only what agents reported`.
   - `fleet keeps its own and loses the four`: at `#sensors?st=fleet`, none of the four headings appear; Findings, `Set aside` (the fixture's `metrics.acknowledged` carries one set-aside finding) and `Checks before merge` do.
   - `efficiency missing`: with `efficiencyFixture({ efficiency: false })`, the card draws; Hours by phase and USD by phase each show `metrics-only-phase`, USD by model shows `metrics-only-model`, Tokens' output reads `9.9M`; Tokens by phase reads `None`; Score and Waste read `None`, Suggestions `None this week`; the nav count is absent; `window.__errors` is empty.
@@ -158,3 +159,4 @@ The ported helpers sit in index.html's page script outside the `devteam-shell-js
 - `m-20261115-210456802-supervisor` (re design-change m-20261115-210348878): a suggestion's thread subject is `{kind:'page', view:'#efficiency?suggestion=<id>'}`, which every kit accepts; no devteam.mjs change and no kit-99; the open thread is found client-side by matching that view; port the chart helpers into index.html (kit-93 and kit-99 reuse them later); re-plan T1 and the done_when 3 test, one cold plan review.
 - `m-20261115-210500882-supervisor`: done_when 3 now says the page subject.
 - `m-20261115-205233392-supervisor`: approve-spec at fe4ddfb; no shell.md bump, the router table is the list (kit-95 names `efficiency` in §5's prose).
+- `m-20261115-234501821-supervisor` (owner rename): Trust's card is now the **Trust Score**; the page's copy says "Trust Score" wherever it names Trust's card, and never "Autonomy Score" (where the mock still says Autonomy Score, read Trust Score). The Efficiency Score's own name is unchanged.
