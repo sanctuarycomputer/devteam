@@ -17,6 +17,11 @@ import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 // evaluation that throws (the last page still there, or the new one half parsed) is "not yet"; timed
 // out, it says where the tab is and the last error, so a page that never became the one expected
 // reads as that. server, if given, adds the end of what the dashboard's server has said.
+// Resolves once window.scrollY has stayed the same for 10 frames running (3 s at most): a smooth
+// scroll moves on every frame until it ends, so one under way never reads as at rest.
+const AT_REST = `new Promise((resolve) => { const end = performance.now() + 3000; let last = scrollY, same = 0; const f = () => { if (scrollY === last) same++; else { same = 0; last = scrollY; } if (same >= 10 || performance.now() > end) resolve(true); else requestAnimationFrame(f); }; requestAnimationFrame(f); })`;
+// Resolves after two frames: whatever an event handler set has been drawn.
+const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))';
 const soonIn = (p, ms = 30000, server = null) => async (expr, what) => {
   const end = Date.now() + ms;
   for (;;) {
@@ -803,7 +808,8 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       assert.equal(await p.ev(`document.activeElement.dataset.pick`), Q, 'focus is back on the radio, not on the page');
       const y = await p.ev('window.scrollY');
       await p.key(' ');
-      await new Promise((r) => setTimeout(r, 300));
+      // a space that scrolls does so smoothly, a little each frame: compared once the page is at rest
+      await p.ev(AT_REST);
       assert.equal((await state(y)).jumped, false, 'space on the radio does not scroll');
       assert.match(await p.ev(`document.querySelector('${box}').value`), /Zかな$/, 'draft intact');
     });
@@ -2056,12 +2062,18 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
+  // every read the page makes, in the order it started, and whether its body has been read: what
+  // "the page's next check has landed" waits on
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { window.__reads2 = []; const f = window.fetch; window.fetch = async (u, o) => { const x = { u: String(u), n: window.__reads2.length, landed: false }; window.__reads2.push(x); const r = await f(u, o); for (const m of ['json', 'text']) { const g = r[m].bind(r); r[m] = () => g().finally(() => { x.landed = true; }); } return r; }; })();` });
   // the titles the stage's frame says when ready; the script runs in the artifact's own frame too, which has no stage
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { window.__titles = []; addEventListener('message', (e) => { const f = document.getElementById('av-frame'); if (f && e.source === f.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__titles.push(e.data.title); }); })();` });
   const soon = soonIn(p);
   // two polls, and a read that may have started before the change: the dashboard's can wait DATA_WAIT_MS (20 s), the viewer's describe 12 s
   const soonData = soonIn(p, 45000);
   const soonView = soonIn(p, 37000);
+  // two of the page's own checks (reads of `prefix`) started after now and landed: a reload the first
+  // one set off has had a whole tick to load its frame and say ready
+  const checksFrom = async (prefix, wait) => { const n0 = await p.ev('window.__reads2.length'); await wait(`window.__reads2.filter((x) => x.n >= ${n0} && x.landed && x.u.startsWith(${JSON.stringify(prefix)})).length >= 2`, `two ${prefix} checks landed`); };
   const said = (title) => p.ev(`window.__titles.filter((x) => x === ${JSON.stringify(title)}).length`);
   const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle }; })()`);
   // the warning token as this scheme resolves it
@@ -2091,8 +2103,8 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     assert.notEqual(dark, light, 'the dark token is another colour');
     assert.equal((await button()).color, dark, 'the warning colour, dark');
     await scheme('light');
-    // and some seconds on, still the old version: only the press loads it
-    await new Promise((r) => setTimeout(r, 3000));
+    // and two of the page's checks on, still the old version: only the press loads it
+    await checksFrom('/api/data', (e, w) => soonData(e, w));
     assert.equal(await said('v2'), 0, 'still nothing reloaded by itself');
     await p.click('#av-reload');
     await soon(`__titles.includes('v2')`, 'the new version in the frame');
@@ -2115,7 +2127,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
     assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
-    await new Promise((r) => setTimeout(r, 3000));
+    await checksFrom('/api/view?', (e, w) => soonView(e, w));
     assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
     await p.click('#av-reload');
     await soon(`__titles.includes('v3')`, 'the new version in the frame');
@@ -2442,6 +2454,9 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
   let said = 0;
   const tell = async (m, answer) => { const n = ++said; await p.ev(`(() => { window.__own = window.__own.filter((x) => x.own !== ${JSON.stringify(answer)}); document.getElementById('av-frame').contentWindow.postMessage(${JSON.stringify({ ...m, n })}, '*'); return true; })()`); return soon(`window.__own.find((x) => x.own === ${JSON.stringify(answer)})`, answer); };
   await soon(`typeof TS === 'object' && TS.ready`, 'the lens to say ready');
+  // a round trip through the artifact: a probe posted to its frame, back as what it heard
+  let probes = 0;
+  const probe = async () => { const n = ++probes; await p.ev(`(() => { document.getElementById('av-frame').contentWindow.postMessage({ probe: ${n} }, '*'); return true; })()`); await soon(`window.__own.some((x) => x.own === 'heard' && x.data?.probe === ${n})`, `probe ${n} heard`); };
 
   const pinAt = () => p.ev(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b ? [parseInt(b.style.left, 10), parseInt(b.style.top, 10)] : null; })()`);
   // nothing the owner wrote (a turn, a title, an outcome) in anything posted to a lens, and every
@@ -2496,20 +2511,25 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
     await p.ev(`(() => { window.__draws = 0; window.__draw = tlDraw; window.tlDraw = () => { window.__draws++; window.__draw(); }; return true; })()`);
     const before = await p.ev(resolves);
     const flood = Array.from({ length: 5000 }, (_, i) => ({ lens: 1, type: 'ready', path: 'more/page.html', title: `ready ${i}`, viewport: { w: 10, h: 10 } }));
-    const t0 = Date.now();
-    await tell({ own: 'forge', say: flood }, 'forged');
-    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
-    assert.ok(Date.now() - t0 < 5000, `the tab answered in ${Date.now() - t0} ms`);
-    // what the parent posted reaches the page's own script after its flood: a beat for any to echo back
-    await new Promise((r) => setTimeout(r, 300));
-    const draws = await p.ev('window.__draws');
+    // the page's polls held still across the count: only the readies can draw in it
+    await p.ev('window.__still()');
+    let draws;
+    try {
+      const t0 = Date.now();
+      await tell({ own: 'forge', say: flood }, 'forged');
+      await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+      assert.ok(Date.now() - t0 < 5000, `the tab answered in ${Date.now() - t0} ms`);
+      // anything the page posted the lens before this probe is heard before its echo (messages keep their order)
+      await probe();
+      draws = await p.ev('window.__draws');
+    } finally { await p.ev('window.__stir()'); }
     assert.ok(draws <= 2, `5,000 readies drawn ${draws} times`);
     assert.equal(await p.ev(resolves), before, 'nothing asked of the lens again');
     assert.equal(await p.ev('TS.path'), 'index.html', 'the page its lens named first, this load');
     // the next load is heard again, once: one resolve for it
     await p.ev(`(() => { window.tlDraw = window.__draw; const f = document.getElementById('av-frame'); f.src = f.getAttribute('src'); return true; })()`);
     await soon(`${resolves} > ${before}`, 'asked to watch on the new load');
-    await new Promise((r) => setTimeout(r, 300));
+    await probe();
     assert.equal(await p.ev(resolves), before + 1, 'once for that load');
     await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && b.style.left === '89px' && b.style.top === '129px'; })()`, 'its pin');
   });
@@ -3129,7 +3149,11 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const lastKey = () => p.ev('window.__keys.at(-1)');
   // what the owner sent, from the fixture's record of every POST: an answer or a thread's words
   const posts = () => p.ev(`(window.__posts ?? []).filter((x) => /^\\/api\\/(answer|thread-say|thread-new|thread-reopen)$/.test(x.url)).length`);
-  const settle = () => new Promise((r) => setTimeout(r, 2500));
+  // the page's own time going by: 8 of its polls (about 2.4 s under POLL_FAST), in which a send a key
+  // set off, at once or later, would have gone through
+  // (each poll waits for the read before it, so a loaded runner stretches them: 2 minutes to see 8)
+  const soonTicks = soonIn(p, 120000);
+  const ticks = async (n = 8) => { const at = await p.ev('window.__polls'); await soonTicks(`window.__polls >= ${at + n}`, `${n} polls`); };
 
   await t.test('Shift and point: the pin cursor, the goal outlined, a chip naming it; Shift up, the cursor back', async () => {
     await still(async () => {
@@ -3297,12 +3321,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       await enter({ shift: true, [held]: true });
       assert.equal((await lastKey())[`${held}Key`], true, `${held} held`);
     }
-    await settle();
+    await ticks();
     assert.deepEqual([turns(), await posts()], [n, sent], 'nothing sent');
     await enter({ shift: true });
     await enter({ shift: true, repeat: true });
     await until(() => turns() === n + 1, 'the turn in the log');
-    await settle();
+    await ticks();
     const t1 = threads().find((x) => x.id === T);
     assert.deepEqual([t1.turns.length, t1.turns.at(-1).text, await posts(), await box()], [n + 1, 'kept line one', sent + 1, ''], 'sent once, the box cleared');
     await p.ev('document.activeElement.blur()');
@@ -3482,14 +3506,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       assert.equal((await lastKey())[`${held}Key`], true, `${held} held`);
       await none(`${held} held`);
     }
-    await settle();
+    await ticks();
     assert.equal(qOf(Qa).status, 'open', 'still open');
     await none('after a while');
     await enter({ shift: true });
     await enter({ shift: true, repeat: true });
     const q = await until(() => { const x = qOf(Qa); return x.status === 'answered' && x; }, 'the answer');
     assert.deepEqual([q.answer, q.channel], ['Yes — after the demo', 'dashboard']);
-    await settle();
+    await ticks();
     assert.equal(await posts(), sent + 1, 'posted once');
     // the thread's copy: back to the goal and its thread
     await p.ev(`location.hash = '#goals'`);
@@ -3691,7 +3715,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const at = await p.at('#drawer-close');
     await p.hold('Shift', true);
     await p.move(at.x, at.y, 8);
-    await new Promise((r) => setTimeout(r, 200));
+    await p.ev(FRAMES);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'nothing there to point at');
     await p.clickAt(at.x, at.y, 8);
     await p.hold('Shift', false);
