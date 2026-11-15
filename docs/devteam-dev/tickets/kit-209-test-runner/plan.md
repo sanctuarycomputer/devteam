@@ -2,85 +2,68 @@
 
 ## TL;DR
 
-- One new file, `test/run.mjs`, plus its test `test/run.test.mjs` and fixtures in `test/fixtures/run/` (named `*.mjs`, never `*.test.mjs`); two one-line changes in `test/lib/ports.mjs` and `test/lib/cli-runner.mjs`; data in `test/timings.json`.
-- Five tasks: the shared temp dir in the libs (T1); the runner's pure parts and `--list` (T2); running files with per-file temp, the shim, output, exit codes, repeat and timings (T3); the watchdog, tree kill, tmux and folder cleanup, signals (T4); `test/timings.json` from CI (T5).
-- The kill rule: only pids this walk stopped and the final snapshot still shows stopped, killed deepest first, the root last; no walk once the child has exited.
-- Every child is `detached: true`; the runner handles SIGINT, SIGTERM and SIGHUP.
-- Tests run on Node 18, 20, 22 and 24 locally (mise installs), one file at a time at the default concurrency, never the full suite (the box rule); CI is the gate.
-- Execution: inline (executing-plans) with TDD, a fresh-subagent review per task (`reviews/task-<n>.md`); the final review comes from two other sessions (risk high).
-- Spec amendments from spec review 2 (F2-1 to F2-3) are below and bind the tasks.
+- One new file, `test/run.mjs`, with its test `test/run.test.mjs` and fixtures in `test/fixtures/run/` (named `*.mjs`, never `*.test.mjs`). Small changes in `test/lib/ports.mjs` and `test/lib/cli-runner.mjs`, and data in `test/timings.json`.
+- Five tasks: the shared temp dir in the libs (T1); the runner's pure parts and `--list` (T2); running files with per-file temp, the shim, output, exit codes, repeat and timings (T3); the watchdog, the tree kill, tmux and folder cleanup, and signals (T4); `test/timings.json` from CI (T5).
+- The kill rule: SIGKILL only pids this walk stopped that a snapshot still shows stopped (stat `T…`), in reverse stop order with the root last. No walk runs once the child has exited.
+- Every child runs `detached: true`, and the runner handles SIGINT, SIGTERM and SIGHUP. The tests' own teardown kills a pid only after checking it is still the fixture's process.
+- Tests run on Node 18, 20, 22 and 24 locally, one file at a time, with `DEVTEAM_*` unset. Never the full suite (the ruling below); CI is the gate.
+- Execution is inline (executing-plans) with TDD and a fresh-subagent review per task (`reviews/task-<n>.md`). The final review comes from two other sessions (risk high).
+- The task steps below are the whole plan. The amendments to the spec are folded into them, and listed at the end with the finding behind each.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `node test/run.mjs [files]` runs each kit test file in its own process with a watchdog, cleans up what it leaves, and groups and shards files for CI.
 
-**Architecture:** One ES module with exported pure functions (option parsing, grouping, sharding, TAP reading, tree walk, socket walk) and a `main()` that runs only when the module is the entry point (by real path). Each file is a `node --test --test-reporter=tap <file>` child in its own process group, with `TMPDIR` set to a scratch folder and a shared dir for what outlives it.
+**Architecture:** One ES module with exported pure functions (option parsing, grouping, sharding, TAP reading, tree walk, socket walk, summary rows) and a `main()` that runs only when the module is the entry point (by real path). Each file is a `node --test --test-reporter=tap <file>` child in its own process group, with `TMPDIR` set to a scratch folder and a shared dir for what outlives it.
 
-**Tech Stack:** Node 18.15+ built-ins only (`node:child_process`, `node:fs`, `node:os`, `node:path`, `node:crypto`, `node:url`, `node:test`), `ps`, `tmux` when present.
+**Tech Stack:** Node 18.15+ built-ins only (`node:child_process`, `node:fs`, `node:os`, `node:path`, `node:crypto`, `node:url`, `node:stream`, `node:test`), `ps`, `tmux` when present.
 
-**Spec:** `docs/devteam-dev/tickets/kit-209-test-runner/spec.md` (approved by spec review 2 at 1ffb807), the design in devteam-dev `project/designs/devteam-s-tests-are-light-fast-and-easy-.md`.
-
-## Spec amendments (spec review 2)
-
-- **F2-1** (as refined by plan review P1-5). SIGKILL goes in reverse stop order: the walk stops breadth-first from the root, so reversed, children go before parents and the root is last. A parent killed first can make the kernel SIGCONT an orphaned stopped group, and a child could then exit and free its pid before its own SIGKILL.
-- **F2-2.** The last-finished name is the description on the last `ok`/`not ok` line in output order (any indent), with `# SKIP`/`# TODO` stripped, skipping a line whose description is the file's own path (a per-file wrapper).
-- **F2-3.** `test/timings.json` per major: Node 18, 20 and 22 jobs print TAP whose top-level lines (`ok N - <name>` at column 0) carry `duration_ms`. Run 43685419235's Node 18 and 22 rest logs have no per-file wrapper line: the script matched every name, with none unmatched. Node 24's log uses the spec reporter, has no `duration_ms`, and adds nothing; `source` says so. A name declared at top level in two files is ambiguous: the script lists it and assigns it to neither, and the ambiguous list must be empty like the others, or each ambiguous name gets a row in verification.md with its time.
+**Spec:** `docs/devteam-dev/tickets/kit-209-test-runner/spec.md` (approved at 6862b5a, ruling m-20261115-070004373-supervisor), the design in devteam-dev `project/designs/devteam-s-tests-are-light-fast-and-easy-.md`. Where this plan's amendments (last section) differ from the spec, the amendment wins.
 
 ## Rulings
 
-- m-20261115-070004373-supervisor: approve-spec at 6862b5a. On this box, run only the test files touched, with `--test-concurrency=2` and the `DEVTEAM_*` variables unset (`env -u DEVTEAM_RUN -u DEVTEAM_TICKET -u DEVTEAM_ROLE -u DEVTEAM_HOME -u DEVTEAM_SUPERVISOR …`); never the full suite.
-
-## Plan review 1 changes
-
-- **P1-1.** Every runner call in `run.test.mjs` goes through one helper, `runRunner(args, { env, deadline = 60 s })`. It spawns the runner `detached: true`, and on its deadline, and in a `t.after` hook either way, it kills the runner's group, every pid in `DTR_FIXTURE_OUT/pids.json`, and each socket listed there with `<real tmux> -S <socket> kill-server` (only sockets under `/tmp/dtr-` or the shared dir the test made). Fixtures end themselves: `hang.mjs` exits after 60 s, its detached child after 60 s, its tmux pane runs `sleep 60`, and the survivor after 30 s.
-- **P1-2.** The check that `lib/kit.mjs` is unchanged is a verification.md row (`git diff --quiet <merge base> -- test/lib/kit.mjs`), never a test.
-- **P1-3.** Signals land asynchronously. Once no new pid appears, `stopTree` re-snapshots (every 20 ms, up to 2 s) until every stopped pid still present shows a stat starting with `T` (`T`, `Tl`, `T+`…). It then SIGKILLs every stopped pid still present whose stat starts with `T`, plus any present whose parent in that snapshot is a stopped pid, so none is left stopped. Unit tests use real stat strings (`Tl`, `Ss`) and a pid that shows `S` in one snapshot and `T` in the next.
-- **P1-4.** The scripted `stopTree` tests use pids above 4,000,000 (over Linux's `pid_max` limit), and a signal stub that never calls `process.kill`.
-- **P1-5.** See F2-1 above.
-- **P1-6.** A pid counts as dead when `kill(pid, 0)` throws ESRCH or `ps -o stat= -p <pid>` shows `Z`. Dead checks poll that every 100 ms for up to 5 s. Fixtures write their JSON to a temp name, then rename it.
-- **P1-7.** `parseArgs` normalizes a file argument by `fs.realpathSync(arg)` relative to `fs.realpathSync(root)`. A file outside the root keeps its real absolute path.
-- **P1-8.** Added tests: the summary row (`rowFor({ file, seconds, result, timeout, run })`, a pure export) carries `near timeout` past 5/6; `--group chain,alone` keeps exactly kit and bounds; `--list` over `env.mjs` writes no output file; with no `DEVTEAM_TEST_SHARED_TMP` and `TMPDIR=X`, `env.mjs` sees `X` as the shared dir; `drain(stream, ms)` (exported) resolves within ms + 1 s on a stream that never ends.
-- **P1-9.** The survivor runs inside the same timed-out hang run, so there is one 5 s timeout and two signal runs. The budget is 45 s; verification.md records `run.test.mjs`'s time on each major from CI.
-- **P1-10.** `ensureShim` accepts an existing shim only when its file and directory are owned by `process.getuid()` and are not writable by group or others. The directory name carries the uid: `devteam-test-tmux-shim-run-<uid>-<hash>`. Otherwise it writes a fresh one at a `mkdtemp` path.
+- m-20261115-070004373-supervisor: approve-spec at 6862b5a. On this box, run only the test files you touch, with `--test-concurrency=2` and the `DEVTEAM_*` variables unset; never the full suite. Each local run is `env -u DEVTEAM_RUN -u DEVTEAM_TICKET -u DEVTEAM_ROLE -u DEVTEAM_HOME -u DEVTEAM_SUPERVISOR -u DEVTEAM_FEATURE <node> --test --test-concurrency=2 test/run.test.mjs`.
 
 ## Global Constraints
 
-- Node 18.15 to 24, built-ins only; no dependency, no `fs.readdirSync(…, { recursive })`, no `util.parseArgs` edge flags past 18.
-- Files are named by their path from the repo root, `test/<name>.test.mjs`; the child's cwd is the repo root (`path.resolve(<dir of run.mjs>, '..')`).
-- Defaults: `--file-timeout` 600 s for `chain` and `LONG` (`{ 'test/dashboard.test.mjs': 600 }`, comment "kit-210 removes it"), 300 s otherwise; concurrency `--concurrency` over `DEVTEAM_TEST_CONCURRENCY` over 2; `ALONE = ['test/bounds.test.mjs']`; near timeout is seconds > 5/6 × timeout; `--shard` n is 1..4.
-- Exact strings: `timed out: <file> after <s> s (last test finished: <name|none>)`, `interrupted`, `failed: <file> (<reason>)`, the shim's `tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory`.
-- Exit codes: 0 all ok; 1 any failure or timeout; 2 usage error; 128 + signal number on interrupt.
-- Kill only pids this walk stopped and still sees stopped; never a group by number or a process by name; act only on sockets whose real path is under the scratch folder.
+- Node 18.15 to 24, built-ins only. No dependency, and no `fs.readdirSync(…, { recursive })`.
+- Files are named by their path from the repo root, `test/<name>.test.mjs`. The root is `fs.realpathSync(path.resolve(<dir of run.mjs>, '..'))`, and the child's cwd is the root.
+- Defaults: `--file-timeout` is 600 s for `chain` and for `LONG` (`{ 'test/dashboard.test.mjs': 600 }`, with the comment "until kit-210 splits it"), 300 s otherwise. Concurrency is `--concurrency` over `DEVTEAM_TEST_CONCURRENCY` over 2. `ALONE = ['test/bounds.test.mjs']`. A file is near timeout at seconds > timeout × 5/6. `--shard` n is 1..4.
+- Exact strings: `timed out: <file> after <s> s (last test finished: <name|none>)`, `interrupted`, `failed: <file> (<reason>)`, and the shim's `tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory`.
+- Exit codes: 0 when everything passed, 1 on any failure or timeout, 2 on a usage error, 128 + the signal number on an interrupt.
+- Kill only pids the walk stopped and a snapshot still shows stopped. Never kill a group by number (the runner's tests excepted: they kill the runner's group only while its leader, their own child, hasn't exited), and never a process by name. Act only on sockets whose real path is under the scratch folder.
 - The top comment of `run.mjs` documents every flag.
-- `lib/kit.mjs` is not changed.
+- `lib/kit.mjs` is not changed (a verification row, never a test).
+- `run.test.mjs` finishes in under 45 s; each spawn of the runner in it has a 60 s deadline.
 
 ## Review Focus
 
-1. **A file whose name is given as `./test/x.test.mjs` or an absolute path.** The runner should name it `test/x.test.mjs` and run it once. T2: `parseArgs` normalizes, and a test passes both forms.
-2. **A named file that doesn't exist, or a file outside `test/`.** A missing one is a usage error (exit 2, naming it), never a silent pass. A file outside `test/` runs, grouped by its source. T2 test.
-3. **`--shard 1/2` on a list with one file.** One shard has it and the other is empty: exit 0 with "no files" in its summary. T2 test (shard output) and T3 (an empty run exits 0).
-4. **A file that prints a lot (MBs of TAP).** It must not block on a full pipe or be lost. T3: the child's output is read as it comes, into an array of chunks, never left unread. Test: a fixture printing 2 MB passes.
-5. **The runner run from another cwd, or through a symlinked checkout.** It should still find `test/` and run. T3: a test runs it with cwd `/` through a symlink to the worktree and sees a failing fixture fail.
+1. **A file named `./test/x.test.mjs`, by an absolute path, or through a symlink.** It is named `test/x.test.mjs` and runs once. T2: `parseArgs` normalizes, and the test passes each form.
+2. **A named file that doesn't exist, or one outside `test/`.** A missing one is a usage error (exit 2, naming it), never a silent pass. One outside `test/` runs under its real absolute path, grouped by its source. T2 test.
+3. **`--shard 2/2` on a one-file list.** That shard is empty: exit 0 with `no files`. T3 test.
+4. **A file that prints a lot (MBs of TAP).** It must not block on a full pipe or lose output. T3 reads the output as it comes, and a fixture printing 2 MB passes.
+5. **The runner started from another cwd, or through a symlinked checkout.** It still finds `test/` and runs. T3: cwd `/`, through a symlink, a failing fixture fails.
 
 ---
 
 ### Task 1: the shared temp dir in the test libs
 
 **Files:**
-- Modify: `test/lib/ports.mjs` (the `dir` line; export `LOCK_DIR`)
+- Modify: `test/lib/ports.mjs` (the `dir` line, now exported as `LOCK_DIR`; the top comment)
 - Modify: `test/lib/cli-runner.mjs` (read the shared dir at startup)
 - Test: `test/run.test.mjs` (created here)
 
 **Interfaces:**
-- Produces: `export const LOCK_DIR` from `ports.mjs` = `path.join(process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir(), 'devteam-kit-ports')`. `cli-runner.mjs` computes `const shared = process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir()` before its env swap, and its compile cache is `path.join(shared, 'devteam-kit-compile-cache')`.
+- Produces: `export const LOCK_DIR = path.join(process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir(), 'devteam-kit-ports')` in `ports.mjs`. `cli-runner.mjs` sets `const shared = process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir()` before its env swap, and its compile cache is `path.join(shared, 'devteam-kit-compile-cache')`.
 
-- [ ] **Step 1: failing tests** in `test/run.test.mjs`:
-  - `ports.mjs keeps its locks in DEVTEAM_TEST_SHARED_TMP`: a fresh `S = mkdtemp`; spawn `node --input-type=module -e "import {LOCK_DIR,PORTS} from '<ports.mjs url>'; console.log(JSON.stringify({LOCK_DIR,PORTS,pid:process.pid, lock: fs.readFileSync(...)}))"` with env `DEVTEAM_TEST_SHARED_TMP=S`, `TMPDIR=<another fresh dir T>`; assert `LOCK_DIR === S/devteam-kit-ports`, the lock file named for its block held its pid, and `T/devteam-kit-ports` doesn't exist.
-  - `cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP` (skip unless `module.enableCompileCache` exists): spawn a node that imports `lib/cli.mjs`, calls `runNode(<a tiny script>, [], { env: { ...process.env, TMPDIR: T2 } })` with its own env `DEVTEAM_TEST_SHARED_TMP=S`; assert `S/devteam-kit-compile-cache` exists and `T2/devteam-kit-compile-cache` doesn't.
-- [ ] **Step 2:** run `node --test test/run.test.mjs`; both fail (no `LOCK_DIR`; the cache under `T2`).
-- [ ] **Step 3:** make the two changes. Update the comment at the top of `ports.mjs` to name `DEVTEAM_TEST_SHARED_TMP`.
-- [ ] **Step 4:** the tests pass on Node 18 and 24 (`~/.local/share/mise/installs/node/<v>/bin/node --test test/run.test.mjs`), and `node --test test/search.test.mjs` still passes.
-- [ ] **Step 5:** commit; review `reviews/task-1.md`.
+- [ ] **Step 1: write the failing tests** in `test/run.test.mjs`:
+  - `ports.mjs keeps its locks in DEVTEAM_TEST_SHARED_TMP`: make fresh dirs `S` and `T`. Spawn `node --input-type=module -e "<import LOCK_DIR and PORTS from the ports.mjs file URL; print { LOCK_DIR, PORTS, pid, lock: the text of LOCK_DIR/<(PORTS-20000)/100>.lock }>"` with `DEVTEAM_TEST_SHARED_TMP=S` and `TMPDIR=T`. Assert `LOCK_DIR === S/devteam-kit-ports`, that the lock held the child's pid, and that `T/devteam-kit-ports` doesn't exist.
+  - `cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP` (skipped unless `module.enableCompileCache` exists): spawn a node with `DEVTEAM_TEST_SHARED_TMP=S` that imports `lib/cli.mjs` and calls `runNode(<a one-line script in S>, [], { env: { ...process.env, TMPDIR: T2 } })`. Assert `S/devteam-kit-compile-cache` exists and `T2/devteam-kit-compile-cache` doesn't.
+  - Each spawn is `spawnSync` with `timeout: 30000`.
+- [ ] **Step 2:** run them. Both fail: there is no `LOCK_DIR`, and the cache lands under `T2`.
+- [ ] **Step 3:** make the two changes.
+- [ ] **Step 4:** they pass on Node 18 and 24, and `test/search.test.mjs` still passes.
+- [ ] **Step 5:** commit, then the review `reviews/task-1.md`.
 
 ### Task 2: the runner's pure parts and `--list`
 
@@ -89,61 +72,82 @@
 - Test: `test/run.test.mjs`
 
 **Interfaces (all exported from `test/run.mjs`):**
-- `class UsageError extends Error`
-- `parseArgs(argv: string[], env: object) -> { files: string[] (repo-relative; [] = all), groups: string[]|null, shard: {i,n}|null, list: bool, repeat: number, timings: string|null, concurrency: number, fileTimeout: number|null }`. Throws `UsageError` on an unknown flag, a bad number, an unknown group, a shard outside n 1..4 or i 1..n, or a named file that doesn't exist.
-- `groupOf(rel: string, src: string) -> 'chain'|'alone'|'chrome'|'rest'`: chain if `rel === 'test/kit.test.mjs'`; alone if in `ALONE`; chrome if `src` matches `/^\s*import\b[^;]*?['"]\.\/lib\/chrome\.mjs['"]/m` or `/\bimport\(\s*['"]\.\/lib\/chrome\.mjs['"]\s*\)/`; else rest.
-- `timeoutOf(rel, group, override: number|null) -> seconds`.
-- `nearTimeout(seconds, timeout) -> bool` (seconds > timeout × 5/6).
-- `weightsFor(files, timingsFiles: object) -> Map<rel, number>`: listed weight, else the median of the chosen files' listed weights, else 1.
-- `shard(files, weights: Map, n) -> string[][]`: greedy, heaviest first (ties by path), to the lightest shard (ties to the lowest index); each shard keeps that order.
-- `planRun(opts, root) -> [{ file, group, timeout }]`: all `test/*.test.mjs` (or `opts.files`), filtered by groups, then the shard, then ordered `alone` first (keeping shard order otherwise).
-- `lastFinished(tap: string, file: string) -> string|null` (amendment F2-2).
+- `ROOT`, `ALONE`, `LONG`, `class UsageError extends Error`.
+- `parseArgs(argv: string[], env: object, root = ROOT) -> { files: string[] ([] means all), groups: string[]|null, shard: {i,n}|null, list: bool, repeat: number, timings: string|null, concurrency: number, fileTimeout: number|null }`. It throws `UsageError` on an unknown flag, a bad number, an unknown group, a shard with n outside 1..4 or i outside 1..n, or a named file that doesn't exist. A file is `path.relative(root, fs.realpathSync(arg))` (split on `path.sep`, joined with `/`) when that doesn't start with `..`, else its real absolute path. Duplicates are dropped.
+- `groupOf(rel: string, src: string) -> 'chain'|'alone'|'chrome'|'rest'`. It is `chain` when `path.basename(rel) === 'kit.test.mjs'` and the file is directly under `test/`, and `alone` when `rel` is in `ALONE`. It is `chrome` when `src` matches `/^\s*import\b[^;]*?['"]\.\/lib\/chrome\.mjs['"]/m` or `/\bimport\(\s*['"]\.\/lib\/chrome\.mjs['"]\s*\)/`. Otherwise it is `rest`.
+- `timeoutOf(rel, group, override: number|null) -> seconds`; `nearTimeout(seconds, timeout) -> bool`.
+- `weightsFor(files, timingsFiles: object) -> Map<rel, number>`: a file's listed weight, else the median of the chosen files' listed weights, else 1.
+- `shard(files, weights: Map, n) -> string[][]`: greedy, heaviest first (ties by path), each to the lightest shard (ties to the lowest index). Each shard keeps that order.
+- `planRun(opts, root = ROOT) -> [{ file, group, timeout }]`: every `test/*.test.mjs` under root (or `opts.files`), filtered by `opts.groups`, then the shard, then `alone` first, keeping the shard's order otherwise.
+- `lastFinished(tap: string, file: string) -> string|null` (amendment A2).
 - `childArgs(file) -> ['--test', '--test-reporter=tap', file]`.
-- `isEntry(argv1, metaUrl) -> bool`: real-path comparison, false when `argv1` is missing.
-- CLI: `--list` prints one line per planned file, `<file>  <group>  <timeout> s`, and exits 0.
+- `rowFor({ file, run, seconds, result, timeout, repeat }) -> string`: the summary row, `file  seconds  result`, with `, near timeout` added past 5/6 and ` (run k)` when `repeat > 1`.
+- `isEntry(argv1, metaUrl) -> bool`: `fs.realpathSync(argv1) === fileURLToPath(metaUrl)`, false when `argv1` is missing or doesn't resolve.
+- CLI: `--list` prints one line per planned file, `<file>  <group>  <timeout> s`, runs nothing, and exits 0.
 
-- [ ] **Step 1: failing tests**:
-  - `groups by rule`: `groupOf` on the real sources gives `kit.test.mjs` chain, `bounds.test.mjs` alone, `dashboard.test.mjs` chrome, `search.test.mjs` rest; a source with `import('./lib/chrome.mjs')` is chrome; one with the import only in a comment (`// see ./lib/chrome.mjs`) is rest.
-  - `shards cover each file once and balance`: weights `{a:10,b:9,c:5,d:4,e:1}` into 2 gives `[[a,d,e],[b,c]]`; for n = 1..4 over the real file list with the real `test/timings.json` (or `{}` before T5), the shards' union equals the list with no duplicates; an unlisted file gets the median of the listed weights.
-  - `parseArgs`: `--shard 0/2`, `--shard 3/2`, `--shard 1/5`, `--group nope`, `--concurrency 0` and a missing file throw `UsageError`; concurrency 2 by default, `DEVTEAM_TEST_CONCURRENCY=3` gives 3, and `--concurrency 4` over it gives 4; `./test/search.test.mjs` and its absolute path both give `test/search.test.mjs` (Review Focus 1, 2).
-  - `timeouts`: `timeoutOf` gives 600 for chain and dashboard, 300 for search, and 7 for any file with an override of 7; `nearTimeout(251, 300)` is true and `nearTimeout(249, 300)` false.
-  - `lastFinished`: over a TAP sample with nested subtests, a `# SKIP` line and a wrapper line naming the file, it gives the last finished line's description in output order; `none` when there are no `ok` lines (null).
+- [ ] **Step 1: write the failing tests**:
+  - `groups by rule`: `groupOf` over the real sources puts `kit.test.mjs` in chain, `bounds.test.mjs` in alone, `dashboard.test.mjs` in chrome and `search.test.mjs` in rest. A source with `import('./lib/chrome.mjs')` is chrome; one naming it only in a comment (`// see ./lib/chrome.mjs`) is rest. `planRun({ groups: ['chain', 'alone'] })` over all files gives exactly `test/bounds.test.mjs` and `test/kit.test.mjs`, bounds first.
+  - `shards cover each file once and balance`: weights `{a:10, b:9, c:5, d:4, e:1}` into 2 shards give `[[a, d, e], [b, c]]`. For n = 1..4 over the real file list and the real `test/timings.json` (`{}` until T5), the shards' union equals the list, with no duplicates. An unlisted file gets the median of the listed weights.
+  - `parseArgs`: `--shard 0/2`, `--shard 3/2`, `--shard 1/5`, `--group nope`, `--concurrency 0`, `--bogus` and a missing file each throw `UsageError`. Concurrency is 2 by default, 3 with `DEVTEAM_TEST_CONCURRENCY=3`, and 4 with `--concurrency 4` over that. `./test/search.test.mjs`, its absolute path and its path through a symlink to the root all give `test/search.test.mjs`, once (Review Focus 1, 2).
+  - `timeouts and rows`: `timeoutOf` gives 600 for chain and for dashboard, 300 for search, and 7 for any file with an override of 7. `rowFor` with seconds 251 and timeout 300 has `near timeout`; with 249 it doesn't; with `repeat: 3, run: 2` it has `(run 2)`.
+  - `lastFinished`: over a TAP sample with nested subtests, a `# SKIP` line and a wrapper line naming the file, it gives the description of the last finished line in output order. With no `ok` lines it gives null.
   - `childArgs` is exactly `['--test', '--test-reporter=tap', f]`.
-  - `--list`: `node test/run.mjs --list test/kit.test.mjs test/bounds.test.mjs test/dashboard.test.mjs test/search.test.mjs` prints bounds first and the four lines with `600 s`, `300 s`, `600 s`, `300 s`, and exits 0; `--shard 1/2 --list` and `--shard 2/2 --list` over every file together list each once; exit 2 for `--shard 3/2`.
+  - `--list` (spawned with a 60 s deadline): `--list test/kit.test.mjs test/bounds.test.mjs test/dashboard.test.mjs test/search.test.mjs` prints bounds first, the four lines with 300, 600, 600 and 300 s, and exits 0. `--shard 1/2 --list` and `--shard 2/2 --list` over every file together list each file once. `--shard 3/2` exits 2.
 - [ ] **Step 2:** they fail (no module).
-- [ ] **Step 3:** write `test/run.mjs`: the top comment with every flag (the spec's list, Node 18.15 floor), the exports above, and `main()` handling `--list` only for now, behind `if (isEntry(process.argv[1], import.meta.url))`.
+- [ ] **Step 3:** write `test/run.mjs`: the top comment with every flag and the Node 18.15 floor, the exports above, and a `main()` that handles only `--list` so far, behind `if (isEntry(process.argv[1], import.meta.url))`. Each `UsageError` prints its message and exits 2.
 - [ ] **Step 4:** they pass on Node 18 and 24.
-- [ ] **Step 5:** commit; review `reviews/task-2.md`.
+- [ ] **Step 5:** commit, then the review `reviews/task-2.md`.
 
 ### Task 3: running the files
 
 **Files:**
 - Modify: `test/run.mjs`
-- Create: `test/fixtures/run/pass.mjs`, `fail.mjs`, `throws.mjs`, `exit-nonzero.mjs`, `flaky.mjs`, `env.mjs`, `ports.mjs`, `ports-2.mjs`, `tmux-ends.mjs`, `loud.mjs`
+- Create: `test/fixtures/run/pass.mjs`, `fail.mjs`, `throws.mjs`, `exit-nonzero.mjs`, `flaky.mjs`, `env.mjs`, `ports.mjs`, `ports-2.mjs`, `tmux-ends.mjs`, `loud.mjs`, `out.mjs` (the fixtures' shared helper: `put(name, obj)` writes JSON to `DTR_FIXTURE_OUT/<name>` via a temp name and a rename)
 - Test: `test/run.test.mjs`
 
 **Interfaces:**
 - Consumes: T2's exports.
-- Produces: `sharedDir(env) -> string` (`env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir()`); `scratchDir() -> string` (`mkdtempSync('/tmp/dtr-')` if `/tmp` is a writable directory, else `mkdtempSync(path.join(os.tmpdir(), 'dtr-'))`); `ensureShim(shared, PATH) -> dir` (the spec's shim at `<shared>/devteam-test-tmux-shim-run-<sha1(text) 12 hex>/tmux`, written to a temp name and renamed, skipped when the marker is there); `realTmux(PATH) -> string` (first non-shim `tmux` on PATH, or ''); `socketsUnder(dir) -> string[]`; `cleanupAfter(entry)` (steps 2 and 3: kill each socket's server with `realTmux -S <s> kill-server`, a 5 s timeout, then `rmSync(dir, { recursive, force, maxRetries: 5 })`). Each running file is `{ file, run, child, dir, out: Buffer[], start, exited }`.
+- Produces:
+  - `sharedDir(env) -> string`: `env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir()`.
+  - `scratchDir() -> string`: `mkdtempSync('/tmp/dtr-')` when `/tmp` is a writable directory, else `mkdtempSync(path.join(os.tmpdir(), 'dtr-'))`.
+  - `realTmux(PATH) -> string`: the first `tmux` on PATH that is an executable file without the marker, or `''`.
+  - `ensureShim(shared, PATH) -> dir`. The dir is `<shared>/devteam-test-tmux-shim-run-<uid>-<sha1(text), 12 hex>`, and the shim is `tmux` in it, with the spec's text and the real tmux path (or `tmux-not-installed`). It is written to a temp name in the dir with mode 0755, then renamed. An existing dir and shim are reused only when both are owned by `process.getuid()`, neither is writable by group or others, and the shim holds the marker. Otherwise the runner exits 2 with `unsafe shim at <path>: not this user's, or writable by others` (it never writes elsewhere, so it never leaks).
+  - `socketsUnder(dir) -> string[]`: a hand walk. `readdirSync(d, { withFileTypes: true })` descends only into `isDirectory()` entries (Dirent's type is never a followed symlink) and collects `isSocket()` entries whose `realpathSync` starts with `realpathSync(dir) + '/'`.
+  - `drain(stream, ms) -> Promise<void>`: it resolves on the stream's `end` or `close`, or after `ms`, whichever comes first.
+  - `cleanupAfter(entry)` (steps 2 and 3): for each socket, `spawnSync(realTmux, ['-S', s, 'kill-server'], { timeout: 5000 })`, then `rmSync(entry.dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })`.
+  - A running file is `{ file, run, child, dir, out: Buffer[], start, exited: false, timer }`.
 - Fixtures read `DTR_FIXTURE_OUT` (a folder the test makes) for their outputs; the runner passes its env through.
+- In `run.test.mjs`: `runRunner(args, { env, cwd, deadline = 60000, detached = true }) -> Promise<{ code, signal, stdout, stderr, child }>` spawns `process.execPath test/run.mjs …`. If the deadline passes, it kills the runner's group (`process.kill(-child.pid, 'SIGKILL')`, only while `child.exitCode === null && child.signalCode === null`) and rejects. `env` defaults to `process.env` with `DTR_FIXTURE_OUT` set.
 
-- [ ] **Step 1: failing tests** (each spawns `node test/run.mjs …` with `DTR_FIXTURE_OUT` set):
-  - `a passing file`: `node test/run.mjs test/search.test.mjs` exits 0, prints its TAP after a `# test/search.test.mjs` header, and a summary with `concurrency 2` and a row `test/search.test.mjs  <s>  ok` (done-when 1).
-  - `exit codes`: each of `fail.mjs`, `throws.mjs`, `exit-nonzero.mjs` (every test passes, then `process.exitCode = 3`) exits non-zero with `failed: test/fixtures/run/<f>.mjs`; `pass.mjs` alone exits 0; `pass.mjs fail.mjs` together exits non-zero (done-when 2).
-  - `per-file temp and the shim`: `env.mjs` writes its `TMPDIR`, `DEVTEAM_TEST_SHARED_TMP` and `PATH` (after importing `lib/kit.mjs`). Run with a fresh `S` as `DEVTEAM_TEST_SHARED_TMP`: `TMPDIR` starts `/tmp/dtr-` (when `/tmp` is writable) and is gone after; the shared value is `S`; PATH's first entry is kit's shim (under `TMPDIR`) and the second is `S/devteam-test-tmux-shim-run-…`, whose `tmux` holds the marker; (that `test/lib/kit.mjs` is unchanged is a verification row, P1-2) (done-whens 3, 4).
-  - `two files at once claim distinct port blocks`: `ports.mjs` and `ports-2.mjs` (a one-line fixture that imports `./ports.mjs`, so the runner sees two files) at `--concurrency 2` with `S` shared; each writes its result under `DTR_FIXTURE_OUT` named by its own pid; both report `LOCK_DIR = S/devteam-kit-ports`, distinct `PORTS`, and each saw the other's lock while it held its own (both wait until two locks exist, up to 10 s) (done-when 3).
-  - `a file that ends on its own`: `tmux-ends.mjs` (skips without tmux) starts a server under its own `mkdtemp(os.tmpdir()/dt-tmux-)` (kit's exit hook doesn't know it), writes the server pid and its scratch folder, and exits 0; afterwards the pid is dead and the folder gone (done-when 6, part).
-  - `--repeat 3 names the failing run`: `flaky.mjs` fails only when its counter (in `DTR_FIXTURE_OUT`) reads 2; the run exits non-zero and its summary has three rows, the failing one marked `run 2` (done-when 8).
+- [ ] **Step 1: write the failing tests:**
+  - `a passing file`: `run.mjs test/search.test.mjs` exits 0. It prints its TAP after a `# test/search.test.mjs` header, then a summary with `concurrency 2` and the row `test/search.test.mjs  <s>  ok` (done-when 1).
+  - `exit codes`: `fail.mjs`, `throws.mjs` and `exit-nonzero.mjs` (every test passes, then `process.exitCode = 3`) each exit 1, with `failed: test/fixtures/run/<f>.mjs (…)`. `pass.mjs` alone exits 0, and `pass.mjs fail.mjs` together exits 1 (done-when 2).
+  - `per-file temp and the shim`: `env.mjs` imports `lib/kit.mjs`, then `put`s its `TMPDIR`, `DEVTEAM_TEST_SHARED_TMP` and `PATH`. Run with a fresh `S` as `DEVTEAM_TEST_SHARED_TMP`: `TMPDIR` starts with `/tmp/dtr-` (when `/tmp` is writable) and is gone afterwards. The shared value is `S`. PATH's first entry is kit's shim (under `TMPDIR`), and its second is `S/devteam-test-tmux-shim-run-<uid>-…`, whose `tmux` holds the marker. A second run reuses that dir (done-whens 3, 4).
+  - `the default shared dir`: with `DEVTEAM_TEST_SHARED_TMP` removed from the env and `TMPDIR=X` (a fresh dir), `env.mjs` sees `X` as the shared dir.
+  - `two files at once claim distinct port blocks`: `ports.mjs`, and `ports-2.mjs` (one line, `import './ports.mjs'`), run at `--concurrency 2` with `S` shared. Each `put`s `{ LOCK_DIR, PORTS, pid }` under its own pid and waits until `S/devteam-kit-ports` holds two locks (up to 10 s). Both report `LOCK_DIR = S/devteam-kit-ports` and distinct `PORTS`, and neither scratch folder has a `devteam-kit-ports` (done-when 3).
+  - `a file that ends on its own`: `tmux-ends.mjs` (skipped without tmux) starts `tmux new-session -d -s e 'sleep 60'` with `TMUX_TMPDIR` set to its own `mkdtemp(os.tmpdir()/dt-tmux-)`, which kit's exit hook doesn't know. It `put`s the server pid, the socket and its `os.tmpdir()`, and exits 0. Afterwards the pid is dead (polled, below) and the folder is gone (done-when 6, part).
+  - `--repeat 3 names the failing run`: `flaky.mjs` keeps a counter in `DTR_FIXTURE_OUT` and fails only on its second run. The run exits 1, and its summary has three rows, the failing one marked `(run 2)` (done-when 8).
   - `--timings`: `--timings <out>` over `pass.mjs` writes `{ run, files: { 'test/fixtures/run/pass.mjs': <number> } }` (done-when 8).
+  - `--list runs nothing`: `--list test/fixtures/run/env.mjs` exits 0, and no output file appears.
   - `a loud file`: `loud.mjs` prints 2 MB in one test and passes; the run exits 0 (Review Focus 4).
-  - `from another cwd, through a symlink`: a symlink `L -> <repo root>`; `node L/test/run.mjs L/test/fixtures/run/fail.mjs` with cwd `/` exits non-zero naming the file (spec check 8 entry point; Review Focus 5).
-  - `an empty shard`: `--shard 2/2 test/fixtures/run/pass.mjs` exits 0 and says `no files` (Review Focus 3).
+  - `from another cwd, through a symlink`: with a symlink `L -> <root>`, `node L/test/run.mjs L/test/fixtures/run/fail.mjs` from cwd `/` exits 1 and names `test/fixtures/run/fail.mjs` (Review Focus 5).
+  - `an empty shard`: `--shard 2/2 test/fixtures/run/pass.mjs` exits 0 and prints `no files` (Review Focus 3).
+  - `drain`: on a `PassThrough` that never ends, `drain(s, 200)` resolves in under 1.2 s.
+  - Dead means `kill(pid, 0)` throws ESRCH, or `ps -o stat= -p <pid>` shows `Z`. `deadSoon(pid)` polls that every 100 ms for up to 5 s.
 - [ ] **Step 2:** they fail.
-- [ ] **Step 3:** implement `main()`: plan, ensure the shim, run `alone` files one at a time, then the rest at `concurrency`, for runs 1..repeat; each child `spawn(process.execPath, childArgs(file), { cwd: root, env: { ...process.env, TMPDIR: dir, DEVTEAM_TEST_SHARED_TMP: shared, PATH: `${shimDir}:${PATH}` }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })`; on `exit`, read the rest of stdout/stderr for up to 2 s, run `cleanupAfter`, record `{ seconds, result }` (`ok`, `failed (exit N)`, `failed (signal SIGx)`), print its header and output. Then the summary, `failed:` lines, `--timings`, exit code.
-- [ ] **Step 4:** they pass on Node 18, 20, 22, 24.
-- [ ] **Step 5:** commit; review `reviews/task-3.md`.
+- [ ] **Step 3:** implement `main()`. It plans the run, ensures the shim, and runs the `alone` files one at a time, then the rest at `concurrency`, for runs 1..repeat. Each child is `spawn(process.execPath, childArgs(file), { cwd: ROOT, env: { ...process.env, TMPDIR: dir, DEVTEAM_TEST_SHARED_TMP: shared, PATH: shimDir + path.delimiter + PATH }, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })`, with stdout and stderr pushed into `out` as they come. On `exit` it:
+  - sets `exited`;
+  - `clearTimeout(timer)`;
+  - awaits `drain` of both pipes (2000 ms), then `destroy()`s them;
+  - runs `cleanupAfter`;
+  - records the seconds and the result (`ok`, `failed (exit N)`, `failed (signal SIGx)`);
+  - prints the header and the output.
 
-### Task 4: watchdog, cleanup and signals
+  Then it prints the summary (`summary: <n> files, concurrency <c>`, or `no files`), each `rowFor`, the `failed:` lines and the `--timings` file, and sets the exit code.
+- [ ] **Step 4:** they pass on Node 18, 20, 22 and 24.
+- [ ] **Step 5:** commit, then the review `reviews/task-3.md`.
+
+### Task 4: the watchdog, cleanup and signals
 
 **Files:**
 - Modify: `test/run.mjs`
@@ -151,31 +155,70 @@
 - Test: `test/run.test.mjs`
 
 **Interfaces:**
-- Produces: `snapshot() -> Map<pid, { ppid, stat }>` (from `ps -A -o pid=,ppid=,stat=`; throws when `ps` fails); `stopTree(root, { snapshot, signal }) -> { stopped: number[], killed: number[] }` (the spec's step 1 with amendment F2-1; `signal(pid, sig)` swallows ESRCH); `cleanup(entry, why)`: if `!entry.exited`, `stopTree(entry.child.pid)` (on a `ps` failure, SIGKILL the child alone and print that the walk failed), then `cleanupAfter(entry)`.
-- The watchdog: a `setTimeout(timeout × 1000)` per running file; when it fires, `cleanup`, and the result `timed out`, with the `timed out: …` line from `lastFinished`.
-- Signals: `SIGINT`, `SIGTERM`, `SIGHUP` handlers: stop scheduling, `cleanup` every running file, print `interrupted`, `process.exit(128 + os.constants.signals[sig])`.
+- Produces:
+  - `snapshot() -> Map<pid, { ppid, stat }>`, from `spawnSync('ps', ['-A', '-o', 'pid=,ppid=,stat='], { timeout: 5000 })`. It throws when `ps` fails.
+  - `stopTree(root, { snapshot, signal, now = Date.now, sleep }) -> { stopped: number[], killed: number[], unstopped: number[] }`. Without both `snapshot` and `signal` it uses the real ones; with exactly one of them it throws. `signal(pid, sig)` swallows ESRCH.
+  - `cleanup(entry, why)`: if `!entry.exited`, `stopTree(entry.child.pid)`. If `ps` fails, it sends SIGKILL to the child alone and prints `tree walk failed: <error>`. Then `cleanupAfter(entry)`.
+  - The `stopTree` algorithm (amendments A1 and A4):
 
-- [ ] **Step 1: failing tests**:
-  - `stopTree with scripted snapshots`: snapshots `[{1:{ppid:0}, 10:{ppid:1}}, {…, 11:{ppid:10}}, {…, 12:{ppid:11}}, same again]` with stats `T` for every stopped pid; the signal log is SIGSTOP 1, 10, 11, 12 (each before any SIGKILL), then SIGKILL 12, 11, 10, 1 (deepest first, root last); a pid the final snapshot doesn't show, or shows as not `T`, is never killed; a pid whose parent was never stopped is never stopped.
-  - `a hung file is killed with its tree`: `hang.mjs` (a passing test `first passes`, then a test that imports `lib/kit.mjs`, spawns `node -e "setInterval(()=>{},1e3)"` with `detached: true`, starts `tmux new-session -d -s h 'sleep 600'` (when `hasTmux`), writes `{ file: process.pid, detached, server, socket, scratch: os.tmpdir() }` to `DTR_FIXTURE_OUT/pids.json`, and waits forever) under `--file-timeout 5`: the run exits 1 within 20 s; it prints `timed out: test/fixtures/run/hang.mjs after 5 s (last test finished: first passes)`; the file, detached and server pids are dead; `tmux -S <socket> has-session` fails; the scratch folder is gone (done-when 5).
-  - `a survivor is refused tmux`: `hang.mjs` with `DTR_SURVIVOR=1` also starts `survivor.mjs` through a parent that exits at once (so it is orphaned before cleanup); the survivor waits for its `TMPDIR` to go (up to 30 s, then exits), runs `tmux -V`, writes `{ status, stderr }` to `DTR_FIXTURE_OUT/survivor.json` and exits; after the run, that file appears within 10 s with status 1 and `tmux refused` in stderr (done-when 4).
-  - `SIGINT to the runner's group` and `SIGTERM to the runner`: the runner started `detached: true`; once `pids.json` exists, `process.kill(-runner.pid, 'SIGINT')` (and in the other test `process.kill(runner.pid, 'SIGTERM')`); the run prints `interrupted`, exits 130 (143), and the file, detached and server pids are dead and the folder gone (done-when 6).
-- [ ] **Step 2:** they fail.
+    ```
+    stop(root); stopped = [root]
+    loop (at most 2 s after the first round with no new pid):
+      snap = snapshot()
+      fresh = pids in snap whose ppid is in stopped and that aren't in stopped yet
+      stop each fresh pid, append it to stopped; if fresh was non-empty, continue
+      if every stopped pid present in snap has a stat starting with 'T': break
+      sleep(20)
+    final = the last snap
+    killed = reversed(stopped) filtered to pids present in final with a stat starting with 'T'; SIGKILL each in that order
+    unstopped = stopped pids present in final without a 'T' stat (reported in the runner's output, never killed)
+    ```
+- The watchdog: `entry.timer = setTimeout(…, timeout × 1000)` when a file starts. When it fires: `cleanup`, the result `timed out`, and the `timed out: …` line from `lastFinished(out, file)`.
+- Signals: handlers for `SIGINT`, `SIGTERM` and `SIGHUP`. Each stops scheduling, runs `cleanup` on every running file, prints `interrupted`, and calls `process.exit(128 + os.constants.signals[sig])`.
+- Test teardown (P2-2): `pids.json` records, for each pid, the `args` that `ps -o args= -p <pid>` showed when it started. A `t.after` hook kills a pid only if it is alive and `ps -o args=` still shows those exact args. It kills a socket's server with `<realTmux> -S <socket> kill-server` only when the socket is under `/tmp/dtr-` or the test's `S`. It kills the runner's group only as `runRunner` does.
+
+- [ ] **Step 1: write the failing tests:**
+  - `stopTree with scripted snapshots`: the pids are 9,000,001 and up, above Linux's limit of 4,194,304, and the signal stub records calls and never calls `process.kill`. The root R has child A; B, A's child, first appears in snapshot 2; A shows `S` in snapshot 2 and `Tl` in snapshot 3. The log is SIGSTOP R, A, B, all before any SIGKILL, then SIGKILL B, A, R. A pid whose parent was never stopped is never signalled. A stopped pid missing from the final snapshot, or one showing `Ss` there, is never killed and is listed in `unstopped` when present. `stopTree(1, { snapshot })` without `signal` throws.
+  - `a hung file is killed with its tree, and a survivor is refused tmux`: `hang.mjs` runs a passing test, `first passes`. Its second test:
+    - imports `lib/kit.mjs`;
+    - spawns `node -e "setTimeout(()=>{},60000)//dtr-fixture"` with `detached: true`;
+    - when `hasTmux`, starts `tmux new-session -d -s h 'sleep 60'`;
+    - when `DTR_SURVIVOR=1`, starts `survivor.mjs` through a parent node that exits at once, so the survivor is orphaned before cleanup;
+    - `put`s `pids.json`: `{ file, detached, server, socket, scratch: os.tmpdir() }`, each pid with its args;
+    - waits, exiting by itself after 60 s.
+
+    The survivor waits for its `TMPDIR` to go (polling, giving up after 30 s), runs `tmux -V` with its env, `put`s `survivor.json` (`{ status, stderr }`) and exits. Run with `--file-timeout 5` and `DTR_SURVIVOR=1`. The run exits 1 well within its deadline. It prints `timed out: test/fixtures/run/hang.mjs after 5 s (last test finished: first passes)`. The file, detached and server pids are dead (`deadSoon`). `tmux -S <socket> has-session` fails. The scratch folder is gone. `survivor.json` appears within 10 s with status 1 and `tmux refused` in its stderr (done-whens 4, 5).
+  - `SIGINT to the runner's group` and `SIGTERM to the runner`: `runRunner` starts the runner `detached: true`. Once `pids.json` exists, the test sends `process.kill(-runner.pid, 'SIGINT')` (in the other test, `process.kill(runner.pid, 'SIGTERM')`). The run prints `interrupted` and exits 130 (143). The file, detached and server pids are dead, and the folder is gone (done-when 6).
+- [ ] **Step 2:** they fail. `runRunner`'s deadline and the teardown clean up the fixtures while there is no watchdog yet.
 - [ ] **Step 3:** implement.
-- [ ] **Step 4:** they pass on Node 18, 20, 22, 24; `run.test.mjs` takes under 45 s here (time it on each, note it).
-- [ ] **Step 5:** commit; review `reviews/task-4.md`.
+- [ ] **Step 4:** they pass on Node 18, 20, 22 and 24, and `run.test.mjs` takes under 45 s here on each (time it, note it).
+- [ ] **Step 5:** commit, then the review `reviews/task-4.md`.
 
 ### Task 5: `test/timings.json`
 
 **Files:**
 - Create: `test/timings.json`
-- Keep: `docs/devteam-dev/tickets/kit-209-test-runner/timings-from-ci.mjs`
+- Modify: `docs/devteam-dev/tickets/kit-209-test-runner/timings-from-ci.mjs` (the ambiguous-name list)
 
-- [ ] **Step 1:** pick the newest green `test.yml` run on main that includes every `test/*.test.mjs` at the merge base (`gh run list -R sanctuarycomputer/devteam -w test.yml -b main -e push -s success`); download every job's log (`gh run view --job <id> --log`) to the scratchpad.
-- [ ] **Step 2:** `node docs/devteam-dev/tickets/kit-209-test-runner/timings-from-ci.mjs <run> . <logs…> > test/timings.json`; stderr must list no unmatched name, no ambiguous name (amendment F2-3: add the ambiguous check to the script) and no file without a time.
-- [ ] **Step 3:** T2's shard test now runs over the real weights; `node test/run.mjs --list --shard i/2` for i = 1, 2 shows the split; note each shard's total weight in verification.md.
-- [ ] **Step 4:** commit; review `reviews/task-5.md`.
+- [ ] **Step 1:** find the newest green `test.yml` push run on main that has every `test/*.test.mjs` at the merge base (`gh run list -R sanctuarycomputer/devteam -w test.yml -b main -e push -s success`), and download every job's log to the scratchpad (`gh run view --job <id> --log`).
+- [ ] **Step 2:** the script also lists each name declared at top level in two files as `ambiguous: <name> (<files>)`, and assigns it to neither.
+- [ ] **Step 3:** run `node …/timings-from-ci.mjs <run> . <logs…> > test/timings.json`. stderr must list no unmatched name, no ambiguous name (or each one gets a verification row with its time) and no file without a time.
+- [ ] **Step 4:** T2's shard test now runs over the real weights. `node test/run.mjs --list --shard i/2` for i = 1 and 2 shows the split; note each shard's total weight in verification.md.
+- [ ] **Step 5:** commit, then the review `reviews/task-5.md`.
 
 ### Then
 
-Verification (`verification.md`, a row per done-when at a named commit, with `devteam.mjs gate test -- <node> --test test/run.test.mjs` per major), finish (worker.md §8), and two final reviews from other sessions (`send supervisor … --kind review-request`).
+Verification (`verification.md`): a row per done-when at a named commit, with `devteam.mjs gate test -- <node> --test --test-concurrency=2 test/run.test.mjs` for each major. Rows also cover `lib/kit.mjs` unchanged (`git diff --quiet <merge base> -- test/lib/kit.mjs`), every file in `test/timings.json` at the merge, and `run.test.mjs`'s time on each major from CI. Then finish (worker.md §8), with two final reviews from other sessions (`send supervisor … --kind review-request`).
+
+## Amendments to the spec
+
+Each binds the task named.
+
+- **A1 (spec review F2-1, plan review P1-5; T4).** SIGKILL goes in reverse stop order, which puts children before parents and the root last. A parent killed first can make the kernel SIGCONT an orphaned stopped group, and a child could then exit and free its pid before its own SIGKILL.
+- **A2 (F2-2; T2).** The last-finished name is the description on the last `ok`/`not ok` line in output order (any indent), with `# SKIP`/`# TODO` stripped. It skips a line whose description is the file's own path.
+- **A3 (F2-3; T5).** On Node 18, 20 and 22, the top-level TAP lines (`ok N - <name>` at column 0) carry `duration_ms`. Run 43685419235's Node 18 and 22 rest logs had no per-file wrapper line, and every name matched. Node 24's log uses the spec reporter and adds nothing (`source` says so). A name two files declare is listed as ambiguous and assigned to neither.
+- **A4 (P1-3, P2-3; T4).** Signals land asynchronously, so `stopTree` re-snapshots (every 20 ms, for at most 2 s) until no new pid appears and every stopped pid shows `T…`. A pid found in a later round is stopped and walked like the rest. SIGKILL reaches only stopped pids that the final snapshot shows `T…`. A stopped pid that never shows `T` is reported as `unstopped`, not killed.
+- **A5 (P1-9, P2-6).** The survivor runs inside the timed-out hang run. The time budget is 45 s (the spec said 40 s), and the time on each major is recorded from CI.
+- **A6 (P1-10, P2-6; T3).** The shim's dir name carries the uid, `devteam-test-tmux-shim-run-<uid>-<hash>`. The runner reuses an existing shim only when it is this user's and not writable by others, and otherwise refuses with exit 2.
+- **A7 (P1-1, P2-2; T3, T4).** Every runner spawn in the tests has a 60 s deadline. Teardown kills a pid only when its args still match the fixture's, and the runner's group only while the runner hasn't exited. Fixtures end by themselves within 60 s.
+- **A8 (P1-2).** That `lib/kit.mjs` is unchanged is a verification row, never a test.
