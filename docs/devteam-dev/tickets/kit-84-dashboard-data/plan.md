@@ -42,7 +42,7 @@
 
 ## The test file: shared shape
 
-`test/dashboard-data.test.mjs` imports `{ test } from 'node:test'`, `assert from 'node:assert/strict'`, `fs`, `path`, `{ execFileSync }` from `node:child_process`, and `{ threadsFixture, fleetFixture, write, json, dashboardOnFreePort, PORTS }` from `./lib/kit.mjs`.
+`test/dashboard-data.test.mjs` imports `{ test } from 'node:test'`, `assert from 'node:assert/strict'`, `fs`, `path`, `{ execFileSync }` from `node:child_process`, and `{ threadsFixture, fleetFixture, line, write, json, dashboardOnFreePort, PORTS }` from `./lib/kit.mjs`. The test's own helper is `handLine`, so it doesn't clash with kit.mjs's `line`.
 
 Each task adds one top-level `test('<name>', { timeout: 300000 }, async (t) => …)`. Each test builds its own fixture and registers its `F.done()` in `t.after`, with a guarded undo list as in `test/question-links-moved.test.mjs`.
 
@@ -50,11 +50,11 @@ Helpers at the top of the file, written in T1 and reused after:
 
 - `data(F)`: `json(F.ok(F.old, ['dashboard-data']))`, the same JSON `/api/data` serves.
 - `logBytes(F)`: a `Map` of each `docs/devteam/run/log/*.jsonl` to its bytes. A test asserts it is equal before and after its reads.
-- `line(F, by, o, atMs, file?)` (P1-1): a hand-written log line with an explicit, unique id. `F.hand` makes ids only for thread, turn, question and observation lines.
-  - It calls `F.hand(by, { ...o, id }, Date.now() - atMs, file)`.
-  - The id is `${PREFIX[o.type]}-${stamp(at)}-${by}`, with `PREFIX = { act: 'a', phase: 'h', message: 'm', decision: 'd', observation: 'o' }`, built the way `F.hand` builds its own.
-  - A module counter adds 1 ms to `at` whenever two lines would share a stamp, so two lines never share an id.
-  - A ticket's phase lines go in file `<ticket id>.jsonl`, as the kit writes them.
+- `handLine(F, by, o, agoMs, file?)` (P1-1, P2-1): writes one log line by hand, with an explicit, unique id. `agoMs` is how long ago, the same sense `F.hand` uses. `F.hand` itself makes ids only for thread, turn, question and observation lines, so this helper doesn't call it; it writes the line in `F.hand`'s format.
+  - `at = Date.now() - agoMs`. While `at` is in the module's `used` set, it subtracts 1 ms; then it adds `at` to `used`.
+  - `id = ${PREFIX[o.type]}-${stamp(new Date(at))}-${by}`, with `PREFIX = { act: 'a', phase: 'h', message: 'm', decision: 'd', observation: 'o' }`. `stamp` is `F.hand`'s (plan-2 confirmed these shapes pass log-check).
+  - It appends kit.mjs's `line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: new Date(at).toISOString(), by })` to `F.logDir/(file ?? \`${by}-${yyyy-mm of at}.jsonl\`)`.
+  - So each line's `at` is the one asked for, give or take a few tie-break milliseconds, and no two lines share an id.
 - `dayAt(d)` (P1-12): a time inside UTC day `d` back from today that is never in the future.
   - For `d ≥ 1`, it is that day's UTC midnight plus 30 minutes.
   - For `d = 0`, it is `day0 + (Date.now() - day0) / 2`, which lies inside today even just after midnight.
@@ -161,11 +161,11 @@ Helpers at the top of the file, written in T1 and reused after:
   - Answer `qa` with `F.owner(['answer', qa, 'yes'])`, then `t-a.held_by === qa2`. Withdraw `qa2`, then `null`.
 
   Findings (`metrics --json`):
-  - `line(F, 't-c', { type: 'phase', to: 'blocked' }, 5 * 60000, 't-c.jsonl')`. A finding `{ severity: 'medium', kind: 'blocked-without-question', subject: 't-c' }` appears. Its suggestion matches `/ask --blocks t-c/` and `/answer its blocked message/`.
-  - `line(F, 't-d', { type: 'phase', to: 'blocked' }, 2 * 3600000, 't-d.jsonl')`. `blocked` (high) is raised for `t-d`, and `blocked-without-question` is not.
+  - `handLine(F, 't-c', { type: 'phase', to: 'blocked' }, 5 * 60000, 't-c.jsonl')`. A finding `{ severity: 'medium', kind: 'blocked-without-question', subject: 't-c' }` appears. Its suggestion matches `/ask --blocks t-c/` and `/answer its blocked message/`.
+  - `handLine(F, 't-d', { type: 'phase', to: 'blocked' }, 2 * 3600000, 't-d.jsonl')`. `blocked` (high) is raised for `t-d`, and `blocked-without-question` is not.
   - An `ask --blocks t-c`: no `blocked-without-question` for `t-c`.
-  - t-e blocked 5 minutes ago, with `goal hold <g2> park --owner`: no `blocked-without-question` for t-e (P1-4). The existing `blocked` finding needs an hour, so it isn't raised either; it isn't this ticket's to change.
-  - The planner: `F.owner(['answer', qg, …])` or `withdraw qg`, so it holds nothing. Then `line(F, 'plan-hb-plan', { type: 'message', kind: 'blocked', to: 'supervisor', text: 'need a ruling' }, 60000)` raises `blocked-without-question` with subject `plan-hb-plan`.
+  - t-e blocked 5 minutes ago while g2 runs: `blocked-without-question` is raised for t-e (P2-3). Then `goal hold <g2> park --owner`: it is no longer raised for t-e (P1-4). The existing `blocked` finding needs an hour, so it isn't raised either; it isn't this ticket's to change.
+  - The planner: `F.sup(['withdraw', qg, '--reason', 'test'])` (P2-2: `answer` refuses a goal-approval question), so it holds nothing. Then `handLine(F, 'plan-hb-plan', { type: 'message', kind: 'blocked', to: 'supervisor', text: 'need a ruling' }, 60000)` raises `blocked-without-question` with subject `plan-hb-plan`.
   - `logBytes` is unchanged across the reads.
 - [ ] **Step 2: Run it.** Expected: FAIL, because `held_by` is undefined.
 - [ ] **Step 3: Implement.**
@@ -221,7 +221,7 @@ Helpers at the top of the file, written in T1 and reused after:
 - Produces: `upkeepDays(now?: number): Array<{ starts_at: string /* ISO UTC midnight */, items: Array<{ kind: 'chore'|'kit-sync'|'ci-fix'|'retro', ref: string, words: string, at: string }>, failed: boolean }>`.
 - Consumes: `logObjects('act')`, `logObjects('observation')`, `tickets()`, `isRecordKeeping`, `CHORES`.
 
-- [ ] **Step 1: Write the failing test.** Fixture `threadsFixture('upkeep-days')`. Write supervisor acts `{ type: 'act', class, what, refs, reversible: false }` and observations with `line(F, 'supervisor', …, Date.now() - dayAt(d))`, so each has its own id:
+- [ ] **Step 1: Write the failing test.** Fixture `threadsFixture('upkeep-days')`. Write supervisor acts `{ type: 'act', class, what, refs, reversible: false }` and observations with `handLine(F, 'supervisor', …, Date.now() - dayAt(d))`, so each has its own id:
   - day 0: `merge-chore` `chore-tidy` twice (two lines, two ids: the code's dedupe is what is tested); `merge-chore` `chore-docs`; `merge-chore` `chore-log`;
   - day 2: `merge-chore` `chore-devteam-sync-v0.9.0`;
   - day 3: `merge-chore` `chore-ci-fix-node24`;
@@ -438,7 +438,9 @@ Helpers at the top of the file, written in T1 and reused after:
   - **Working tree (a).** `max_active_tickets` reads `local: 4`.
   - **Working tree (b).** No throw. `agent_command.local` is absent or `null`, and `max_active_tickets` reads `local: null, local_withheld: true`.
   - **Working tree (c).** `release` reads `local: null, local_withheld: true`.
-  - **Defaults** (P1-5). Every `value` key with `set: false` (on the same fixture: all but `max_active_tickets`, `release`, `tmux_session`, `forge` and `worktree_files`, which `fleetFixture` or the test set) is not withheld, and its `value` deep-equals `SETTINGS_DEFAULTS[key]`.
+  - **Defaults** (P1-5, P2-4). The test parses main's settings block itself (`git show main:docs/devteam/project/settings.md`, the same regex), giving `mainKeys`.
+    - Every entry's `set` equals `mainKeys.has(key)`.
+    - Every `value` key not in `mainKeys` is not withheld, and its `value` deep-equals `SETTINGS_DEFAULTS[key]`.
   - **Wrong type.** In the `agent_command: 42` case, no throw and no `42` under it.
   - **Words.** Each entry has a non-empty name and description; no description is longer than 140 characters or has a newline.
   - **Self-test.** Remove `tick_minutes:` from `SETTINGS_WORDS` in the fixture's own kit copy (`F.old/docs/devteam/scripts/devteam.mjs`), and restore it afterwards. On that copy, `dashboard-data` still exits 0, so the owner's page never breaks on a new key. The entry reads `{ group: 'Other', name: 'Unnamed setting (tick_minutes)', shown: 'hidden', value: null }`, and the test's words check fails, naming the key (asserted: the missing set is `['tick_minutes']`). A missing name hides the value rather than guessing a show kind, so a new key can't leak.
@@ -453,7 +455,7 @@ Helpers at the top of the file, written in T1 and reused after:
 - Modify: `test/fixtures/g1/dashboard-data.txt`.
 
 - [ ] **Step 1: Re-record it.** Run only the G1 test (P1-15): `DEVTEAM_G1_RECORD=1 node --test --test-name-pattern '^G1' test/components.test.mjs`, through `gate test`. `components.test.mjs` isn't a touched file, so nothing else in it runs on the box.
-- [ ] **Step 2: Read the diff.** `git diff test/fixtures/g1/` adds only these fields:
+- [ ] **Step 2: Read the diff.** Recording rewrites all 13 goldens. `git diff --stat test/fixtures/g1/` must list only `dashboard-data.txt` (P2-5). Any other file changed means an output moved: stop and find why. Then `git diff test/fixtures/g1/dashboard-data.txt` adds only these fields:
   - `class_words` and `class_name` keys;
   - `held_by` on tickets and planners;
   - `threads`, `upkeep_days` (with no `starts_at` and no dates) and `settings_all`;
