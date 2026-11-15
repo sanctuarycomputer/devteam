@@ -1,6 +1,6 @@
 # kit-237-no-scratch-hub-registration: verification
 
-At commit `abc0ecc3cb88f6fa8165109facfc6687c082c7c0` (later commits change only this ticket's records). The gate runs below are from there; the first two ran at `cf7c1b8`, before final-1's two comment-and-env fixes, and the same 57 pass at `abc0ecc`. CI (the whole suite, all jobs) passed at `950be36`, run 43696952752. The run at the head is in the merge request. Local runs were on the box with Node 18.20.4. As the box rule says, only the touched test file ran, at `--test-concurrency=2`. CI runs the whole suite on Node 18, 20, 22 and 24.
+At commit `abc0ecc3cb88f6fa8165109facfc6687c082c7c0` (later commits change only this ticket's records). The gate run below is the one at `abc0ecc` (57 pass); earlier runs at `51d6147` and `cf7c1b8` passed the same 57. CI (the whole suite, all jobs) passed at `950be36`, run 43696952752. The run at the head is in the merge request. Local runs were on the box with Node 18.20.4. As the box rule says, only the touched test file ran, at `--test-concurrency=2`. CI runs the whole suite on Node 18, 20, 22 and 24.
 
 Box safety (ruling m-20261115-082335469-supervisor): every case runs with a HOME of its own. The cases with no `DEVTEAM_HUB_PORT` set `DEVTEAM_IMAGE_HUB=4320`, so nothing binds 4320. The only contact is `machine status`'s read-only GET of `/instances.json`, which the spec accepts. The real `~/.devteam/repos-4320/` held the same five files (`37843d29…`, `525596…`, `a26b98…`, `b3ed4f…`, `d6ea08…`) before and after every local run, the reviewers' included.
 
