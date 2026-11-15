@@ -434,6 +434,9 @@ test('typed text, Enter, AltGr, Backspace and Ctrl+A each send what the spec say
     // AltGr on Windows is Ctrl and Alt together: how @ is typed on many layouts
     got = await sent(c, async () => { await keyEvent(p, 'keyDown', '@', 'KeyQ', { text: '@', modifiers: 3, windowsVirtualKeyCode: 81 }); await keyEvent(p, 'keyUp', '@', 'KeyQ', { modifiers: 3, windowsVirtualKeyCode: 81 }); });
     assert.deepEqual(got, [{ t: 'key', type: 'press', key: '@', code: 'KeyQ', text: '@' }]);
+    // Ctrl+Alt on the letter itself is a chord, on any platform
+    got = await sent(c, async () => { await keyEvent(p, 'rawKeyDown', 'q', 'KeyQ', { modifiers: 3, windowsVirtualKeyCode: 81 }); await keyEvent(p, 'keyUp', 'q', 'KeyQ', { modifiers: 3, windowsVirtualKeyCode: 81 }); });
+    assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'q', code: 'KeyQ', mods: 3 }, { t: 'key', type: 'up', key: 'q', code: 'KeyQ' }]);
     got = await sent(c, async () => { await keyEvent(p, 'rawKeyDown', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 }); await keyEvent(p, 'keyUp', 'Backspace', 'Backspace', { windowsVirtualKeyCode: 8 }); });
     assert.deepEqual(got, [{ t: 'key', type: 'down', key: 'Backspace', code: 'Backspace' }, { t: 'key', type: 'up', key: 'Backspace', code: 'Backspace' }]);
     got = await sent(c, async () => { await p.hold('Control', true); await keyEvent(p, 'rawKeyDown', 'a', 'KeyA', { modifiers: 2, windowsVirtualKeyCode: 65 }); await keyEvent(p, 'keyUp', 'a', 'KeyA', { modifiers: 2, windowsVirtualKeyCode: 65 }); await p.hold('Control', false); });
@@ -1002,5 +1005,28 @@ test('Sign out of everything is off while there is no socket, and a confirm that
     srv.last().send({ t: 'bye', why: 'The supervisor has the browser again.' });
     await until(async () => !(await p.ev(`document.getElementById('bye').hidden`)), 'bye');
     await until(async () => (await disabled()) === true, 'off after bye');
+  } finally { await shut(p); await srv.close(); }
+});
+
+// Ruling on final review FB4: an address or Back with no socket isn't dropped silently.
+test('an address or Back with no socket says it wasn\'t sent', { skip, timeout: 60000 }, async () => {
+  const srv = await startServer();
+  const { p, c } = await ready(srv);
+  try {
+    srv.refuse(true);
+    c.close();
+    await until(async () => (await text(p, 'chip')) === 'Reconnecting…', 'Reconnecting…');
+    await go(p, 'https://shop.example/account');
+    assert.equal(await text(p, 'note'), 'Not connected: not sent.');
+    await p.ev(`document.getElementById('note').textContent = ''`);
+    await p.click('#back');
+    assert.equal(await text(p, 'note'), 'Not connected: not sent.', 'Back too');
+    srv.refuse(false);
+    await srv.waitConn(2, 8000);
+    await until(async () => (await text(p, 'chip')) === 'Live', 'Live');
+    const got = await sent(srv.last(), () => go(p, 'https://shop.example/account'), 300);
+    assert.deepEqual(got, [{ t: 'nav', url: 'https://shop.example/account' }], 'sent once connected');
+    assert.equal(await text(p, 'note'), '');
+    assert.deepEqual(srv.conns.flatMap((k) => k.got.filter((m) => m.t === 'nav' || m.t === 'back')), [{ t: 'nav', url: 'https://shop.example/account' }], 'nothing from while it was down');
   } finally { await shut(p); await srv.close(); }
 });

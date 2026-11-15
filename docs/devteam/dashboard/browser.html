@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wDlmAcsFMh1QAW5okBrU0jK8xA5eXB8DOi97lMN9D20='; style-src 'sha256-eMRLDEIQtqogj+nLtYtvjAkVL+Ezm1jRvm5T/aXLPug='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kxR3cgZFVFlVW55U16Q2rvURR5L1yaesECFy2+zypNk='; style-src 'sha256-cqYYaeELvHFgB3LEIGD5/i37pu/j+tY+GNvrwVFT1xw='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -39,7 +39,7 @@
   .foot span:first-child { max-width: var(--text); }
   .chip { font: 12px var(--mono); padding: 1px 8px; border-radius: 999px; background: var(--chip); }
   .chip.live { color: var(--green); }
-  dialog { max-width: var(--text); border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
+  dialog { width: min(var(--text), calc(100vw - 32px)); max-width: none; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--fg); padding: 16px; }
   dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
   dialog p { margin: 0 0 14px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; }
@@ -162,6 +162,7 @@
       if (!closed(m, ['t', 'qid'])) return;
       if (m.qid === null) $('foot').textContent = 'The supervisor has the browser. You can watch.';
       else if (typeof m.qid === 'string' && QID.test(m.qid)) $('foot').textContent = 'When you\'re done, press Done on the card.';
+      fit(); // a line that wraps takes height from the screen
     }
   }
 
@@ -272,7 +273,9 @@
   const held = new Map(); // code → { key, code?, meta }
   // by its key or, on a layout whose V types something else, by its place on the keyboard
   const pasteChord = (e) => ((e.key === 'v' || e.key === 'V' || e.code === 'KeyV') && (e.ctrlKey || e.metaKey) && !e.altKey) || (e.key === 'Insert' && e.shiftKey);
-  const altGr = (e) => e.getModifierState('AltGraph') || (e.ctrlKey && e.altKey);
+  // AltGr, or Ctrl and Alt together (how Windows reports it) when the key types something other
+  // than its own letter: Ctrl+Alt+Q typing @ is a character, Ctrl+Alt+Q typing q a chord
+  const altGr = (e) => e.getModifierState('AltGraph') || (e.ctrlKey && e.altKey && !(/^Key[A-Z]$/.test(e.code) && e.key.toLowerCase() === e.code.slice(3).toLowerCase()));
   const named = (e) => (e.code && e.code.length <= 32 ? { key: e.key, code: e.code } : { key: e.key });
   canvas.addEventListener('keydown', (e) => {
     if (e.isComposing || MODIFIERS.has(e.key) || pasteChord(e)) return;
@@ -334,16 +337,19 @@
     if (url.length > 2048) return { refuse: 'That address is too long.' };
     return { url };
   }
+  // with no socket an entry or Back would go nowhere: say so rather than drop it silently
+  const live = () => socket && socket.readyState === 1;
   $('go').addEventListener('submit', (e) => {
     e.preventDefault();
     if (!addr.value.trim()) return;
     const r = toNav(addr.value);
     if (r.refuse) return note(r.refuse);
+    if (!live()) return note('Not connected: not sent.');
     note('');
     send({ t: 'nav', url: r.url });
     addr.blur();
   });
-  $('back').addEventListener('click', () => send({ t: 'back' }));
+  $('back').addEventListener('click', () => { if (!live()) return note('Not connected: not sent.'); note(''); send({ t: 'back' }); });
   $('again').addEventListener('click', () => {
     ended = false;
     $('bye').hidden = true;
@@ -358,7 +364,7 @@
   $('forget').addEventListener('click', () => {
     confirm.close();
     // the socket dropped with the confirm open: say so, never sign out silently into nothing
-    if (!socket || socket.readyState !== 1) return note('Not connected: nothing was signed out.');
+    if (!live()) return note('Not connected: nothing was signed out.');
     send({ t: 'forget' });
   });
 

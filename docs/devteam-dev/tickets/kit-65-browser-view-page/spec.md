@@ -137,4 +137,9 @@ All in `test/browser-view-page.test.mjs`, which uses `test/lib/chrome.mjs` (real
 
 ## Rulings
 
-None yet.
+The rulings made after this spec was approved are in `plan.md`, Rulings, which wins where the two differ (final review FB5):
+
+- m-20261115-035923461-supervisor: `clicks` is counted by the page (within 500 ms and 4 px, up to 3), not read from the event's `detail`; console and errors are caught by a recorder in the page's world, not CDP events.
+- The worker's ruling on task review T3-4: only a leading scheme is parsed as is; the "value with `://`" rule is gone.
+- m-20261115-055236676-supervisor (final-1 F2): Sign out is off with no open socket; a confirm pressed after a drop says "Not connected: nothing was signed out."
+- m-20261115-055916125-supervisor (final-1b FB4): an address or Back with no open socket says "Not connected: not sent."
