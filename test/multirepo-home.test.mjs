@@ -278,3 +278,96 @@ test('records in home: check-ticket reads them from home\'s ticket/<id> at both 
     assert.match(check(['--records', r.reviewed]).out, /no final review record/);
   } finally { F.done(); }
 });
+
+test('records in home: merge checks the records at one pinned sha and lands them first; a half-done merge says so and a retry finishes it once', () => {
+  const F = recordsFixture('records-merge');
+  const { old, g, okIn, runIn, ticket } = F;
+  const id = 'console-01-a';
+  const T = `docs/devteam/project/tickets/${id}`;
+  try {
+    // no records in home: refused before anything lands
+    ticket('console-02-b');
+    const w0 = path.join(old, '.worktrees', 'console-02-b');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-02-b', w0, 'origin/trunk'], F.console);
+    write(path.join(w0, 'src/b.js'), 'b\n');
+    g(['add', '-A'], w0); g(['commit', '-qm', 'b'], w0); g(['push', '-q', 'origin', 'ticket/console-02-b'], w0);
+    assert.match(runIn(old, ['merge', 'console-02-b', '--dry-run'], SUP).out, /no records for console-02-b in home: commit them under .* and push it/);
+
+    const r = readyInHome(F, id);
+    const dry = () => runIn(old, ['merge', id, '--dry-run'], SUP);
+    assert.match(dry().out, new RegExp(`ok: ticket/${id} at \\w{12} would merge in console, records at ${r.head.slice(0, 12)} in home`));
+    // merge reads origin's records, never the local branch: a local commit that breaks them doesn't
+    // move what merge checks, while check-ticket (the worker's committed state) sees it
+    tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| local | x | pass |\n` }, () => {
+      assert.match(runIn(old, ['check-ticket', id, '--sha', r.code]).out, /records verdict .* does not hold/);
+      assert.equal(dry().status, 0, dry().out);
+    });
+    // and the reverse: origin's records broken, the local branch fine: merge refuses
+    tryCommit(F, r.rw, { [`${T}/verification.md`]: `${VERIF}| pushed | x | pass |\n` }, () => { g(['push', '-q', 'origin', `ticket/${id}`], r.rw); });
+    assert.equal(runIn(old, ['check-ticket', id, '--sha', r.code]).status, 0);
+    assert.match(dry().out, /records verdict .* does not hold/);
+    g(['push', '-q', '--force', 'origin', `ticket/${id}`], r.rw);
+
+    // the half-done merge: console's origin refuses the push, after the records landed
+    const hook = path.join(F.consoleOrigin, 'hooks', 'pre-receive');
+    write(hook, '#!/bin/sh\necho refused by the test >&2\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+    const half = runIn(old, ['merge', id], SUP);
+    assert.notEqual(half.status, 0);
+    assert.match(half.err, new RegExp(`the records of ${id} landed in home at ${r.head.slice(0, 12)}; the code did not land in console \\(push to trunk in console refused .*\\): run merge ${id} again`));
+    g(['fetch', '-q', 'origin'], old); g(['fetch', '-q', 'origin'], F.console);
+    for (const f of ['spec.md', 'plan.md', 'verification.md', 'reviews/final-1.md']) g(['cat-file', '-e', `origin/main:${T}/${f}`], old);
+    assert.equal(g(['show', 'origin/trunk:src/main.js'], F.console), 'console', "console's main doesn't have the code");
+    const merges = () => json(okIn(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
+    assert.equal(merges().length, 0, 'no merge act');
+    const row = () => json(okIn(old, ['status', '--json'])).tickets.find((x) => x.id === id);
+    assert.equal(row().records_landed, true);
+    assert.match(okIn(old, ['status']), new RegExp(`${id}.*its records landed in home but its code is not merged: run merge ${id} again`));
+    const findings = () => json(okIn(old, ['metrics', '--json'])).findings;
+    assert.ok(findings().some((x) => x.kind === 'records-without-code' && x.subject === id), 'the finding that names the fix');
+    assert.ok(findings().some((x) => x.kind === 'merged-without-merge' && String(x.subject).startsWith('home:')), 'records on home\'s main with no merge act, which is true');
+    // the retry: same checks, the records skipped (landed), the code lands, one act
+    fs.rmSync(hook);
+    const again = okIn(old, ['merge', id], SUP);
+    assert.match(again, new RegExp(`merged ticket/${id} at \\w{12} in console`));
+    assert.doesNotMatch(again, /landed the records/);
+    g(['fetch', '-q', 'origin'], old); g(['fetch', '-q', 'origin'], F.console);
+    assert.equal(g(['show', 'origin/trunk:src/main.js'], F.console), id, 'the code landed');
+    const recordMerges = g(['log', '--first-parent', '--merges', '--format=%P', 'origin/main'], old).split('\n').filter((l) => l.split(' ')[1] === r.head);
+    assert.equal(recordMerges.length, 1, 'the records merged into home once');
+    assert.equal(merges().length, 1);
+    assert.match(merges()[0].what, new RegExp(`^merged ticket/${id} at ${r.code}; records at ${r.head} in home`));
+    assert.equal(row().records_landed, undefined);
+    assert.ok(!findings().some((x) => ['records-without-code', 'merged-without-merge'].includes(x.kind)), 'both gone once the act names the records');
+    assert.ok(!g(['ls-tree', '-r', '--name-only', 'origin/trunk'], F.console).split('\n').some((f) => f.startsWith('docs/devteam/')), 'nothing of the project in console');
+    assert.match(okIn(old, ['merge', id], SUP), /already on trunk: nothing to merge, nothing logged/);
+  } finally { F.done(); }
+});
+
+test('records in home on a GitHub home: a merged records PR is recognized (branch there or gone), else an open one is needed', () => {
+  const F = recordsFixture('records-gh', { forge: 'git' });
+  const { old, g, runIn } = F;
+  const id = 'console-01-a';
+  try {
+    const r = readyInHome(F, id);
+    F.edit((j) => { delete j.forge; });
+    g(['commit', '-qam', 'home on github'], old); g(['push', '-q', 'origin', 'main'], old);
+    // a gh on PATH: pr list --state merged answers from a file; every other call fails (no open PR)
+    const bin = path.join(F.base, 'gh-bin');
+    const merged = path.join(F.base, 'merged.json');
+    write(path.join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "pr list"*"--state merged"*) cat '${merged}' ;;\n  *) exit 1 ;;\nesac\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    const dry = () => runIn(old, ['merge', id, '--dry-run'], SUP, { PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    const origin = path.join(F.base, 'origin.git');
+    g(['update-ref', 'refs/pull/7/head', r.head], origin);
+    write(merged, JSON.stringify([{ number: 7, headRefOid: r.head, mergedAt: '2026-11-15T00:00:00Z' }]));
+    assert.match(dry().out, new RegExp(`records at ${r.head.slice(0, 12)} in home \\(landed already: only the code lands\\)`));
+    // the head branch deleted on merge: the newest merged PR, fetched from refs/pull/<n>/head
+    g(['push', '-q', 'origin', `:ticket/${id}`], r.rw);
+    assert.match(dry().out, /\(landed already: only the code lands\)/);
+    // no merged PR and no open one: refused
+    g(['push', '-q', 'origin', `ticket/${id}`], r.rw);
+    write(merged, '[]');
+    assert.match(dry().out, new RegExp(`no open home PR from ticket/${id} \\(its records\\)`));
+  } finally { F.done(); }
+});
