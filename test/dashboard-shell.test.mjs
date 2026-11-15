@@ -246,6 +246,10 @@ test('dbTable: numeric sort, a second press reverses, None when empty; onOpen ge
   // numbers as numbers: decimals and negatives; a null sort key as empty
   const nums = [{ cells: ['a'], sort: ['1.5'] }, { cells: ['b'], sort: ['1.25'] }, { cells: ['c'], sort: ['-2'] }, { cells: ['d'], sort: [null] }, { cells: ['e'], sort: ['10'] }];
   assert.deepEqual(S.sortRows(nums, { col: 0, dir: 1 }).map(([i]) => i), [3, 2, 1, 0, 4], 'empty, -2, 1.25, 1.5, 10');
+  // a mixed column is text throughout: the same order from any input order
+  const mixed = ['1.9', '1.9a', '1.10'].map((k) => ({ cells: [k], sort: [k] }));
+  const orders = [[0, 1, 2], [2, 1, 0], [1, 2, 0]].map((o) => S.sortRows(o.map((i) => mixed[i]), { col: 0, dir: 1 }).map(([, r]) => r.sort[0]).join(' '));
+  assert.equal(new Set(orders).size, 1, `one order: ${orders.join(' | ')}`);
 });
 
 test('every builder escapes the text it is given, in attributes too', () => {
