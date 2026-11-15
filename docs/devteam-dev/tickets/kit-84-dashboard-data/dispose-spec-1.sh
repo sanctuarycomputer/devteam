@@ -1,8 +1,25 @@
 #!/bin/sh
+# kit-84: dispositions for spec-1.
 set -e
 D=/data/home/code/devteam-dev/docs/devteam/scripts/devteam.mjs
-R=docs/devteam-dev/tickets/kit-84-dashboard-data/reviews/spec-1.md
-d() { node "$D" dispose kit-84-dashboard-data "$R" "$1" "$2"; }
+T=kit-84-dashboard-data
+R=spec-1.md
+cd "$(git rev-parse --show-toplevel)"
+# dispose reads docs/devteam/project/tickets/<id>/reviews: a temporary link there, removed after
+L=docs/devteam/project/tickets/$T
+made_project=0; made_tickets=0
+[ -d docs/devteam/project ] || made_project=1
+[ -d docs/devteam/project/tickets ] || made_tickets=1
+cleanup() {
+  [ -L "$L" ] && rm "$L"
+  [ "$made_tickets" = 1 ] && rmdir docs/devteam/project/tickets 2>/dev/null
+  [ "$made_project" = 1 ] && rmdir docs/devteam/project 2>/dev/null
+  return 0
+}
+trap cleanup EXIT
+mkdir -p docs/devteam/project/tickets
+ln -s "$PWD/docs/devteam-dev/tickets/$T" "$L"
+d() { node "$D" dispose "$T" "$R" "$1" "$2"; }
 d F1-1 "fixed: differs is per file (newest first-parent commit a sync commit or not); acceptance 1 has a two-sync case"
 d F1-2 "fixed: a planner is blocked by an unanswered blocked message (cmdPhase allows planners only parked); acceptance 3 covers it"
 d F1-3 "fixed: blocked (high, >=1h) unchanged; blocked-without-question covers the first hour, one finding per item at a time"
