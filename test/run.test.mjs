@@ -60,3 +60,103 @@ test('cli-runner keeps its compile cache in DEVTEAM_TEST_SHARED_TMP', { skip: !m
     fs.rmSync(T2, { recursive: true, force: true });
   }
 });
+
+// ---- the runner's pure parts (T2) ----
+const R = await import('./run.mjs');
+const root = R.ROOT;
+const runMjs = path.join(testDir, 'run.mjs');
+const src = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const allFiles = () => fs.readdirSync(testDir).filter((f) => f.endsWith('.test.mjs')).sort().map((f) => `test/${f}`);
+const runSync = (args, opts = {}) => spawnSync(process.execPath, [runMjs, ...args], { cwd: root, encoding: 'utf8', timeout: 60000, env: nodeEnv(opts.env), ...opts });
+
+test('groups by rule', () => {
+  assert.equal(R.groupOf('test/kit.test.mjs', src('test/kit.test.mjs')), 'chain');
+  assert.equal(R.groupOf('test/bounds.test.mjs', src('test/bounds.test.mjs')), 'alone');
+  assert.equal(R.groupOf('test/dashboard.test.mjs', src('test/dashboard.test.mjs')), 'chrome');
+  assert.equal(R.groupOf('test/search.test.mjs', src('test/search.test.mjs')), 'rest');
+  assert.equal(R.groupOf('test/x.test.mjs', "const c = await import('./lib/chrome.mjs');\n"), 'chrome');
+  assert.equal(R.groupOf('test/x.test.mjs', "// see ./lib/chrome.mjs for how\nimport fs from 'node:fs';\n"), 'rest');
+  const plan = R.planRun({ files: [], groups: ['chain', 'alone'], shard: null }, root);
+  assert.deepEqual(plan.map((p) => p.file), ['test/bounds.test.mjs', 'test/kit.test.mjs']);
+});
+
+test('shards cover each file once and balance', () => {
+  const w = new Map(Object.entries({ a: 10, b: 9, c: 5, d: 4, e: 1 }));
+  assert.deepEqual(R.shard(['a', 'b', 'c', 'd', 'e'], w, 2), [['a', 'd', 'e'], ['b', 'c']]);
+  const files = allFiles();
+  const timings = JSON.parse(fs.existsSync(path.join(testDir, 'timings.json')) ? fs.readFileSync(path.join(testDir, 'timings.json'), 'utf8') : '{"files":{}}').files;
+  const weights = R.weightsFor(files, timings);
+  for (let n = 1; n <= 4; n++) {
+    const shards = R.shard(files, weights, n);
+    assert.equal(shards.length, n);
+    const all = shards.flat();
+    assert.equal(new Set(all).size, all.length, `no file twice at n=${n}`);
+    assert.deepEqual([...all].sort(), files);
+  }
+  const m = R.weightsFor(['x', 'y', 'z', 'new'], { x: 1, y: 5, z: 9 });
+  assert.equal(m.get('new'), 5);
+  assert.equal(R.weightsFor(['new'], {}).get('new'), 1);
+});
+
+test('parseArgs', () => {
+  for (const bad of [['--shard', '0/2'], ['--shard', '3/2'], ['--shard', '1/5'], ['--group', 'nope'], ['--concurrency', '0'], ['--bogus'], ['test/no-such.test.mjs']]) {
+    assert.throws(() => R.parseArgs(bad, {}, root), R.UsageError, bad.join(' '));
+  }
+  assert.deepEqual(R.parseArgs(['--group', 'chain,alone'], {}, root).groups, ['chain', 'alone']);
+  assert.equal(R.parseArgs([], {}, root).concurrency, 2);
+  assert.equal(R.parseArgs([], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 3);
+  assert.equal(R.parseArgs(['--concurrency', '4'], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 4);
+  assert.deepEqual(R.parseArgs(['--shard', '2/3'], {}, root).shard, { i: 2, n: 3 });
+  const link = path.join(fresh('link'), 'kit');
+  fs.symlinkSync(root, link);
+  try {
+    const abs = path.join(root, 'test/search.test.mjs');
+    const o = R.parseArgs(['./test/search.test.mjs', abs, path.join(link, 'test/search.test.mjs')], {}, root);
+    assert.deepEqual(o.files, ['test/search.test.mjs']);
+  } finally { fs.rmSync(path.dirname(link), { recursive: true, force: true }); }
+});
+
+test('timeouts and rows', () => {
+  assert.equal(R.timeoutOf('test/kit.test.mjs', 'chain', null), 600);
+  assert.equal(R.timeoutOf('test/dashboard.test.mjs', 'chrome', null), 600);
+  assert.equal(R.timeoutOf('test/search.test.mjs', 'rest', null), 300);
+  assert.equal(R.timeoutOf('test/kit.test.mjs', 'chain', 7), 7);
+  assert.equal(R.nearTimeout(251, 300), true);
+  assert.equal(R.nearTimeout(249, 300), false);
+  assert.match(R.rowFor({ file: 'test/a.test.mjs', run: 1, seconds: 251, result: 'ok', timeout: 300, repeat: 1 }), /^test\/a\.test\.mjs\s+251\.0\s+ok, near timeout$/);
+  assert.doesNotMatch(R.rowFor({ file: 'test/a.test.mjs', run: 1, seconds: 249, result: 'ok', timeout: 300, repeat: 1 }), /near timeout|run/);
+  assert.match(R.rowFor({ file: 'test/a.test.mjs', run: 2, seconds: 1, result: 'failed (exit 1)', timeout: 300, repeat: 3 }), /failed \(exit 1\) \(run 2\)$/);
+});
+
+test('lastFinished', () => {
+  const tap = [
+    'TAP version 13',
+    '# Subtest: /abs/test/x.test.mjs',
+    '    # Subtest: outer',
+    '        # Subtest: inner',
+    '        ok 1 - inner',
+    '    ok 1 - outer',
+    '    ok 2 - skipped one # SKIP not here',
+    '    # Subtest: hangs',
+    'ok 1 - /abs/test/x.test.mjs',
+  ].join('\n');
+  assert.equal(R.lastFinished(tap, '/abs/test/x.test.mjs'), 'skipped one');
+  assert.equal(R.lastFinished('TAP version 13\nnot ok 3 - broke\n# Subtest: next\n', 'test/x.test.mjs'), 'broke');
+  assert.equal(R.lastFinished('TAP version 13\n# Subtest: first\n', 'test/x.test.mjs'), null);
+});
+
+test('childArgs', () => {
+  assert.deepEqual(R.childArgs('test/x.test.mjs'), ['--test', '--test-reporter=tap', 'test/x.test.mjs']);
+});
+
+test('--list prints the plan and runs nothing', () => {
+  const r = runSync(['--list', 'test/kit.test.mjs', 'test/bounds.test.mjs', 'test/dashboard.test.mjs', 'test/search.test.mjs']);
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.trim().split('\n').map((l) => l.split(/\s+/));
+  assert.deepEqual(lines, [['test/bounds.test.mjs', 'alone', '300', 's'], ['test/kit.test.mjs', 'chain', '600', 's'], ['test/dashboard.test.mjs', 'chrome', '600', 's'], ['test/search.test.mjs', 'rest', '300', 's']]);
+  const listed = [1, 2].flatMap((i) => { const s = runSync(['--list', '--shard', `${i}/2`]); assert.equal(s.status, 0, s.stderr); return s.stdout.trim().split('\n').filter(Boolean).map((l) => l.split(/\s+/)[0]); });
+  assert.deepEqual([...listed].sort(), allFiles());
+  const bad = runSync(['--list', '--shard', '3/2']);
+  assert.equal(bad.status, 2);
+  assert.match(bad.stderr, /shard/);
+});
