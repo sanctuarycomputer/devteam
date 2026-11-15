@@ -180,3 +180,4 @@ merge was stopped there.
 - m-20261115-183216730-supervisor: risk high; full spec and plan review, two finals; lessons
   k-20261115-182656232, k-20261115-080753394, k-20261115-164245020 in every brief; only touched
   test files at --test-concurrency=2.
+- m-20261115-214138678-supervisor (on design-change m-20261115-214129798): accepted. A records landing in home logs its own merge-word act (refs [], "merged home's ticket/<id> at <sha>: the records of <id>, ahead of its code in <link>") instead of the final act inferring earlier landings from git. Change from spec acceptance 3's parenthetical: in the half-done window merged-without-merge doesn't fire on the records merge (merge made it and says so); records-without-code and status records_landed remain the signal. Both finals confirm at the new head.
