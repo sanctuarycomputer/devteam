@@ -133,7 +133,7 @@ jobs:
             kill "$HUBPID"
             end=$(( $(date +%s%N) + 5000000000 ))
             while [ "$(date +%s%N)" -lt "$end" ]; do
-              if list_in && p=$(holder_in) && [ "$p" != "$HUBPID" ]; then echo "the hub is back as pid $p"; exit 0; fi
+              if list_in && p=$(holder_in) && [ "$p" != "$HUBPID" ] && [ "$(date +%s%N)" -lt "$end" ]; then echo "the hub is back as pid $p"; exit 0; fi
               sleep 0.2
             done
             echo "the hub was not back within 5s of its kill"; exit 1'
