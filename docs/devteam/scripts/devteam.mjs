@@ -11519,14 +11519,102 @@ function efficiencyTrials(perPoint) {
       };
     });
 }
+// Model families from the top, for "a smaller model": the same version one family down, or, when
+// that version isn't priced, that family's newest priced version. Priced means named exactly in
+// MODEL_PRICES or settings.model_prices (priceFor's prefix fallback prices versions nobody listed).
+/* model families start */
+const MODEL_FAMILIES = [['fable', 'mythos'], ['opus'], ['sonnet'], ['haiku']];
+const parseModelKey = (k) => { const x = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(k ?? ''); return x ? { family: x[1], version: x[2] } : null; };
+const versionCmp = (a, b) => { const p = a.split('-').map(Number), q = b.split('-').map(Number); for (let i = 0; i < Math.max(p.length, q.length); i++) { const d = (p[i] ?? 0) - (q[i] ?? 0); if (d) return d; } return 0; };
+function smallerModel(key, priced) {
+  const m = parseModelKey(key);
+  const tier = m ? MODEL_FAMILIES.findIndex((f) => f.includes(m.family)) : -1;
+  if (tier < 0 || tier === MODEL_FAMILIES.length - 1) return null;
+  const down = MODEL_FAMILIES[tier + 1][0];
+  if (priced.includes(`claude-${down}-${m.version}`)) return `claude-${down}-${m.version}`;
+  const newest = priced.map(parseModelKey).filter((x) => x?.family === down).sort((a, b) => versionCmp(b.version, a.version))[0];
+  return newest ? `claude-${down}-${newest.version}` : null;
+}
+// a model as the owner reads it: claude-sonnet-5-5 is Sonnet 5.5
+const modelWords = (key) => { const m = parseModelKey(key); return m ? `${m.family[0].toUpperCase()}${m.family.slice(1)} ${m.version.replace(/-/g, '.')}` : 'that model'; };
+/* model families end */
+// A suggestion's id: stable while its condition holds, never from a rank or a date, and safe as a
+// thread subject (suggestion:<id>).
+const effId = (kind, subject) => `eff-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+const dollars = (x) => `$${Number.isInteger(x) ? x : x.toFixed(2)}`;
+// Decide: up to five suggestions whose condition holds this week, by estimated dollars (the design's
+// five kinds). ids are this week's tickets, ids12 the 12 weeks', [start, end) this week.
+function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS }) {
+  const ts = tickets();
+  const out = [];
+  const add = (kind, subject, usd, per, what, evidence) => out.push({ id: effId(kind, subject), kind, what, evidence, effect: `about ${dollars(+usd.toFixed(2))} ${per === 'once' ? 'once' : 'a week'}`, usd: +usd.toFixed(2), per });
+  const recs = (id) => walk.get(id) ?? [];
+  // a review pass, priced from final-review reviewer spend: the median over the 12 weeks' tickets
+  // with a final record of their reviewer spend over their final records
+  const perTicket = ids12.map((id) => {
+    const finals = recs(id).filter((r) => r.verdict && /^final-\d+[a-z]?\.md$/.test(r.file)).length;
+    const usd = items.filter((x) => x.who === id && x.role === 'reviewer' && (x.phase === 'final-review' || x.phase === 'review')).reduce((a, x) => a + x.usd, 0);
+    return finals ? usd / finals : null;
+  }).filter((x) => x !== null);
+  const perPass = median(perTicket);
+  if (perPass !== null) {
+    const small = ids.filter((id) => ts.get(id)?.size === 'S' && ts.get(id)?.risk === 'normal');
+    const passes = small.reduce((a, id) => a + recs(id).filter((r) => r.verdict && ['spec', 'plan'].includes(reviewPassOf(r.file)?.stage)).length, 0);
+    if (passes >= 3) add('review-depth', 's-normal', passes * perPass, 'week', 'Fit review depth to small, normal-risk tickets: fewer spec and plan review rounds, keeping the final review', `${passes} spec and plan reviews this week on ${small.length} small, normal-risk ticket${small.length === 1 ? '' : 's'}, at about ${dollars(+perPass.toFixed(2))} a review`);
+    for (const stage of ['spec', 'plan', 'task', 'final']) {
+      const all = ids.flatMap((id) => recs(id)).filter((r) => r.verdict && reviewPassOf(r.file)?.stage === stage);
+      const firsts = all.filter((r) => reviewPassOf(r.file).first);
+      const rejected = firsts.filter((r) => r.verdict === 'CHANGES').length;
+      if (firsts.length >= 4 && rejected / firsts.length > 0.5) add('tighter-specs', stage, (all.length - firsts.length) * perPass, 'week', `Tighten ${stage} work before it is reviewed: most first ${stage} reviews asked for changes`, `${rejected} of ${firsts.length} first ${stage} reviews asked for changes this week, and ${all.length - firsts.length} more rounds followed`);
+    }
+  }
+  // a smaller model: one model over 90% of this week's spend above $50
+  const week = items.filter((x) => x.at >= start && x.at < end);
+  const total = week.reduce((a, x) => a + x.usd, 0);
+  const byModel = {};
+  for (const x of week) for (const [mdl, v] of Object.entries(x.by_model)) byModel[modelKey(mdl)] = (byModel[modelKey(mdl)] ?? 0) + v.usd;
+  const [dom, domUsd] = Object.entries(byModel).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (total > 50 && domUsd > 0.9 * total) {
+    const priced = [...Object.keys(MODEL_PRICES), ...Object.keys(loadSettings().model_prices ?? {})].map(modelKey);
+    const target = smallerModel(dom, priced);
+    const from = priceFor(dom), to = target && priceFor(target);
+    if (from && to && to.output < from.output) {
+      const NOT = ['final-review', 'review', 'spec', 'plan', 'planning'];
+      const work = week.filter((x) => !NOT.includes(x.phase)).reduce((a, x) => a + Object.entries(x.by_model).filter(([mdl]) => modelKey(mdl) === dom).reduce((b, [, v]) => b + v.usd, 0), 0);
+      add('smaller-model', dom, work * (1 - to.output / from.output), 'week', `Try ${modelWords(target)} for building, outside reviews, specs and planning`, `${modelWords(dom)} was ${Math.round((100 * domUsd) / total)}% of this week's ${dollars(+total.toFixed(2))}, ${dollars(+work.toFixed(2))} of it outside reviews, specs and planning`);
+    }
+  }
+  // keep the prompt cache: low-cache-hit's window, priced at its highest-spend priced model
+  if (m.findings.some((f) => f.kind === 'low-cache-hit')) {
+    const recent = items.filter((x) => x.at >= Date.now() - 7 * DAY);
+    const inSide = recent.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    const reads = recent.reduce((a, x) => a + x.cache_read, 0);
+    const spendBy = {};
+    for (const x of recent) for (const [mdl, v] of Object.entries(x.by_model)) spendBy[modelKey(mdl)] = (spendBy[modelKey(mdl)] ?? 0) + v.usd;
+    const model = Object.entries(spendBy).sort((a, b) => b[1] - a[1]).map(([k]) => k).find((k) => priceFor(k));
+    if (model) { const p = priceFor(model); add('cache', 'prompt-cache', (Math.max(0, 0.6 * inSide - reads) * (p.input - p.read)) / 1e6, 'week', 'Keep the prompt cache: resume sessions instead of relaunching them, and keep prompts stable at the start', `${inSide ? Math.round((100 * reads) / inSide) : 0}% of input tokens were cache reads in the last 7 days, short of 60%`); }
+  }
+  // a costly ticket: its spend above the median per point (as the finding counts it), once
+  const pp = (id) => (m.cost.by_ticket[id] ?? 0) / (POINTS[ts.get(id)?.size] ?? 1);
+  const merged = [...ts.keys()].filter((id) => mergedAt(id) && m.cost.by_ticket[id] !== undefined).map(pp).sort((a, b) => a - b);
+  const med = merged[Math.floor(merged.length / 2)];
+  for (const f of m.findings.filter((x) => x.kind === 'costly-ticket')) {
+    const points = POINTS[ts.get(f.subject)?.size] ?? 1;
+    const spent = m.cost.by_ticket[f.subject] ?? 0;
+    add('costly-ticket', f.subject, spent - med * points, 'once', `Find where ${f.subject}'s spend went, and try a lever on the next tickets like it`, `${dollars(+spent.toFixed(2))} on ${points} point${points === 1 ? '' : 's'}, against a median of ${dollars(+med.toFixed(2))} a point`);
+  }
+  return out.sort((a, b) => b.usd - a.usd || a.id.localeCompare(b.id)).slice(0, 5);
+}
 function efficiencyData(m) {
-  const { cycles, ticketUsd, perPoint, items } = m[METRICS_INTERNALS];
+  const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];
+  const weekIds = [];
   const walk = ticketReviewWalk();
   const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
   const r2 = (x) => +x.toFixed(2);
   const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
     // the week's tickets: merged in it with spend recorded, the set perPoint counts
     const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
+    weekIds.push(done.map((c) => c.id));
     const pp = perPoint(start, end);
     const points = pp?.points ?? 0;
     const fp = done.map((c) => firstPassOf(walk.get(c.id) ?? [])).reduce((a, f) => ({ n: a.n + f.first_passes, bad: a.bad + f.rejected }), { n: 0, bad: 0 });
@@ -11548,7 +11636,8 @@ function efficiencyData(m) {
   const { best } = scoreWeeks(weeks);
   return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
     observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
-    waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint), suggestions: [] };
+    waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint),
+    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: Date.parse(weeks[11].starts_at), end: Date.parse(weeks[11].starts_at) + WEEK, POINTS }) };
 }
 
 function collectMetrics(since) {

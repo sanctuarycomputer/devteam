@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import vm from 'node:vm';
 import { fleetFixture, dashboardOnFreePort, json, line, write } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -305,5 +306,133 @@ test('trials: spend trials and their state', () => {
     assert.deepEqual(tr.map((x) => [x.id, x.state]), [[t3, 'dropped'], [t2, 'kept'], [t1, 'running']], 'newest first; the newest outcome wins');
     const one = tr.find((x) => x.id === t1);
     assert.deepEqual(one, { id: t1, what: 'Trial: resume sessions instead of relaunching them', since: new Date(since).toISOString(), usd_per_point_start: 1, usd_per_point_now: 6, escaped_defects_since: 1, state: 'running' });
+  } finally { E.done(); }
+});
+
+// ---- suggestions (Decide) ----
+const ID_PART = /^[a-z0-9][a-z0-9-]{0,110}$/; // SUBJECT_REF's id part: suggestion:<id> once kit-99 adds the type
+const CODE_WORDS = /\b(review-depth|smaller-model|costly-ticket|tighter-specs|low-cache-hit|cost-hotspot|final-review)\b|claude-/;
+const plainWords = (sugg) => { for (const s of sugg) for (const k of ['what', 'evidence', 'effect']) { assert.equal(typeof s[k], 'string', `${s.id} ${k}`); assert.doesNotMatch(s[k], CODE_WORDS, `${s.id} ${k}: ${s[k]}`); } };
+const byId = (sugg) => Object.fromEntries(sugg.map((s) => [s.id, s]));
+// model_prices is the owner's: it applies as origin/main has it, so the change lands there
+const setPrices = (E, prices) => {
+  const f = path.join(E.old, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace(/("model_prices": \{[^]*?\},\s*)?"gates": \{\}/, `"model_prices": ${JSON.stringify(prices)}, "gates": {}`));
+  E.g(['commit', '-qam', 'settings: model_prices'], E.old);
+  E.g(['push', '-q', 'origin', 'main'], E.old);
+};
+// a moment this week, after Monday 00:00 and before now
+const thisWeekAt = (E, f) => E.thisMonday + Math.floor(E.span * f);
+
+// The family table, loaded from the script by itself (as coverageFns loads its block).
+function modelFns() {
+  const src = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'docs/devteam/scripts/devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* model families start */'), j = src.indexOf('/* model families end */');
+  assert.ok(i >= 0 && j > i, 'the model families block in devteam.mjs');
+  return vm.runInContext(`${src.slice(i, j)}\n;({ smallerModel, modelWords })`, vm.createContext({}));
+}
+
+test('smaller model: same version one family down', () => {
+  const { smallerModel, modelWords } = modelFns();
+  const priced = ['claude-fable-5-1', 'claude-mythos-5-1', 'claude-fable-5', 'claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-5-5', 'claude-haiku-4-5'];
+  assert.equal(smallerModel('claude-opus-5-5', priced), 'claude-sonnet-5-5');
+  assert.equal(smallerModel('claude-fable-5-1', priced), 'claude-opus-5-5', 'opus-5-1 is not priced: the newest priced opus');
+  assert.equal(smallerModel('claude-haiku-5-5', priced), null, 'nothing below haiku');
+  assert.equal(smallerModel('claude-sonnet-4-6', priced), 'claude-haiku-5-5', 'haiku-4-6 is not priced: the newest priced haiku');
+  assert.equal(smallerModel('claude-gpt-9', priced), null, 'an unknown family');
+  assert.equal(smallerModel('claude-opus-9-9', [...priced, 'claude-sonnet-9-9']), 'claude-sonnet-9-9');
+  assert.equal(modelWords('claude-sonnet-5-5'), 'Sonnet 5.5');
+});
+
+test('smaller-model condition and effect', (t) => {
+  const E = effFixture('eff-smaller');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    const OPUS = 'us.anthropic.Claude-Opus-5-5-20261001';
+    E.addTicket('eff-30-a'); E.phase('eff-30-a', 'build', thisWeekAt(E, 0.1));
+    const s = (usd, phase, model = OPUS) => E.spend('eff-30-a', { usd, phase, model, atMs: thisWeekAt(E, 0.2) });
+    s(20, 'build'); s(17, 'final-review'); s(5, 'spec'); s(3, 'build', 'claude-sonnet-5-5');
+    assert.deepEqual(E.data().efficiency.suggestions, [], '$45 this week: not above $50');
+    s(15, 'spec');
+    const a = E.data().efficiency.suggestions;
+    assert.equal(a.length, 1);
+    assert.deepEqual([a[0].id, a[0].kind, a[0].usd, a[0].per], ['eff-smaller-model-claude-opus-5-5', 'smaller-model', 10, 'week'], 'opus is 57 of 60: $20 outside reviews, specs and planning, times 1 - 10/20');
+    assert.match(a[0].what, /Sonnet 5\.5/);
+    plainWords(a);
+    assert.deepEqual(E.data().efficiency.suggestions.map((x) => x.id), [a[0].id], 'the same id on the next read');
+    setPrices(E, { 'claude-sonnet-5-5': { input: 2, output: 25 } });
+    assert.deepEqual(E.data().efficiency.suggestions, [], 'sonnet priced above opus in settings: no saving');
+    setPrices(E, {});
+    s(7, 'build', 'claude-sonnet-5-5');
+    assert.deepEqual(E.data().efficiency.suggestions, [], 'opus 57 of 67 (85%): not above 90%');
+  } finally { E.done(); }
+});
+
+test('suggestion ids are valid thread subjects, cut at 110 characters', (t) => {
+  const E = effFixture('eff-ids');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    const long = `claude-opus-${Array(60).fill('5').join('-')}`;
+    setPrices(E, { [long]: { input: 4, output: 20 } });
+    E.addTicket('eff-31-a'); E.phase('eff-31-a', 'build', thisWeekAt(E, 0.1));
+    E.spend('eff-31-a', { usd: 60, model: long, atMs: thisWeekAt(E, 0.2) });
+    const [s] = E.data().efficiency.suggestions;
+    assert.equal(s.id, `eff-smaller-model-${long}`.slice(0, 110));
+    assert.match(s.id, ID_PART);
+  } finally { E.done(); }
+});
+
+test('review depth and tighter specs priced per pass', (t) => {
+  const E = effFixture('eff-depth');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    // per pass: X ($4 in final-review and $2 in review over 2 final records) 3, Y 4, Z 5: median 4
+    const finals = [];
+    for (const [id, k, usd, n] of [['eff-32-x', 6, [4, 2], 2], ['eff-32-y', 7, [4], 1], ['eff-32-z', 8, [10], 2]]) {
+      E.shipped(id, k, 0, { spends: [{ usd: 1 }, ...usd.map((u, j) => ({ role: 'reviewer', phase: j ? 'review' : 'final-review', usd: u }))] });
+      for (let p = 1; p <= n; p++) { E.reviewFile(id, `final-${p}.md`, 'APPROVE'); finals.push(path.join(E.old, 'docs/devteam/project/tickets', id, 'reviews', `final-${p}.md`)); }
+    }
+    // this week: one S/normal ticket with 3 spec and plan records; four M tickets with 3 of 4 first
+    // plan reviews asking for changes, and 2 later plan passes
+    E.shipped('eff-32-s', 11, 0, { spends: [{ usd: 1 }] });
+    for (const f of ['spec-1.md', 'spec-2.md', 'plan-1.md']) E.reviewFile('eff-32-s', f, 'APPROVE');
+    ['b', 'c', 'd', 'e'].forEach((x, j) => { const id = `eff-32-${x}`; E.shipped(id, 11, j + 1, { size: 'M', spends: [{ usd: 1 }] }); E.reviewFile(id, 'plan-1.md', j < 3 ? 'CHANGES' : 'APPROVE'); if (j < 2) E.reviewFile(id, 'plan-2.md', 'APPROVE'); });
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    const s = byId(eff.suggestions);
+    assert.deepEqual(Object.keys(s).sort(), ['eff-review-depth-s-normal', 'eff-tighter-specs-plan']);
+    assert.deepEqual([s['eff-review-depth-s-normal'].usd, s['eff-review-depth-s-normal'].per], [12, 'week'], '3 passes at $4');
+    assert.deepEqual([s['eff-tighter-specs-plan'].usd, s['eff-tighter-specs-plan'].per], [8, 'week'], '2 later plan passes at $4');
+    assert.deepEqual(eff.suggestions.map((x) => x.id), ['eff-review-depth-s-normal', 'eff-tighter-specs-plan'], 'by dollars');
+    plainWords(eff.suggestions);
+    for (const f of finals) fs.rmSync(f);
+    assert.deepEqual(E.data().efficiency.suggestions, [], 'no final records: no price per pass, so neither');
+  } finally { E.done(); }
+});
+
+test('cache and costly tickets, the top five by dollars, and dropping out', (t) => {
+  const E = effFixture('eff-cache');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    for (const i of [0, 1, 2, 3, 4]) E.shipped(`eff-33-m${i}`, 9, i, { spends: [{ usd: 5 }] });
+    E.addTicket('eff-33-k', 'M'); E.phase('eff-33-k', 'build', thisWeekAt(E, 0.1));
+    E.spend('eff-33-k', { usd: 40, input: 6e6, cache_read: 4e6, atMs: thisWeekAt(E, 0.2) });
+    E.land();
+    let eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    let s = byId(eff.suggestions);
+    assert.deepEqual(Object.keys(s).sort(), ['eff-cache-prompt-cache', 'eff-costly-ticket-eff-33-k']);
+    assert.deepEqual([s['eff-costly-ticket-eff-33-k'].usd, s['eff-costly-ticket-eff-33-k'].per], [30, 'once'], '$40 less the median $5 a point times 2 points');
+    assert.deepEqual([s['eff-cache-prompt-cache'].usd, s['eff-cache-prompt-cache'].per], [7.6, 'week'], '2M tokens short of 60% cache reads, at $4 - $0.20 a million');
+    plainWords(eff.suggestions);
+    // three more costly tickets: six conditions, five shown, by dollars
+    for (const [x, usd] of [['k2', 30], ['k3', 24], ['k4', 22]]) { const id = `eff-33-${x}`; E.addTicket(id, 'M'); E.phase(id, 'build', thisWeekAt(E, 0.1)); E.spend(id, { usd, input: 1e6, atMs: thisWeekAt(E, 0.3) }); }
+    eff = E.data().efficiency;
+    assert.deepEqual(eff.suggestions.map((x) => [x.id, x.usd]), [['eff-smaller-model-claude-opus-5-5', 58], ['eff-costly-ticket-eff-33-k', 30], ['eff-costly-ticket-eff-33-k2', 20], ['eff-cache-prompt-cache', 14.44], ['eff-costly-ticket-eff-33-k3', 14]]);
+    for (const x of eff.suggestions) assert.match(x.id, ID_PART);
+    // its finding set aside, a condition no longer holds: that suggestion drops out, the rest keep their ids
+    E.hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'costly-ticket eff-33-k2', kind: 'finding-ack', detail: 'seen', severity: 1, valence: 0 }, Date.now() - 500);
+    assert.deepEqual(E.data().efficiency.suggestions.map((x) => x.id), ['eff-smaller-model-claude-opus-5-5', 'eff-costly-ticket-eff-33-k', 'eff-cache-prompt-cache', 'eff-costly-ticket-eff-33-k3', 'eff-costly-ticket-eff-33-k4']);
   } finally { E.done(); }
 });
