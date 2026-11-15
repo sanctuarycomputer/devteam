@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fleetFixture, json, line, PORTS, bareProject, dashboardOnFreePort, until } from './lib/kit.mjs';
+import { fleetFixture, json, line, PORTS, bareProject, dashboardOnFreePort, until, kit } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 
@@ -256,10 +256,11 @@ test('the dashboard posts a goal order as the owner; the hub does not take one',
 });
 
 test("supervisor.md's goal-change row asks one --order question to reorder several goals", () => {
-  const md = fs.readFileSync(path.resolve(import.meta.dirname, '..', 'docs/devteam/process/supervisor.md'), 'utf8');
+  const md = fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8');
   const row = md.split('\n').find((l) => l.startsWith('| `owner-decision`, `--class goal-change`'));
   assert.ok(row, 'the goal-change row');
   assert.match(row, /--order/);
   assert.match(row, /goal order --approved/);
-  assert.match(row, /never one question per goal/);
+  assert.match(row, /carries no `--goal`/);
+  assert.match(row, /Never one question per goal/);
 });
