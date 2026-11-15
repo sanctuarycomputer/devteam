@@ -6,6 +6,6 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| S3-1 | Minor | quality.md §3 (cross-references stay true) | spec §4 edge case "A question answered in another tab" ("No pin is left in the panel (§2.6, AC4)") | The no-stale-pin check moved from AC4 to AC5, but the §4 edge case still cites AC4. Point it at AC5. Not blocking. | |
+| S3-1 | Minor | quality.md §3 (cross-references stay true) | spec §4 edge case "A question answered in another tab" ("No pin is left in the panel (§2.6, AC4)") | The no-stale-pin check moved from AC4 to AC5, but the §4 edge case still cites AC4. Point it at AC5. Not blocking. | wont-fix for now: the reference is corrected in T0's spec reconcile commit at build, so this approving verdict stands |
 
 Verdict: APPROVE 7f6ef6bf0706a8bf6ccea47a68348076a5c3ce65
