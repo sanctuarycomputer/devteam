@@ -162,3 +162,47 @@ test('lines on sibling repos: coverage per repo, project folder holds only ticke
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
   } finally { F.done(); }
 });
+
+// Records in home (links.<id>.records "home"): a link ticket's spec, plan, verification and
+// reviews live on home's ticket/<id>, in home's project folder; only its code is in the link.
+const SUP = { DEVTEAM_ROLE: 'supervisor' };
+function recordsFixture(name, linkExtra = {}) {
+  const F = multiFixture(name);
+  const links = json(F.okIn(F.old, ['settings'])).links;
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, records: 'home', ...linkExtra } } });
+  return F;
+}
+// home's ticket/<id> in a worktree of home: the records the worker keeps there
+function homeRecords(F, id, files, { push = true } = {}) {
+  const rw = path.join(F.old, '.worktrees', `records-${id}`);
+  if (!fs.existsSync(rw)) F.g(['worktree', 'add', '-q', '-b', `ticket/${id}`, rw, 'origin/main'], F.old);
+  for (const [f, text] of Object.entries(files)) write(path.join(rw, 'docs/devteam/project/tickets', id, f), text);
+  F.g(['add', '-A'], rw); F.g(['commit', '-qm', `${id}: records`], rw);
+  if (push) F.g(['push', '-q', 'origin', `ticket/${id}`], rw);
+  return { rw, sha: F.g(['rev-parse', 'HEAD'], rw) };
+}
+
+test('records in home: the setting (repo by default, home or refused), and approve-plan reads the plan from home', () => {
+  const F = multiFixture('records-setting');
+  const { old, okIn, runIn, ticket } = F;
+  try {
+    const eff = () => json(okIn(old, ['links', '--json'])).links.find((x) => x.id === 'console').effective.records;
+    assert.equal(eff(), 'repo', 'today\'s behaviour by default');
+    assert.equal(json(okIn(old, ['links', '--json'])).home.effective.records, 'home');
+    assert.match(runIn(old, ['link', 'set', 'console', 'records', 'nope'], SUP).err, /links\.console: records is "repo" or "home"/);
+    F.edit((j) => { j.links.console.records = 'home'; });
+    F.g(['commit', '-qam', 'records home'], old); F.g(['push', '-q', 'origin', 'main'], old);
+    assert.doesNotMatch(runIn(old, ['validate']).out, /records is/);
+    assert.equal(eff(), 'home');
+    // approve-plan reads the plan from home's ticket/<id>, never the link's
+    ticket('console-01-a');
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', 'console-01-a', '--', 'ok'], SUP);
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    F.g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'docs/devteam/project/tickets/console-01-a/plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
+    F.g(['add', '-A'], w); F.g(['commit', '-qm', 'plan in the link'], w);
+    assert.match(runIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP).err, /no plan\.md for console-01-a on ticket\/console-01-a/, "a plan in the link doesn't count");
+    homeRecords(F, 'console-01-a', { 'plan.md': '# plan\n\n## TL;DR\n\n- x\n' }, { push: false });
+    assert.match(okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP), /^a-/, "the plan on home's ticket/<id>");
+  } finally { F.done(); }
+});

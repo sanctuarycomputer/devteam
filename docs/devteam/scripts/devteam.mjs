@@ -787,10 +787,14 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
-const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project'];
+const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
-const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project' };
+// records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
+// "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
+// home's project folder, so nothing of the project lands in the linked repo (recordsInHome).
+const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo' };
+const RECORDS_WHERE = ['repo', 'home'];
 // what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
 const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
 const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
@@ -814,7 +818,7 @@ const locatorForPrompt = (v) => redactUrl(v).replace(/\s/g, encodeURIComponent).
 const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
-  gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string',
+  gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -891,6 +895,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       if (ctx.remotes.has(k)) errs.push(`${at}: the same remote as links.${ctx.remotes.get(k)}`);
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
+      if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -2523,6 +2528,23 @@ const repoReadable = (name) => { if (name === 'home') return true; const l = own
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
+// Whether a ticket keeps its records in home (its repo link's records is "home"): spec, plan,
+// verification and reviews on home's ticket/<id>, in home's project folder, while its code is on
+// its repo's ticket/<id>. Read from main's committed settings, like the routing above, so a
+// working tree's edit changes nothing until it lands. A view: never touches a checkout.
+function recordsInHome(t) {
+  const name = t ? repoOfTicketLink(t) : 'home';
+  if (name === 'home') return false;
+  const s = committedComponents();
+  const l = ownEntry(s.links, name);
+  return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.records === 'home';
+}
+const recordsInHomeId = (id) => recordsInHome(tickets().get(id));
+// The repo that holds a ticket's records: home for records in home, else the ticket's own (an act).
+const recordsRepo = (id) => (recordsInHomeId(id) ? repo('home') : repoOfTicketId(id));
+// Home's ticket/<id>, where a records-in-home ticket's records are: the local branch (the worker's
+// committed state), else origin's.
+const homeRecordsRef = (id) => homeTicketBranchRef(id);
 // A ticket's git facts come from its own repo. Views ask by name, through factsRepo,
 // which is null for a repo this machine can't read: its tickets read as unmerged and branchless
 // while link-unreachable says why. Home's methods are today's functions.
@@ -3918,6 +3940,8 @@ function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  // A records-in-home ticket's final review names the home commit of the records it reviewed too.
+  const recordsRaw = text.match(/^-[ \t]*Records:[ \t]*(\S+)[ \t]*$/m)?.[1] ?? null;
   // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
   const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
@@ -3938,11 +3962,19 @@ function parseReview(file, text) {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
     reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
+    records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
-const ticketReviews = (id, src) => { const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
+// A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
+// branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+const ticketReviews = (id, src) => {
+  if (recordsInHomeId(id)) {
+    const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
+    return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
+  }
+  const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
 const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 function latestPerTrack(records, stage) {
   const latest = new Map();
@@ -8954,7 +8986,9 @@ function cmdAct() {
       }
     } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
-    const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
+    // where the records are: home's ticket/<id> for records in home, else the ticket's repo (an act:
+    // fails fast on a missing or wrong checkout)
+    const R = recordsRepo(t.id);
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
     const plan = ref ? R.git(['show', `${ref}:${R.projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
@@ -19515,7 +19549,7 @@ function cmdLinks() {
   const origin = git(['config', '--get', 'remote.origin.url']);
   // each readable repo's own main (a view: a link whose checkout is wrong or missing just has none)
   const mains = (R) => ({ main_ref: R.mainRef(), main_sha: R.mainRef() ? R.resolveCommit(R.mainRef()) : null });
-  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
+  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : k === 'records' ? 'home' : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
     if (!K) return { id, ...redactLink(l) };
