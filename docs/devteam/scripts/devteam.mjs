@@ -421,12 +421,13 @@ function remoteKeyAt(r, base) {
 // a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
 // repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder has no settings.md
 // (a sibling's own copy, with or without tickets/, or a repo not adopted yet), for every command but
-// init (which adopts) and help, and, in the kit's own repo, its read-only views (KIT_VIEWS).
+// init (which adopts) and help, and, in the kit's own repo, its views (KIT_VIEWS).
 const cwdCommon = commonOf(process.cwd());
 // The kit's own repo (a remote of it is the kit's upstream) has no project of its own, but its
-// read-only views run there as they always did, over no tickets: nothing in them writes.
+// views run there, over no tickets: nothing in them writes but `box-pins bump`, which rewrites only
+// the pin ARGs of the Dockerfile it is given (cloud/Dockerfile unless --dockerfile names another).
 const KIT_UPSTREAM = 'sanctuarycomputer/devteam';
-const KIT_VIEWS = ['status', 'whoami', 'validate', 'links'];
+const KIT_VIEWS = ['status', 'whoami', 'validate', 'links', 'box-pins'];
 const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.url$'], root) ?? '').split('\n').some((l) => l && remoteKeyAt(l.slice(l.indexOf(' ') + 1), root) === KIT_UPSTREAM);
 const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
 // The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
@@ -440,7 +441,7 @@ const homeAt = (() => {
     const root = common ? path.dirname(common) : null;
     const proj = root && path.join(root, 'docs', 'devteam', 'project');
     // the machine's commands look after every project from anywhere, a folder that is no project included
-    const machineWide = ['machine', 'operator-thread', 'hub'].includes(command) || (command === 'recover' && flags.machine);
+    const machineWide = ['machine', 'operator-thread', 'hub'].includes(command) || (command === 'recover' && flags.machine) || (command === 'box-pins' && positional[0] === 'installed');
     if (proj && command && !machineWide && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
     return { common, proj: null };
   }
@@ -480,7 +481,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN || path.join(mainRoot, 'docs
 // (machine, operator-thread, recover --machine, the hub) run from anywhere and keep no run folder. Not defended (the agents are trusted not to forge): a
 // DEVTEAM_RUN that names some other folder inside home on purpose.
 const realPathMade = (p) => { let a = p; const rest = []; while (!fs.existsSync(a) && path.dirname(a) !== a) { rest.unshift(path.basename(a)); a = path.dirname(a); } return path.join(realPath(a), ...rest); };
-if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread', 'hub'].includes(command) && !(command === 'recover' && flags.machine)) {
+if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operator-thread', 'hub'].includes(command) && !(command === 'recover' && flags.machine) && !(command === 'box-pins' && positional[0] === 'installed')) {
   const r = realPathMade(runDir), root = realPath(mainRoot);
   if (r !== realPathMade(path.join(mainRoot, 'docs', 'devteam', 'run')) && r !== root && !r.startsWith(`${root}${path.sep}`)) die(`DEVTEAM_RUN=${runDir} is not inside this kit's home (${mainRoot}): a session's run folder leaked into another repo's kit; unset DEVTEAM_RUN, or run home's kit from home`);
 }
@@ -13874,6 +13875,320 @@ function cmdHub() {
   startHub(log, ok ? { kit: rel, image: true, standalone: true } : { kit: ownKitVersion(), standalone: true });
 }
 
+// ===== box-pins: the box image's tool pins (cloud/Dockerfile) =====
+// The pins are kit-47's ARGs, one per line just above the layer that installs the tool: <P>_VERSION,
+// and for a downloaded binary <P>_SHA256_X86_64 and <P>_SHA256_AARCH64; a `# hold: <reason>` line
+// right above a _VERSION ARG holds that tool. Late in the file, ARG DEVTEAM_RELEASE stamps the kit
+// release and ENV DEVTEAM_BOX_TOOLS names every tool's version for the gateway and box-status. The
+// table says where each tool comes from and how the image reports it (`installed`). Only the top
+// package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built.
+const bareVersion = (v) => String(v).replace(/^v/, '');
+const firstVersion = (o) => /(?<![\w.])v?(\d+(?:\.\d+)+)/.exec(o)?.[1] ?? null;
+const BOX_TOOLS = [
+  { name: 'claude-code', prefix: 'CLAUDE_CODE', source: 'npm', pkg: '@anthropic-ai/claude-code', run: ['claude', '--version'], parse: firstVersion },
+  // the image installs claude-swap with UV_TOOL_DIR set only inside its RUN, so `uv tool list` finds it only there
+  { name: 'claude-swap', prefix: 'CLAUDE_SWAP', source: 'pypi', pkg: 'claude-swap', run: ['uv', 'tool', 'list'], env: { UV_TOOL_DIR: '/opt/uv/tools' }, parse: (o) => /^claude-swap\s+v?(\d+(?:\.\d+)+)/m.exec(o)?.[1] ?? null },
+  // asset names as each tool's RUN downloads them, from the pin as the ARG holds it
+  { name: 'gh', prefix: 'GH', source: 'github', repo: 'cli/cli', assets: { x86_64: (v) => `gh_${bareVersion(v)}_linux_amd64.tar.gz`, aarch64: (v) => `gh_${bareVersion(v)}_linux_arm64.tar.gz` }, run: ['gh', '--version'], parse: firstVersion },
+  { name: 'ttyd', prefix: 'TTYD', source: 'github', repo: 'tsl0922/ttyd', assets: { x86_64: () => 'ttyd.x86_64', aarch64: () => 'ttyd.aarch64' }, run: ['ttyd', '--version'], parse: firstVersion },
+  { name: 'mise', prefix: 'MISE', source: 'github', repo: 'jdx/mise', assets: { x86_64: (v) => `mise-${v}-linux-x64`, aarch64: (v) => `mise-${v}-linux-arm64` }, run: ['mise', '--version'], parse: firstVersion },
+  { name: 'uv', prefix: 'UV', source: 'github', repo: 'astral-sh/uv', assets: { x86_64: () => 'uv-x86_64-unknown-linux-gnu.tar.gz', aarch64: () => 'uv-aarch64-unknown-linux-gnu.tar.gz' }, run: ['uv', '--version'], parse: firstVersion },
+];
+const BOX_ARCHES = { x86_64: 'X86_64', aarch64: 'AARCH64' };
+// what came off the network (or out of a file) goes to a terminal only when it is plainly a version
+const safe = (s) => (/^[\w.+-]{1,64}$/.test(String(s ?? '')) ? String(s) : '?');
+const versionParts = (v) => (/^v?\d+(\.\d+)+$/.test(String(v ?? '')) ? bareVersion(v).split('.').map(Number) : null);
+function newer(a, b) {
+  const x = versionParts(a), y = versionParts(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0);
+  return false;
+}
+// a version in the form its pin has: a leading v exactly when the pin has one (gh's tag is v2.104.0, its pin 2.104.0)
+const pinForm = (v, pinned) => `${String(pinned).startsWith('v') ? 'v' : ''}${bareVersion(v)}`;
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const HOLD_LIKE = /^\s*#\s*hold\b/i;
+
+// The Dockerfile's pins and every problem in how they are written (all but whether the stamp is a
+// given release, which is the caller's): what verify reports, and what check and bump refuse on.
+function readPins(text) {
+  const lines = text.split('\n');
+  const problems = [];
+  const argLines = (name) => lines.flatMap((l, i) => (l.startsWith(`ARG ${name}=`) ? [i] : []));
+  const pinLines = new Set();
+  const tools = BOX_TOOLS.map((tool) => {
+    const p = { tool, version: null, versionLine: null, sums: {}, sumLines: {}, hold: null };
+    const v = argLines(`${tool.prefix}_VERSION`);
+    v.forEach((i) => pinLines.add(i));
+    if (!v.length) problems.push(`${tool.name} has no ${tool.prefix}_VERSION`);
+    else if (v.length > 1) problems.push(`${tool.name}'s ${tool.prefix}_VERSION is given ${v.length} times`);
+    else {
+      p.versionLine = v[0];
+      p.version = lines[v[0]].slice(`ARG ${tool.prefix}_VERSION=`.length);
+      if (!p.version) problems.push(`${tool.name}'s ${tool.prefix}_VERSION is empty`);
+      // a pin that isn't a plain version can't be compared with upstream, so check and bump would never move it
+      else if (!versionParts(p.version)) problems.push(`${tool.name}'s ${tool.prefix}_VERSION ${safe(p.version)} is not a plain version`);
+    }
+    for (const [arch, suffix] of Object.entries(tool.assets ? BOX_ARCHES : {})) {
+      const name = `${tool.prefix}_SHA256_${suffix}`;
+      const s = argLines(name);
+      s.forEach((i) => pinLines.add(i));
+      if (!s.length) problems.push(`${tool.name} has no ${name}`);
+      else if (s.length > 1) problems.push(`${tool.name}'s ${name} is given ${s.length} times`);
+      else {
+        p.sumLines[arch] = s[0];
+        p.sums[arch] = lines[s[0]].slice(`ARG ${name}=`.length);
+        if (!/^[0-9a-f]{64}$/.test(p.sums[arch])) problems.push(`${name} is not 64 lowercase hex`);
+      }
+    }
+    return p;
+  });
+  const rel = argLines('DEVTEAM_RELEASE');
+  rel.forEach((i) => pinLines.add(i));
+  let release = null, releaseLine = null;
+  if (!rel.length) problems.push('no DEVTEAM_RELEASE');
+  else if (rel.length > 1) problems.push(`DEVTEAM_RELEASE is given ${rel.length} times`);
+  else {
+    releaseLine = rel[0];
+    release = lines[rel[0]].slice('ARG DEVTEAM_RELEASE='.length);
+    if (!/^v\d+\.\d+\.\d+$/.test(release)) problems.push(`DEVTEAM_RELEASE ${safe(release)} is not vX.Y.Z`);
+  }
+  // holds: exactly `# hold: <reason>`, directly above a tool's _VERSION ARG; anything else that looks
+  // like one is a problem, so a hold meant is never ignored and bump never moves a held tool
+  lines.forEach((l, i) => {
+    if (!HOLD_LIKE.test(l)) return;
+    const m = /^# hold:(?: (.*))?$/.exec(l);
+    if (!m) return problems.push(`line ${i + 1} looks like a hold but is not "# hold: <reason>"`);
+    const p = tools.find((t) => t.versionLine === i + 1);
+    if (!p) return problems.push(`the hold on line ${i + 1} is not directly above a _VERSION ARG`);
+    if (!m[1]?.trim()) return problems.push(`${p.tool.name}'s hold has no reason`);
+    p.hold = m[1].trim();
+  });
+  // no version or sum written anywhere but its ARG: a literal left in a RUN would not follow a bump
+  // the text found, with a little of the line around it, however deep in a long RUN it sits
+  const around = (l, m) => l.slice(Math.max(0, m.index - 24), m.index + m[0].length + 24).trim().replace(/[^\x20-\x7e]/g, '?');
+  const strays = (re, say) => lines.forEach((l, i) => { const m = !pinLines.has(i) && !HOLD_LIKE.test(l) && re.exec(l); if (m) problems.push(`${say} is written outside its ARG (line ${i + 1}: ${around(l, m)})`); });
+  for (const p of tools) {
+    if (p.version) strays(new RegExp(`(?<![\\d.])${escapeRe(bareVersion(p.version))}(?!\\.?\\d)`), `${p.tool.name}'s version ${safe(p.version)}`);
+    for (const [arch, sum] of Object.entries(p.sums)) if (sum) strays(new RegExp(`(?<![0-9a-fA-F])${escapeRe(sum)}(?![0-9a-fA-F])`), `${p.tool.name}'s ${p.tool.prefix}_SHA256_${BOX_ARCHES[arch]} sum`);
+  }
+  // the ENV the gateway, box-status and `installed` read: exactly every tool's pin, each once
+  const env = lines.flatMap((l) => { const m = /^\s*(?:ENV\s+)?DEVTEAM_BOX_TOOLS="([^"]*)"/.exec(l); return m ? [m[1]] : []; });
+  if (!env.length) problems.push('no DEVTEAM_BOX_TOOLS');
+  else if (env.length > 1) problems.push(`DEVTEAM_BOX_TOOLS is given ${env.length} times`);
+  else {
+    const pairs = env[0].split(/\s+/).filter(Boolean);
+    for (const { tool } of tools) {
+      const want = `${tool.name}=$${tool.prefix}_VERSION`;
+      const n = pairs.filter((x) => x === want).length;
+      if (n !== 1) problems.push(n ? `DEVTEAM_BOX_TOOLS names ${want} ${n} times` : `DEVTEAM_BOX_TOOLS does not name ${want}`);
+    }
+    for (const x of pairs) if (!tools.some(({ tool }) => x === `${tool.name}=$${tool.prefix}_VERSION`)) problems.push(`DEVTEAM_BOX_TOOLS names ${/^[\w.+=$-]{1,80}$/.test(x) ? x : '?'}, which is no tool's`);
+  }
+  return { lines, tools, release, releaseLine, problems };
+}
+// The Dockerfile box-pins works on: --dockerfile, or the cwd checkout's cloud/Dockerfile (the kit's own).
+function pinsFile() {
+  const file = path.resolve(flagStr('dockerfile') ?? path.join(repoRoot, 'cloud', 'Dockerfile'));
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) die(`box-pins: no cloud/Dockerfile at ${file} (box-pins works on the kit's own checkout, or --dockerfile <path>)`, 2);
+  return { file, text: fs.readFileSync(file, 'utf8') };
+}
+const releaseFlag = () => {
+  const r = flagStr('release') ?? (flags.release === true ? '' : undefined);
+  if (r !== undefined && !/^v\d+\.\d+\.\d+$/.test(r)) die(`box-pins: --release ${JSON.stringify(r)} is not vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+  return r;
+};
+// Each tool's latest release upstream: npm's latest dist-tag, PyPI's version, or the highest GitHub
+// release that is neither a draft nor a prerelease (read from the list, so a backport published after
+// a newer line is not taken for the latest). Throws an Error whose message is the why, in our words.
+// GitHub is read anonymously, or with GH_TOKEN, which goes to the API only: never with a download.
+const pinsBase = (k, dflt) => (process.env[k] || dflt).replace(/\/+$/, '');
+// one deadline for the answer and its body (DEVTEAM_PINS_TIMEOUT_MS only for tests)
+const timedOut = (e) => e?.name === 'TimeoutError' || e?.name === 'AbortError';
+const unreachable = (e) => new Error(`unreachable (${timedOut(e) ? 'timed out' : safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.name)})`);
+async function upstreamJson(url, headers = {}) {
+  const signal = AbortSignal.timeout(Number(process.env.DEVTEAM_PINS_TIMEOUT_MS) || 15000);
+  let res;
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins', ...headers }, signal }); } catch (e) { throw unreachable(e); }
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  let body;
+  try { body = await res.text(); } catch (e) { throw unreachable(e); }
+  try { return JSON.parse(body); } catch { throw new Error('bad JSON'); }
+}
+const notRelease = (v) => new Error(`not a release: ${safe(v)}`);
+async function latestOf(tool) {
+  if (tool.source === 'npm') {
+    const v = (await upstreamJson(`${pinsBase('DEVTEAM_PINS_NPM', 'https://registry.npmjs.org')}/${tool.pkg.replace('/', '%2f')}/latest`))?.version;
+    if (!versionParts(v)) throw notRelease(v);
+    return { version: v };
+  }
+  if (tool.source === 'pypi') {
+    const v = (await upstreamJson(`${pinsBase('DEVTEAM_PINS_PYPI', 'https://pypi.org')}/pypi/${tool.pkg}/json`))?.info?.version;
+    if (!versionParts(v)) throw notRelease(v);
+    return { version: v };
+  }
+  const auth = process.env.GH_TOKEN ? { authorization: `Bearer ${process.env.GH_TOKEN}` } : {};
+  const list = await upstreamJson(`${pinsBase('DEVTEAM_PINS_GITHUB', 'https://api.github.com')}/repos/${tool.repo}/releases?per_page=30`, { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...auth });
+  if (!Array.isArray(list)) throw new Error('bad JSON');
+  const best = list.filter((r) => r && !r.draft && !r.prerelease && versionParts(r.tag_name)).reduce((a, r) => (!a || newer(r.tag_name, a.tag_name) ? r : a), null);
+  if (!best) throw new Error('no release');
+  return { version: best.tag_name, release: best };
+}
+// Every tool against upstream, in table order: held (nothing asked), current, stale or unknown.
+const holdText = (r) => String(r).replace(/[^\x20-\x7e]/g, '?');
+function checkPins(pins) {
+  return Promise.all(pins.tools.map(async ({ tool, version, hold }) => {
+    const row = { name: tool.name, pinned: version };
+    if (hold) return { ...row, status: 'held', reason: hold };
+    try {
+      const { version: latest } = await latestOf(tool);
+      return newer(latest, version) ? { ...row, status: 'stale', latest: pinForm(latest, version) } : { ...row, status: 'current' };
+    } catch (e) { return { ...row, status: 'unknown', why: e.message }; }
+  }));
+}
+const pinsCheckLine = (r) => `${r.name}: ${r.status === 'stale' ? `stale ${safe(r.pinned)} -> ${safe(r.latest)}` : r.status === 'held' ? `held ${holdText(r.reason)}` : r.status === 'unknown' ? `unknown ${r.why}` : `current ${safe(r.pinned)}`}`;
+// A release asset's sha256, from its bytes: downloaded (GitHub redirects to its object store) with no
+// auth header whatever the URL, and checked against the digest GitHub publishes for it when it does.
+async function assetSum(asset) {
+  const url = String(asset.browser_download_url ?? '');
+  if (!/^https?:\/\//.test(url)) throw new Error(`${safe(asset.name)} has no download URL`);
+  const failed = (e) => new Error(`download of ${safe(asset.name)} failed (${timedOut(e) ? 'timed out' : safe(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.code ?? e?.name)})`);
+  const signal = AbortSignal.timeout(Number(process.env.DEVTEAM_PINS_TIMEOUT_MS) || 120000);
+  let res, bytes;
+  try { res = await fetch(url, { headers: { 'user-agent': 'devteam-box-pins' }, redirect: 'follow', signal }); } catch (e) { throw failed(e); }
+  if (!res.ok) throw new Error(`download of ${safe(asset.name)}: HTTP ${res.status}`);
+  try { bytes = Buffer.from(await res.arrayBuffer()); } catch (e) { throw failed(e); }
+  const sum = crypto.createHash('sha256').update(bytes).digest('hex');
+  const d = typeof asset.digest === 'string' && asset.digest.startsWith('sha256:') ? asset.digest.slice(7) : null;
+  if (d && d !== sum) throw new Error(`the digest GitHub publishes for ${safe(asset.name)} is not the sha256 of its download`);
+  return sum;
+}
+// The Dockerfile with every unheld tool at its latest release (sums from its assets' bytes) and the
+// stamp at release; only those ARG lines change. Throws `<tool>: <why>` on any upstream failure.
+async function bumpPins(pins, release) {
+  const lines = [...pins.lines];
+  const changes = [];
+  const set = (i, name, from, to) => { if (from === to) return; lines[i] = `ARG ${name}=${to}`; changes.push({ arg: name, from, to }); };
+  const moves = await Promise.all(pins.tools.map(async (p) => {
+    if (p.hold) return null;
+    try {
+      const latest = await latestOf(p.tool);
+      if (!newer(latest.version, p.version)) return null;
+      const version = pinForm(latest.version, p.version);
+      const sums = {};
+      for (const [arch, nameOf] of Object.entries(p.tool.assets ?? {})) {
+        const asset = (latest.release?.assets ?? []).find((a) => a?.name === nameOf(version));
+        if (!asset) throw new Error(`no asset ${safe(nameOf(version))} in release ${safe(latest.version)}`);
+        sums[arch] = await assetSum(asset);
+      }
+      return { p, version, sums };
+    } catch (e) { throw new Error(`${p.tool.name}: ${e.message}`); }
+  }));
+  for (const m of moves.filter(Boolean)) {
+    set(m.p.versionLine, `${m.p.tool.prefix}_VERSION`, m.p.version, m.version);
+    for (const [arch, sum] of Object.entries(m.sums)) set(m.p.sumLines[arch], `${m.p.tool.prefix}_SHA256_${BOX_ARCHES[arch]}`, m.p.sums[arch], sum);
+  }
+  set(pins.releaseLine, 'DEVTEAM_RELEASE', pins.release, release);
+  return { text: lines.join('\n'), changes, held: pins.tools.filter((p) => p.hold).map((p) => ({ name: p.tool.name, reason: p.hold })) };
+}
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
+// box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
+// the Dockerfile's pins), and installed inside the box image, from anywhere.
+async function cmdBoxPins() {
+  const mode = positional[0];
+  if (mode === 'verify') {
+    const want = releaseFlag();
+    const { text } = pinsFile();
+    const pins = readPins(text);
+    if (want !== undefined && pins.release !== null && pins.release !== want) pins.problems.push(`DEVTEAM_RELEASE is ${safe(pins.release)}, not ${want}`);
+    for (const p of pins.problems) out(`box-pins verify: ${p}`);
+    if (pins.problems.length) { process.exitCode = 1; return; }
+    out(`box-pins verify: ok, ${pins.tools.length} tools, release ${pins.release}`);
+    return;
+  }
+  if (mode === 'check') {
+    const pins = readPins(pinsFile().text);
+    // a file whose pins can't be read is not checked: exit 2, as for no file
+    if (pins.problems.length) {
+      if (flags.json) out(JSON.stringify({ box_pins: 1, problems: pins.problems }, null, 2));
+      else for (const p of pins.problems) out(`box-pins check: ${p}`);
+      process.exitCode = 2;
+      return;
+    }
+    const rows = await checkPins(pins);
+    if (flags.json) out(JSON.stringify({ box_pins: 1, tools: rows }, null, 2));
+    else for (const r of rows) out(pinsCheckLine(r));
+    // 1: a pin is behind; 3: none is, but some upstream couldn't be asked; 0: all current or held
+    process.exitCode = rows.some((r) => r.status === 'stale') ? 1 : rows.some((r) => r.status === 'unknown') ? 3 : 0;
+    return;
+  }
+  if (mode === 'bump') {
+    const release = releaseFlag();
+    if (release === undefined) die(`box-pins bump needs --release vX.Y.Z\nusage: ${BOX_PINS_USAGE}`);
+    const { file, text } = pinsFile();
+    const pins = readPins(text);
+    if (pins.problems.length) {
+      for (const p of pins.problems) out(`box-pins bump: ${p}`);
+      die('box-pins bump: nothing written');
+    }
+    if (newer(pins.release, release)) die(`box-pins bump: --release ${release} is older than DEVTEAM_RELEASE ${pins.release}; nothing written`);
+    let bumped;
+    try { bumped = await bumpPins(pins, release); } catch (e) { die(`box-pins bump: ${e.message}; nothing written`); }
+    // what is written must verify at that release, or nothing is
+    const again = readPins(bumped.text);
+    if (again.release !== release) again.problems.push(`DEVTEAM_RELEASE is ${safe(again.release)}, not ${release}`);
+    if (again.problems.length) die(`box-pins bump: the result would not verify (${again.problems.join('; ')}); nothing written`);
+    for (const c of bumped.changes) out(`${c.arg} ${safe(c.from)} -> ${safe(c.to)}`);
+    for (const h of bumped.held) out(`held ${h.name}: ${holdText(h.reason)}`);
+    if (flags['dry-run']) return out('--dry-run: nothing written');
+    if (bumped.text === text) return out('unchanged');
+    // beside the file (a symlink's target), so the rename is atomic; with its mode, whatever the umask
+    const real = fs.realpathSync(file);
+    const mode = fs.statSync(real).mode & 0o777;
+    const tmpFile = `${real}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tmpFile, bumped.text, { mode });
+      fs.chmodSync(tmpFile, mode);
+      fs.renameSync(tmpFile, real);
+    } catch (e) { fs.rmSync(tmpFile, { force: true }); throw e; }
+    out(`wrote ${file}`);
+    return;
+  }
+  if (mode === 'installed') {
+    // inside the image: what each tool says it is, asked at its path in the image, never through PATH
+    // (on the box dev's PATH finds mise's own uv first), against the pins the image was built with
+    const pinned = (process.env.DEVTEAM_BOX_TOOLS ?? '').trim();
+    if (!pinned) die('box-pins installed: DEVTEAM_BOX_TOOLS is not set (not the box image?)', 2);
+    const want = new Map(), unknown = [], named = new Map();
+    for (const pair of pinned.split(/\s+/)) {
+      const i = pair.indexOf('=');
+      const name = i > 0 ? pair.slice(0, i) : pair;
+      named.set(name, (named.get(name) ?? 0) + 1);
+      if (BOX_TOOLS.some((t) => t.name === name)) want.set(name, pair.slice(i + 1)); else unknown.push(name);
+    }
+    // always a folder: a relative one is made absolute, so no tool is ever a bare name PATH resolves
+    const bin = path.resolve(process.env.DEVTEAM_BOX_BIN || '/usr/local/bin');
+    let bad = 0;
+    const say = (line, ok = false) => { out(line); if (!ok) bad++; };
+    for (const tool of BOX_TOOLS) {
+      const pin = want.get(tool.name);
+      if (pin === undefined) { say(`${tool.name}: not in DEVTEAM_BOX_TOOLS`); continue; }
+      if (named.get(tool.name) > 1) { say(`${tool.name}: named ${named.get(tool.name)} times in DEVTEAM_BOX_TOOLS`); continue; }
+      const [file, ...args] = tool.run;
+      const r = spawnSync(path.join(bin, file), args, { encoding: 'utf8', timeout: 20000, env: { ...process.env, ...tool.env } });
+      if (r.error || r.status !== 0) { say(`${tool.name}: did not run (${r.error ? safe(r.error.code) : r.signal ? safe(r.signal) : `exit ${r.status}`})`); continue; }
+      const found = tool.parse(r.stdout);
+      if (!found) { say(`${tool.name}: no version in its output`); continue; }
+      const v = pinForm(found, pin);
+      if (v === pin) say(`${tool.name}: ${safe(v)}`, true); else say(`${tool.name}: installed ${safe(v)}, pinned ${safe(pin)}`);
+    }
+    for (const n of unknown) say(`${safe(n)}: not a tool box-pins knows`);
+    process.exitCode = bad ? 1 : 0;
+    return;
+  }
+  die(`usage: ${BOX_PINS_USAGE}`);
+}
+
 // The port the box's image serves its own hub on (ENV DEVTEAM_IMAGE_HUB), a plain port or nothing. A
 // dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
 // take the port in the second the image's hub restarts, until it adopts this release.
@@ -19187,6 +19502,8 @@ The log
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
+  box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run]  (each [--dockerfile p])   in the kit's own checkout: the box image's tool pins in cloud/Dockerfile (Claude Code, claude-swap, gh, ttyd, mise, uv). verify checks them and the release stamp offline; check says which are behind upstream (exit 1 stale, 3 some unknown, 0 none, 2 no file or one that doesn't verify); bump moves every tool not held (a "# hold: <reason>" line above its _VERSION ARG) to its latest, with sums from the downloaded assets, and stamps the release. Only the top package of the npm and PyPI tools is pinned: their dependencies resolve when the image is built
+  box-pins installed   inside the box image: each tool's version, asked at its path in the image (never through PATH), against DEVTEAM_BOX_TOOLS
   hub [--release vX.Y.Z]   the machine's hub alone, on 127.0.0.1:4320, retrying while anything holds it; logs to ~/.devteam/hub-<port>.log (the box's boot runs it from the image's kit with the image's release)
 `;
 
@@ -19207,7 +19524,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);

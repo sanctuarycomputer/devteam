@@ -2021,6 +2021,104 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash, window.__esc]`), [false, '/view/artifact/viewer-mock', '', true]);
   });
 });
+// The reload button says when the artifact on the stage changed since its frame loaded, on the
+// page's real polls (never POLL_FAST: "within one poll" is the 10 s one), and only a press reloads.
+test("the viewer's reload button says when a newer version is ready, and the press loads it", { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('reload-hint');
+  undo.push(() => F.done());
+  // the page's <title> is what its lens says when it is ready: how the test sees what the frame shows
+  const mock = (title) => ({ 'artifact.json': JSON.stringify({ v: 1, title: 'Hint mock', summary: 'A page that changes', by: 'supervisor', for: [] }), 'index.html': `<!doctype html><html><head><title>${title}</title></head><body><p>${title}</p></body></html>` });
+  const T = landArtifact(F, 'hint-mock', mock('main'));
+  const draft = path.join(F.old, '.worktrees/demo-01-draft/docs/devteam/project/artifacts/hint-mock');
+  const edit = (title) => { for (const [rel, text] of Object.entries(mock(title))) write(path.join(draft, rel), text); };
+  // written before the dashboard starts: its first read already lists the draft
+  edit('v1');
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const B = `http://127.0.0.1:${port}`;
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
+  // the titles the stage's frame says when ready; the script runs in the artifact's own frame too, which has no stage
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { window.__titles = []; addEventListener('message', (e) => { const f = document.getElementById('av-frame'); if (f && e.source === f.contentWindow && e.data?.lens === 1 && e.data.type === 'ready') window.__titles.push(e.data.title); }); })();` });
+  const soon = soonIn(p);
+  // two polls, and a read that may have started before the change: the dashboard's can wait DATA_WAIT_MS (20 s), the viewer's describe 12 s
+  const soonData = soonIn(p, 45000);
+  const soonView = soonIn(p, 37000);
+  const said = (title) => p.ev(`window.__titles.filter((x) => x === ${JSON.stringify(title)}).length`);
+  const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle }; })()`);
+  // the warning token as this scheme resolves it
+  const amber = () => p.ev(`(() => { const e = document.createElement('span'); e.style.color = 'var(--amber)'; document.getElementById('artifact-view').append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`);
+  const scheme = (value) => p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
+  const FRESH = 'Load the page again';
+  const NEWER = 'A newer version is ready: reload to see it';
+
+  await t.test('on the dashboard: a draft changed on disk outlines reload in the warning colour, light and dark; the press loads it', async () => {
+    await p.send('Page.navigate', { url: `${B}/#artifact/wt/demo-01-draft/hint-mock` });
+    await soon(`typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the frame');
+    assert.deepEqual(await p.ev(`[TS.kind, TS.at, /^[0-9a-f]{64}$/.test(TS.fp ?? '')]`), ['artifact', 'demo-01-draft', true], 'opened with its fingerprint');
+    let b = await button();
+    assert.deepEqual([b.stale, b.title], [false, FRESH], 'nothing newer at open');
+    // a press on the version shown changes nothing (a press before any check is the viewer tab's, below)
+    await p.click('#av-reload');
+    await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
+    assert.equal((await button()).stale, false);
+    edit('v2');
+    await soonData(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
+    b = await button();
+    const light = await amber();
+    assert.deepEqual([b.title, b.color, b.width, b.style], [NEWER, light, '2px', 'solid'], 'the warning colour, light');
+    assert.equal(await said('v2'), 0, 'nothing reloaded by itself');
+    await scheme('dark');
+    const dark = await amber();
+    assert.notEqual(dark, light, 'the dark token is another colour');
+    assert.equal((await button()).color, dark, 'the warning colour, dark');
+    await scheme('light');
+    // and some seconds on, still the old version: only the press loads it
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(await said('v2'), 0, 'still nothing reloaded by itself');
+    await p.click('#av-reload');
+    await soon(`__titles.includes('v2')`, 'the new version in the frame');
+    b = await button();
+    assert.deepEqual([b.stale, b.title], [false, FRESH], 'the outline goes');
+    assert.equal(await p.ev('TS.fp === TS.fpNow'), true);
+  });
+
+  await t.test('in a viewer tab: its own check of the draft, every 10 s; a press before any check still leaves the hint to come; a tree is never checked', async () => {
+    edit('v1');
+    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=demo-01-draft` });
+    await soon(`document.documentElement.classList.contains('viewer') && typeof __titles === 'object' && __titles.includes('v1')`, 'the draft in the viewer');
+    // pressed before the tab's first check: only boot's ask so far
+    await p.click('#av-reload');
+    await soon(`__titles.filter((x) => x === 'v1').length === 2`, 'the draft again');
+    assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'no check yet when pressed');
+    let b = await button();
+    assert.deepEqual([b.stale, b.title], [false, FRESH]);
+    edit('v3');
+    await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
+    b = await button();
+    assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
+    await new Promise((r) => setTimeout(r, 3000));
+    assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
+    await p.click('#av-reload');
+    await soon(`__titles.includes('v3')`, 'the new version in the frame');
+    assert.deepEqual([(await button()).stale, (await button()).title], [false, FRESH], 'the outline goes');
+    // a published tree: after one 10 s tick has passed (four reads of the threads: boot's and three
+    // 5 s ticks, started beside it), still only boot's ask
+    await p.send('Page.navigate', { url: `${B}/view/artifact/hint-mock?at=tree:${T}` });
+    await soon(`document.documentElement.classList.contains('viewer') && typeof TS === 'object' && TS.at === 'tree:${T}'`, 'the tree in the viewer');
+    await soonView(`__asked.filter((u) => u === '/api/threads').length >= 4`, 'a 10 s tick gone by');
+    assert.equal(await p.ev(`__asked.filter((u) => u.startsWith('/api/view?')).length`), 1, 'a tree is never checked');
+    assert.equal((await button()).stale, false);
+  });
+});
 test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
