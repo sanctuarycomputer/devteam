@@ -15764,11 +15764,12 @@ function makeSession(role) {
   }
   seedWorktree(wt, { repo: R });
   // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
-  if (typeof s.agent_trust_command === 'string' && s.agent_trust_command.trim()) {
+  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
+  else if (s.agent_trust_command?.trim()) {
     try {
       execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
     } catch (e) {
-      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' || e.signal ? 'it ran past 60 s' : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
+      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
     }
   }
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);

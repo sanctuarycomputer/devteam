@@ -706,6 +706,7 @@ setInterval(() => {}, 1e6);
     // the dialog, no hook: one metrics pass names the session and the dialog's line
     fs.writeFileSync(screen, dialog);
     const made = F.sup(['planner', 'big', '--goal', F.goal], U);
+    assert.match(made, /made planner plan-big in \S+:plan-big/);
     target = `=${/made planner plan-big in (\S+):plan-big/.exec(made)?.[1]}:plan-big`;
     await started(1, 'Enter to confirm');
     assert.equal(lines()[0].trusted, false);
