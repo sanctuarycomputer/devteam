@@ -23,7 +23,7 @@
 ## Global Constraints
 
 - Never change the `devteam-layout` or `devteam-shell-js` blocks (shell.md §1); new CSS goes after the block, new JS outside `devteam-shell-js`, `threads-core` and its functions unchanged.
-- Files only from the ticket's touches (plus `test/pane-question.answer.test.mjs` if the design-change `m-20261115-204718101` is approved; until then T2 leaves it and the supervisor is told).
+- Files only from the ticket's touches, plus `test/pane-question.answer.test.mjs` (ruling `m-20261115-204940196-supervisor`: its dock check moves to the panel, `.tt` and `#ask-threads`, assertion kept).
 - Thread data, `/api/threads` and the thread actions unchanged; no `devteam.mjs` or schema change.
 - Tokens used by name: `--threads-w` (380px; 100vw below 900px), `--bar-h` (49px), `--panel-pad`, `--header-pad`, `--backdrop`, `--line-2`; `--av-right: calc(var(--threads-w) + 16px)` only above 900px while open.
 - Words exactly: "Inbox"; tabs "Threads", "Supervisor", "Shell"; split "Open", "Resolved"; marks "Ready to accept", "Your move", "Waiting on the supervisor"; button titles "N ready to accept, M your move" / "M your move" / "N waiting on the supervisor"; empty lines "No open threads. Hold Shift and click anything on the page, or start one with +." and "Nothing resolved yet."; back arrow `aria-label="Back to the threads"`; × `aria-label="Close Threads"`.
@@ -72,7 +72,7 @@
 
 **Files:**
 - Modify: `docs/devteam/dashboard/index.html` (`tlCard`, `tlPlaceCard`, `tlClose`, `tlOpen`, the click handler, `tlDock` removed, dock markup/CSS removed, Escape)
-- Modify: `test/dashboard.test.mjs` (the dock-driving lines: ~536, ~1881, ~2534–2541, ~3334–3375, ~3597–3605), `test/pane-question.answer.test.mjs` (~242–245, once approved)
+- Modify: `test/dashboard.test.mjs` (the dock-driving lines: ~536, ~1881, ~2534–2541, ~3334–3375, ~3597–3605), `test/pane-question.answer.test.mjs` (~242–245)
 - Test: `test/dashboard-threads-sidebar.test.mjs`
 
 **Interfaces:**
@@ -124,3 +124,8 @@
 ## Self-review notes
 
 Spec coverage: §2.1–2.3 → T1; §2.4, 2.6, 2.9 → T2; §2.5 → T3; §2.7–2.8 → T4; AC8 → T5; AC5 → T2 step 4 and every task's `dashboard.test.mjs` run. The kit-145 badge is a note, carried in T2 only if kit-145 has merged by then.
+
+## Rulings
+
+- `m-20261115-203750802-supervisor`: plan ahead; build after kit-88 merges and approve-plan.
+- `m-20261115-204940196-supervisor`: `test/pane-question.answer.test.mjs` in touches, its dock check moved to the panel with its assertion kept; the `/view/` tab gets the floating Inbox button and the panel (spec §2.8).
