@@ -293,3 +293,129 @@ test("Upkeep's last 14 days, from a log with known answers", { timeout: 300000 }
   for (const x of days) assert.deepEqual(x.items.map((i) => i.at), x.items.map((i) => i.at).sort(), 'each day in at order');
   assert.deepEqual(logBytes(F), before, 'the reads wrote nothing to the log');
 });
+
+test('the governance listing, read-only, with what changed here', { timeout: 300000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = fleetFixture('governance');
+  undo.push(() => F.done());
+  // each main commit pushed: main is origin's
+  const commit = (root, msg) => { F.g(['add', '-A'], root); F.g(['commit', '-qm', msg], root); F.g(['push', '-q', 'origin', 'main'], root); };
+  // A project initialised fresh, with its own origin, in fleetFixture's folder. Init's strategy
+  // template is taken out, so neither project file is written.
+  const govFixture = (name, upstreamBase, project = null) => {
+    const root = path.join(F.base, name);
+    const org = path.join(F.base, `${name}.git`);
+    F.g(['init', '-q', '--bare', '-b', 'main', org], F.base);
+    fs.mkdirSync(root);
+    F.g(['init', '-q', '-b', 'main'], root);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) F.g(['config', k, v], root);
+    F.g(['remote', 'add', 'origin', org], root);
+    fs.cpSync(kit, path.join(root, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+    // a global flag, after the command
+    const pre = project ? ['--project', project] : [];
+    F.ok(root, ['init', '--name', name, ...(upstreamBase ? ['--upstream-base', upstreamBase] : []), ...pre]);
+    const proj = path.join(root, project ?? 'docs/devteam/project');
+    fs.rmSync(path.join(proj, 'strategy.md'));
+    const sf = path.join(proj, 'settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"gates": {}, "forge": "git", "agent_command": "true", "resume_command": "true"'));
+    commit(root, 'init');
+    return { root, org, pre, proj };
+  };
+  const gov = (G, root = G.root) => json(F.ok(root, ['governance', '--json', ...G.pre])).files;
+  const logAt = (root) => (fs.existsSync(path.join(root, 'docs/devteam/run/log')) ? logBytes({ old: root }) : 'no log');
+  const kitFiles = (dir) => fs.readdirSync(path.join(kit, dir)).filter((f) => f.endsWith('.md')).sort().map((f) => `docs/devteam/${dir}/${f}`);
+  const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
+  const row = (files, p) => files.find((r) => r.path === p);
+  const notWritten = (r, p, title) => {
+    assert.ok(r, `a row for ${p}`);
+    assert.deepEqual({ ...r, last_change: undefined }, { group: 'project', path: p, title, last_change: undefined, differs: null, written: false, state: 'not written yet' });
+  };
+
+  // A: initialised at v0.1.0
+  const A = govFixture('gov-sync', 'v0.1.0');
+  const before = logAt(A.root);
+  let files = gov(A);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/devteam/project/strategy.md', 'docs/devteam/project/exterior.md'], 'every file, in its group, by name');
+  assert.deepEqual(files.map((r) => r.group), [...kitFiles('governance').map(() => 'governance'), ...kitFiles('process').map(() => 'process'), 'project', 'project']);
+  const con = row(files, 'docs/devteam/governance/constitution.md');
+  assert.equal(con.title, 'Constitution');
+  assert.equal(con.differs, false, 'untouched since the sync');
+  assert.equal(con.written, true);
+  assert.equal(con.state, null);
+  assert.match(con.last_change, ISO);
+  for (const r of files.filter((x) => x.group !== 'project')) assert.equal(r.differs, false, `${r.path} untouched`);
+  notWritten(row(files, 'docs/devteam/project/strategy.md'), 'docs/devteam/project/strategy.md', 'Strategy');
+  notWritten(row(files, 'docs/devteam/project/exterior.md'), 'docs/devteam/project/exterior.md', 'Exterior');
+
+  // a local edit
+  fs.appendFileSync(path.join(A.root, 'docs/devteam/governance/quality.md'), '\nA local rule.\n');
+  commit(A.root, 'a local rule');
+  files = gov(A);
+  assert.equal(row(files, 'docs/devteam/governance/quality.md').differs, true);
+  assert.equal(row(files, 'docs/devteam/governance/quality.md').state, 'changed here');
+  assert.equal(row(files, 'docs/devteam/governance/constitution.md').differs, false);
+
+  // a second sync, to v0.2.0, that changes worker.md and leaves quality.md alone
+  const sf = path.join(A.proj, 'settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"upstream_base": "v0.1.0"', '"upstream_base": "v0.2.0"'));
+  fs.appendFileSync(path.join(A.root, 'docs/devteam/process/worker.md'), '\nFrom the next release.\n');
+  commit(A.root, 'chore-devteam-sync-v0.2.0: kit files verbatim from the tag; upstream_base v0.2.0');
+  files = gov(A);
+  assert.equal(row(files, 'docs/devteam/governance/quality.md').differs, true, 'the sync left the local edit');
+  assert.equal(row(files, 'docs/devteam/process/worker.md').differs, false, 'the sync brought it');
+  assert.equal(row(files, 'docs/devteam/process/worker.md').state, null);
+
+  // the strategy written
+  fs.writeFileSync(path.join(A.proj, 'strategy.md'), '# Our strategy\n\nSell to admins.\n');
+  commit(A.root, 'the strategy');
+  files = gov(A);
+  const st = row(files, 'docs/devteam/project/strategy.md');
+  assert.equal(st.written, true);
+  assert.equal(st.title, 'Our strategy');
+  assert.equal(st.state, null);
+  assert.equal(st.differs, null, 'the project\'s own');
+  assert.match(st.last_change, ISO);
+  notWritten(row(files, 'docs/devteam/project/exterior.md'), 'docs/devteam/project/exterior.md', 'Exterior');
+  const cli = json(F.ok(A.root, ['governance', '--json']));
+  assert.deepEqual(logAt(A.root), before, 'the reads wrote nothing to the log');
+
+  // B and C: no upstream_base and no strategy, under another project folder
+  const B = govFixture('gov-none', null, 'docs/elsewhere');
+  const beforeB = logAt(B.root);
+  files = gov(B);
+  assert.deepEqual(files.map((r) => r.path), [...kitFiles('governance'), ...kitFiles('process'), 'docs/elsewhere/strategy.md', 'docs/elsewhere/exterior.md']);
+  for (const r of files.filter((x) => x.group !== 'project')) {
+    assert.equal(r.differs, null, `${r.path}: no sync commit`);
+    assert.equal(r.state, null);
+    assert.match(r.last_change, ISO);
+  }
+  notWritten(row(files, 'docs/elsewhere/strategy.md'), 'docs/elsewhere/strategy.md', 'Strategy');
+  notWritten(row(files, 'docs/elsewhere/exterior.md'), 'docs/elsewhere/exterior.md', 'Exterior');
+  assert.deepEqual(logAt(B.root), beforeB, 'the reads wrote nothing to the log');
+
+  // D: a shallow clone of A
+  const neu = path.join(F.base, 'gov-shallow');
+  F.g(['clone', '-q', '--depth', '1', `file://${A.org}`, neu], F.base);
+  files = gov(A, neu);
+  assert.equal(files.length, cli.files.length);
+  for (const r of files) assert.equal(r.last_change, '—', `${r.path}: its history is cut off`);
+  for (const r of files.filter((x) => x.group !== 'project')) assert.equal(r.differs, null, `${r.path}: shallow`);
+
+  // the dashboard serves the same
+  const env = F.env({
+    DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3),
+    CLAUDE_CONFIG_DIR: path.join(F.base, 'claude'), CODEX_HOME: path.join(F.base, 'codex'),
+    DEVTEAM_DATA_WAIT_MS: '600000',
+  });
+  delete env.DEVTEAM_SUPERVISOR;
+  const { dash, port } = await dashboardOnFreePort(A.root, env);
+  undo.push(() => dash.stop());
+  const get = async (route) => { const r = await fetch(`http://127.0.0.1:${port}${route}`); assert.equal(r.status, 200, route); return r.json(); };
+  assert.deepEqual(await get('/api/governance'), cli);
+  const d = await get('/api/data');
+  for (const k of ['class_words', 'threads', 'upkeep_days']) assert.ok(k in d, `/api/data has ${k}`);
+  const h = await get('/api/hello');
+  for (const k of ['you', 'waiting', 'ready']) assert.equal(typeof h.threads?.[k], 'number', `/api/hello's threads.${k}`);
+  assert.deepEqual(logAt(A.root), before, 'the dashboard\'s reads wrote nothing to the log');
+});

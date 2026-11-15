@@ -5025,6 +5025,68 @@ function strategyState() {
   const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
   return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
 }
+// governance [--json]: the kit's governance and process files, then the project's strategy and
+// exterior, each with its title, its last change on main, and whether it was changed here since the
+// kit was last synced (differs). Read from main, as strategyState is; with no main, or a project
+// outside the repo, from the working tree, with no history. One first-parent walk of main over the
+// listed files and settings.md: a file's first appearance is its newest commit, and the settings.md
+// commits are the sync candidates. A sync commit is one where upstream_base became a different
+// release tag. A sync PR that also carried a local edit to a file reads false for that file: the
+// walk can't tell the two apart, and that is accepted (spec §1).
+function governanceView() {
+  const main = projectInRepo ? mainRef() : null;
+  const at = (p) => (main ? git(['show', `${main}:${p}`], projectRoot) : readText(path.join(projectRoot, p)));
+  const kitDirs = ['governance', 'process'];
+  const listed = main
+    ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
+    : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
+  const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
+  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback }));
+  const settingsRel = `${projectRel}/settings.md`;
+  const newest = new Map();
+  const syncs = new Set();
+  let shallow = new Set();
+  if (main) {
+    const paths = [...kit, ...project].map((r) => r.path);
+    const walk = (merges) => git(['log', '--first-parent', ...merges, '--format=%x00%H %cI', '--name-only', main, '--', ...paths, settingsRel], projectRoot);
+    const commits = (walk(['--diff-merges=first-parent']) ?? walk(['-m']) ?? '').split('\0').slice(1).map((chunk) => {
+      const [head, ...names] = chunk.split('\n').filter(Boolean);
+      const [sha, iso] = head.split(' ');
+      return { sha, iso, names };
+    });
+    for (const c of commits) for (const p of c.names) if (!newest.has(p)) newest.set(p, c);
+    for (const c of commits.filter((x) => x.names.includes(settingsRel))) {
+      const base = settingsAt(c.sha, { orNull: true })?.upstream_base;
+      if (releaseParts(base) && base !== (settingsAt(`${c.sha}^1`, { orNull: true })?.upstream_base ?? null)) syncs.add(c.sha);
+    }
+    const sf = git(['rev-parse', '--git-path', 'shallow'], projectRoot);
+    const text = sf && readText(path.resolve(projectRoot, sf));
+    if (text) shallow = new Set(text.split('\n').filter(Boolean));
+  }
+  const files = [...kit, ...project].map(({ group, path: p, fallback }) => {
+    const text = at(p);
+    const written = text !== null;
+    const c = newest.get(p);
+    const known = c && !shallow.has(c.sha);
+    const differs = group === 'project' || !syncs.size || !known ? null : !syncs.has(c.sha);
+    return {
+      group,
+      path: p,
+      title: text?.match(/^# (.+)/m)?.[1].trim() ?? (written ? path.basename(p, '.md') : fallback),
+      last_change: known ? c.iso : '—',
+      differs,
+      written,
+      state: !written ? 'not written yet' : differs ? 'changed here' : null,
+    };
+  });
+  return { files };
+}
+function cmdGovernance() {
+  gitReadCache = new Map();
+  const view = governanceView();
+  if (flags.json) return json(view);
+  for (const r of view.files) out(`${r.group.padEnd(10)} ${r.path}  ${r.state ?? ''}`);
+}
 // A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
 // answered strategy-change question. The one change that needs none is init's untouched template
 // arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
@@ -15458,6 +15520,10 @@ async function cmdDashboard() {
       const r = await run(['timeline', id, '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
+    if (req.method === 'GET' && u.pathname === '/api/governance') {
+      const r = await run(['governance', '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
     // An artifact a question or ticket links to, read from git (committed content only, never a
     // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
     if (req.method === 'GET' && u.pathname === '/api/file') {
@@ -20176,6 +20242,7 @@ Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
+  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
@@ -20218,7 +20285,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
