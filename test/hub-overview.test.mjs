@@ -512,5 +512,6 @@ test('machine status prints the box line after the hub line, only with the image
   assert.deepEqual(status({ DEVTEAM_KIT_RELEASE: ' ', DEVTEAM_BOX_TOOLS: '' }).box, [], 'spaces only are unset');
   assert.equal(status({ DEVTEAM_KIT_RELEASE: '\u001b[31mx', DEVTEAM_BOX_TOOLS: 'gh=2.83.0 uv=\u001b[0m \u001b[1m=1 gh=9' }).next, 'machine: box ?: gh 2.83.0', 'only plain values reach the terminal');
   assert.equal(status({ DEVTEAM_KIT_RELEASE: 'v1.0.0' }).next, 'machine: box v1.0.0', 'no tools named');
+  assert.equal(status({ DEVTEAM_BOX_TOOLS: 'gh=2.83.0\t uv=0.9.9' }).next, 'machine: box ?: gh 2.83.0, uv 0.9.9', 'tools with no release; any spaces between pairs');
   assert.equal(execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }), before, 'no file added');
 });
