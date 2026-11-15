@@ -8,7 +8,7 @@ After a machine stop, `accounts-tick` brings gone sessions back through `session
 
 ## Rulings
 
-(none yet)
+- m-20261115-225726341-supervisor: depends_on also has kit-239 and kit-86 (end of the devteam.mjs chain, D4). Finish spec and plan; build waits for the supervisor's word.
 
 ## Acceptance checks (the done-whens)
 
@@ -42,9 +42,9 @@ The tiering is a separate pure-ish function (`relaunchTier(name, role, launch)`)
 
 Today one boolean `tried` makes `budget()` return 0 after the first attempt of any kind. It becomes a count of attempts this tick (`tries`). The supervisor restart and the limit restarts keep today's rule (0 once any attempt was made). The relaunch loop gets its own budget: 0 once `tries` reaches the cap, where the cap is 1 when `memoryFull()` says the machine is at or over its ceiling and 3 otherwise (including when memory can't be read: `memoryFull()` never blocks on not knowing, as `worker` and `planner` already treat it). The cap is read once, only when there is something to relaunch. Each relaunch still goes through `claimRestart` (one per session per 10 minutes, 3 in 6 hours) and needs at least `RESTART_MIN_MS` (30 s) left of the tick's `RESTART_TICK_MS` (110 s), so three relaunches never push a tick past the dashboard's 120 s limit.
 
-**A shortened relaunch costs no attempt (spec-1 F1).** The first relaunch of a tick gets the full `RESTART_CHILD_MS` (100 s) as today; a later one gets only what is left (30 to 100 s), and a resume whose `worktree_setup` is slower would be killed by the tick's own timeout. When the child was killed by that timeout (`spawnSync`'s `error.code === 'ETIMEDOUT'` or `signal === 'SIGKILL'` with no exit status) and its budget was under `RESTART_CHILD_MS`, `relaunchGone` gives the claim back (`releaseRestart`, as `restartPane` already does for a claim nothing came of), reports `cut-short` (counted as an attempt this tick, so the loop stops, but not in the record), and logs the `session-relaunched` observation saying it was cut short and left for the next tick. That next tick tries it first in its tier with the full 100 s. A relaunch killed with the full 100 s stays a spent attempt, as today. supervisor.md's "the relaunch has 100 s" sentence says this.
+**A later relaunch starts only with the time it may need (spec-1 F1, spec-2 F2-1, F2-2).** The first relaunch of a tick gets up to `RESTART_CHILD_MS` (100 s) as today. A resume runs its repo's `worktree_setup` before its window exists, and that can take most of 100 s (an install); a relaunch given less could be killed partway and spend an attempt that one-a-tick would not have. So a second or third relaunch starts only when the time left gives it the full `RESTART_CHILD_MS`, if the session's repo has a `worktree_setup` (a worker's: `repoOfTicket`; a planner's: home; a repo that can't be read counts as having one); with no `worktree_setup` a resume takes seconds, and the usual `RESTART_MIN_MS` (30 s) is enough. A session that can't start this tick waits for the next, whose first relaunch it may be; nothing is claimed for it, so the restart record and its caps stay exactly as today, and no claim is ever given back (no second `worktree_setup` can overlap a killed one any sooner than today). With a `worktree_setup` that takes more than about 10 s, this is one relaunch a tick, as today; the order still applies.
 
-An attempt counts as today: `relaunchGone` returning `relaunched`, `failed` or `left` counts; `null` (not due) and `gave-up` don't.
+An attempt counts as today: `relaunchGone` returning `relaunched`, `failed` or `left` counts; `null` (not due, or no budget) and `gave-up` don't. A session passed over for want of time gets `budget 0`, which `claimRestart` only looks with (null), so it is not claimed.
 
 ## Contracts
 

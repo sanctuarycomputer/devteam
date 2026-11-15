@@ -5,13 +5,13 @@
 - Three changes in `cmdAccountsTick` / `sessionsToRelaunch` (`docs/devteam/scripts/devteam.mjs`): held tickets stay down, gone sessions come back in tiers (work in progress, then the rest, then workers idle on a dependency), up to 3 a tick under the memory ceiling.
 - Tests in `test/recovery.relaunch.test.mjs` only, TDD, one task per change; the fixture file stays as it is.
 - `supervisor.md` §11's relaunch bullet rewritten to match.
-- Build starts only after kit-202 merges and approve-plan is recorded; merge `origin/main` first.
+- Build starts only on the supervisor's word, after kit-202, kit-239 and kit-86 merge and approve-plan is recorded; merge `origin/main` first.
 - Local runs: only `test/recovery.relaunch.test.mjs`, `--test-concurrency=2`, with `timeout`; CI (`test.yml`) is the gate.
 - No contract, no one-way door.
 
 ## Rulings
 
-(none yet)
+- m-20261115-225726341-supervisor: depends_on also has kit-239 and kit-86. Build waits for the supervisor's word (and every depends_on merged).
 
 ## Tasks
 
@@ -42,19 +42,19 @@ Every file below is in the ticket's touches. Run the test file as `timeout 600 n
 - Code: `relaunchTier(name, role, launch)` next to `sessionsToRelaunch`, returning 0, 1 or 2 per the spec; `sessionsToRelaunch` maps found → tier and sorts stably. The dirty check: `fs.existsSync(path.join(wt, '.git'))` then `spawnSync('git', ['status', '--porcelain'], { cwd: wt, timeout: 10000 })`, dirty when it exits 0 with output (anything else counts as clean; plan-1 P7, spec-1 F2). Planner waiting: `planners().find((p) => p.feature === launch[1])?.waiting_on_owner?.length` or an open `threadViews(readLog().objects)` thread whose subject is item `planner:<feature>` / `planner:plan-<feature>`, or artifact `at === name`; no preview rule (spec-1 F3). Idle: `lastPhaseOf(name)?.to` in `blocked`, `awaiting-word`, or the worker's last sent message (`logObjects('message')`, `created_by === name`, by time) has kind `blocked` and isn't in `handledMessages()`.
 - Review record `reviews/task-2.md`.
 
-### T3: up to 3 a tick under the ceiling, and a cut-short relaunch costs no attempt
+### T3: up to 3 a tick under the ceiling, a later one only with the time it may need
 
 - Test (red first), memory files written into `F.base`: full = MemTotal 8 GB, MemAvailable 0.5 GB; under = MemAvailable 6 GB.
   - The first test ("a machine that died…") runs its ticks with memory full and keeps `one relaunch per tick`.
-  - New test "up to 3 a tick under the memory ceiling" (plan-1 P2): five gone workers launched in order `demo-80-a`, `demo-81-notdue` (its restart record has an attempt a minute ago), `demo-82-b`, `demo-83-c`, `demo-84-d`. Under the ceiling, tick 1 relaunches exactly `demo-80-a, demo-82-b, demo-83-c` (`state().relaunched`), passing over `demo-81-notdue`; tick 2 relaunches `demo-84-d`; `demo-81-notdue` comes back in neither.
+  - New test "up to 3 a tick under the memory ceiling" (plan-1 P2): five gone workers launched in order `demo-80-a`, `demo-81-notdue` (its restart record has an attempt a minute ago), `demo-82-b`, `demo-83-c`, `demo-84-d`; no `worktree_setup`. Under the ceiling, tick 1 relaunches exactly `demo-80-a, demo-82-b, demo-83-c` (`state().relaunched`), passing over `demo-81-notdue`; tick 2 relaunches `demo-84-d`; `demo-81-notdue` comes back in neither, and its restart record still holds only its one attempt.
+  - New test "with a worktree_setup, a later relaunch needs the full 100 s": settings `worktree_setup` is `sleep 12` (so the first relaunch alone leaves under 100 s of the 110 s tick); three gone workers, under the ceiling. Tick 1 relaunches exactly one (the first in order); the other two have no entry in the restart record (not claimed). Tick 2 relaunches exactly the next. (About 25 s of wall time, no CPU.)
   - Existing tests that see two gone sessions at once (plan-1 P1) run with memory full so their one-a-tick assertions hold: "the key guard" (its last tick), "what a crash leaves behind" (its ticks after demo-51-m is added). Their subject isn't the count.
-  - Cut short (spec-1 F1), new test "a later relaunch cut short by the tick gives its attempt back": settings `worktree_setup` is `sh -c '[ "$(basename "$PWD")" = demo-91-slow ] && sleep 40 || true'`; gone workers `demo-90-quick` then `demo-91-slow`; under the ceiling, with `DEVTEAM_RESTART_TICK_MS=35000` (a test-only knob, below) so the second relaunch's budget is about 33 s. Tick 1 relaunches `demo-90-quick`, cuts `demo-91-slow` short, and leaves no attempt for it in `F.restartsFile`; it is not in `state().relaunched`. Then `worktree_setup` is cleared and tick 2 relaunches `demo-91-slow` first. (About 35 s of wall time, no CPU.)
-- Code: `tried` → `tries` (a number); `budget(cap = 1)` returns 0 when `tries >= cap` or the time left is under `RESTART_MIN_MS`; the supervisor restart and limit restarts call `budget()` (cap 1, unchanged behaviour); the relaunch loop computes `const cap = memoryFull() ? 1 : 3` once, when `sessionsToRelaunch` found anything, and calls `budget(cap)`. `relaunchGone`: when the child was killed by its timeout and its budget was under `RESTART_CHILD_MS`, `releaseRestart(name, claimedAt)` (claimRestart's `now`), return `'cut-short'` (counts as a try this tick), and log the observation saying so. `RESTART_TICK_MS` reads `DEVTEAM_RESTART_TICK_MS` when it is a positive integer no larger than 110000 (tests only, as `DEVTEAM_STATUS_SECONDS` is; it can only shorten a tick). The comment "one relaunch a tick" updated.
+- Code: `tried` → `tries` (a number). `budget(cap = 1, need = RESTART_MIN_MS)` returns 0 when `tries >= cap` or the time left is under `need`, else `Math.min(RESTART_CHILD_MS, left)`. The supervisor restart and limit restarts call `budget()` (unchanged behaviour). The relaunch loop computes `const cap = memoryFull() ? 1 : 3` once, when `sessionsToRelaunch` found anything, and calls `budget(cap, tries && hasSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS)`, where `hasSetup` reads the session's repo's `settings.worktree_setup` (worker: `repoOfTicket(tickets().get(name))`; planner: `repo('home')`; a throw counts as true). No new environment knob, no released claims (plan-2 F2-1, F2-3 gone with the design). The comment "one relaunch a tick" updated.
 - Review record `reviews/task-3.md`.
 
 ### T4: supervisor.md §11
 
-- Rewrite the "After a dead machine" bullet: "… relaunches each session the kit launched that isn't held (its goal parked or let go, its ticket held, or the fleet drained), parked, done, merged or superseded …, work in progress first (uncommitted changes in its worktree, a planner the owner waits on through a thread or question, a worker in build), sessions idle on a dependency (blocked or awaiting word) last, launch order otherwise; up to 3 a tick while the machine's memory is under `machine_memory_ceiling`, 1 at or over it, sharing the restart record and caps above". Reword "the relaunch has 100 s": the first relaunch of a tick has 100 s; a later one has what's left, and one cut short by that is given back its attempt and tried first next tick (plan-1 P5). Keep the rest of the bullet.
+- Rewrite the "After a dead machine" bullet: "… relaunches each session the kit launched that isn't held (its goal parked or let go, its ticket held, or the fleet drained), parked, done, merged or superseded …, work in progress first (uncommitted changes in its worktree, a planner the owner waits on through a thread or question, a worker in build), sessions idle on a dependency (blocked or awaiting word) last, launch order otherwise; up to 3 a tick while the machine's memory is under `machine_memory_ceiling`, 1 at or over it, sharing the restart record and caps above". Reword "the relaunch has 100 s": each relaunch has 100 s when its repo has a `worktree_setup` (a later one in a tick starts only if 100 s are left; else it waits for the next tick), so a slow setup means one a tick (plan-1 P5). Keep the rest of the bullet.
 - Review record `reviews/task-4.md` (may share one record with T3 if reviewed together; then one file per task anyway, citing the same commit).
 
 ### T5: verify and finish
