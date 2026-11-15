@@ -67,7 +67,7 @@ A `node` input under `workflow_dispatch` (`type: choice`, options `'20'`, `'22'`
 
 ### pane-question.answer:140 (class D)
 
-The dashboard runs `tmux` from its PATH. The test gives that dashboard (only) a PATH whose first entry is a folder holding a `tmux` wrapper script. The wrapper passes every call through to the tmux that PATH found before, except the first call with `send-keys` and `-l` as whole arguments (the digit) while an `armed` file exists. That call writes `waiting` and waits until `go` exists, polling every 50 ms and giving up after 8 s, under the dashboard's own 10 s tmux timeout (F1-8). Giving up, it writes `gave-up` before passing through, and the test asserts there's no `gave-up` file, so a slow run fails saying so, not as 200 versus 409 (F2-2). The test:
+The dashboard runs `tmux` from its PATH. The test gives that dashboard (only) a PATH whose first entry is a folder holding a `tmux` wrapper script. The wrapper passes every call through to the tmux that PATH found before, except the first call with `send-keys` and `-l` as whole arguments (the digit) while an `armed` file exists. That call writes `waiting` and waits until `go` exists, polling every 50 ms and giving up after 8 s, under the dashboard's own 10 s tmux timeout (F1-8). Either way it then passes the call through. Giving up, it first writes `gave-up`, and the test asserts there's no `gave-up` file, so a slow run fails saying so, not as 200 versus 409 (F2-2). The test:
 
 1. posts the answer and waits until `waiting` exists, so the dashboard is between its last look and the key;
 2. posts the second answer: 409 "another answer is on its way" (no 300 ms guess);
