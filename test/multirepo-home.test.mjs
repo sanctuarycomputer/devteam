@@ -495,13 +495,22 @@ test('records in home: a half-done merge, then a review record added on home\'s 
     g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'x'], forge);
     g(['push', '-q', 'origin', 'main'], forge);
     const forged = g(['rev-parse', 'HEAD'], forge);
+    // an evil merge that stays in the folder: a real records commit (an ancestor of what merge will
+    // check) merged with a review no records commit has. Never named, still flagged.
+    g(['fetch', '-q', 'origin', `ticket/${id}`], forge);
+    g(['merge', '-q', '--no-ff', '--no-commit', 'FETCH_HEAD'], forge);
+    write(path.join(forge, `${T}/reviews/final-9.md`), review('nobody', r.code));
+    g(['add', '-A'], forge); g(['commit', '-qm', `${id}: records`], forge);
+    g(['push', '-q', 'origin', 'main'], forge);
+    const evil = g(['rev-parse', 'HEAD'], forge);
+    const last = homeRecords(F, id, { 'reviews/task-10.md': review('later-reviewer', r.code) });
     fs.rmSync(hook);
-    assert.match(okIn(old, ['merge', id], SUP), new RegExp(`landed the records of ${id} at ${later.sha.slice(0, 12)} in home`));
+    assert.match(okIn(old, ['merge', id], SUP), new RegExp(`landed the records of ${id} at ${last.sha.slice(0, 12)} in home`));
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
-    assert.match(act.what, new RegExp(`; records at ${later.sha} in home, and earlier at ${r.head}$`), 'the forged merge is not named');
+    assert.match(act.what, new RegExp(`; records at ${last.sha} in home, and earlier at ${r.head}$`), 'neither forged merge is named');
     const f = json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(!f.some((x) => x.kind === 'records-without-code'));
-    assert.deepEqual(f.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject), [`home:${forged.slice(0, 12)}`], 'both records merges are named by the act; the forged one stays flagged');
+    assert.deepEqual(f.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort(), [`home:${evil.slice(0, 12)}`, `home:${forged.slice(0, 12)}`].sort(), 'both records merges are named by the act; the forged ones stay flagged');
     // --remove: a dirty records worktree refuses before anything is removed
     okIn(r.w, ['phase', 'done'], W);
     write(path.join(r.rw, `${T}/notes.md`), 'uncommitted\n');

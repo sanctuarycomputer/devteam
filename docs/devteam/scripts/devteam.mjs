@@ -5122,15 +5122,16 @@ function pinRecords(id) {
 // Every earlier records head of a ticket merged into home's main by landRecords: a half-done
 // merge's first landing, before the records branch moved. The merge act names them, so none reads
 // as a merge no act made. A subject is only text anyone can write, so a head counts only when it is
-// an ancestor of the records merge checks now (so those checks covered it) and its merge changed
-// nothing outside the ticket's records folder; any other merge stays merged-without-merge.
+// an ancestor of the records merge checks now (so those checks covered it), its merge changed
+// nothing outside the ticket's records folder, and its tree is exactly git's own merge of its two
+// parents (an evil merge adds what no records commit has); any other merge stays merged-without-merge.
 function landedRecordsHeads(id, recSha) {
   const own = `${projectRel}/tickets/${id}/`;
   git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
   mainRefCache = undefined;
   const main = mainRef();
   if (!main) return [];
-  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own))).map(([, , h]) => h);
+  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own)) && mergeTree(p1, h).tree === git(['rev-parse', `${m}^{tree}`])).map(([, , h]) => h);
 }
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
