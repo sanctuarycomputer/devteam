@@ -132,16 +132,11 @@ document.getElementById('i').addEventListener('input', (e) => send({ kind: 'inpu
   };
 
   const server = http.createServer((req, res) => {
-    const url = new URL(req.url, 'http://fixture.invalid');
     const send = (status, body, headers = {}) => {
       if (res.headersSent) return;
       res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...headers });
       res.end(body);
     };
-    if (req.method === 'POST') {
-      posts.posts++;
-      posts.paths[url.pathname] = (posts.paths[url.pathname] ?? 0) + 1;
-    }
     if (Number(req.headers['content-length']) > BODY_MAX) return send(413, page('Too large', '<h1>Too large</h1>'), { connection: 'close' });
     let body = '';
     let size = 0;
@@ -153,11 +148,19 @@ document.getElementById('i').addEventListener('input', (e) => send({ kind: 'inpu
     });
     req.on('end', () => {
       if (size > BODY_MAX) return;
-      const route = routes[`${req.method} ${url.pathname}`]
-        ?? (req.method === 'GET' && /^\/(orders|magic)\//.test(url.pathname) ? () => [200, page('A page', '<h1>A page</h1>')] : null);
-      if (!route) return send(404, page('Not found', '<h1>Not found</h1>'));
+      // one guard over everything a request's own bytes reach (its URL included: GET // is no URL),
+      // so no request can take the site down under a test that still needs it
       let answer;
-      try { answer = route(req, url, body); } catch (e) { answer = [500, page('Error', `<h1>${esc(e.message)}</h1>`)]; }
+      try {
+        const url = new URL(req.url, 'http://fixture.invalid');
+        if (req.method === 'POST') {
+          posts.posts++;
+          posts.paths[url.pathname] = (posts.paths[url.pathname] ?? 0) + 1;
+        }
+        const route = routes[`${req.method} ${url.pathname}`]
+          ?? (req.method === 'GET' && /^\/(orders|magic)\//.test(url.pathname) ? () => [200, page('A page', '<h1>A page</h1>')] : null);
+        answer = route ? route(req, url, body) : [404, page('Not found', '<h1>Not found</h1>')];
+      } catch (e) { answer = [400, page('Bad request', `<h1>${esc(e.message)}</h1>`)]; }
       send(...answer);
     });
   });

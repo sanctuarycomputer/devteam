@@ -395,6 +395,7 @@ test('the fixture site serves every page later tests browse', async (t) => {
   });
   assert.equal(big, 'HTTP/1.1 413 Payload Too Large');
   assert.equal((await go('GET', '/nope')).status, 404);
+  assert.equal((await go('GET', '//')).status, 400, 'a request that is no URL is refused, not a crash');
   assert.equal((await go('GET', '/')).status, 200, 'still serving');
 });
 
