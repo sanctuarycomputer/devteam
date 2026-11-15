@@ -50,6 +50,9 @@ const look = (dirs) => { // a second look, by the run's own dirs
 let bad = false;
 const rows = [];
 const bases = new Map();
+// the base copies never outlive the run, on an error or a signal (plan reviews M7, n2)
+const dropBases = () => { for (const b of bases.values()) fs.rmSync(b, { force: true }); };
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { dropBases(); process.exit(130); });
 try {
 for (const [name, part, title, expectBase] of CASES) {
   if (!bases.has(name)) { const b = `test/zz-probe-base-${name}.test.mjs`; fs.writeFileSync(b, execFileSync('git', ['show', `${base}:test/${name}.test.mjs`])); bases.set(name, b); }
@@ -79,7 +82,6 @@ for (const [name, part, title, expectBase] of CASES) {
   console.log(`| ${row.test} | ${row.expectBase ? 'yes' : 'no'} | ${row.base} | ${row.head} |`);
 }
 } finally {
-  // the base copies never outlive the run (plan review M7)
-  for (const b of bases.values()) fs.rmSync(b, { force: true });
+  dropBases();
 }
 process.exit(bad ? 1 : 0);

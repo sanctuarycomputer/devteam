@@ -5,16 +5,17 @@
 // - the folders the test makes with fs.mkdtempSync are noted: those matching PROBE_THROW, and every
 //   tmux folder (dt-tmux-) made after the first, which is lib/kit.mjs's own for the whole file;
 // - every child the test process starts (spawn, execFile, fork, exec) is noted with its pid;
-// - in a root-level after hook, which node runs once the file's tests and their own t.after hooks
-//   are done, and so before any exit listener (lib/kit.mjs prepends one that kills leftover
-//   dashboards, lib/chrome.mjs adds one for Chrome), it writes to PROBE_OUT one JSON line per process
-//   still alive that the test started: a noted child, or any process of this user whose args or
-//   environment name a noted folder (a tmux server by its TMUX_TMPDIR, a pane's agent, a
-//   dashboard's children by their HOME). Then a last line: { file, children, dirs, left }. Then it
-//   lib/cli.mjs's warm pool (test/lib/cli-runner.mjs: idle node processes the file keeps ready for
-//   its next command, each gone with the file's process) is the file's, not a test's: it is counted
-//   as pool, never as left. Then it exits, a second later (the reporter's last lines): a test whose hooks didn't let go of a child
-//   would otherwise hold the process open, and no exit would come (plan review I3).
+// - in a root-level after() hook, it lists every live process the test started: a noted child, or
+//   any process of this user whose args or environment name a noted folder (a tmux server by its
+//   TMUX_TMPDIR, a pane's agent, a dashboard's children by their HOME). Node runs that hook once the
+//   file's tests and their own t.after hooks are done, so before any exit listener (lib/kit.mjs
+//   prepends one that kills leftover dashboards, lib/chrome.mjs adds one for Chrome). A root after()
+//   the test file registers itself would run after this one; no file it probes has one.
+// - lib/cli.mjs's warm pool (test/lib/cli-runner.mjs: idle node processes the file keeps for its next
+//   command, gone with the file's process) is the file's, not a test's: counted as pool, not left.
+// - it writes one JSON line per process left to PROBE_OUT, then a last line
+//   { file, children, pool, dirs, left }, and exits a second later (after the reporter's last lines):
+//   a test whose hooks didn't let go of a child would otherwise hold the process open (plan review I3).
 import cp from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
