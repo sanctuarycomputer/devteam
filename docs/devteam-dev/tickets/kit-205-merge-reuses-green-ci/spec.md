@@ -74,10 +74,11 @@ Both are pinned by tests, so a later change can't quietly let the supervisor dec
 - Asking the forge for branch protection's required checks (admin-only API on GitHub); the owner names the checks instead.
 - Changing `gate`, `gate --all`, check-pr or check-ticket.
 
-## Open (to the supervisor)
+## Docs
 
-- The field should be documented next to **Modes** in `governance/quality.md` §2 (one or two sentences). That file is not in `touches`; asked as a design-change. Without it, the field is documented only in devteam.mjs comments.
+- `governance/quality.md` §2 gets a short paragraph after **Modes** (m-20261115-204545585): `covered_by` is trust in a check at the exact head sha, never at an earlier one, and the gate still runs when a check is missing, failed or pending.
 
 ## Rulings
 
+- m-20261115-204545585-supervisor: quality.md is in touches, for the covered_by sentences only; they say covered_by is trust in a check at the exact head sha, never an earlier one, and the gate still runs when the check is missing, failed or pending.
 - m-20261115-203723494-supervisor: plan ahead; spec and plan now; build only after kit-204 merges and approve-plan is recorded; briefs carry k-20261115-182656232, k-20261115-080753394, k-20261115-164245020 and the scripts-in-files rule; run only touched test files at --test-concurrency=2.

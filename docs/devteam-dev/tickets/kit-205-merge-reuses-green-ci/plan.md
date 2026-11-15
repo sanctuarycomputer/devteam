@@ -7,7 +7,7 @@
 - Right before the gate loop, when an applicable gate declares `covered_by`, merge re-reads the PR once (`gh pr view --json headRefOid,statusCheckRollup`); a failed read, a moved head or forge `git` covers nothing. A covered gate is not run, writes no `gate` line, is printed, and is named in the merge act's `what`; any other gate runs exactly as today.
 - Tests drive `merge` on a sibling-repo ticket (the `multiFixture` pattern from `multirepo-landing.test.mjs`) with a fake `gh` that serves successive `pr view` answers from numbered files; the gate's command touches a marker file, so "ran" vs "not run" is a file check. One test per D1/D2/D3 case.
 - D3's owner rules are pinned by tests on existing code (a chore adding `covered_by` to a gate needs a gate-change answer; a supervisor gate-add can't carry it); `GATE_ADD_FIELDS` is not touched.
-- Order: T1 helpers + merge wiring with its tests, T2 the owner-rule tests (and the quality.md sentence if the design-change is granted). Built only after kit-204 merges and approve-plan is recorded.
+- Order: T1 helpers + merge wiring with its tests, T2 the owner-rule tests and the quality.md paragraph. Built only after kit-204 merges and approve-plan is recorded.
 - Risk: a gate skipped on a check state misread. The helper treats every state it doesn't know as not covered; tests cover pending, failed, missing, skipped-only, neutral, ignored-and-failing, moved head, failed re-read and forge git.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -23,11 +23,11 @@
 ## Rulings
 
 - m-20261115-203723494-supervisor: plan ahead (spec and plan now); build only after kit-204 merges and approve-plan is recorded; every brief carries k-20261115-182656232, k-20261115-080753394, k-20261115-164245020 and the scripts-in-files rule; only the touched files run, at `--test-concurrency=2`.
-- m-20261115-204302985 (design-change, quality.md into touches): pending.
+- m-20261115-204545585-supervisor (re m-20261115-204302985): quality.md is in touches for the covered_by sentences only; they say covered_by is trust in a check at the exact head sha, never an earlier one, and the gate still runs when a check is missing, failed or pending.
 
 ## Global constraints
 
-- Files outside this folder: `docs/devteam/scripts/devteam.mjs`, `test/kit.test.mjs` (and `docs/devteam/governance/quality.md` only if the design-change is granted). No file added.
+- Files outside this folder: `docs/devteam/scripts/devteam.mjs`, `test/kit.test.mjs` and `docs/devteam/governance/quality.md` (the covered_by paragraph only). No file added.
 - On the box: run only `test/kit.test.mjs` filtered to this ticket's tests, `node --test --test-concurrency=2 --test-name-pattern='covered_by' test/kit.test.mjs`, through `run-tests.sh` in this folder (own HOME via `mktemp -d`, `DEVTEAM_HUB_PORT=4791`, every `DEVTEAM_*` unset, `nice`, `timeout 900`), judged by its exit code, never through a pipe. `test.yml` on GitHub is the gate; its conclusion is read with `gh run view`.
 - Every test name this ticket adds contains `covered_by`, so the filter above selects exactly them.
 - No log schema change, no new settings key other than the gate field.
@@ -88,13 +88,13 @@
 
 **Files:**
 - Test: `test/kit.test.mjs`
-- Modify (only if the design-change is granted): `docs/devteam/governance/quality.md` §2, after **Modes**.
+- Modify: `docs/devteam/governance/quality.md` §2, after **Modes**.
 
 - [ ] **Step 1: tests** (pass on today's code; they pin it):
   1. `covered_by on an existing gate is the owner's gate-change` — `fleetFixture`; main gets `gates: { test: 'true' }` (committed, pushed); a chore changes it to `{ cmd: 'true', covered_by: 'ci' }`; `merge --chore x --dry-run` fails with `/changes owner settings: gates \(gate-change\)/`; with `--approved` of an answered gate-change question it passes.
   2. `covered_by on a new gate is not the supervisor's to add` — a chore adds `lint: { cmd: 'true', covered_by: 'ci' }`; output matches `/it sets covered_by; a new gate the owner hasn't approved has only cmd, paths, junit, mode/`.
 - [ ] **Step 2: run** — `run-tests.sh`, exit 0.
-- [ ] **Step 3: docs, if granted:** one paragraph after Modes: "**Covered by the forge.** A gate CI already runs can say `"covered_by": "ci"` (every check the forge reports) or `"covered_by": ["<check name>", …]` (those checks; preferred, since a check that never reported then counts as missing). `merge` then reads the PR again and does not run the gate when every one of those checks is complete and green at the exact head; with any pending, failed, missing or skipped, a moved head, or a forge with no checks, it runs the gate as usual. merge says which gates it trusted, and the merge act records them. It is the owner's gate field (gate-change)."
+- [ ] **Step 3: docs:** one paragraph after Modes: "**Covered by the forge.** A gate the forge's CI already runs can say `"covered_by": "ci"` (every check the forge reports) or `"covered_by": ["<check name>", …]` (those checks; preferred, since a check that never reported then counts as missing). It is trust in those checks at the exact head sha `merge` is landing, never at an earlier commit: `merge` reads the PR again and skips the gate only when every one of them is complete and green at that sha. When any is missing, failed or pending (or skipped, the head moved, or the forge has no checks), the gate runs as usual. `merge` says which gates it trusted, and its act records them. It is the owner's gate field (gate-change)."
 - [ ] **Step 4: commit** `kit-205: covered_by is the owner's`; `reviews/task-2.md`.
 
 ### Finish
