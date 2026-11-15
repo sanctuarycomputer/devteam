@@ -5119,21 +5119,6 @@ function pinRecords(id) {
 // run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
 // (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
 // add a fallback to home there. null, or why it didn't land.
-// Every earlier records head of a ticket merged into home's main by landRecords: a half-done
-// merge's first landing, before the records branch moved. The merge act names them, so none reads
-// as a merge no act made. A subject is only text anyone can write, so a head counts only when its
-// merge brought it in (it wasn't already in the first parent, as landRecords' --no-ff merge never
-// is), it is an ancestor of the records merge checks now (so those checks covered it), its merge changed
-// nothing outside the ticket's records folder, and its tree is exactly git's own merge of its two
-// parents (an evil merge adds what no records commit has); any other merge stays merged-without-merge.
-function landedRecordsHeads(id, recSha) {
-  const own = `${projectRel}/tickets/${id}/`;
-  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
-  mainRefCache = undefined;
-  const main = mainRef();
-  if (!main) return [];
-  return (git(['log', main, '--first-parent', '--merges', '--format=%H %P%x09%s']) ?? '').split('\n').filter((l) => l.split('\t')[1] === `${id}: records`).map((l) => l.split('\t')[0].split(' ')).filter(([m, p1, h, ...more]) => !more.length && /^[0-9a-f]{40}$/.test(h ?? '') && h !== recSha && ancestorOf(h, p1) === false && ancestorOf(h, recSha) === true && changedFiles(p1, m).every((x) => x.startsWith(own)) && mergeTree(p1, h).tree === git(['rev-parse', `${m}^{tree}`])).map(([, , h]) => h);
-}
 function landRecords(id, rec, linkName) {
   const HR = repo('home');
   const HS = HR.settings;
@@ -5410,7 +5395,11 @@ function cmdMerge() {
   if (rec && !rec.landed) {
     const why = landRecords(id, rec, R.name);
     if (why) die(`the records of ${id} did not land in home (${why}); nothing landed: verify from the start`);
-    out(`landed the records of ${id} at ${rec.sha.slice(0, 12)} in home`);
+    // Its own act, logged as it lands: the merge it made on home's main is named by what merge did,
+    // never inferred from git later (a subject, a tree or a parent is anything anyone can push). No
+    // refs: the ticket isn't merged until its code lands (merged-without-merge reads merge-word refs).
+    const ra = appendLog({ type: 'act', class: 'merge-word', what: `merged home's ticket/${id} at ${rec.sha}: the records of ${id}, ahead of its code in ${R.name}`, refs: [], reversible: false }, 'supervisor');
+    out(`landed the records of ${id} at ${rec.sha.slice(0, 12)} in home (${ra.id})`);
   }
   const landCode = () => {
     if (viaGit) {
@@ -5435,7 +5424,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home${landedRecordsHeads(id, rec.sha).map((h) => `, and earlier at ${h}`).join('')}` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {

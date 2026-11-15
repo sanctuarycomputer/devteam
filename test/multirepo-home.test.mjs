@@ -343,7 +343,10 @@ test('records in home: merge checks the records at one pinned sha and lands them
     assert.match(okIn(old, ['status']), new RegExp(`${id}.*records in home, code not merged: run merge ${id} again`));
     const findings = () => json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(findings().some((x) => x.kind === 'records-without-code' && x.subject === id), 'the finding that names the fix');
-    assert.ok(findings().some((x) => x.kind === 'merged-without-merge' && String(x.subject).startsWith('home:')), 'records on home\'s main with no merge act, which is true');
+    assert.ok(!findings().some((x) => x.kind === 'merged-without-merge'), 'the records merge is named by its own act, logged as it landed');
+    const recAct = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && String(a.what).startsWith(`merged home's ticket/${id} at ${r.head}`));
+    assert.ok(recAct, 'the records landing is an act of its own');
+    assert.deepEqual(recAct.refs ?? [], [], 'with no ticket refs: the ticket is not merged yet');
     // the retry: same checks, the records skipped (landed), the code lands, one act
     fs.rmSync(hook);
     const again = okIn(old, ['merge', id], SUP);
@@ -507,7 +510,9 @@ test('records in home: a half-done merge, then a review record added on home\'s 
     fs.rmSync(hook);
     assert.match(okIn(old, ['merge', id], SUP), new RegExp(`landed the records of ${id} at ${last.sha.slice(0, 12)} in home`));
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
-    assert.match(act.what, new RegExp(`; records at ${last.sha} in home, and earlier at ${r.head}$`), 'neither forged merge is named');
+    assert.match(act.what, new RegExp(`; records at ${last.sha} in home$`));
+    const landings = json(okIn(old, ['log', '--type', 'act', '--json'])).filter((a) => String(a.what).startsWith(`merged home's ticket/${id} at `)).map((a) => a.what.split(' ')[4].replace(/:$/, ''));
+    assert.deepEqual(landings, [r.head, last.sha], 'each records landing logged its own act; the forged merges have none');
     const f = json(okIn(old, ['metrics', '--json'])).findings;
     assert.ok(!f.some((x) => x.kind === 'records-without-code'));
     assert.deepEqual(f.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort(), [`home:${evil.slice(0, 12)}`, `home:${forged.slice(0, 12)}`].sort(), 'both records merges are named by the act; the forged ones stay flagged');
@@ -545,6 +550,10 @@ test('records in home: a hand-made merge borrowing the records subject is never 
     g(['clone', '-q', path.join(F.base, 'origin.git'), forge], F.base);
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], forge);
     g(['fetch', '-q', 'origin', `ticket/${id}`], forge);
+    // (0) a plain --no-ff merge of a real records commit, by hand before merge ran: git can't tell it
+    // from merge's own; only merge's act says what merge landed, so it stays flagged
+    g(['merge', '-q', '--no-ff', '-m', `${id}: records`, first.sha], forge);
+    const viaClean = g(['rev-parse', 'HEAD'], forge);
     g(['merge', '-q', '--no-ff', '-m', `${id}: records`, 'FETCH_HEAD'], forge);
     const viaFootprint = g(['rev-parse', 'HEAD'], forge);
     g(['checkout', '-q', '-b', 'y', 'origin/main'], forge);
@@ -570,6 +579,6 @@ test('records in home: a hand-made merge borrowing the records subject is never 
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && (a.refs ?? []).includes(id));
     assert.doesNotMatch(act.what, /and earlier at/, 'neither hand-made merge is named');
     const flagged = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge').map((x) => x.subject).sort();
-    assert.deepEqual(flagged, [viaAncestry, viaFootprint, viaEmpty, viaReadme].map((s) => `home:${s.slice(0, 12)}`).sort());
+    assert.deepEqual(flagged, [viaClean, viaAncestry, viaFootprint, viaEmpty, viaReadme].map((s) => `home:${s.slice(0, 12)}`).sort());
   } finally { F.done(); }
 });
