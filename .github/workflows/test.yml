@@ -3,53 +3,66 @@ on:
   pull_request:
   push:
     branches: [main]
+# A newer push to a pull request cancels its older run, so the org's runners aren't spent on a
+# stale head. A push to main is in a group of its own (its run id): never cancelled, never queued
+# behind another. Keyed on the PR's number, not its branch name, which forks can share.
+concurrency:
+  group: test-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   kit:
-    # named as before: the test_timeout below would otherwise join the name on 20, 22 and 24
     name: kit (${{ matrix.node }}, ${{ matrix.part }})
-    # Projects run the kit on whatever Node they pin, so test every supported major. Each major
-    # runs in two jobs side by side: the "devteam kit" chain (and the forks it starts), and every
-    # other test file.
+    # Projects run the kit on whatever Node they pin, so every supported major is tested. Every job
+    # runs test/run.mjs, which runs each file in a process of its own under a per-file watchdog (300 s,
+    # 600 s for the chain and the files it lists as long): a hung file fails in at most its timeout,
+    # named with the last test that finished, so no node flag caps a file or a test here.
+    # Groups (run.mjs reads them from the files): chain is kit.test.mjs; alone runs before anything
+    # else in its job; chrome is every file that imports lib/chrome.mjs; rest is the others. Shards
+    # are dealt by the weights in test/timings.json. Before Node 22 the Chrome-driven tests skip
+    # themselves (no WebSocket), so there the chrome files join the rest shards.
+    # Every job comes from this include list (no cross product), so none is ever excluded or
+    # skipped: scripts that gate on "every job green" count a skipped one as not green.
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22, 24]
-        part: [chain, rest]
-        # A hung test file ends its step in minutes, not at the job's limit. --test-timeout is
-        # 600000 (above dashboard.test.mjs, the longest file at about 400 s):
-        # - Node 18 rejects the flag (bad option), so it gets none;
-        # - on 20 and 22 it caps each whole file, killed and named as "not ok - <file>" if that
-        #   comes before the step's own limit;
-        # - on 24 it caps each top-level test only, and never ends a file held open after its tests.
-        # So every test step also has timeout-minutes: 12 (the slowest healthy step is about 7),
-        # and the last step lists what is still running.
         include:
-          - node: 20
-            test_timeout: --test-timeout=600000
-          - node: 22
-            test_timeout: --test-timeout=600000
-          - node: 24
-            test_timeout: --test-timeout=600000
+          - { node: 18, part: chain, key: chain, groups: chain, shard: '' }
+          - { node: 18, part: rest 1/2, key: rest-1, groups: 'rest,chrome', shard: 1/2, alone: true, gitleaks: true }
+          - { node: 18, part: rest 2/2, key: rest-2, groups: 'rest,chrome', shard: 2/2, gitleaks: true }
+          - { node: 20, part: chain, key: chain, groups: chain, shard: '' }
+          - { node: 20, part: rest 1/2, key: rest-1, groups: 'rest,chrome', shard: 1/2, alone: true, gitleaks: true }
+          - { node: 20, part: rest 2/2, key: rest-2, groups: 'rest,chrome', shard: 2/2, gitleaks: true }
+          - { node: 22, part: chain, key: chain, groups: chain, shard: '' }
+          - { node: 22, part: rest 1/2, key: rest-1, groups: rest, shard: 1/2, alone: true, gitleaks: true }
+          - { node: 22, part: rest 2/2, key: rest-2, groups: rest, shard: 2/2, gitleaks: true }
+          - { node: 22, part: chrome 1/2, key: chrome-1, groups: chrome, shard: 1/2 }
+          - { node: 22, part: chrome 2/2, key: chrome-2, groups: chrome, shard: 2/2 }
+          - { node: 24, part: chain, key: chain, groups: chain, shard: '' }
+          - { node: 24, part: rest 1/2, key: rest-1, groups: rest, shard: 1/2, alone: true, gitleaks: true }
+          - { node: 24, part: rest 2/2, key: rest-2, groups: rest, shard: 2/2, gitleaks: true }
+          - { node: 24, part: chrome 1/2, key: chrome-1, groups: chrome, shard: 1/2 }
+          - { node: 24, part: chrome 2/2, key: chrome-2, groups: chrome, shard: 2/2 }
     runs-on: ubuntu-latest
-    # the kit won't start a worker while the machine's memory is over its ceiling: the tests read a
-    # machine of their own (or none), never the runner's
+    timeout-minutes: 12
     env:
+      # the kit won't start a worker while the machine's memory is over its ceiling: the tests read a
+      # machine of their own (or none), never the runner's
       DEVTEAM_CGROUP: /nonexistent/devteam-cgroup
       DEVTEAM_MEMINFO: /nonexistent/devteam-meminfo
-    # a hung test should fail the job, not hold it for hours
-    timeout-minutes: 30
+      # this job's files, for both its --list and its run, so what the tests job checks is what ran
+      RUN_ARGS: --group ${{ matrix.groups }}${{ matrix.shard && format(' --shard {0}', matrix.shard) || '' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      # the kit drives workers through tmux; the tests run it on servers of their own, through a shim
-      # that refuses the machine's default server (test/lib/kit.mjs)
+      # the kit drives workers through tmux; the tests run it on servers of their own, through shims
+      # that refuse the machine's default server (test/lib/kit.mjs, test/run.mjs)
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
       # test/gitleaks.test.mjs runs the kit's gitleaks config through gitleaks itself: a pinned
       # release, checked against its published sha256, and required (DEVTEAM_TEST_GITLEAKS) so the
-      # test can't fall back to its regex-only check here
-      - if: matrix.part == 'rest'
+      # test can't fall back to its regex-only check. In both rest jobs, wherever the shards put it.
+      - if: matrix.gitleaks
         run: |
           set -euo pipefail
           V=8.30.1
@@ -58,23 +71,87 @@ jobs:
           echo "${SHA}  /tmp/gitleaks.tgz" | sha256sum -c -
           sudo tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
           gitleaks version
-      # test files are *.test.mjs directly under test/; test/lib holds helpers, which node --test's
-      # own discovery would also pick up
-      - if: matrix.part == 'chain'
-        timeout-minutes: 12
-        run: node --test ${{ matrix.test_timeout }} --test-concurrency=8 test/kit.test.mjs
-      # bounds.test.mjs times the kit's code against a bound: alone, so nothing else's load counts
-      - if: matrix.part == 'rest'
-        timeout-minutes: 12
-        run: node --test ${{ matrix.test_timeout }} test/bounds.test.mjs
-      - if: matrix.part == 'rest'
+      # what this job runs, for the tests job's check that each major runs every file once
+      - name: list
+        run: |
+          set -euo pipefail
+          : > list.txt
+          if [ "${{ matrix.alone }}" = true ]; then node test/run.mjs --list --group alone >> list.txt; fi
+          # shellcheck disable=SC2086 # RUN_ARGS is several words
+          node test/run.mjs --list $RUN_ARGS >> list.txt
+          cat list.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: list-${{ matrix.node }}-${{ matrix.key }}
+          path: list.txt
+          if-no-files-found: error
+          # a re-run of failed jobs replaces its own list and still finds the others'
+          overwrite: true
+          retention-days: 7
+      # alone: bounds.test.mjs times the kit's code, so nothing else's load should count; a step of
+      # its own, so it is in rest 1/2 whatever the shard weights say
+      - if: matrix.alone
+        timeout-minutes: 11
         env:
-          DEVTEAM_TEST_GITLEAKS: '1'
-        timeout-minutes: 12
-        run: node --test ${{ matrix.test_timeout }} --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')
-      # Names a hung file. A step's timeout signals only its shell, so the node --test runner, the
-      # hung file's own process (its path names the file) and what it started (a dashboard's or
-      # hub's tmp folder names its test) are all still running here; when Node's per-file limit
-      # fired first instead, its "not ok - <file>" line above names it.
-      - if: failure()
+          DEVTEAM_TEST_GITLEAKS: ${{ matrix.gitleaks && '1' || '' }}
+        run: node test/run.mjs --concurrency "$(nproc)" --group alone
+      # runs after a red alone step too, so one job shows every failure
+      - if: ${{ !cancelled() }}
+        timeout-minutes: 11
+        env:
+          DEVTEAM_TEST_GITLEAKS: ${{ matrix.gitleaks && '1' || '' }}
+        run: |
+          # shellcheck disable=SC2086 # RUN_ARGS is several words
+          node test/run.mjs --concurrency "$(nproc)" $RUN_ARGS
+      # run.mjs names a hung file itself. This lists what is still running when a step's or the
+      # job's limit ends it instead (the runner itself hung): a step timeout signals only its shell.
+      - if: failure() || cancelled()
         run: ps -eww -o pid,ppid,etimes,args
+  # The one check over the whole run. if: always(), so it runs (and is red) when a job failed or was
+  # cancelled: skipped, a required check would count as passing. always() rather than !cancelled()
+  # for the same reason, in a cancelled run.
+  tests:
+    needs: [kit]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: needs
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            let ok = Object.keys(needs).length > 0;
+            for (const [job, v] of Object.entries(needs)) { console.log(job + ": " + v.result); if (v.result !== "success") ok = false; }
+            process.exit(ok ? 0 : 1);
+          '
+      - if: always()
+        uses: actions/checkout@v5
+      - if: always()
+        uses: actions/download-artifact@v4
+        with:
+          pattern: list-*
+          path: lists
+      # Per Node major, the files its jobs listed, together, are test/*.test.mjs, each once: a file
+      # in no shard, or in two, makes the diff non-empty.
+      - name: coverage
+        if: always()
+        run: |
+          set -euo pipefail
+          printf '%s\n' test/*.test.mjs | sort > want.txt
+          bad=0
+          for n in 18 20 22 24; do
+            set -- lists/list-"$n"-*/list.txt
+            if [ ! -f "$1" ]; then echo "Node $n: no lists"; bad=1; continue; fi
+            cat "$@" | awk '{print $1}' | sort > "got-$n.txt"
+            if diff want.txt "got-$n.txt" > "diff-$n.txt"; then
+              echo "Node $n: $(wc -l < "got-$n.txt") files from $# jobs, each once"
+            else
+              echo "Node $n: the jobs' lists differ from test/*.test.mjs (< missing, > extra or repeated):"
+              cat "diff-$n.txt"
+              bad=1
+            fi
+          done
+          exit "$bad"

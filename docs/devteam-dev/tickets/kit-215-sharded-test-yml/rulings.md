@@ -16,3 +16,11 @@ What this changes:
   The tests:
   1. `gate ci -- sh …/devteam-ci-green.sh <green head>` exits 0, and `sh …/devteam-ci-green.sh <failing commit's sha>` exits 1, naming `kit (18, chain)` and `tests`.
   2. A script in this folder (`gates-accept.mjs`) imports `checksRefusal` from `/data/home/code/devteam-dev/scripts/kit-merge-pr.mjs`, reads `gh pr checks <n> -R sanctuarycomputer/devteam --json name,state,bucket` saved at the green head, and exits 0 only if `checksRefusal` returns null. It does the same for the checks saved at the failing commit and exits 0 only if it gets a refusal. Each saved file holds 17 test.yml entries, plus any other workflow's checks.
+
+## m-20261115-214100201-supervisor
+
+"kit-212 has merged. Start Task 1 (merge origin/main into your branch first)." Merged at 5aa69bc; main now has 73 test files.
+
+## m-20261115-214228505-supervisor
+
+Review rounds are capped (trial a-20261115-214153204, lesson k-20261115-214154316): after a second round of any spec, plan or final review, Minor findings are fixed and disposed with no further pass; a third pass only confirms a Critical or Important fix, covering only that fix.
