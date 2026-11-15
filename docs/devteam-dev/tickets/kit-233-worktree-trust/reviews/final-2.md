@@ -1,0 +1,12 @@
+# Final review, pass 2
+
+- Reviewer: final-reviewer 2 (fresh subagent, claude-opus-5-5; has not seen the build)
+- Reviewed: b44ec60b76c7ac9ac3f7431eeec1bf8a8569e71b
+
+I read final-1 and its dispositions, and the diff from 0d171ca to b44ec60. Outside this ticket's folder, the only change is in devteam.mjs: the comment by the `agent_trust_command` default, and the next-step text of the worker and planner `blocked-prompt` findings. test/kit.test.mjs and governance/quality.md did not change. Each disposition holds at b44ec60. F3: both `blocked-prompt` next steps now name `agent_trust_command`. F4: the comment says to keep the hook quick and idempotent, since it runs on every launch, a resume and the tick's relaunches included. That is true, because the hook runs in `makeSession` after `seedWorktree` and before the launch lock, so every `worker` or `planner` call runs it. F5: the comment says to name scripts by absolute path, because the hook's cwd is the worktree (`cwd: wt`). F1 and F2 are wont-fix, and verification.md lists both under "Not covered by a test". No test asserts the next-step text. test/lib/chain.mjs and the folder-trust test check only `subject` and `detail`, and grep finds no other reader of the old wording. I checked verification.md against the folder-trust test at the end of test/kit.test.mjs. Every row's claim matches an assertion there: the detail prefix, the boxed and numbered forms, the mid-line and busy-pane negatives, the hook's real-path `DEVTEAM_WORKTREE` and cwd, its output on stderr only, the failing hook's warning, and the `governance-edit` refusal followed by the approved dry-run. Its other claims check out too. `fe6adbc` is the red task-1 commit. 051fefc to b44ec60 adds only verification.md. `git diff --name-status origin/main...b44ec60` names only the three files the row lists. The folder-trust test passes here (1 pass, 0 fail, 8 s).
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| F1 | Suggestion | Clarity | devteam.mjs collectMetrics, worker `blocked-prompt` next step | The new clause leaves out its verb ("... need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree"), so it can read as a relative clause with no main verb. "and a folder-trust dialog means agent_trust_command could pre-trust the worktree", the planner's wording, would read plainly. | |
+
+Verdict: APPROVE b44ec60b76c7ac9ac3f7431eeec1bf8a8569e71b
