@@ -14,17 +14,18 @@ The Node 22 rest job never hangs to its 30-minute limit: a per-test timeout name
   - **Node 24.14.1:** it caps each top-level test (supervisor m-20261115-050643117: kit.test.mjs is one of about 180 s), but never ends a file whose tests have finished while a child holds it open.
   - `--test-force-exit` ends such a file on 20 to 24, but the run passes, so the leak is hidden.
   - The longest file, dashboard.test.mjs, takes about 400 s, so the value is 600000 where the flag exists.
-- **Healthy step times** (the last 15 green test.yml runs): the slowest test step is 429 s (`kit (24, rest)`); the slowest chain step is 236 s (`kit (18, chain)`); bounds takes under 10 s. A 12-minute step limit (720 s) clears the slowest by about 1.7×, and the 600 s per-file limit fires first on 20, 22 and 24, so the file is named before the step is stopped.
+- **Healthy step times** (the last 15 green test.yml runs): the slowest test step is 429 s (`kit (24, rest)`); the slowest chain step is 236 s (`kit (18, chain)`); bounds takes under 10 s. A 12-minute step limit (720 s) clears the slowest by about 1.7×.
+- **What names a hung file.** The 600 s per-file limit names the file through Node's runner (`not ok - <file>`) only on 20 and 22, and only for a file that started within the step's first 120 s; otherwise the 12-minute step limit stops the step first. Node 24 has no per-file limit. So on every major, the failure-only listing is what names it. A step timeout leaves those processes alive for that step: the runner signals only the step's shell (actions/runner `src/Runner.Sdk/ProcessInvoker.cs`, `kill(_proc.Id, …)` then `NixKillProcessTree`), so the `node --test` runner, its file processes and their detached children all live until the job ends.
 
 ## Acceptance checks (the done-whens)
 
 1. A hung test ends the job in minutes on every major, and the log names it (ruling m-20261115-051541126):
    - every `node --test` step in the `kit` job (chain, bounds, rest) passes `--test-timeout=600000` on Node 20, 22 and 24, through a matrix value, and nothing on 18, which rejects the flag;
    - every test step has `timeout-minutes: 12`, on every major;
-   - a step that runs only on failure lists the processes still alive (pid, age, command), so a leaked dashboard, hub or Chrome names its test by its tmp folder;
+   - a step that runs only on failure (a step timeout counts) lists every process still alive, unfiltered (pid, parent, age, full command). The hung file's own `node … test/<file>.test.mjs` process names the file, and a leaked dashboard or hub names its test by its tmp folder (`devteam-hub-ov-…`, `devteam-<machine>-…`). Chrome's profile folder (`devteam-chrome-…`) is generic, so Chrome is found through its parent;
    - no `--test-force-exit`.
 
-   Check: on the PR's CI every job passes (Node 18 accepts the steps; no healthy file reaches either limit). The per-major behaviour above is recorded in verification.md from the probes.
+   Check: on the PR's CI every job passes (Node 18 accepts the steps; no healthy file reaches either limit). The per-major behaviour above is recorded in verification.md from the probes. Nothing here relies on Node's `not ok - <file>` line: verification shows the listing's output, from one run of the listing command on the box against a probe that leaks a child.
 2. The hanging test is fixed, and the cause is in the PR. Every test in `test/hub-overview.test.mjs` cleans up through one ordered cleanup:
    - steps run last-registered-first, so processes are stopped before the folders they write into are removed;
    - every step runs even if an earlier one throws;
@@ -36,7 +37,7 @@ The Node 22 rest job never hangs to its 30-minute limit: a per-test timeout name
 
 ## Approaches considered
 
-- **A. An ordered cleanup local to the file (chosen).** One `cleanup(t)` helper in hub-overview.test.mjs. On first use it registers a single `t.after` that runs the steps registered so far in reverse, each in its own try/catch, then rethrows the first error. A step registered after that hook has started runs at once (a `t.after` added then would never run), and each step is bounded by a timeout of its own (30 s), so one that never settles can't block the rest. The helpers and tests register through it instead of calling `t.after` directly. This fixes the order and the skipping for every test in the file, and changes nothing outside it.
+- **A. An ordered cleanup local to the file (chosen).** One `cleanup(t)` helper in hub-overview.test.mjs. On first use it registers a single `t.after` that runs the steps registered so far in reverse, each in its own try/catch, then rethrows the first error. A step registered after that hook has started runs at once (a `t.after` added then would never run). Its error joins the first error while the hook is still running; after the hook has finished, the error is caught and written to stderr rather than left as an unhandled rejection after the test, and each step is bounded by a timeout of its own (30 s), so one that never settles can't block the rest. The helpers and tests register through it instead of calling `t.after` directly. This fixes the order and the skipping for every test in the file, and changes nothing outside it.
 - **B. Make the removal never throw (try/catch around `rmSync`).** Later hooks would run, but the folder is still removed before the processes stop, so it's left behind in tmp, and a different throwing hook would still skip the rest.
 - **C. Register the removal after the stops.** This fixes this order but stays fragile: a test that fails before reaching that line never removes its folder, and any other throwing hook still skips the rest.
 - **D. A shared helper in `test/lib/kit.mjs`, used by every file with the pattern** (dashboard, speed and operator-threads tests too). That is the full fix, but it is outside this ticket's touches and overlaps other tickets on those files. Ruled out of this ticket: the supervisor gives that pattern to the tests-light goal (m-20261115-050956047).
@@ -63,4 +64,5 @@ None provided or consumed: test code and CI configuration only.
 - m-20261115-050956047 (supervisor, on design-change m-20261115-050850201): `test/hub-overview.test.mjs` added to touches; this ticket now follows kit-50 (its build waits for kit-50's merge). Fix only that file; the pattern in the dashboard, speed and operator-threads tests goes to tests-light.
 - m-20261115-050252206 (supervisor): on Node 20 and 22, `--test-timeout` applies per file; set it above the longest file, for example 600000.
 - m-20261115-050643117 (supervisor): on Node 24 it also caps a top-level test; never less than 600000.
+- Spec review 2 F2-1: the step limit stays at 12 minutes (the ruling below), and the spec no longer claims Node's per-file limit fires first; the listing names the file on every major.
 - m-20261115-051541126 (supervisor, on design-change m-20261115-051533609, after spec review F1/F2): `--test-timeout=600000` on 20, 22 and 24 only; `timeout-minutes: 12` on every test step; a failure-only step listing leftover processes; no `--test-force-exit`. Confirm 12 minutes clears the slowest healthy job on every major with margin (done above: 429 s max).
