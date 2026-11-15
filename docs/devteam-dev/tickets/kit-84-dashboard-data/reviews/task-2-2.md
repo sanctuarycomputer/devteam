@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T2-2-1 | Minor | test coverage (outside the verdict) | docs/devteam/scripts/devteam.mjs:11754 | The no-goal fallback hint (`ask … --links '[{"title":"The plan","ref":"plan/<feature>","path":…}]'`) is untested. `cmdAsk` accepts `--links` and the item has exactly one way (`path`, devteam.mjs:6081-6087), so it is accepted; `ref` is an extra key that ask ignores for non-strategy links. It is only reached when a planner serves no goal. | |
+| T2-4 | Minor | test coverage (outside the verdict) | docs/devteam/scripts/devteam.mjs:11754 | The no-goal fallback hint (`ask … --links '[{"title":"The plan","ref":"plan/<feature>","path":…}]'`) is untested. `cmdAsk` accepts `--links` and the item has exactly one way (`path`, devteam.mjs:6081-6087), so it is accepted; `ref` is an extra key that ask ignores for non-strategy links. It is only reached when a planner serves no goal. | wont-fix the reviewer confirmed cmdAsk accepts the --links shape; a planner with no goal needs a feature line without goals, which the fixture can't build cheaply; the branch is one template string |
 
 Pass-1 findings:
 - T2-1: fixed. The planner hint is now `ask on its goal (ask --goal <first goal> …); otherwise answer its blocked message` (devteam.mjs:11754-11755). It never names `--blocks plan-…`. `--goal` is accepted by cmdAsk (devteam.mjs:5870-5990, `flagStr('goal')`), and a plan branch's question is held through `waiting_on_owner` by goal (devteam.mjs:3396). The test asserts the `--goal <g3>` text and `doesNotMatch /--blocks plan-/` (test/dashboard-data.test.mjs:~205-207). The ticket hint is unchanged.
