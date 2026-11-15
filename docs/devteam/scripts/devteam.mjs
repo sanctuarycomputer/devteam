@@ -1126,6 +1126,70 @@ function ladder() {
   return (ladderCache = a);
 }
 const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
+// The rungs as the dashboard says them.
+const RUNG_PLAIN = { 1: 'asks you first', 2: 'asks, goes ahead at a deadline', 3: 'decides and tells you' };
+// Every kind of decision in plain words, for display: the constitution's classes, constitutional and
+// owner-only lists, every class the kit writes itself (OWNER_ACTS, the fleet's, the goal's), and
+// kit-85's settings acts. A name never contains a class id (the one-word ones included), so no id
+// ever shows. One entry per line: test/dashboard-data.test.mjs takes one out to check it is missed.
+const CLASS_WORDS = Object.freeze({
+  'new-feature': "Starting a feature you haven't asked for",
+  'priority-change': 'Changing what gets worked on first',
+  'release-scope': 'Moving a story to a later release',
+  'upstream-pr': 'Proposing an improvement to the kit itself',
+  'release-production': 'Shipping a release to production',
+  'production-migration': 'Changing production data',
+  'incident-fix': 'Fixing a production incident',
+  'production-remediation': 'Restarting, scaling or rolling back production',
+  'merge-word': 'Merging a ticket',
+  'approve-feature-plan': "Approving a feature's plan",
+  'merge-chore': 'Merging a chore',
+  'worker-slots': 'Starting and stopping workers',
+  'replan-within-feature': 'Replanning the tickets of a feature',
+  'add-ticket': 'Adding a ticket',
+  'approve-spec': "Approving a ticket's spec",
+  'approve-plan': "Approving a ticket's plan",
+  'approve-design-change': 'Approving a change to a design',
+  'contract-ruling': 'Ruling on a contract between pieces of work',
+  'improvement-trial': 'Trying out a process improvement',
+  'release-staging': 'Shipping a release to staging',
+  'goal-readiness': 'Saying a goal is ready to start',
+  'apply-default': "Going ahead with a question's default",
+  'withdraw-question': 'Taking back a question',
+  recovery: 'Getting stuck work going again',
+  'carry-answer': 'Applying an earlier answer of yours',
+  drain: 'Letting running work finish and starting nothing new',
+  undrain: 'Starting new work again after a wind-down',
+  'goal-hold': 'Holding a goal or letting it go',
+  'fleet-drain': 'Winding down the whole fleet',
+  'fleet-park': 'Parking the whole fleet',
+  'fleet-undrain': 'Starting the whole fleet again after a wind-down',
+  'fleet-unpark': 'Unparking the whole fleet',
+  'registry-edit': 'Changing a registry entry',
+  'goal-impact': 'Judging how much a goal matters',
+  'orient-noise': 'Ruling some signals to be noise',
+  'gate-add': 'Adding a check',
+  'one-way-door': "A change that can't be undone",
+  'check-override': 'Overriding a failing check',
+  'governance-edit': 'Changing the rules',
+  'process-edit': 'Changing how the team works',
+  'gate-change': 'Changing a check',
+  'goal-change': 'Changing a goal',
+  'strategy-change': 'Changing the strategy',
+  'goal-met': 'Saying a goal is met',
+  'registry-attest': 'Confirming the registry is complete',
+  'new-dependency': 'Adding a new dependency',
+  'artifact-publish': 'Publishing a page',
+  'pane-answer': "Answering the supervisor's terminal",
+  'goal-order': 'Putting the goals in order',
+  'goal-approval': 'Approving a goal',
+  'owner-setting': 'Asking for a setting',
+  'settings-edit': 'Changing one of its own settings',
+});
+// A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
+// in its own words, so the gap is visible and the bare id never is. No class, no name.
+const className = (c) => (c == null ? null : Object.hasOwn(CLASS_WORDS, c) ? CLASS_WORDS[c] : `Unnamed kind (${String(c).toLowerCase().replace(/-/g, ' ')})`);
+const withClassName = (row) => ({ ...row, class_name: className(row.class) });
 
 // ===== 3. the schema and the log =====
 
@@ -12025,20 +12089,20 @@ function collectOoda() {
     // supervisor's to accept (the owner sees those too, read-only); only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
-    acts: recent(acts, 60),
-    decisions: decisionRecords().slice(0, 200),
-    trust,
-    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    acts: recent(acts, 60).map(withClassName),
+    decisions: decisionRecords().slice(0, 200).map(withClassName),
+    trust: trust.map(withClassName),
+    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k), class_name: className(k) }])),
     impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
-    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
+    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80).map(withClassName),
     // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
     // under three records the Loop shows these since the log began instead of lines; retros and rung
     // changes mark the chart, so cause sits next to effect
     learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
-    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
+    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${className(t.class)} to ${RUNG_PLAIN[e.rung]}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
     learning: learningRecords().map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
@@ -12053,8 +12117,10 @@ function dashboardData() {
     caps: { max_active_tickets: settings.max_active_tickets },
     gates_configured: Object.keys(settings.gates ?? {}),
     tickets: deriveStatus(),
+    // every kind of decision in plain words; each row with a class carries its class_name
+    class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
-    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')),
+    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
