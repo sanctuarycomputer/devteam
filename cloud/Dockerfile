@@ -276,9 +276,10 @@ last=""
 while IFS="$tab" read -r s _ n id; do
   [ -n "$id" ] && [ "$n" != dashboard ] || continue
   case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
-  [ "$s" != "$last" ] && [ -n "$last" ] && set -- "$@" "-#[align=centre]$tag" "" ""
+  [ "$s" != "$last" ] && [ -n "$last" ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
   last="$s"
-  set -- "$@" "$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34)" "" "switch-client -c '$c' -t '$id'"
+  # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it literally
+  set -- "$@" "$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34 | sed 's/#/##/g')" "" "switch-client -c '$c' -t '$id'"
 done <<LIST
 $list
 LIST
