@@ -4664,7 +4664,7 @@ function render(d) {
   const stats = [
     ['done', `${pct(fcAll.done, fcAll.scope)}%`],
     ['forecast finish', fcAll.finished ? 'done' : fcAll.eta ? fmtDate(fcAll.eta) : '–'],
-    ['workers active', `${active}/${d.caps.max_active_tickets}`],
+    ['workers active', `${active}/${d.caps.max_active_tickets ?? 'no cap'}`],
     ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
     ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],

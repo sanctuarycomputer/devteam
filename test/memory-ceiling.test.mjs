@@ -54,7 +54,7 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     assert.ok(!full.some((f) => ['idle-capacity', 'idle-planning'].includes(f.kind)), JSON.stringify(full.map((f) => f.kind)));
     const mf = full.find((f) => f.kind === 'memory-full');
     assert.ok(mf, 'memory-full is shown');
-    assert.match(mf.detail, /^the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling, with 5 tickets ready, 0\/5 workers active/);
+    assert.match(mf.detail, /^the machine's memory is at 27\.2 of 32\.0 GB \(85%\), at or over its 80% ceiling, with 5 tickets ready, 0\/no cap workers active/);
     assert.match(mf.suggestion, /lower max_active_tickets/);
     assert.doesNotMatch(mf.suggestion, /make a worker|make workers/);
 

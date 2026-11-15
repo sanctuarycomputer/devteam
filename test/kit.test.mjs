@@ -824,7 +824,7 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
       if (!findings.some((f) => f.kind === 'memory-full')) {
         const idle = findings.find((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject));
         assert.ok(idle, 'idle capacity');
-        assert.match(idle.detail, /^2\/\d+ workers active/);
+        assert.match(idle.detail, /^2\/(\d+|no cap) workers active/);
         assert.match(idle.suggestion, /w-02-stopped/);
       }
     }
@@ -848,6 +848,8 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     const r = ready();
     assert.deepEqual(r.active.filter((id) => ids.includes(id)), ['w-03-stuck']);
     assert.equal(r.active_per_component.web, 1);
+    assert.equal(r.caps.max_active_per_component, null, 'no cap per component by default');
+    assert.ok(!/component at cap/.test(F.sup(['ready'])), 'and so none is ever at cap');
     assert.deepEqual(r.held.map((x) => x.id).filter((id) => ids.includes(id)).sort(), ['w-01-held', 'w-04-held-stopped']);
     assert.ok(r.ready.some((x) => x.id === 'w-02-stopped'));
     assert.match(F.sup(['ready']), /^active workers: 2\//m, 'w-03-stuck and w-05-worktree; neither held nor stopped');
