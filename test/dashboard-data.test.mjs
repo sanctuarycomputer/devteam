@@ -471,6 +471,8 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const init = fs.readFileSync(sf, 'utf8');
   const cmd = 'claude --token ghp_PLANTED1';
   const TOKEN = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
+  // a sensor id the scrubber catches: a names key that reads withheld (T6-1)
+  const SENSOR_ID = 'ghp_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2';
   const planted = {
     ...block(init),
     max_active_tickets: 3,
@@ -478,7 +480,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     gates: { test: { cmd: 'TOKEN=PLANTED2 npm test' } },
     upstream_repo: 'https://user:PLANTED3@example.com/PLANTED4/kit.git',
     links: { ...block(init).links, site: { kind: 'url', title: 'Site', url: 'https://example.com/?key=PLANTED5' } },
-    sensors: { web: { kind: 'http', url: 'https://example.com/PLANTED6' } },
+    sensors: { web: { kind: 'http', url: 'https://example.com/PLANTED6' }, [SENSOR_ID]: { kind: 'http', url: 'https://example.com/health' } },
     sensor_defaults: { params: { token: 'PLANTED7' } },
     remediations: { restart: { script: 'x.mjs', params: { key: 'PLANTED8' } } },
     sensor_scrub: ['PLANTED9'],
@@ -536,6 +538,9 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   assert.equal(entry(all, 'sensor_scrub').value, 1);
   assert.equal(entry(all, 'secret_commands').value, 1);
   assert.deepEqual(entry(all, 'sensor_defaults').value, ['params']);
+  assert.equal(SENSOR_ID.length, 4 + 36);
+  assert.deepEqual(entry(all, 'sensors').value, ['web', '[withheld]'], 'a sensor id the scrubber catches reads withheld');
+  assert.ok(!JSON.stringify(all).includes(SENSOR_ID), 'the sensor id token shows');
   const ac = entry(all, 'agent_command');
   assert.deepEqual([ac.value, ac.set, ac.default, ac.owner_only], [null, true, 'claude --dangerously-skip-permissions', 'governance-edit']);
   assert.equal(entry(all, 'upstream_repo').default, null);
