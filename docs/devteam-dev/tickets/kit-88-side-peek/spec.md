@@ -110,9 +110,11 @@ Each peek keeps everything today's opener for its kind draws, restyled only. The
 
 ## 7. Open points for the supervisor
 
-1. `test/dashboard-owner-action.test.mjs` (not in `touches`) clicks the lesson peek's Retire it and expects a `POST /api/knowledge` (its lines ~151–155). §2.3 makes that button start a thread, so that test must change: its positive control moves to the Inbox lesson card's Retire it, which still posts. Recommendation: add `test/dashboard-owner-action.test.mjs` to `touches`.
+1. Settled by `m-20261115-195457593-supervisor` (below). `test/dashboard-owner-action.test.mjs` clicks the lesson peek's Retire it and expects a `POST /api/knowledge` (its lines ~151–155). §2.3 makes that button start a thread, so that test must change: its positive control moves to the Inbox lesson card's Retire it, which still posts. Recommendation: add `test/dashboard-owner-action.test.mjs` to `touches`.
 2. `test/fixtures/dashboard-shell.html` (§2.5): recommendation: leave it out; the test wires the fixture's table in the loaded page.
 
 ## Rulings
+
+- `m-20261115-195457593-supervisor`: `test/dashboard-owner-action.test.mjs` is in touches. It keeps a test that the peek's Retire it starts a thread and posts nothing to `/api/knowledge`, beside the moved positive control (the Inbox lesson card's Retire it, which posts).
 
 - `m-20261115-195003493-supervisor`: plan ahead (spec and plan now; the mock at main is the reference); build nothing until kit-87 has merged and approve-plan is recorded; briefs carry lessons `k-20261115-182656232`, `k-20261115-080753394`, `k-20261115-164245020` and the scripts-in-files rule; run only touched files at `--test-concurrency=2`.
