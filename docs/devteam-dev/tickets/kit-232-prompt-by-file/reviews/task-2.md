@@ -18,7 +18,7 @@ Task 1's test passes against this commit, and fails when this site is reverted i
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T2-1 | nit | quality (readability) | devteam.mjs:15192–15197 | `promptPointer` and its comment were inserted between `typeNow` and its existing comment ("Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter)."), which now reads as if it describes `promptPointer`. Move the helper above that comment. | |
-| T2-2 | info | spec check 1 | devteam.mjs:12705, 12922 | No test exercises the argv of the fresh `recoverOne`/`legacyRecover` pointer. The spec accepts "code at the three sites" plus machine.test.mjs:632 for these, so this does not block, and the code is correct by reading. Recorded for visibility only. | |
+| T2-1 | nit | quality (readability) | devteam.mjs:15192–15197 | `promptPointer` and its comment were inserted between `typeNow` and its existing comment ("Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter)."), which now reads as if it describes `promptPointer`. Move the helper above that comment. | fixed: in ba9296b, promptPointer moved above the typeNow comment |
+| T2-2 | info | spec check 1 | devteam.mjs:12705, 12922 | No test exercises the argv of the fresh `recoverOne`/`legacyRecover` pointer. The spec accepts "code at the three sites" plus machine.test.mjs:632 for these, so this does not block, and the code is correct by reading. Recorded for visibility only. | wont-fix the spec accepts code at the supervisor sites; their tests are outside touches |
 
 Verdict: APPROVE 6f426be7bc8af7abd98891fc14b63f3159de37ee

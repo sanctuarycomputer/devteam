@@ -22,6 +22,6 @@ One portability nit: the exact `first` equality builds the expected path from th
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T1-1 | minor | quality (portable tests) | test/kit.test.mjs:623 (`assert.equal(call.first, …${prompt}…)`) | The expected pointer uses `path.join(F.old, …)`, not the realpath. Under a symlinked tmpdir (macOS `/var` → `/private/var`) the kit names `/private/var/…` and the exact match fails when run locally. Line 221 already accepts either `[p, fs.realpathSync(p)]`. CI (ubuntu-only) is unaffected. Suggest comparing against both forms, or `fs.realpathSync(prompt)`. | |
+| T1-1 | minor | quality (portable tests) | test/kit.test.mjs:623 (`assert.equal(call.first, …${prompt}…)`) | The expected pointer uses `path.join(F.old, …)`, not the realpath. Under a symlinked tmpdir (macOS `/var` → `/private/var`) the kit names `/private/var/…` and the exact match fails when run locally. Line 221 already accepts either `[p, fs.realpathSync(p)]`. CI (ubuntu-only) is unaffected. Suggest comparing against both forms, or `fs.realpathSync(prompt)`. | fixed: in ba9296b, the pointer is matched against the path and its realpath |
 
 Verdict: APPROVE 83ea4218d893cbd3bbec5c206ae085ddaccf248d
