@@ -11556,7 +11556,8 @@ function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS 
     const usd = items.filter((x) => x.who === id && x.role === 'reviewer' && (x.phase === 'final-review' || x.phase === 'review')).reduce((a, x) => a + x.usd, 0);
     return finals ? usd / finals : null;
   }).filter((x) => x !== null);
-  const perPass = median(perTicket);
+  // with no spend items (spend reported on phase lines only) there is no reviewer spend to price from
+  const perPass = items.length ? median(perTicket) : null;
   if (perPass !== null) {
     const small = ids.filter((id) => ts.get(id)?.size === 'S' && ts.get(id)?.risk === 'normal');
     const passes = small.reduce((a, id) => a + recs(id).filter((r) => r.verdict && ['spec', 'plan'].includes(reviewPassOf(r.file)?.stage)).length, 0);
@@ -11603,7 +11604,7 @@ function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS 
     const spent = m.cost.by_ticket[f.subject] ?? 0;
     add('costly-ticket', f.subject, spent - med * points, 'once', `Find where ${f.subject}'s spend went, and try a lever on the next tickets like it`, `${dollars(+spent.toFixed(2))} on ${points} point${points === 1 ? '' : 's'}, against a median of ${dollars(+med.toFixed(2))} a point`);
   }
-  return out.sort((a, b) => b.usd - a.usd || a.id.localeCompare(b.id)).slice(0, 5);
+  return out.sort((a, b) => b.usd - a.usd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 5);
 }
 function efficiencyData(m) {
   const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];

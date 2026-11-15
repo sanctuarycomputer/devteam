@@ -436,3 +436,21 @@ test('cache and costly tickets, the top five by dollars, and dropping out', (t) 
     assert.deepEqual(E.data().efficiency.suggestions.map((x) => x.id), ['eff-smaller-model-claude-opus-5-5', 'eff-costly-ticket-eff-33-k', 'eff-cache-prompt-cache', 'eff-costly-ticket-eff-33-k3', 'eff-costly-ticket-eff-33-k4']);
   } finally { E.done(); }
 });
+
+test('no spend items: no price per review pass, so no review suggestions', (t) => {
+  const E = effFixture('eff-reported');
+  try {
+    if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
+    // spend reported on phase lines only (no harness logs, no spend lines)
+    const reported = (id, k, i, usd) => { E.addTicket(id); const m = E.mergeAt(k, i); E.hand(id, { type: 'phase', from: null, to: 'build' }, m - 2 * HOUR); E.hand(id, { type: 'phase', from: 'build', to: 'final-review', usd }, m - HOUR); E.merge(id, m); };
+    reported('eff-34-x', 6, 0, 4);
+    E.reviewFile('eff-34-x', 'final-1.md', 'APPROVE');
+    reported('eff-34-s', 11, 0, 2);
+    for (const f of ['spec-1.md', 'spec-2.md', 'plan-1.md']) E.reviewFile('eff-34-s', f, 'APPROVE');
+    E.land();
+    const eff = E.data().efficiency;
+    if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
+    assert.equal(eff.weeks[11].tickets, 1, 'reported spend still counts the ticket');
+    assert.deepEqual(eff.suggestions, []);
+  } finally { E.done(); }
+});
