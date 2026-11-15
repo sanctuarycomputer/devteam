@@ -11,6 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
@@ -30,7 +33,7 @@ jobs:
           docker volume create box-data >/dev/null
           docker run -d --name box -e DEVTEAM_PUBLIC_URL=https://box.test -v box-data:/data -p 127.0.0.1:8080:8080 box >/dev/null
           end=$((SECONDS + 120))
-          until curl -fsS -o /dev/null http://127.0.0.1:8080/healthz 2>/dev/null; do
+          until curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:8080/healthz 2>/dev/null; do
             [ "$(docker inspect -f '{{.State.Running}}' box)" = true ] || { echo "the box stopped before /healthz answered"; exit 1; }
             [ "$SECONDS" -lt "$end" ] || { echo "timed out after 120s: /healthz"; exit 1; }
             sleep 1
@@ -58,7 +61,7 @@ jobs:
           IN_BOX='
           list_in() {
             local j
-            j=$(curl -fsS --max-time 1 http://127.0.0.1:4320/instances.json 2>/dev/null) || return 1
+            j=$(curl -fsS --max-time 2 http://127.0.0.1:4320/instances.json 2>/dev/null) || return 1
             J="$j" ROOT="${1:-}" /usr/local/bin/node -e "const j = JSON.parse(process.env.J); process.exit(j.hub === 1 && j.kit === process.env.REL && j.image === true && (process.env.ROOT === \"\" || (j.instances ?? []).some((i) => i.root === process.env.ROOT)) ? 0 : 1)"
           }
           holder_in() {
@@ -99,11 +102,14 @@ jobs:
           log=/data/home/code/e2e/docs/devteam/run/dashboard.log
           started() { local t; t=$(dx cat "$log" 2>/dev/null) || return 1; grep -qF 'started on' <<<"$t"; }
           until_ok 60 'the e2e dashboard starts' started
-          # each line is "<time> [<pid>] <message>"
-          t=$(dx cat "$log")
-          left=
-          while IFS= read -r l; do [ "${l#*] }" != 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)' ] || left=1; done <<<"$t"
-          [ -n "$left" ] || { echo "dashboard.log has no 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)':"; echo "$t"; exit 1; }
+          # each line is "<time> [<pid>] <message>"; this one comes just after "started on"
+          left() {
+            local t l
+            t=$(dx cat "$log" 2>/dev/null) || return 1
+            while IFS= read -r l; do [ "${l#*] }" != 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)' ] || return 0; done <<<"$t"
+            return 1
+          }
+          until_ok 5 "dashboard.log says 'hub: left to the image (DEVTEAM_IMAGE_HUB=4320)'" left || { dx cat "$log"; exit 1; }
           [ "$(holder)" = "$HUBPID" ] || { echo "4320 is no longer held by the image's hub (pid $HUBPID)"; exit 1; }
           until_ok 15 'the list names /data/home/code/e2e' list_ok /data/home/code/e2e
       - name: the versions show (the gateway's start line, box-status)
@@ -119,6 +125,24 @@ jobs:
           for want in "machine: hub 4320 up, kit $REL (image)" "machine: box $REL: $tools"; do
             grep -qxF "$want" <<<"$st" || { echo "box-status has no line '$want'"; exit 1; }
           done
+      - name: the hub comes back when it dies and when its window closes
+        run: |
+          . "$BOX_SH"
+          # killed: its window's loop starts it again; timed in the box, so docker's own start-up isn't counted
+          dx env HUBPID="$HUBPID" bash -c "$IN_BOX"'
+            kill "$HUBPID"
+            end=$(( $(date +%s%N) + 5000000000 ))
+            while [ "$(date +%s%N)" -lt "$end" ]; do
+              if list_in && p=$(holder_in) && [ "$p" != "$HUBPID" ]; then echo "the hub is back as pid $p"; exit 0; fi
+              sleep 0.2
+            done
+            echo "the hub was not back within 5s of its kill"; exit 1'
+          # its window closed: the minute loop makes it again
+          dx tmux kill-window -t '=home:hub'
+          if has_hub_window; then echo "home:hub is still there after kill-window"; exit 1; fi
+          until_ok 90 'the minute loop brings back home:hub' has_hub_window
+          until_ok 15 "the hub answers hub 1, kit $REL, image true again" list_ok
+          holder >/dev/null || { echo "4320's holder is not the image's hub"; exit 1; }
       - name: what the box said
         if: failure()
         run: |
