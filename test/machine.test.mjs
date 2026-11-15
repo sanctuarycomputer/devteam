@@ -437,15 +437,23 @@ test('a session\'s dashboard doesn\'t record its project; a plain one and the su
   const dashboard = async (r, env) => {
     const accounts = path.join(r, 'docs/devteam/run/accounts.json');
     fs.rmSync(accounts, { force: true });
-    const d = spawn(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), 'dashboard'], { cwd: r, env: { ...baseEnv, DEVTEAM_ACCOUNTS_MS: '200', DEVTEAM_CSWAP: 'off', ...env }, stdio: 'ignore' });
+    const d = spawn(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), 'dashboard'], { cwd: r, env: { ...baseEnv, DEVTEAM_ACCOUNTS_MS: '200', DEVTEAM_CSWAP: 'off', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let said = '';
+    d.stdout.on('data', (c) => { said += c; });
+    d.stderr.on('data', (c) => { said += c; });
     const exited = new Promise((res) => d.once('exit', res));
+    const at = () => { try { return JSON.parse(fs.readFileSync(accounts, 'utf8')).at; } catch { return null; } };
     try {
-      // two ticks: the first one's child may still be running when the file appears
-      const first = await until(() => { try { return JSON.parse(fs.readFileSync(accounts, 'utf8')).at; } catch { return null; } }, 'the dashboard\'s first accounts tick');
-      await until(() => { try { return JSON.parse(fs.readFileSync(accounts, 'utf8')).at !== first; } catch { return false; } }, 'its next tick');
-    } finally { d.kill(); await exited; }
-    // a tick child started just before the stop finishes on its own
-    await new Promise((res) => setTimeout(res, 1500));
+      // a tick's child writes accounts.json after it records, so one file means one record; two
+      // ticks, so the record isn't only a slow first tick's
+      const first = await until(() => at() ?? (d.exitCode !== null ? assert.fail(`the dashboard exited: ${said}`) : null), 'the dashboard\'s first accounts tick');
+      await until(() => at() !== first, 'its next tick');
+    } finally {
+      d.kill();
+      await exited;
+      // a tick child started just before the stop finishes on its own
+      await new Promise((res) => setTimeout(res, 1500));
+    }
   };
   const onPort = { DEVTEAM_IMAGE_HUB: String(port) }; // leaves the hub to "the image": nothing binds the hub port
   const mine = (h, r, p) => recordsIn(h, p).filter((x) => x.root === fs.realpathSync(r));
@@ -457,6 +465,11 @@ test('a session\'s dashboard doesn\'t record its project; a plain one and the su
     assert.deepEqual(mine(home, w, port), [], 'a worker\'s dashboard records nothing');
     await dashboard(pl, { ...onPort, DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'x' });
     assert.deepEqual(mine(home, pl, port), [], 'a planner\'s dashboard records nothing');
+    // each mark of a session alone is enough
+    for (const [what, only] of [['a ticket alone', { DEVTEAM_TICKET: 'x-1' }], ['a feature alone', { DEVTEAM_FEATURE: 'x' }], ['a worker\'s role alone', { DEVTEAM_ROLE: 'worker' }], ['a planner\'s role alone', { DEVTEAM_ROLE: 'planner' }]]) {
+      await dashboard(w, { ...onPort, ...only });
+      assert.deepEqual(mine(home, w, port), [], `${what}: its dashboard records nothing`);
+    }
     await dashboard(plain, onPort);
     assert.equal(mine(home, plain, port).length, 1, 'a dashboard with no session records its project');
   } finally {
@@ -476,7 +489,7 @@ test('a session\'s dashboard doesn\'t record its project; a plain one and the su
   assert.match(rec.stdout, /^hubrec-dash-sup\b/m, 'recover --machine finds it');
 });
 
-test('stray hub records under a temp or scratchpad root are ignored, and status names each once', async () => {
+test('stray hub records under a temp or scratchpad root are ignored, and status names each once', () => {
   const h = realHome();
   const env = boxEnv(h);
   const dir = path.join(h, '.devteam', 'repos-4320');
@@ -492,7 +505,7 @@ test('stray hub records under a temp or scratchpad root are ignored, and status 
   assert.match(rec.stdout, /^hubrec-kept\b/m);
   assert.doesNotMatch(rec.stdout, /hubrec-stray/, 'recover never sees a stray');
   const empty = fs.mkdtempSync(path.join(tmp, 'no-repos-'));
-  const st = await new Promise((resolve) => execFile(process.execPath, [KIT, 'machine', 'status', '--in', empty], { cwd: nowhere, encoding: 'utf8', env: { ...baseEnv, ...env } }, (err, stdout, stderr) => resolve({ err, stdout, stderr })));
+  const st = machine(['machine', 'status', '--in', empty], env);
   const said = st.stdout.split('\n');
   for (const f of ['aaaa000000000001.json', 'aaaa000000000002.json']) assert.equal(said.filter((l) => l.startsWith(`machine: stray hub record ${f} (`)).length, 1, `${f} named once\n${st.stdout}`);
   assert.match(st.stdout, /^machine: stray hub record aaaa000000000001\.json \(under the temp folder; ignored, remove it\)$/m);

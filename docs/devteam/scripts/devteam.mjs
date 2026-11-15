@@ -12766,12 +12766,13 @@ const hubPortExplicit = () => !!process.env.DEVTEAM_HUB_PORT;
 const hubRecordOff = () => process.env.DEVTEAM_HUB_RECORD === 'off';
 const sessionRun = () => !!process.env.DEVTEAM_TICKET || !!process.env.DEVTEAM_FEATURE || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE);
 // p is dir or inside it, by whole segments (/tmpx is not under /tmp)
-const within = (dir, p) => { const rel = path.relative(dir, p); return rel === '' || (!!rel && !rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
+const within = (dir, p) => { const rel = path.relative(dir, p); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 // The temp folders, resolved; never one that holds the home folder (a TMPDIR set that wide would
 // make every real project a stray, and recover --machine would skip them all)
 const tempDirs = () => { const home = realPath(os.homedir()); return [...new Set([os.tmpdir(), process.env.TMPDIR].filter(Boolean).map((d) => realPath(path.resolve(d))))].filter((d) => !within(d, home)); };
 const scratchRootWhy = (root) => {
-  const r = realPath(root);
+  // resolved as far as it exists: a record can name a root since deleted (/var is /private/var on macOS)
+  const r = realPathMade(root);
   if (tempDirs().some((d) => within(d, r))) return 'under the temp folder';
   if (r.split(path.sep).includes('scratchpad')) return 'in a scratchpad';
   return null;
