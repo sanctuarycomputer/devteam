@@ -783,7 +783,7 @@ const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
 const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The only acts the owner writes: records of what the owner did, never calls.
-const OWNER_ACTS = ['artifact-publish', 'pane-answer'];
+const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -1211,7 +1211,7 @@ function integrity(o, file) {
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish) and
     // of answering what the supervisor's terminal asked (pane answer). Nobody else writes those
     // classes: an agent can't make the log say the owner published, or gave a tool their yes.
-    if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? 'the owner\'s acts are artifact-publish and pane-answer only' : `${o.class} is the owner\'s`;
+    if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
     if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
@@ -1890,6 +1890,45 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   // the owner approved this change and no other: the set must be exactly it
   if (l && !legacy && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
   return null;
+}
+
+// The goal order (planning.md §1, priority is the owner's): the goals named take priority 1..n in
+// that order, and the live goals left out keep their relative place after them. goals: the goal
+// objects as they stand (the log's, or the fold's at one line), Upkeep among them or not.
+const orderableGoal = (g) => g?.type === 'goal' && g.kind !== 'upkeep' && !['met', 'abandoned'].includes(g.status ?? 'draft');
+// Why ids can't be ordered (null when they can): each a goal, named once, live, not Upkeep.
+function goalOrderRefusal(ids, goals) {
+  const byId = new Map(goals.map((g) => [g.id, g]));
+  const seen = new Set();
+  for (const id of ids) {
+    const g = byId.get(id);
+    if (seen.has(id)) return `${id} is named more than once`;
+    seen.add(id);
+    if (!g || g.type !== 'goal') return `no goal ${id}`;
+    if (g.kind === 'upkeep') return 'Upkeep has no place in the goal order';
+    if (g.status === 'met') return `${id} is met`;
+    if (g.status === 'abandoned') return `${id} is let go`;
+  }
+  return null;
+}
+// The lines an order writes: every goal named, at its place; then each live goal left out that has
+// a priority, numbered after them in its current order, only where its number changes.
+function goalOrderPlan(ids, goals) {
+  const plan = ids.map((id, i) => ({ id, priority: i + 1 }));
+  const rest = goals.filter((g) => orderableGoal(g) && !ids.includes(g.id) && typeof g.priority === 'number').sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+  rest.forEach((g, j) => { if (g.priority !== ids.length + j + 1) plan.push({ id: g.id, priority: ids.length + j + 1 }); });
+  return plan;
+}
+// The order written: one goal line per planned goal, then one act (class goal-change, the owner's
+// class: the owner's own record of it, or the supervisor's applying the owner's answer).
+function applyGoalOrder(ids, by, approved = null) {
+  const goals = [...(readLog().byType.get('goal') ?? [])];
+  const plan = goalOrderPlan(ids, goals);
+  for (const p of plan) appendLog({ type: 'goal', op: 'set', id: p.id, priority: p.priority, ...(approved ? { approved } : {}) }, by);
+  const title = (id) => goals.find((g) => g.id === id)?.title ?? id;
+  appendLog({ type: 'act', class: by === 'owner' ? 'goal-order' : 'goal-change', what: `${approved ? `applied ${approved}: ` : ''}put the goals in order: ${ids.map((id, i) => `${i + 1}. ${title(id)}`).join(', ')}${plan.length > ids.length ? '; the rest after them, in their order' : ''}`, refs: plan.map((p) => p.id), reversible: true, ...(approved ? { approved_by: approved } : {}) }, by);
+  logCache = null;
+  return ids.map((id, i) => `${i + 1} ${id} ${title(id)}`).join('\n');
 }
 
 // The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
@@ -10241,6 +10280,22 @@ function cmdGoal() {
     registryPreconditionCheck(id, { ...logGet(id), ...Object.fromEntries(Object.entries(f).filter(([, x]) => x !== undefined)) });
     appendLog({ type: 'goal', op: 'set', id, ...f }, by);
     return out(`updated ${id}`);
+  }
+  // The goal order in one step: the owner's ids, 1..n, the rest after in their own order (the
+  // owner's terminal or the dashboard); or the supervisor applying an answered goal-change --order
+  // question, exactly the order it proposed (goal order --approved <qid>).
+  if (sub === 'order') {
+    const ids = positional.slice(1);
+    const approved = flagStr('approved') ?? null;
+    if (approved) return goalOrderApproved(approved, ids);
+    if (process.env.DEVTEAM_ROLE) die(`goal order is the owner's (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE}): the supervisor asks one goal-change --order question, then goal order --approved <qid>`);
+    const { by } = ownerWriter('the owner orders the goals; ask one goal-change --order question, then goal order --approved <qid>');
+    if (!ids.length) die('usage: goal order <g-id> <g-id> … (the owner) | goal order --approved <qid> (the supervisor)');
+    const why = goalOrderRefusal(ids, readLog().byType.get('goal') ?? []);
+    if (why) die(`goal order: ${why}`);
+    const said = applyGoalOrder(ids, by);
+    nudgeSupervisor(`[devteam goal order from owner] the goals are in a new order: devteam.mjs goal list`);
+    return out(said);
   }
   // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine
   // (notes the planner must take into account; the supervisor reworks the design and asks again),
@@ -19580,9 +19635,11 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions|impact] …
+  goal [list|check|show|forecast|add|set|order|decide|approve|status|reading|hold|park-sessions|impact] …
   goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
+  goal order <g-id> <g-id> …   owner: put the goals in order, 1..n; the goals left out keep their order after them (one line per goal moved, one goal-order act)
+  goal order --approved <qid> [<g-id> …]   supervisor: apply an answered goal-change --order question, exactly the order it proposed
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
