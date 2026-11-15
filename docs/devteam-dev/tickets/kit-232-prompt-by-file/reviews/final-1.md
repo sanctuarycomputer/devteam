@@ -28,7 +28,7 @@ I restored the file after the mutations and removed the worktree. GitHub CI on #
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | quality.md §3 (test covers the change) | test/kit.test.mjs new test; devteam.mjs ~12705, ~12922 | The new test drives only a planner through `makeSession`. The supervisor fresh-start pointer in `recoverOne` and `legacyRecover` is covered only by `machine.test.mjs:633`, whose regex now matches the file name inside the pointer rather than the prompt's text, so its message "with its own kit's prompt" is proven more weakly than before. The code is correct; this is test depth only. The spec already accepts it (Out of scope, F5). | |
-| F2 | Minor | done-when 4 | PR #253 checks | GitHub CI (build, kit 18/20/22/24 chain and rest) was pending at review time. The merge must wait for it to go green at a72f45a. | |
+| F1 | Minor | quality.md §3 (test covers the change) | test/kit.test.mjs new test; devteam.mjs ~12705, ~12922 | The new test drives only a planner through `makeSession`. The supervisor fresh-start pointer in `recoverOne` and `legacyRecover` is covered only by `machine.test.mjs:633`, whose regex now matches the file name inside the pointer rather than the prompt's text, so its message "with its own kit's prompt" is proven more weakly than before. The code is correct; this is test depth only. The spec already accepts it (Out of scope, F5). | wont-fix the spec accepts code at the supervisor sites (spec review F5); their old-kit fixture is outside touches |
+| F2 | Minor | done-when 4 | PR #253 checks | GitHub CI (build, kit 18/20/22/24 chain and rest) was pending at review time. The merge must wait for it to go green at a72f45a. | fixed: CI 8/8 success at a72f45a (run 43687186908, gate ci on the rerun); verification.md row 4 |
 
 Verdict: APPROVE a72f45ab0e0dfd37e0e152c7c625e9448f7c351a
