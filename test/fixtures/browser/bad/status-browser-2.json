@@ -1,0 +1,13 @@
+{
+  "browser": 2,
+  "instance": "acme-shop-3f9c2a71b0de",
+  "running": true,
+  "held": "q-20261115-031502114-supervisor",
+  "preview": "browser-2",
+  "url": "https://shop.example/account/login?next=•••",
+  "tabs": 2,
+  "restarted": true,
+  "notes": [
+    "Cleared a stale SingletonLock left by host devteam-box-7c9d4-x2kqp."
+  ]
+}

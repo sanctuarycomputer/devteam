@@ -1,0 +1,12 @@
+# Task review, task 1, pass 2
+
+- Reviewer: task-confirmer-1 (fresh subagent, claude-opus-5-5)
+- Reviewed: eb698402922566784fcc1bcbed9cee141ed32573 (task 1 fixes, diff since d1d5d7a)
+
+I read only the diff of eb69840 under `test/` and `docs/devteam/schema/` against pass 1's T1..T6. `node --test test/browser-contract.test.mjs` passes in the worktree (9/9). In a `git archive` copy of eb69840 under /data/home/tmp/claude-1000/kit61-t1c2/ I re-ran every pass-1 survivor as a one-change mutant, and each is now killed: a fragment allowed after the query or host (`(?:#.*)?` before the mask's final `)$`, in all 7 copies) (T1); `x-snapshot-text`'s host widened to `\S+` (T2); in check.mjs, the `minItems` message reworded, `maxItems` disabled, `minLength` disabled, and `asList` put back to the old helper (T4, T5); the `status.held` pattern removed, the frame `data` pattern removed, `tabs.minItems` removed, `control_secret` loosened to `{32,}`, and `paste.text` raised to 100000 (T6). I also put the old `refusal.host` pattern back, and that mutant is killed too, by the `<b>` case. T3: the refusal description now says `why` is HTML-escaped where the page shows it, matching spec §1 "The refusal page". The new agreement test cuts `asList` and `schemaErrors` out of devteam.mjs and compares them with check.mjs on every fixture and on values that reach every keyword. That is a sound guard. Its regex is anchored to the function's signature and to a closing `}` at column 0, and it asserts that both pieces were found, so drift fails loudly and can't slip through silently. The new tests and the tighter host pattern bring in no new Critical or Important issue. One Minor: the host pattern allows `:` (needed for bracketed IPv6), so it accepts a host with a port, although the description says "with no port". That leaks nothing and doesn't block.
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| T7 | Minor | spec §1 shapes table, `refusal.host` ("the refused host as asked"); the field's own description ("with no port") | docs/devteam/schema/browser.schema.json:484 | `^[A-Za-z0-9._:\[\]-]{1,255}$` accepts `a.example:443` and unbalanced brackets such as `[::1`. The description promises no port. Either narrow the pattern (a name or IPv4 with no `:`, or one bracketed IPv6 address), or drop "with no port" from the description. Nothing unsafe passes, because `<`, `>`, `"`, `/`, `?`, `#`, `@` and whitespace are all refused. | fixed |
+
+Verdict: APPROVE eb698402922566784fcc1bcbed9cee141ed32573

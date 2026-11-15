@@ -1,0 +1,83 @@
+[
+  {
+    "t": "mouse",
+    "type": "move",
+    "x": 80,
+    "y": 41.5,
+    "button": "none"
+  },
+  {
+    "t": "mouse",
+    "type": "down",
+    "x": 80,
+    "y": 42,
+    "button": "left",
+    "clicks": 1
+  },
+  {
+    "t": "mouse",
+    "type": "up",
+    "x": 80,
+    "y": 42,
+    "button": "left",
+    "clicks": 1
+  },
+  {
+    "t": "mouse",
+    "type": "click",
+    "x": 120,
+    "y": 60,
+    "button": "left",
+    "clicks": 1,
+    "mods": 0
+  },
+  {
+    "t": "wheel",
+    "x": 80,
+    "y": 50,
+    "dx": 0,
+    "dy": 120,
+    "mods": 0
+  },
+  {
+    "t": "key",
+    "type": "press",
+    "key": "a",
+    "code": "KeyA",
+    "text": "a"
+  },
+  {
+    "t": "key",
+    "type": "down",
+    "key": "Shift",
+    "code": "ShiftLeft",
+    "mods": 8
+  },
+  {
+    "t": "key",
+    "type": "up",
+    "key": "Shift",
+    "code": "ShiftLeft"
+  },
+  {
+    "t": "key",
+    "type": "press",
+    "key": "Enter",
+    "code": "Enter",
+    "text": "\r"
+  },
+  {
+    "t": "paste",
+    "text": "owner@shop.example"
+  },
+  {
+    "t": "nav",
+    "url": "https://shop.example/account"
+  },
+  {
+    "t": "back"
+  },
+  {
+    "t": "forget"
+  }
+]

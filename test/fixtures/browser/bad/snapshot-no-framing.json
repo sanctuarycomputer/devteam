@@ -1,0 +1,53 @@
+{
+  "browser": 1,
+  "url": "https://shop.example/account/login?next=•••",
+  "title": "Sign in · Shop",
+  "nodes": [
+    {
+      "role": "heading",
+      "name": "Sign in to your account",
+      "level": 1
+    },
+    {
+      "ref": "e1",
+      "role": "textbox",
+      "name": "Email",
+      "value": "owner@shop.example",
+      "focused": true
+    },
+    {
+      "ref": "e2",
+      "role": "link",
+      "name": "Forgot your password?",
+      "href": "https://shop.example/account/reset?token=•••"
+    },
+    {
+      "ref": "e3",
+      "role": "textbox",
+      "name": "Password",
+      "value": "•••"
+    },
+    {
+      "ref": "e4",
+      "role": "textbox",
+      "name": "Code",
+      "value": "•••"
+    },
+    {
+      "ref": "e5",
+      "role": "checkbox",
+      "name": "Remember me",
+      "checked": false
+    },
+    {
+      "ref": "e6",
+      "role": "button",
+      "name": "Sign in",
+      "disabled": false
+    },
+    {
+      "role": "text",
+      "name": "New here? Create an account."
+    }
+  ]
+}
