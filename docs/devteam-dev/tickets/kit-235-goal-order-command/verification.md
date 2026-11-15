@@ -1,6 +1,6 @@
 # kit-235-goal-order-command: verification
 
-At commit `b1c0f8bb7a1bea4e9e4aee93e441e56f3d1ab60a` (later commits change only this ticket's records). Local runs on the box, Node 18.20.4, only the touched test file at `--test-concurrency=2` (box rule). CI runs the whole suite on every Node it covers; its run at the head is in the merge request.
+At commit `2a4f4fe4e10eddc66a48cd7427582b74197e0dc5` (later commits change only this ticket's records). Local runs on the box, Node 18.20.4, only the touched test file at `--test-concurrency=2` (box rule). CI runs the whole suite on every Node it covers; its run at the head is in the merge request.
 
 Gate: `devteam.mjs gate test --junit … -- node --test --test-concurrency=2 --test-reporter=junit … test/goal-order.test.mjs` → gate test passed, 7 test cases, 0 failures. CI (the whole suite, every job) passed at `29fd4ad` (run 43732259658) and at `3f5ebe2` after merging kit-209 and kit-83 (run 43733631755), through `gate ci -- gh run watch … --exit-status`; the run at the head is in the merge request.
 
