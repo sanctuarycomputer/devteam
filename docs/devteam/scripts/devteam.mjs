@@ -11340,6 +11340,8 @@ function collectMetrics(since) {
   // dashboard's (kit-173: spend, time and rework against the best of 12 weeks, quality held).
   // mis_rated: merged tickets whose results contradict their rating (supervisor.md §9).
   m.mis_rated = misRated(cycles, ts, ticketUsd);
+  // merged tickets' hours, start to merge, for hours per point (the tickets cost.per_point counts)
+  m.cycle_hours_total = +(cycles.filter((c) => ticketUsd[c.id] !== undefined).reduce((a, c) => a + c.ms, 0) / 3600000).toFixed(2);
   m.efficiency = efficiencyOf(m);
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
@@ -11632,11 +11634,11 @@ function collectMetrics(since) {
     // Time efficiency: tickets spending most of their clock waiting, and spec or plan reviews that
     // reject most first passes (each rejection is another round of tokens and hours)
     const eff = m.efficiency;
-    if (eff?.wait_hours_pct !== null && eff?.wait_hours_pct > 50 && m.tickets_merged >= 5) add('medium', 'waiting-heavy', 'tickets', `${eff.wait_hours_pct}% of ticket hours were spent waiting (awaiting-word, blocked, parked, starting)`, 'answer review and merge requests the tick they arrive, give owner questions a default where one is allowed, and let small tickets build before their spec and plan approvals (quality.md §3, Review depth)');
+    if (eff?.wait_hours_pct !== null && eff?.wait_hours_pct > 50 && m.tickets_merged >= EFF_MIN_MERGED()) add('medium', 'waiting-heavy', 'tickets', `${eff.wait_hours_pct}% of ticket hours were spent waiting (awaiting-word, blocked, parked, starting)`, 'answer review and merge requests the tick they arrive, give owner questions a default where one is allowed, and let small tickets build before their spec and plan approvals (quality.md §3, Review depth)');
     for (const x of m.mis_rated ?? []) add('low', 'mis-rated', x.id, `rated ${x.rated}, but: ${x.why.join('; ')}`, 'at the retro, fold what it teaches into how planners rate (a lesson), which tasks go to a fast model, or the review depth (supervisor.md §9, Ratings checked against results)');
     for (const stage of ['spec', 'plan']) {
       const st = m.reviews?.by_stage?.[stage];
-      if (st && st.first_passes >= 10 && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt (supervisor.md §10)`);
+      if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt (supervisor.md §10)`);
     }
     const tw = m.cost.per_point_this_week, lw = m.cost.per_point_last_week;
     if (tw && lw && tw.tickets >= 3 && lw.tickets >= 3 && tw.usd_per_point > 1.5 * lw.usd_per_point) add('medium', 'cost-per-point-rising', 'spend', `$${tw.usd_per_point} per merged point this week, $${lw.usd_per_point} last week`, 'find what changed (model, ticket mix, review rounds) and trial a fix (supervisor.md §9)');
@@ -11782,6 +11784,11 @@ function misRated(cycles, ts, ticketUsd) {
   return out;
 }
 const EFFICIENCY_WAIT = ['awaiting-word', 'blocked', 'parked', 'starting'];
+// How much evidence a finding needs before it speaks: 5 merged tickets for waiting-heavy, 10 first
+// passes at a stage for review-churn. The environment can lower them (tests, a tiny project).
+const envInt = (k, d) => { const n = Number(process.env[k]); return Number.isInteger(n) && n > 0 ? n : d; };
+const EFF_MIN_MERGED = () => envInt('DEVTEAM_EFFICIENCY_MIN_MERGED', 5);
+const EFF_MIN_PASSES = () => envInt('DEVTEAM_CHURN_MIN_PASSES', 10);
 const EFFICIENCY_OVERHEAD = ['supervisor', 'planning', 'review'];
 function efficiencyOf(m) {
   const split = (o) => {
@@ -11798,7 +11805,7 @@ function efficiencyOf(m) {
   return {
     wait_hours_pct: pct(h.share),
     wait_usd_pct: pct(u.share),
-    hours_per_point: points ? +(h.total / points).toFixed(1) : null,
+    hours_per_point: points && m.cycle_hours_total !== undefined ? +(m.cycle_hours_total / points).toFixed(1) : null,
     usd_per_point: m.cost?.per_point?.usd_per_point ?? null,
     first_pass_rejection: { spec: rej('spec'), plan: rej('plan'), final: rej('final') },
     mis_rated: m.mis_rated ?? [],
