@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// the shared temp dir (test/run.mjs names it), read before a test's env replaces this one's
+const shared = process.env.DEVTEAM_TEST_SHARED_TMP || os.tmpdir();
 const slot = process.argv[2];
 const parent = Number(process.argv[3]);
 // run any other way (a bare `node --test` finds every file under test/), it does nothing
@@ -30,5 +32,5 @@ process.argv = [process.execPath, r.script, ...r.args];
 // written whole, then renamed: the test process reads the code the moment the file appears
 process.on('exit', (code) => { fs.writeFileSync(path.join(slot, 'exit.tmp'), String(code)); fs.renameSync(path.join(slot, 'exit.tmp'), path.join(slot, 'exit')); });
 // V8's code cache for the script (Node 22.1+): the same code, compiled once rather than on every call
-module.enableCompileCache?.(path.join(os.tmpdir(), 'devteam-kit-compile-cache'));
+module.enableCompileCache?.(path.join(shared, 'devteam-kit-compile-cache'));
 await import(pathToFileURL(r.script).href);
