@@ -504,6 +504,16 @@ const SETTINGS_DEFAULTS = {
   tmux_session: null,
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
+  // A shell command run before a worker's or planner's agent starts, fresh or resumed, so the agent
+  // trusts its worktree and never stops at a folder-trust dialog nobody is watching. It runs in the
+  // worktree with DEVTEAM_WORKTREE its real path (and what worktree_setup sees); its output goes to
+  // stderr; a failure only warns, and the blocked-prompt finding still shows a dialog. Empty runs
+  // nothing. For Claude Code, set projects[$DEVTEAM_WORKTREE].hasTrustDialogAccepted to true in
+  // ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, written atomically (a temp file, then a rename): running
+  // sessions rewrite that file. Name scripts by absolute path: it runs in the worktree, so a relative
+  // one would run the branch's own file. Keep it quick and idempotent: it runs on every launch, a
+  // resume and the tick's relaunches included. The owner's, like agent_command; home's only.
+  agent_trust_command: '',
   main_branch: 'main',
   merge_method: 'merge',
   // true adds --admin to gh pr merge, for a main whose ruleset requires a review the PR's author
@@ -588,7 +598,7 @@ const SETTINGS_DEFAULTS = {
 // release is how a tag reaches production; project names every public link and the gateway's binding.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
-  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
+  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', agent_trust_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
@@ -2648,6 +2658,12 @@ const PANE_WAITS = [
   ['limit', new RegExp(`\\b${LIMIT_REACHED}\\b|${LIMIT_HIT}\\b|\\bresets? (at|in) \\d|^approaching (your )?usage limit`, 'i')],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
+// A folder-trust dialog: an agent asks whether to trust a folder it has never run in, as every new
+// worktree is, and waits (Claude Code 2.1: "Quick safety check: …", "❯ No, exit", "Yes, I trust this
+// folder", with no numbers). Its words are tied to the line start (after a box edge, the cursor and a
+// number) and read only when nothing on the pane is busy, so the same words shown as an agent's own
+// output (a spec it printed, a pane it captured) don't count. A prompt wait, like PANE_WAITS' own.
+const PANE_TRUST = /Do you trust (?:the (?:files|contents)|this (?:folder|directory|workspace))|^(?:[│|]\s*)?(?:❯\s*)?(?:\d+\.\s*)?Yes, I trust this (?:folder|directory|workspace)\b|^(?:[│|]\s*)?Quick safety check:/i;
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
 // lines, comments, and quoted output. A banner or prompt never looks like these.
 const PANE_CODE = /^(\d+\s|[+-]\s|#|\/\/|\/\*|\*\s|--\s|<!--|>\s|[│|]\s*\d+\s)/;
@@ -2678,6 +2694,7 @@ function paneWaitingIn(window) {
     const hit = lines.find((l) => !PANE_CODE.test(l) && re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
+  if (!found && !busy) { const hit = lines.find((l) => !PANE_CODE.test(l) && PANE_TRUST.test(l)); if (hit) found = { kind: 'prompt', line: hit.slice(0, 200) }; }
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
   // keyed as recordSent wrote it: tmux's own #S:#W, without the exact-match =
   if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') { resendLostEnter(`${tmuxSession()}:${window}`, target, lines); if (heldPending(`${tmuxSession()}:${window}`)) flushHeld(`${tmuxSession()}:${window}`); }
@@ -11239,7 +11256,7 @@ function collectMetrics(since) {
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
-    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix, and a folder-trust dialog that agent_trust_command could pre-trust the worktree`);
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
@@ -11252,7 +11269,7 @@ function collectMetrics(since) {
     const who = `plan-${p.feature}`;
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
-    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11)`);
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11); a folder-trust dialog means agent_trust_command could pre-trust the worktree`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
@@ -12152,7 +12169,7 @@ function limitStop(rawLines) {
   const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
   // the input line under a banner, from the unfiltered lines (PANE_CODE takes "> text" for code)
   const input = banner === -1 ? null : rawLines.slice(rawLines.findLastIndex((l) => LIMIT_BANNER.test(l)) + 1).map((l) => INPUT_LINE.exec(l.trim())).filter(Boolean).pop();
-  return { menu, draft: !menu && !!input?.[1], limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
+  return { menu, draft: !menu && !!input?.[1], limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
 }
 // Not sh(): it trims the output, which would put the pane's first line at column 0.
 function paneBottom(target) {
@@ -15748,6 +15765,15 @@ function makeSession(role) {
     resume = false;
   }
   seedWorktree(wt, { repo: R });
+  // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
+  if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
+  else if (s.agent_trust_command?.trim()) {
+    try {
+      execFileSync('sh', ['-c', s.agent_trust_command], { cwd: wt, stdio: ['ignore', 2, 'inherit'], env: { ...gateEnv(null, R), DEVTEAM_WORKTREE: realPath(wt) }, timeout: 60000 });
+    } catch (e) {
+      warn(`agent_trust_command failed in ${wt}: ${e.code === 'ETIMEDOUT' ? 'it ran past 60 s' : e.signal ? `killed by ${e.signal}` : `exit ${e.status ?? '?'}`}; if the agent asks whether to trust its folder, the blocked-prompt finding shows it`);
+    }
+  }
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
