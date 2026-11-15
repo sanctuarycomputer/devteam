@@ -47,7 +47,7 @@ In `docs/devteam/scripts/devteam.mjs`:
    // A prompt goes to the agent as a file it is told to read, never as its text on the command line:
    // one argument is at most 128 KB on Linux (MAX_ARG_STRLEN), and a prompt with a large knowledge
    // block passes that, so the shell refuses the line and no agent starts.
-   const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now and follow it.`;
+   const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now, every part (a long file takes more than one read), and follow it.`;
    ```
 2. Worker/planner (~15809): `type(\`${sessionMarkerPrefix()}${cmd} ${shq(promptPointer(promptFile))}\`)`, fresh and resume alike.
 3. `recoverOne` (~12704): `${cmd} ${id ? \`"$(cat '${promptFile}')"\` : shq(promptPointer(promptFile))}`.
