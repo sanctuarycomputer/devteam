@@ -225,10 +225,10 @@ try {
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
   .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
-  /* fixed, so it never moves what is under the cursor; at the top, as both bottom corners are taken,
+  /* fixed, so it never moves what is under the cursor; at the top under the page bar, as both bottom corners are taken,
      over the content, not the nav (below it on a phone, where staleNote measures the nav), under a
      drawer or review, and never in the way of a click */
-  .stale-note { position: fixed; top: 12px; left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
+  .stale-note { position: fixed; top: calc(var(--bar-h) + 12px); left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -283,7 +283,7 @@ try {
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
     :where(.no-shell) .side .foot { display: none; }
-    .stale-note { top: 60px; left: 16px; }
+    .stale-note { top: calc(var(--bar-h) + 60px); left: 16px; }
     .nav a { white-space: nowrap; }
     /* a long URL or id wraps; it doesn't widen the page */
     :where(.no-shell) main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
@@ -789,7 +789,7 @@ try {
   <nav class="nav" data-group="project"></nav>
   <div class="eyebrow">Autonomy</div>
   <nav class="nav" data-group="autonomy"></nav>
-  <div class="settings" aria-label="Fleet settings">
+  <div class="settings" role="group" aria-label="Fleet settings">
     <div id="side-fleet"></div>
     <div id="side-state"></div>
     <a class="set" href="#settings"><i class="icon-settings" aria-hidden="true"></i>Settings</a>

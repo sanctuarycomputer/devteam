@@ -63,13 +63,14 @@ test('pages and nav', { skip: canDrive ? false : 'needs Chrome and a Node with W
   // changing page scrolls to the top
   await p.click('.side nav.nav a[href="#board"]');
   await onPage('board');
-  await p.ev("document.querySelector('#board').style.minHeight = '4000px'");
+  // both pages taller than the window, so only showPage can bring Library to the top
+  await p.ev("document.querySelector('#board').style.minHeight = '4000px'; document.querySelector('#library').style.minHeight = '4000px'");
   await p.ev('window.scrollTo(0, 1500)');
   await until(() => p.ev('scrollY > 0'), 'Board scrolled down');
   await p.click('.side nav.nav a[href="#library"]');
   await onPage('library');
   assert.equal(await p.ev('scrollY'), 0, 'Library opens at the top');
-  await p.ev("document.querySelector('#board').style.minHeight = ''");
+  await p.ev("document.querySelector('#board').style.minHeight = ''; document.querySelector('#library').style.minHeight = ''");
 
   // the Inbox button's count is the nav's
   assert.equal(await p.ev("document.querySelector('#inbox-btn-n').textContent"), await p.ev("document.querySelector('#n-questions').textContent"));
