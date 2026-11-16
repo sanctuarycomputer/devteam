@@ -19,6 +19,9 @@ const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 // ticket (links in its peek), and an open review question whose page is committed on main.
 // Gives the tab (p), the port, the ids, and helpers: dt (the kit CLI; role null is the owner), load
 // (a fresh visit), shown, onPage, size.
+// True once an element's box reads the same twice running (until polls 100 ms apart): the page slides back over --dur
+// after the panel closes, and a click at a box read a moment before lands beside the button.
+const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
 async function pagesFixture(t, name, { records = true } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-dash-${name}-`));
   const later = cleanup(t);
@@ -451,6 +454,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('goals');
   await go('#overview');
   await onPage('overview');
+  await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
   await p.click('#inbox-btn');
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the Threads panel, at rest, lists it');
   n = await len();
@@ -955,6 +959,7 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   await until(async () => await cardKey() === null, 'closed');
 
   // the Threads panel's row names the setting
+  await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
   await p.click('#inbox-btn');
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the Threads panel, at rest, lists it');
   assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .th-where').textContent`), `Settings, ${name}`);
