@@ -62,7 +62,13 @@ async function open(t, F, hash) {
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
   const soon = soonIn(p, 30000, () => dash.out());
   await soon('typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page and its threads read');
-  return { p, soon, size };
+  // a reload: the old document marked, then a new one (without the mark) with its data and threads read
+  const reload = async () => {
+    await p.ev('window.__old = true; void 0');
+    await p.send('Page.reload');
+    await soon('!window.__old && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
+  };
+  return { p, soon, size, reload, chrome, port, dash };
 }
 
 test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
@@ -389,6 +395,10 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon(`innerWidth === 1440 && !${isOpen}`, 'Board, the panel closed');
   await p.ev(`location.hash = '#talk/${A}'; void 0`);
   await soon(`${isOpen} && ${inPanel(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'the panel on A over Board');
+  // closed by its × first: a nav to a head without keys would carry the remembered panel (T3, spec §2.5)
+  await soon(STEADY('#th-close'), '× at rest');
+  await p.click('#th-close');
+  await soon(`!${isOpen}`, 'the panel closed');
   await go('#overview', 'Overview');
   await soon(`!${isOpen} && ${card}.hidden`, 'closed');
 
@@ -451,8 +461,8 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   assert.equal(await p.ev(n('.ok')), '2', 'still green 2: the count came before the read');
   await p.ev('const q = window.__threadsQueue; window.__threadsQueue = null; q.forEach((go) => go()); void 0');
   await until(() => JSON.parse(F.owner(['thread', 'show', Y1, '--json'])).turns.some((u) => u.text === 'my answer'), 'the turn on the server');
-  // Y1 has no subject: it opened in the panel; the panel closed takes it away
-  await p.ev("location.hash = '#overview'");
+  // Y1 has no subject: it opened in the panel; the panel closed (its ×) takes it away
+  await p.click('#th-close');
   await soon("!document.body.classList.contains('threads-open') && document.getElementById('tl-card').hidden", 'the panel and its thread closed');
 
   // the ready one accepted: blue, counting the your-move ones
@@ -470,4 +480,239 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   await soon("!document.querySelector('.pagebar .tt .n.th') && /No open threads\\. Hold Shift and click anything on the page, or start one with \\+\\./.test(document.getElementById('th-pane').textContent)", 'no thread count, the empty line');
   await p.click('#th-close');
   await soon("!document.body.classList.contains('threads-open')", 'closed');
+});
+
+// kit-89 T3: the panel's state in history, under a peek, over a reload and remembered (spec §2.5, §2.9).
+const IS_OPEN = "document.body.classList.contains('threads-open')";
+const AT_REST = `(${IS_OPEN} && getComputedStyle(document.getElementById('threads')).transform === 'none')`;
+const ROW = (id) => `document.querySelector('#tl-list [data-tl-open="${id}"]')`;
+const CARD = "document.getElementById('tl-card')";
+const IN_PANEL = (id) => `(!!document.querySelector('#th-card-slot > #tl-card.in-panel') && !${CARD}.hidden && ${CARD}.dataset.key === '${id}')`;
+const FLOATING = (id) => `(${CARD}.parentElement?.id === 'tl' && !${CARD}.hidden && !${CARD}.classList.contains('in-panel') && ${CARD}.dataset.key === '${id}')`;
+const PEEK = "(!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none')";
+const NO_PEEK = "!document.body.classList.contains('peek-open')";
+const STORE = "localStorage.getItem('devteam.threads.open')";
+const stored = (v) => JSON.stringify(v === null ? null : JSON.stringify(v));
+
+test('a peek and a thread over a reload', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const F = threadsFixture('threads-peek');
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const TK = 'ch-01-tidy-docs';
+  F.sup(['ticket', 'add', TK, '--json', JSON.stringify({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
+  const { p, soon, reload } = await open(t, F, '#board');
+  await soon(`!!document.querySelector('#board [data-ticket="${TK}"]')`, 'the ticket on Board');
+
+  // a ticket's peek over Board; the panel opened from #tt-peek and A opened in it: no entry, the page under it changed
+  await p.ev(`location.hash = '#ticket/${TK}'; void 0`);
+  await soon(PEEK, 'the peek');
+  const len = await p.ev('history.length');
+  await soon("getComputedStyle(document.getElementById('tt-peek')).visibility === 'visible'", '#tt-peek shown');
+  await p.click('#tt-peek');
+  await soon(`${AT_REST} && history.state?.page === '#board?th=open' && !!${ROW(A)}`, 'the panel over the peek');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`${IN_PANEL(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'A in the panel, under the peek');
+  assert.deepEqual(await p.ev(`[location.hash, history.length, ${PEEK}]`), [`#ticket/${TK}`, len, true], 'the peek still open, no entry added (Review Focus 2)');
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open', t: A }), 'remembered under the peek');
+
+  // Back and Forward through it: the entry below shows its own keys; the peek's entry keeps th and t
+  await p.ev('history.back()');
+  await soon(`location.hash === '#board' && ${NO_PEEK} && !${IS_OPEN}`, 'Back: Board, its own keys');
+  await p.ev('history.forward()');
+  await soon(`location.hash === '#ticket/${TK}' && ${PEEK} && ${IN_PANEL(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'Forward: the peek, the panel on A');
+  assert.equal(await p.ev('history.length'), len, 'no entry stacked');
+
+  // AC6: a reload keeps the peek over Board and the panel on A; closing the peek leaves #board?th=open&t=<A>
+  await reload();
+  await soon(`location.hash === '#ticket/${TK}' && ${PEEK} && ${IN_PANEL(A)} && document.querySelector('main.page > section[data-page="board"]').classList.contains('on')`, 'reloaded: the peek over Board, A in the panel');
+  await p.click('#drawer-close');
+  await soon(`${NO_PEEK} && location.hash === '#board?th=open&t=${A}' && ${IN_PANEL(A)}`, 'the peek closed, the panel still on A');
+
+  // opening a peek keeps the remembered panel
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open', t: A }));
+  await p.ev(`location.hash = '#ticket/${TK}'; void 0`);
+  await soon(`${PEEK} && ${IN_PANEL(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'the peek over the panel on A');
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open', t: A }), 'kept with a peek open');
+
+  // Escape with the focus in the in-panel composer: back to the list, the peek stays; again on the list: the
+  // panel closes, the peek stays, the focus on #tt-peek
+  await p.ev("document.getElementById('tl-c-text').focus()");
+  await p.key('Escape');
+  await soon(`${PEEK} && history.state?.page === '#board?th=open' && document.activeElement === ${ROW(A)}`, "the list, the focus on A's row, the peek open");
+  await p.key('Escape');
+  await soon(`${PEEK} && !${IS_OPEN} && history.state?.page === '#board' && document.activeElement === document.getElementById('tt-peek')`, 'the panel closed, the peek open, the focus on #tt-peek');
+  assert.equal(await p.ev(STORE), null, 'closed is remembered');
+
+  // G's row under the peek: the peek closes, Goals with G's card
+  await p.click('#tt-peek');
+  await soon(`${AT_REST} && !!${ROW(G)}`, 'the panel over the peek');
+  await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
+  await p.click(`#tl-list [data-tl-open="${G}"]`);
+  await soon(`location.hash === '#goals?th=open&t=${G}' && ${NO_PEEK} && ${FLOATING(G)}`, "Goals, the peek closed, G's card open");
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open' }), 'a floating t is not remembered');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && ${STORE} === null`, 'closed');
+});
+
+test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const F = threadsFixture('threads-history');
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const R = idOf(F.owner(['thread', 'new', 'A done thing']));
+  F.owner(['thread', 'resolve', R, '--outcome', 'ok']);
+  const { p, soon, reload, chrome, port } = await open(t, F, `#overview?th=open&t=${A}`);
+  const go = async (hash, what) => { await p.ev(`location.hash = ${JSON.stringify(hash)}; void 0`); await soon(`location.hash === ${JSON.stringify(hash)}`, what); };
+  const nav = async (page) => { await soon(STEADY(`.side nav.nav a[href="#${page}"]`), `the ${page} link at rest`); await p.click(`.side nav.nav a[href="#${page}"]`); };
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // AC7: a reload keeps the panel on A
+  await soon(`${AT_REST} && ${IN_PANEL(A)}`, 'A in the panel');
+  await reload();
+  await soon(`location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)}`, 'reloaded: A in the panel');
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open', t: A }), 'remembered');
+
+  // a fresh tab on #goals, /api/threads held 3 s by its own init script: the stored keys written into its hash
+  // at once, kept while the read is held, the store unchanged; A opens in the panel when the read lands
+  const q = await chrome.newPage();
+  t.after(() => q.close());
+  await q.send('Page.enable');
+  await q.send('Runtime.enable');
+  await q.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await q.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const t0 = Date.now(); const rf = window.fetch; window.fetch = async (u, o) => { if (String(u).startsWith('/api/threads')) await new Promise((r) => setTimeout(r, Math.max(0, t0 + 3000 - Date.now()))); return rf(u, o); }; })()` });
+  await q.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
+  const soonQ = soonIn(q, 30000);
+  await soonQ(`typeof DATA === "object" && DATA !== null && location.hash === '#goals?th=open&t=${A}'`, 'the remembered keys in the new tab');
+  assert.deepEqual(await q.ev(`[TL.have, location.hash, ${STORE}, document.body.classList.contains('threads-open')]`), [0, `#goals?th=open&t=${A}`, JSON.stringify({ th: 'open', t: A }), true], 'held: t kept, the store unchanged, the panel open');
+  await pause(1000);
+  assert.deepEqual(await q.ev(`[TL.have, location.hash, ${STORE}]`), [0, `#goals?th=open&t=${A}`, JSON.stringify({ th: 'open', t: A })], 'still held, still kept');
+  await soonQ(`TL.have > 0 && ${IN_PANEL(A)} && location.hash === '#goals?th=open&t=${A}'`, 'A in the panel once the read lands');
+  await q.close();
+  // the first tab in front again: a tab behind another runs no transitions after a reload
+  await p.send('Page.bringToFront');
+
+  // after opening a thread from the list, Back shows the list; Back after the back arrow reopens the thread
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && !!${ROW(A)}`, 'the list');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)}`, 'A from the list');
+  await p.ev('history.back()');
+  await soon(`location.hash === '#overview?th=open' && ${AT_REST} && !!${ROW(A)} && ${CARD}.hidden`, 'Back: the list');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`${IN_PANEL(A)}`, 'A again');
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && !!${ROW(A)}`, 'the arrow: the list');
+  await p.ev('history.back()');
+  await soon(`location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)}`, 'Back after the arrow: A again');
+
+  // × then a nav click: closed; the focus back on .tt; opening by .tt focuses the selected tab
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`location.hash === '#overview' && !${IS_OPEN} && ${STORE} === null`, 'closed, nothing remembered');
+  await soon("document.activeElement === document.querySelector('.pagebar .tt')", 'the focus on .tt');
+  await nav('goals');
+  await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'Goals, still closed');
+  // with the panel open on the list, a nav click carries th=open
+  await p.click('.pagebar .tt');
+  await soon(`location.hash === '#goals?th=open' && ${AT_REST}`, 'the panel on Goals');
+  assert.equal(await p.ev("document.activeElement?.closest('#th-tabs [role=\"tab\"]')?.getAttribute('aria-selected')"), 'true', 'the focus on the selected tab');
+  await nav('overview');
+  await soon(`location.hash === '#overview?th=open' && ${IS_OPEN}`, 'Overview with the panel');
+  // with a floating card open and the panel open, a nav click carries th=open only
+  await soon(`${AT_REST} && !!${ROW(G)}`, "G's row");
+  await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
+  await p.click(`#tl-list [data-tl-open="${G}"]`);
+  await soon(`location.hash === '#goals?th=open&t=${G}' && ${FLOATING(G)}`, "G's card on Goals");
+  assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open' }));
+  await nav('overview');
+  await soon(`location.hash === '#overview?th=open' && ${IS_OPEN} && ${CARD}.hidden`, 'th=open only');
+
+  // + then Send, then Back: the list
+  await soon(STEADY('#threads [data-tl-new]'), '+ at rest');
+  await p.click('#threads [data-tl-new]');
+  await soon("document.activeElement?.id === 'tl-c-text'", 'the draft');
+  await p.type('a new one');
+  await p.key('Enter', 8);
+  await soon("/[?&]t=/.test(location.hash)", 't added');
+  await p.ev('history.back()');
+  await soon(`location.hash === '#overview?th=open' && !!${ROW(A)} && ${CARD}.hidden`, 'Back: the list');
+
+  // bad values dropped; t without th for an in-panel thread gets th=open
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && ${STORE} === null`, 'closed');
+  await p.ev("location.hash = '#overview?th=bogus&t=BAD!'; void 0");
+  await soon(`location.hash === '#overview' && !${IS_OPEN} && history.state?.page === '#overview'`, 'dropped: #overview, closed');
+  await p.ev(`location.hash = '#overview?t=${A}'; void 0`);
+  await soon(`location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)} && history.state?.page === '#overview?th=open&t=${A}'`, 'th=open added, A in the panel');
+
+  // Review Focus 3: a remembered t the threads don't have: the list, t dropped
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN}`, 'closed');
+  await p.ev(`localStorage.setItem('devteam.threads.open', JSON.stringify({ th: 'open', t: 't-nope' })); void 0`);
+  await nav('goals');
+  await soon(`location.hash === '#goals?th=open' && ${AT_REST} && !!${ROW(A)} && ${STORE} === ${stored({ th: 'open' })}`, 'the list, t dropped');
+
+  // a floating card's ×: a new entry without t; Back reopens it
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN}`, 'closed');
+  await go(`#goals?t=${G}`, "G's card");
+  await soon(FLOATING(G), "G's card open");
+  let n = await p.ev('history.length');
+  await p.click('#tl-card [data-tl-close]');
+  await soon(`location.hash === '#goals' && ${CARD}.hidden`, 'closed, t gone');
+  assert.equal(await p.ev('history.length'), n + 1, 'a new entry');
+  await p.ev('history.back()');
+  await soon(`location.hash === '#goals?t=${G}' && ${FLOATING(G)}`, 'Back: the card again');
+  await go('#goals', 'Goals');
+  await soon(`${CARD}.hidden`, 'closed');
+
+  // a resolved thread's t survives a reload; Reopen in the in-panel card reopens it
+  await go(`#overview?th=resolved&t=${R}`, 'R');
+  await soon(IN_PANEL(R), 'R in the panel');
+  await reload();
+  await soon(`location.hash === '#overview?th=resolved&t=${R}' && ${IN_PANEL(R)}`, 'reloaded: R in the panel');
+  await soon(AT_REST, 'the panel at rest');
+  await soon("!!document.querySelector('#tl-c-acts [data-tl-reopen]')", 'Reopen');
+  await soon(STEADY('#tl-c-acts [data-tl-reopen]'), 'Reopen at rest');
+  await p.click('#tl-c-acts [data-tl-reopen]');
+  await soon(`TL.threads.find((x) => x.id === '${R}')?.status === 'open'`, 'reopened');
+  await soon(IN_PANEL(R), 'still shown');
+  await until(() => JSON.parse(F.owner(['thread', 'show', R, '--json'])).status === 'open', 'reopened on the server');
+
+  // under a #talk/<G> card with the panel open, A from the list replaces the talk/ entry
+  await go('#overview?th=open', 'the list');
+  await p.ev(`location.hash = '#talk/${G}'; void 0`);
+  await soon(`${FLOATING(G)} && ${IS_OPEN} && history.state?.page === '#goals?th=open&t=${G}'`, "the talk/ card over Goals, the panel kept, t added");
+  n = await p.ev('history.length');
+  await soon(`${AT_REST} && !!${ROW(A)}`, 'the list beside it');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`location.hash === '#goals?th=open&t=${A}' && ${IN_PANEL(A)}`, 'the talk/ entry replaced by A in the panel');
+  assert.equal(await p.ev('history.length'), n, 'history.length unchanged');
+  // under a #talk/<A> card, the back arrow replaces the talk/ entry with the list
+  await p.ev(`location.hash = '#talk/${A}'; void 0`);
+  await soon(`location.hash === '#talk/${A}' && ${IN_PANEL(A)} && history.state?.page === '#goals?th=open&t=${A}'`, 'A by its talk/ link');
+  n = await p.ev('history.length');
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#goals?th=open' && !!${ROW(A)}`, 'the talk/ entry replaced by the list');
+  assert.equal(await p.ev('history.length'), n, 'history.length unchanged');
+
+  // a pin opens its card as an entry (t), and resolving a card the route opened takes t away
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'closed');
+  await soon(`!!document.querySelector('#tl-pins [data-tl-pin="${G}"]')`, "G's pin");
+  n = await p.ev('history.length');
+  await p.ev(`document.querySelector('#tl-pins [data-tl-pin="${G}"]').click()`);
+  await soon(`location.hash === '#goals?t=${G}' && ${FLOATING(G)}`, 'the pin: t, the card');
+  assert.equal(await p.ev('history.length'), n + 1, 'a new entry');
+  await p.click('#tl-c-acts [data-tl-resolve]');
+  await soon("!!document.querySelector('#tl-card [data-tl-resolve-go]')", 'the resolve form');
+  await p.click('#tl-card [data-tl-resolve-go]');
+  await soon(`location.hash === '#goals' && ${CARD}.hidden`, 'resolved: closed, t gone');
 });

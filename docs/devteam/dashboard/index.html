@@ -3874,7 +3874,8 @@ function closeDrawer() {
   peekHide();
   lastFocus?.focus?.();
   const c = closeTarget(history.state);
-  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
+  // back to the entry below, which has its own head: the panel's th and t from under the peek go with it (kit-89 §2.5)
+  if (c.go) { TH_CARRY = history.state?.page ?? null; history.go(c.go); } else goHead(c.replace, { replace: true });
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
@@ -5119,8 +5120,27 @@ function stampEntry() {
   ROUTE_COLD = false;
   HERE = history.state;
 }
-// Every route draws the Threads panel from the page head in force after the rest (thRoute), whichever way it went.
-function route() { routeHead(); thRoute(); }
+// Every route draws the Threads panel from the page head in force after the rest (thRoute), whichever way it went
+// (kit-89 spec §2.5): freshness read before the entry is stamped; a peek closed carries its page's th and t; on a
+// fresh entry the remembered panel applied; then the panel decided, drawn and remembered. A route run inside
+// routeHead (a redirect's stamped replace) has done all of it already.
+let ROUTE_N = 0;
+// TH_MADE: the head thGo is about to assign (an entry it makes isn't fresh); TH_FRESH: an entry's freshness, read
+// before its stamp ({ hash, fresh }); TH_CARRY: the page head under a peek being closed by going back
+let TH_MADE = null, TH_FRESH = null, TH_CARRY = null;
+function route() {
+  thFreshness();
+  const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
+  TH_FRESH = null;
+  const carry = TH_CARRY;
+  TH_CARRY = null;
+  const n = ++ROUTE_N;
+  routeHead();
+  if (n !== ROUTE_N) return;
+  if (carry) thCarry(carry);
+  if (fresh) thRemember();
+  thRoute();
+}
 function routeHead() {
   stampEntry();
   const raw = location.hash.slice(1);
@@ -5167,6 +5187,8 @@ window.addEventListener('hashchange', () => { if (DATA) route(); });
 // A move through history fires popstate at once and queues its hashchange, so a link followed in
 // between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
 // its close would go back past the page. HERE follows each entry here, as it changes.
+// (the Threads code reads an entry's freshness first, before the stamp hides it: kit-89 spec §2.5)
+window.addEventListener('popstate', () => thFreshness());
 window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -6166,7 +6188,9 @@ async function tlRoute(id) {
     TL.route = id;
     return void thRoute();
   }
-  const head = subjectHead(t.subject);
+  // its subject's page head, the panel's th kept and t added (kit-89 spec §2.5)
+  const cur = parseHead(thHead(), SHELL_ROUTES), sp = parseHead(subjectHead(t.subject), SHELL_ROUTES);
+  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) ? { th: cur.state.th } : {}), t: id } });
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
   // the page head changed after the router's part drew the panel from the old one
@@ -6503,7 +6527,7 @@ async function tlRefresh() {
     TL.have = n;
     // the first read, or one that brings in a t the route named before the threads had it: the Threads part of
     // the route runs again, now that the t can be decided (spec §2.5)
-    if (first || (TH.t && TH.opened !== TH.t && TL.threads.some((x) => x.id === TH.t))) thRoute();
+    if (first || (TH.t && TH.opened !== TH.t && TL.threads.some((x) => x.id === TH.t)) || (TH.ask && TH.t === TH.ask.t && n > TH.ask.seq)) thRoute();
   } catch { return; }
   tlDraw();
   thAdopt();
@@ -6532,7 +6556,8 @@ function tlClose() {
   if (VIEWER) return void history.replaceState(history.state, '', `${location.pathname}${location.search}`);
   if (!own) return;
   const c = closeTarget(history.state);
-  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
+  // in place: the page head under it without the card's t (kit-89 spec §2.5), so the same link opens it again
+  if (c.go) history.go(c.go); else goHead(thWithout(c.replace), { replace: true });
 }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
@@ -6651,7 +6676,7 @@ document.addEventListener('click', (e) => {
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
   const pin = e.target.closest('[data-tl-pin]');
-  if (pin) return void tlOpen(pin.dataset.tlPin, false);
+  if (pin) return void thPin(pin.dataset.tlPin);
   const row = e.target.closest('[data-tl-open]');
   if (row) return void thOpenRow(row.dataset.tlOpen);
   if (e.target.closest('[data-tl-back]')) return void thBack();
@@ -6726,7 +6751,7 @@ function tlPinsInto(box, pins, held) {
 // focus to go once the route has drawn (focus: 'tab' | 'thf' | 'inbox' | 'back' | 'row' | 'composer' | null; focusRow: the
 // thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), and a + draft's
 // thread waiting for its id in the threads (adopt).
-const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null };
+const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null };
 const TH_LISTS = ['open', 'resolved'];
 const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
@@ -6856,19 +6881,116 @@ function thGo({ th = null, t, focus = false } = {}) {
   const next = headFor({ page: p.page, state });
   if (next === head) return void thRoute();
   if (parseHead(location.hash, SHELL_ROUTES).link !== undefined) {
+    // under a talk/ head a change of t replaces the talk/ entry with the page head (stamped): one card, one thread
+    if (location.hash.startsWith('#talk/') && (t || null) !== (p.state.t || null)) return void goHead(next, { replace: true });
     history.replaceState(withPage(history.state, next), '', location.href);
     HERE = history.state;
     return void thRoute();
   }
+  TH_MADE = next;
   goHead(next);
 }
-// The router's part: the panel from the page head in force, drawn as a change of view.
+// The router's part (kit-89 spec §2.5): the page head in force decided (bad values dropped, an unknown t dropped,
+// th=open added for an in-panel t), the panel drawn from it as a change of view, then remembered. The first read
+// of the threads runs this again (never the whole route), so what needs the threads waits for them.
 function thRoute() {
   if (VIEWER) return;
+  thDecide();
   const p = parseHead(thHead(), SHELL_ROUTES);
   TH.th = TH_LISTS.includes(p.state?.th) ? p.state.th : null;
   TH.t = typeof p.state?.t === 'string' ? p.state.t : null;
   thRouted();
+  thStore();
+}
+const THREADS_KEY = 'devteam.threads.open';
+const TH_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// The threads and the page are read: whether a t is known, in the panel or floating, can be decided.
+const thReady = () => TL.have > 0 && !!DATA;
+// The page head in force changed in place, stamped: the entry's own head (hash and stamp), or under a link head
+// the page under it (withPage), the link left as it is.
+function thReplace(next) {
+  if (parseHead(location.hash, SHELL_ROUTES).link === undefined) history.replaceState(withPage(history.state, next), '', next);
+  else history.replaceState(withPage(history.state, next), '');
+  HERE = history.state;
+}
+// A t the threads don't have is unknown only once a read begun after it was named has landed (a thread made a
+// moment ago may not be in the last one): until then it is kept, and the read asked for.
+function thUnknown(t) {
+  if (!TH.ask || TH.ask.t !== t) { TH.ask = { t, seq: TL.seq }; tlRefresh(); return false; }
+  return TL.have > TH.ask.seq;
+}
+function thDecide() {
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined) return;
+  const s = { ...p.state };
+  // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
+  if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
+  if (s.t !== undefined && !TH_ID.test(s.t)) delete s.t;
+  // a t named before the first read: that read decides it
+  if (s.t && !TL.have && TH.ask?.t !== s.t) TH.ask = { t: s.t, seq: 0 };
+  if (s.t && thReady()) {
+    const t = TL.threads.find((x) => x.id === s.t);
+    if (t) { TH.ask = null; if (!s.th && tlInPanel(t)) s.th = 'open'; }
+    else if (thUnknown(s.t)) { TH.ask = null; delete s.t; }
+  }
+  const next = headFor({ page: p.page, state: s });
+  if (next !== head) thReplace(next);
+}
+// Remembered (devteam.threads.open): th, and t with it only for a thread shown in the panel; nothing while the
+// threads are unread or the t is still being asked about. A throwing store does nothing.
+function thStore() {
+  if (!thReady() || (TH.t && TH.ask?.t === TH.t)) return;
+  try {
+    if (!TH.th) return void localStorage.removeItem(THREADS_KEY);
+    const v = { th: TH.th };
+    if (TH.t && thInPanelId(TH.t)) v.t = TH.t;
+    localStorage.setItem(THREADS_KEY, JSON.stringify(v));
+  } catch {}
+}
+function thStored() {
+  let v;
+  try { v = JSON.parse(localStorage.getItem(THREADS_KEY) || 'null'); } catch { return null; }
+  if (!v || typeof v !== 'object' || !TH_LISTS.includes(v.th)) return null;
+  return typeof v.t === 'string' && TH_ID.test(v.t) ? { th: v.th, t: v.t } : { th: v.th };
+}
+// A fresh entry (a cold load, a nav click, a link) whose page head in force carries neither th nor t: the
+// remembered keys written into it (a page head's hash; under a link head, the page under it).
+function thRemember() {
+  if (VIEWER) return;
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined || p.state.th !== undefined || p.state.t !== undefined) return;
+  const v = thStored();
+  if (v) thReplace(headFor({ page: p.page, state: { ...p.state, ...v } }));
+}
+// Read before an entry is stamped (the router, and popstate, which comes first): an entry with no state is fresh
+// unless it is the one thGo just made.
+// A page head without its t.
+function thWithout(head) {
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined || p.state.t === undefined) return head;
+  const s = { ...p.state };
+  delete s.t;
+  return headFor({ page: p.page, state: s });
+}
+function thFreshness() {
+  if (history.state && typeof history.state.page === 'string') return;
+  TH_FRESH = { hash: location.hash, fresh: !(TH_MADE !== null && location.hash === TH_MADE) };
+  TH_MADE = null;
+}
+// A peek closed by going back: the entry below shows the panel as it was under the peek (its th and t), stamped.
+function thCarry(page) {
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES), c = parseHead(page, SHELL_ROUTES);
+  if (p.link !== undefined || c.link !== undefined || p.page !== c.page) return;
+  const s = { ...p.state };
+  delete s.th;
+  delete s.t;
+  if (c.state.th !== undefined) s.th = c.state.th;
+  if (c.state.t !== undefined) s.t = c.state.t;
+  const next = headFor({ page: p.page, state: s });
+  if (next !== head) thReplace(next);
 }
 // TH as the route has it: its thread opened (or the one it opened closed), then the panel drawn.
 function thRouted() {
@@ -6923,6 +7045,11 @@ function thFocus(kind) {
   if (kind === 'back') return void $('th-pane').querySelector('[data-tl-back]')?.focus();
   if (kind === 'composer') return void tlEl('tl-c-text')?.focus();
   if (kind === 'row' || kind === 'current') { const r = rowOf(kind === 'row' ? TH.focusRow : TL.open); return void (r ? r.focus() : tab()); }
+  thFocusBack();
+}
+// The focus back from the panel: the Inbox button the owner can see (#tt-peek over a peek or the viewer, else .tt),
+// else the peek's or the viewer's close (spec §2.9).
+function thFocusBack() {
   const to = [$('tt-peek'), document.querySelector('.pagebar .tt'), $('av-close'), $('drawer-close')].find(thSeen);
   to?.focus();
 }
@@ -6975,9 +7102,17 @@ function thOpenRow(id) {
   if (TH.th && innerWidth > 900) state.th = TH.th;
   state.t = id;
   const head = headFor({ page: p.page, state });
-  if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); location.hash = head; return; }
+  if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); TH_MADE = head; location.hash = head; return; }
   thRoute();
   tlReveal(s);
+}
+// A pin on the page: its thread opened as a Threads change, a new entry with its t (spec §2.5: every change is an
+// entry), the panel's th kept; on a frame (an artifact, a preview) or in the /view/ tab, today's in place.
+function thPin(id) {
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t || VIEWER || (t.subject?.kind !== 'item' && t.subject?.kind !== 'page')) return void tlOpen(id, false);
+  if (tlInPanel(t)) return void tlOpen(id, false);
+  thGo({ th: TH.th, t: id });
 }
 // A + draft sent: once the threads have its id, it is the panel's thread in the URL, a new entry (so Back goes
 // to the list the + was pressed on), the focus left where it is (spec §2.4).
@@ -7016,9 +7151,12 @@ function tlAct(action, body) {
       TL.pend.push(p);
       TL.resolving = false;
       // a floating card closes; a thread in the panel stays shown, with Reopen, until the owner goes back (spec §4)
-      if (status === 'resolved' && !(t && tlInPanel(t) && t.id === TL.open)) TL.open = null;
+      const floating = status === 'resolved' && !(t && tlInPanel(t) && t.id === TL.open);
+      if (floating) TL.open = null;
       tlRelay();
       tlDraw();
+      // the card the route opened (its t in the page head in force) closed: t taken away, a new entry (spec §2.5)
+      if (floating && t && TH.t === t.id && !location.hash.startsWith('#talk/')) thGo({ th: TH.th, t: null });
     },
     undo: () => { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'resolved') TL.open = wasOpen; tlRelay(); tlDraw(); },
     onOk: () => { p.confirmed = true; tlRefresh(); },
