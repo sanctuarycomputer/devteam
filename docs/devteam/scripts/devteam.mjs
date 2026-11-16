@@ -4170,16 +4170,29 @@ function cmdWaves() {
   out(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}`);
 }
 
+// The sessions with a message to the supervisor still unanswered (a blocked or review request, a
+// question): their wait is the supervisor's, whatever else they also wait on.
+function idsAwaitingReply() {
+  const msgs = logObjects('message');
+  const replied = new Set([...msgs, ...logObjects('question')].map((m) => m.re).filter(Boolean));
+  return new Set(msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).flatMap((m) => [m.created_by, m.ticket]).filter(Boolean));
+}
 function cmdStatus() {
   const rows = deriveStatus();
   if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
+  const asking = idsAwaitingReply();
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     // held on purpose or stopped before it ran: never stale (a held one shows its hold, which wins)
     const held = r.held && r.phase !== 'done' && !r.merge_sha ? r.held : null;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
-    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
+    // a blocked ticket whose dependencies haven't merged, and that asked the supervisor nothing still
+    // unanswered, waits on them, not on the supervisor: say which. awaiting-word is always the
+    // supervisor's word to give (a plan-ahead ticket's approval too); so is an unanswered message.
+    const deps = r.phase === 'blocked' && !asking.has(r.id) ? (r.depends_on ?? []).filter((d) => !mergeShaFor(d)) : [];
+    const waitsOn = deps.length ? ` WAITING ON ${deps.join(', ')} TO MERGE` : ' WAITING ON SUPERVISOR';
+    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? waitsOn : '';
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
@@ -12452,6 +12465,9 @@ function collectMetrics(since) {
     if (p.phase === 'blocked' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `blocked for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
+    // blocked only on dependencies that haven't merged, with nothing asked of the supervisor: it
+    // waits as planned (status says WAITING ON <ids> TO MERGE), and isn't a stuck session
+    else if (p.phase === 'blocked' && (ts.get(id)?.depends_on ?? []).some((d) => !mergeShaFor(d)) && !openMsgs.some((m) => m.created_by === id || m.ticket === id)) {}
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
     // the first hour of the same: blocked with nothing holding it, raised at once
     else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
@@ -13369,7 +13385,9 @@ const ACCOUNTS_FRESH_MS = 10 * 60000;
 const RESTART_EVERY_MS = 10 * 60000;
 const RESTART_SPAN_MS = 6 * 3600000;
 const RESTART_MAX = 3;
-// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: one relaunch a tick.
+// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: each relaunch or
+// restart has up to 100 s, and another starts only with at least 30 s (100 s, after the first, for a
+// relaunch whose repo has a worktree_setup) of the tick's 110 left.
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
@@ -13636,9 +13654,10 @@ function restartPane(name, launch, budget) {
 }
 // A machine that died (a dead battery, a redeploy) took the tmux server with it, and what survives
 // on disk says which sessions to bring back: every worker and planner the kit launched, not held
-// or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
-// gone, or was created after that session's last launch: a window closed in a session older than
-// its launch was closed on purpose, and stays closed (the findings report it).
+// (its goal or the fleet parked, let go or drained, or its ticket's held field) or finished, whose
+// worktree still exists and whose window doesn't. Only when the tmux session is gone, or was
+// created after that session's last launch: a window closed in a session older than its launch was
+// closed on purpose, and stays closed (the findings report it). Work in progress comes back first.
 const LAUNCH_ACT = /^(?:made|resumed) (worker|planner) (\S+) in /;
 const SETTLED_MS = 2 * 60000;
 function lastLaunches() {
@@ -13673,7 +13692,41 @@ function sessionsToRelaunch(launchOf, held) {
     if (role === 'worker' ? !lastPhaseOf(name) || tickets().get(name)?.superseded_by : !planners().some((p) => p.feature === launch[1])) continue;
     found.push({ name, launch });
   }
-  return found;
+  // stable: within a tier, the launch order
+  const tier = new Map(found.map((f) => [f.name, relaunchTier(f.name, f.launch)]));
+  return found.sort((a, b) => tier.get(a.name) - tier.get(b.name));
+}
+// Which gone sessions come back first: 0, work in progress (uncommitted changes in its worktree, a
+// planner the owner waits on, a worker in build); 2, a worker idle on a dependency (blocked or
+// awaiting word, or its last message to the supervisor an unanswered blocked); 1, the rest.
+function relaunchTier(name, [role, id]) {
+  const wt = path.join(mainRoot, '.worktrees', name);
+  // a checkout of its own: a plain directory would read the enclosing repo's status
+  if (fs.existsSync(path.join(wt, '.git'))) {
+    const r = spawnSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (r.status === 0 && r.stdout.trim()) return 0;
+  }
+  if (role === 'planner') return plannerAwaitsOwner(name, id) ? 0 : 1;
+  const ph = lastPhaseOf(name)?.to;
+  if (ph === 'build') return 0;
+  if (['blocked', 'awaiting-word'].includes(ph)) return 2;
+  const said = logObjects('message').filter((m) => m.created_by === name).sort(byTime).pop();
+  return said?.kind === 'blocked' && !handledMessages().has(said.id) ? 2 : 1;
+}
+// An open question on the planner's goals or plan branch (its row's waiting_on_owner), or an open
+// thread on it: on its card (planner:<feature>) or on an artifact drawn in its worktree.
+function plannerAwaitsOwner(name, feature) {
+  if (planners().find((p) => p.feature === feature)?.waiting_on_owner?.length) return true;
+  const on = (s) => isObj(s) && ((s.kind === 'item' && [`planner:${feature}`, `planner:${name}`].includes(s.ref)) || (s.kind === 'artifact' && s.at === name));
+  return threadViews(readLog().objects).some((t) => t.status === 'open' && on(t.subject));
+}
+// Whether a resume of this session runs a worktree_setup: its repo's setting (a worker's ticket's
+// repo, a planner's home). repo() exits on a link it can't read, so that is checked first, and a
+// repo that can't be read counts as having one.
+function hasWorktreeSetup(name, [role]) {
+  const t = role === 'worker' ? tickets().get(name) : null;
+  if (t && !repoReadable(repoOfTicketLink(t))) return true;
+  return !!(t ? repoOfTicket(t) : repo('home')).settings.worktree_setup;
 }
 // Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
@@ -15197,10 +15250,12 @@ function cmdAccountsTick() {
   let supervisorRefused = null;
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
-  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
-  // one relaunch a tick, in what's left of it; the rest still report if they've given up
-  let tried = false;
-  const budget = () => { const left = RESTART_TICK_MS - (Date.now() - began); return tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left); };
+  // a ticket's held field holds it too: nothing runs for a held ticket
+  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || isHeld(tickets().get(name) ?? {}) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+  // one restart a tick (up to 3 relaunches, below), in what's left of it; the rest still report if
+  // they've given up. A budget of 0 only looks: claimRestart takes nothing from the record.
+  let tries = 0;
+  const budget = (cap = 1, need = RESTART_MIN_MS) => { const left = RESTART_TICK_MS - (Date.now() - began); return tries >= cap || left < need ? 0 : Math.min(RESTART_CHILD_MS, left); };
   if (bin) {
     const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
     const saySwitched = (e) => out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
@@ -15238,14 +15293,14 @@ function cmdAccountsTick() {
         const sup = restartSupervisor(budget());
         if (sup?.refused) { supervisorRefused = sup.refused; out(`the supervisor is stopped at a usage limit and was not restarted: ${sup.refused}`); }
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
-        else if (sup) tried = true;
+        else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
-          else if (did) tried = true;
+          else if (did) tries += 1;
           if (did === 'restarted') state.resumed.push(name);
         }
       }
@@ -15254,11 +15309,17 @@ function cmdAccountsTick() {
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
   // would only stop again, and it is still there for a later tick.
+  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), 1 at or over it. A
+  // resume runs its repo's worktree_setup before its window exists, and that can take most of the
+  // 100 s: a later relaunch whose repo has one starts only with the full 100 s left, so it is never
+  // cut short into a spent attempt; it waits for the next tick instead.
   if (!state.active_no_room) {
-    for (const { name, launch } of sessionsToRelaunch(launchOf, held)) {
-      const did = relaunchGone(name, launch, budget());
+    const gone = sessionsToRelaunch(launchOf, held);
+    const cap = gone.length ? (memoryFull() ? 1 : 3) : 0;
+    for (const { name, launch } of gone) {
+      const did = relaunchGone(name, launch, budget(cap, tries && tries < cap && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
-      else if (did) tried = true;
+      else if (did) tries += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
   }
@@ -16551,7 +16612,7 @@ async function cmdDashboard() {
 
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, a TL;DR that names the approach and matches the plan, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
