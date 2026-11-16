@@ -3611,9 +3611,10 @@ const GOVERNED = /^docs\/devteam\/(governance|process)\/|(^|\/)strategy\.md$/;
 function howItChanges(kind, rec = {}) {
   const id = rec.id;
   const tip = KEY_TIPS['How it changes'];
-  const corrected = (c) => `Corrected by ${esc(who(c.by))}: ${esc(c.reason)}`;
+  // who corrected it when that is known (a record whose set_by lacks it says only that it was corrected)
+  const corrected = (c) => `Corrected${c.by ? ` by ${esc(who(c.by))}` : ''}: ${esc(c.reason)}`;
   // a correction from the dashboard's row, else from the record itself (one older than the dashboard holds)
-  const fromRecord = () => { const c = rec.record?.fields?.corrected; return c ? { reason: c.reason, by: rec.record?.set_by?.corrected?.by } : null; };
+  const fromRecord = () => { const c = rec.record?.fields?.corrected; return c ? { reason: c.reason, by: rec.record?.set_by?.corrected?.by ?? c.by ?? null } : null; };
   const correctRow = (lt) => `Correct, on its row in Self Improvement: <a class="linkish" href="#loop?lt=${lt}">${lt === 'act' ? 'Act' : 'Decide'}</a>`;
   let html;
   switch (kind) {

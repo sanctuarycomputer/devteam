@@ -460,11 +460,11 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
 const peekHashes = (ids) => {
   const e = encodeURIComponent;
   return {
-    ticket: ['ticket', `#ticket/${e(ids.ticket)}`], goal: ['goal', `#goal/${e(ids.goal)}`], feature: ['feature', `#feature/${e(ids.feature)}`], story: ['story', `#story/${e(ids.story)}`],
+    ticket: ['ticket', `#ticket/${e(ids.ticket)}`], ticketMerged: ['ticket', `#ticket/${e(ids.ticketMerged)}`], ticketReplaced: ['ticket', `#ticket/${e(ids.ticketReplaced)}`], goal: ['goal', `#goal/${e(ids.goal)}`], feature: ['feature', `#feature/${e(ids.feature)}`], story: ['story', `#story/${e(ids.story)}`],
     release: ['release', `#release/${e(ids.release)}`], wave: ['wave', `#wave/${e(ids.wave)}`], milestone: ['milestone', `#milestone/${e(ids.milestone)}`],
     act: ['act', `#act/${e(ids.act)}`], actUnderDecision: ['act', `#act/${e(ids.actUnderDecision)}`], actCorrected: ['act', `#act/${e(ids.actCorrected)}`],
     decision: ['decision', `#decision/${e(ids.decision)}`], decisionNotMine: ['decision', `#decision/${e(ids.decisionNotMine)}`],
-    lesson: ['lesson', `#lesson/${e(ids.lesson)}`], problem: ['problem', `#problem/${e(ids.problem)}`], incident: ['problem', `#problem/${e(ids.incident)}`],
+    lesson: ['lesson', `#lesson/${e(ids.lesson)}`], lessonOwner: ['lesson', `#lesson/${e(ids.lessonOwner)}`], problem: ['problem', `#problem/${e(ids.problem)}`], incident: ['problem', `#problem/${e(ids.incident)}`],
     signal: ['signal', `#signal/${e(ids.signal)}`], observation: ['observation', `#observation/${e(ids.observation)}`], learning: ['learning', `#learning/${e(ids.learning)}`],
     retro: ['retro', `#retro/${e(ids.retro)}`], thread: ['thread', `#thread/${e(ids.thread)}`], planner: ['planner', `#planner/${e(ids.planner)}`],
     qAnswered: ['q', `#q/${e(ids.qAnswered)}`], qDefaulted: ['q', `#q/${e(ids.qDefaulted)}`], qWithdrawn: ['q', `#q/${e(ids.qWithdrawn)}`], qLong: ['q', `#q/${e(ids.qLong)}`],
@@ -490,6 +490,7 @@ const howCases = (ids) => {
     thread: { text: 'Reply in its thread' },
     governanceFile: { text: 'lands with your yes' },
     goal: thread(`goal:${ids.goal}`), ticket: thread(`ticket:${ids.ticket}`), planner: thread(`planner:${ids.planner}`), lesson: thread(`lesson:${ids.lesson}`),
+    ticketMerged: thread(`ticket:${ids.ticketMerged}`), ticketReplaced: thread(`ticket:${ids.ticketReplaced}`), lessonOwner: thread(`lesson:${ids.lessonOwner}`),
     problem: thread(`problem:${ids.problem}`), incident: thread(`problem:${ids.incident}`), observation: thread(`observation:${ids.observation}`),
     ...Object.fromEntries(['feature', 'story', 'release', 'wave', 'milestone', 'signal', 'learning', 'retro', 'sensorHttp', 'sensorReader', 'file'].map((k) => [k, { text: SHIFT, sel: 'a[href^="#"]' }])),
   };
@@ -497,6 +498,249 @@ const howCases = (ids) => {
 // the peek drawn in full: its kind, its properties first, its History card last and loaded
 const peekDrawn = (kind) => `(() => { const b = document.getElementById('drawer-body'), last = b.lastElementChild;
   return !document.getElementById('drawer').hidden && DRAWER.kind === ${JSON.stringify(kind)} && !!b.querySelector('section.attrs') && !!last && last.matches('.psect') && /^History$/.test(last.querySelector('.card-head')?.textContent.trim() ?? '') && !last.querySelector('.loading'); })()`;
+
+// The design's peek inventory (project/designs/a-cleaner-more-consistent-dashboard.md, "Every detail
+// and widget stays"; spec §2.4), one row per item: kind (the design's kind), item (its words), on (the
+// fixture record whose peek draws it, a key of peekHashes) and selectorOrText, read in the peek's body:
+//   'dt:<key>'               a property with that key and a value;
+//   'sect:<title>'           a section card with that title and a body;
+//   either, then ' >> <css>' something in it, or ' >> text:<words>' words in it;
+//   '<css>' or 'text:<words>' in the whole body;
+//   'stored:<type>'          every stored field: each row the page's stored-field formatter makes of the
+//                            record's fields is a key in the first properties list.
+// inject (with why): page code run just before a redraw, where the fixture can't carry the item (a
+// field the kit never writes in a test project); it patches the page's own data (PEEKS, DATA), and
+// the item is read in the same turn, so no refresh can come between.
+const PATCH_PEEK = 'const patchPeek = (kind, id, f) => { const k = peekKey(kind, id); const v = structuredClone(PEEKS.get(k)); f(v); PEEKS.set(k, v); };';
+const inventory = (ids) => {
+  const J = JSON.stringify;
+  const row = (kind, on, item, selectorOrText, extra = {}) => ({ kind, on, item, selectorOrText, ...extra });
+  // one incident in every stage at once: its decision, its question to you, its fix merged, its
+  // verify window and a regression; the kit gets there only through triage, a fix ticket's merge, a
+  // deploy and a regression, and one incident's stage is one of them
+  const incident = { why: 'an incident reaches decision, question, fix, verify and regressed only through triage, a merged fix, a deploy and a regression',
+    inject: `${PATCH_PEEK} patchPeek('problem', ${J(ids.incident)}, (v) => Object.assign(v.incident, { decision: ${J(ids.decision)}, question: { id: ${J(ids.qDefaulted)}, status: 'defaulted', default: '8080', deadline: new Date().toISOString() }, ticket: ${J(ids.ticket)}, merged: 'abcdef1234567890', verify: { until: new Date(Date.now() + 864e5).toISOString(), assumed: true, regressed: ['abcdef1234567890'] } }));` };
+  return [
+    // ---- ticket: every stored field; computed rows; the handoff; time per phase; gate runs; spend; the graph
+    row('ticket', 'ticket', 'every stored field', 'stored:ticket'),
+    ...['Title', 'Feature', 'Component', 'Kind', 'Size', 'Risk', 'Serves', 'Waits on', 'Contracts', 'Touches'].map((k) => row('ticket', 'ticket', k.toLowerCase(), `dt:${k}`)),
+    row('ticket', 'ticket', 'links', 'dt:Links', { why: 'a ticket\'s links name registry entries (settings links), and the fixture project has none',
+      inject: `${PATCH_PEEK} patchPeek('ticket', ${J(ids.ticket)}, (v) => { v.record.fields.links = ['docs-site']; });` }),
+    row('ticket', 'ticket', 'done when', 'dt:Done when >> ul li'),
+    row('ticket', 'ticket', 'one-way doors', 'dt:One-way doors'),
+    row('ticket', 'ticketReplaced', 'replaced by', `dt:Replaced by >> a[href="#ticket/${encodeURIComponent(ids.ticket)}"]`),
+    row('ticket', 'ticket', 'on hold', 'dt:On hold >> text:until the processor is chosen'),
+    row('ticket', 'ticket', 'notes', 'dt:Notes'),
+    row('ticket', 'ticket', 'created', 'dt:Created'),
+    row('ticket', 'ticket', 'last changed', 'dt:Last changed'),
+    row('ticket', 'ticket', 'Status', 'dt:Status'),
+    row('ticket', 'ticket', 'Documents', 'dt:Documents >> .links a'),
+    row('ticket', 'ticket', 'Reviews', 'dt:Reviews >> text:approved'),
+    row('ticket', 'ticket', 'Blocks', 'dt:Blocks >> a[href="#ticket/pay-02-receipt"]'),
+    row('ticket', 'ticket', 'Wave', 'dt:Wave >> a[href^="#wave/"]'),
+    row('ticket', 'ticket', 'Ships in', `dt:Ships in >> a[href="#release/${encodeURIComponent(ids.release)}"]`),
+    row('ticket', 'ticket', 'Spent', 'dt:Spent >> text:$2.40'),
+    row('ticket', 'ticket', 'Branch', 'dt:Branch >> text:ticket/pay-01-card'),
+    row('ticket', 'ticketMerged', 'Merged', 'dt:Merged >> code'),
+    row('ticket', 'ticket', 'the handoff', 'sect:Handoff >> text:the expiry field is next'),
+    row('ticket', 'ticket', 'time per phase', 'sect:Time per phase so far >> .phase-strip .ph'),
+    row('ticket', 'ticket', 'gate runs ✓', 'sect:Gate runs >> .gate-dot.ok'),
+    row('ticket', 'ticket', 'gate runs ✗', 'sect:Gate runs >> .gate-dot.fail'),
+    row('ticket', 'ticket', 'gate runs ≈', 'sect:Gate runs >> .gate-dot.flaky'),
+    row('ticket', 'ticket', 'gate runs slow', 'sect:Gate runs >> .badge.medium'),
+    row('ticket', 'ticket', 'gate runs flaky', 'sect:Gate runs >> .badge.high'),
+    row('ticket', 'ticket', 'spend over time', 'sect:Spend over time >> svg'),
+    row('ticket', 'ticket', 'the dependency graph', 'sect:Dependencies >> .diagram-wrap'),
+    // ---- goal
+    row('goal', 'goal', 'every stored field', 'stored:goal'),
+    row('goal', 'goal', 'outcome', 'dt:Outcome >> text:admins pay alone'),
+    row('goal', 'goal', 'horizon', 'dt:Horizon'),
+    row('goal', 'goal', 'measure', 'dt:Measure >> text:cards taken a day'),
+    row('goal', 'goal', 'numbered milestones', `dt:Milestones >> ol li a[href^="#milestone/"]`),
+    row('goal', 'goal', 'preconditions with "no plan yet"', 'dt:Preconditions >> ol .badge'),
+    row('goal', 'goal', 'not in scope', 'dt:Not in scope >> text:refunds'),
+    row('goal', 'goal', 'hold', 'dt:Hold >> text:waiting on the processor'),
+    row('goal', 'goal', 'plan after', 'dt:Plan after'),
+    row('goal', 'goal', 'approved', `dt:Approved >> a[href="#q/${encodeURIComponent(ids.qAnswered)}"]`, { why: 'approved is written only by goal set --approved with an answered goal-change question that proposed exactly that change',
+      inject: `${PATCH_PEEK} patchPeek('goal', ${J(ids.goal)}, (v) => { v.record.fields.approved = ${J(ids.qAnswered)}; });` }),
+    row('goal', 'goal', 'State', 'dt:State >> .badge'),
+    row('goal', 'goal', 'Why it matters: level', 'dt:Why it matters >> text:of 4'),
+    row('goal', 'goal', 'Why it matters: rationale', 'dt:Why it matters >> text:checkout moves the number'),
+    row('goal', 'goal', 'Why it matters: who and when', 'dt:Why it matters >> text:Judged by the supervisor'),
+    row('goal', 'goal', 'Why it matters: the decision', 'dt:Why it matters >> a[href^="#decision/"]'),
+    row('goal', 'goal', 'Why it matters: the strategy', 'dt:Why it matters >> a[href*="strategy.md"]'),
+    row('goal', 'goal', 'Design', 'dt:Design >> a'),
+    row('goal', 'goal', 'Forecast per milestone', 'dt:Forecast >> ol li:nth-child(2)'),
+    row('goal', 'goal', 'Features', `dt:Features >> a[href="#feature/${encodeURIComponent(ids.feature)}"]`),
+    row('goal', 'goal', 'Planners', `dt:Planners >> a[href="#planner/${encodeURIComponent(ids.planner)}"]`),
+    row('goal', 'goal', 'Your verdicts', 'dt:Your verdicts >> text:Approve'),
+    row('goal', 'goal', 'Questions', `dt:Questions >> a[href="#q/${encodeURIComponent(ids.qAnswered)}"]`),
+    row('goal', 'goal', 'the step bar', '.steps'),
+    row('goal', 'goal', 'next step', '.goal-next'),
+    row('goal', 'goal', 'Readings', 'sect:Readings >> svg'),
+    row('goal', 'goal', 'the design\'s TL;DR', 'sect:Design: the TL;DR >> .tldr'),
+    row('goal', 'goal', 'Problems that threaten it', `sect:Problems that threaten it >> a[href="#problem/${encodeURIComponent(ids.problem)}"]`),
+    row('goal', 'goal', 'Decisions and acts', 'sect:Decisions and acts >> ol.tl li'),
+    row('goal', 'goal', 'the progress block', 'sect:Progress >> .no-shell .board'),
+    // ---- feature, story, release, wave, milestone
+    row('feature', 'feature', 'stored fields', 'stored:feature'),
+    ...['Title', 'Goals', 'Stories', 'Design', 'Notes'].map((k) => row('feature', 'feature', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    ...['Status', 'Milestones', 'Releases', 'Waves'].map((k) => row('feature', 'feature', k, `dt:${k}`)),
+    row('feature', 'feature', 'Planner', 'dt:Planner', { why: 'a feature is planned before it is on the roadmap, so a planner at work on a feature with a peek takes a re-plan',
+      inject: `DATA.planners = [...(DATA.planners || []), { feature: ${J(ids.feature)}, title: 'Pay', goals: [], tickets: 0, branch: 'plan/pay', window: false, waiting_on_supervisor: [], waiting_on_owner: [] }];` }),
+    row('feature', 'feature', 'Plan reviews', 'dt:Plan reviews >> text:approved', { why: 'its plan PR\'s reviews are read from a planner\'s branch, which a feature on the roadmap no longer has',
+      inject: `${PATCH_PEEK} patchPeek('feature', ${J(ids.feature)}, (v) => { v.plan_reviews = [{ stage: 'plan', pass: 1, verdict: 'APPROVE', reviewer: 'claude' }]; });` }),
+    row('feature', 'feature', 'the design\'s TL;DR', 'sect:Design: the TL;DR >> .tldr'),
+    row('feature', 'feature', 'the dependency graph grouped by wave', 'sect:Dependencies >> text:Wave'),
+    row('feature', 'feature', 'the progress block', 'sect:Progress >> .no-shell'),
+    row('story', 'story', 'stored text', 'dt:Text >> text:admin adds a card'),
+    row('story', 'story', 'stored release', `dt:Release >> a[href="#release/${encodeURIComponent(ids.release)}"]`),
+    row('story', 'story', 'Feature', `dt:Feature >> a[href="#feature/${encodeURIComponent(ids.feature)}"]`),
+    row('story', 'story', 'the progress block', 'sect:Progress >> .no-shell'),
+    ...['Tagged', 'Stories', 'Features'].map((k) => row('release', 'release', k, `dt:${k}`)),
+    row('release', 'release', 'Readiness', 'sect:Readiness >> ul li'),
+    row('release', 'release', 'Changelog', `sect:Changelog >> a[href="#ticket/${encodeURIComponent(ids.ticketMerged)}"]`),
+    row('release', 'release', 'the progress block', 'sect:Progress >> .no-shell'),
+    row('wave', 'wave', 'Features', 'dt:Features'),
+    row('wave', 'wave', 'Waiting on', 'dt:Waiting on >> a[href^="#ticket/"]'),
+    row('wave', 'wave', 'the progress block', 'sect:Progress >> .no-shell'),
+    ...['Title', 'Target', 'Preconditions', 'Tickets'].map((k) => row('milestone', 'milestone', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    ...['Goal', 'Status', 'Features'].map((k) => row('milestone', 'milestone', k, `dt:${k}`)),
+    row('milestone', 'milestone', 'Forecast', 'dt:Forecast'),
+    row('milestone', 'milestone', 'Readings with the milestone\'s target', 'sect:Readings >> text:this milestone (1)'),
+    row('milestone', 'milestone', 'the progress block', 'sect:Progress >> .no-shell'),
+    // ---- act and decision
+    row('act', 'actUnderDecision', 'every stored field', 'stored:act'),
+    ...['What', 'Class', 'Decision', 'Given', 'About', 'Reversible'].map((k) => row('act', 'actUnderDecision', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    row('act', 'actUnderDecision', 'Under', 'dt:Under'),
+    row('act', 'actUnderDecision', 'lineage', 'sect:How it came about, and what came of it >> .lineage'),
+    row('act', 'actUnderDecision', 'What its instructions carried', `sect:What its instructions carried >> a[href="#lesson/${encodeURIComponent(ids.lesson)}"]`),
+    row('act', 'actUnderDecision', 'The decision it carried out', `sect:The decision it carried out >> a[href="#decision/${encodeURIComponent(ids.decision)}"]`),
+    row('act', 'actUnderDecision', 'What it cites', `sect:What it cites >> a[href="#goal/${encodeURIComponent(ids.goal)}"]`),
+    row('decision', 'decision', 'every stored field', 'stored:decision'),
+    ...['What', 'Class', 'Authority', 'Approved by', 'Rests on', 'Rationale', 'About', 'Reversible'].map((k) => row('decision', 'decision', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    row('decision', 'decision', 'Under', 'dt:Under'),
+    row('decision', 'decision', 'Its class now', 'dt:Its class now'),
+    row('decision', 'decision', 'lineage', 'sect:How it came about, and what came of it >> .lineage'),
+    row('decision', 'decision', 'The answer it rests on', `sect:The answer it rests on >> a[href="#q/${encodeURIComponent(ids.qDefaulted)}"]`),
+    row('decision', 'decision', 'What it drew on', `sect:What it drew on (not its authority) >> a[href="#lesson/${encodeURIComponent(ids.lesson)}"]`),
+    row('decision', 'decision', 'Carried out by', `sect:Carried out by >> a[href="#act/${encodeURIComponent(ids.actUnderDecision)}"]`),
+    row('decision', 'decisionRule', 'The standing rule it rests on', `sect:The standing rule it rests on >> a[href="#lesson/${encodeURIComponent(ids.lesson)}"]`),
+    // ---- lesson and knowledge (one opener)
+    row('lesson', 'lesson', 'every stored field', 'stored:knowledge'),
+    ...['Statement', 'Kind', 'Status', 'Scope', 'Evidence'].map((k) => row('lesson', 'lesson', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    row('lesson', 'lessonOwner', 'stored plain', 'dt:In plain words'),
+    row('lesson', 'lesson', 'Goes to', 'dt:Goes to'),
+    row('lesson', 'lessonOwner', 'the plain-words paragraph', 'text:Ask the owner before the checkout changes processor.'),
+    row('lesson', 'lessonOwner', 'the Inbox link', 'a.linkish[href="#inbox"]'),
+    row('lesson', 'lesson', 'the supervisor-decides note', 'text:the supervisor keeps or retires it itself'),
+    row('lesson', 'lesson', 'lineage', 'sect:How it came about, and what came of it >> .lineage'),
+    row('lesson', 'lesson', 'The signals it came from', 'sect:The signals it came from >> ul li'),
+    row('lesson', 'lesson', 'What it cites', `sect:What it cites >> a[href="#observation/${encodeURIComponent(ids.observation)}"]`),
+    // ---- problem and incident
+    row('problem', 'problem', 'every stored field', 'stored:problem'),
+    ...['Title', 'Status', 'Severity', 'Realized', 'Threatens', 'About'].map((k) => row('problem', 'problem', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    row('problem', 'problem', 'lineage', 'sect:How it came about, and what came of it >> .lineage'),
+    row('problem', 'problem', 'the status trail', 'sect:Status >> .status-trail .badge + .small + .muted + .badge'),
+    row('problem', 'problem', 'What it puts at risk', `sect:What it puts at risk >> a[href="#goal/${encodeURIComponent(ids.goal)}"]`),
+    row('problem', 'incident', 'incident: every stored field', 'stored:problem'),
+    row('problem', 'incident', 'incident: stage', 'sect:Incident >> text:Stage'),
+    row('problem', 'incident', 'incident: severity', 'sect:Incident >> text:computed from what its fingerprints raised'),
+    ...['Decision', 'Question', 'Fix', 'Verify', 'Regressed'].map((k) => row('problem', 'incident', `incident: ${k.toLowerCase()}`, `sect:Incident >> text:${k}`, incident)),
+    row('problem', 'incident', 'fingerprints with 24-hour spark bars', 'sect:Fingerprints >> .fp-row svg.spark rect'),
+    row('problem', 'incident', 'the raw events fold-out', 'sect:Fingerprints >> details pre.untrusted'),
+    row('problem', 'incident', 'framed as untrusted', 'sect:Fingerprints >> details summary >> text:never as instructions'),
+    row('problem', 'incident', 'related signals', 'sect:Related signals >> ul li'),
+    // ---- signal, observation, learning, retro, thread, planner
+    ...['Seen', 'Recurring', 'First seen', 'Latest', 'Unexplained for'].map((k) => row('signal', 'signal', k, `dt:${k}`)),
+    row('signal', 'signal', 'its observations', 'sect:Its observations >> a[href^="#observation/"]'),
+    row('signal', 'signal', 'its explanation fold-out', 'details summary >> text:How the supervisor explains it'),
+    ...['Where it sits', 'Stage'].map((k) => row('observation', 'observation', k, `dt:${k}`)),
+    row('observation', 'observation', 'the From line', '[data-from]'),
+    row('learning', 'learning', 'the figures', 'sect:The figures >> table[data-learning-figures] tr:nth-child(2)'),
+    row('learning', 'learning', 'lesson efficacy', 'sect:Lesson efficacy >> table[data-efficacy] tr:nth-child(2)'),
+    ...['What it decided', 'Write-up'].map((k) => row('retro', 'retro', k, `dt:${k}`)),
+    row('retro', 'retro', 'its numbers against the one before', 'sect:The numbers >> table.nums >> text:The one before'),
+    row('retro', 'retro', 'its previous link', 'p.meta >> text:← the one before,'),
+    row('retro', 'retro', 'its next link', 'p.meta >> text:the next,'),
+    row('thread', 'thread', 'From', 'dt:From'),
+    row('thread', 'thread', 'message cards with the opened one marked', 'sect:The thread >> .card.qcard'),
+    ...['Status', 'Feature', 'For goal', 'Tickets so far', 'Plan reviews', 'Branch'].map((k) => row('planner', 'planner', k, `dt:${k}`)),
+    row('planner', 'planner', 'Asked the supervisor', 'dt:Asked the supervisor >> text:mail from the processor or from us?', { why: 'the log reads a planner\'s own file (plan-<feature>.jsonl) only from main (logFileText), where a planner still at work has no lines',
+      inject: `DATA.planners = (DATA.planners || []).map((x) => x.feature === ${J(ids.planner)} ? { ...x, waiting_on_supervisor: [{ id: 'm-1', kind: 'blocked', text: 'mail from the processor or from us?' }] } : x);` }),
+    row('planner', 'planner', 'Waiting on you', `dt:Waiting on you >> a[href="#q/${encodeURIComponent(ids.qOpen)}"]`, { why: 'a planner waits on you through an open question linked to its plan branch, which the fixture\'s questions are not',
+      inject: `DATA.planners = (DATA.planners || []).map((x) => x.feature === ${J(ids.planner)} ? { ...x, waiting_on_owner: [${J(ids.qOpen)}] } : x);` }),
+    row('planner', 'planner', 'its design TL;DR', 'sect:Its design: the TL;DR >> .tldr'),
+    row('planner', 'planner', 'its draft board', 'sect:Its draft >> .board .tcard'),
+    row('planner', 'planner', 'its graph', 'sect:Its draft >> .diagram-wrap'),
+    // ---- question
+    row('q', 'qAnswered', 'every stored field', 'stored:question'),
+    ...['Question', 'Kind', 'Goal', 'Recommendation', 'Answer', 'Context', 'Blocks'].map((k) => row('q', 'qAnswered', `stored ${k.toLowerCase()}`, `dt:${k}`)),
+    ...['Status', 'Settled', 'Took', 'Matched'].map((k) => row('q', 'qAnswered', k, `dt:${k}`)),
+    row('q', 'qAnswered', 'context', '.ctx >> text:the processor keeps a copy too'),
+    row('q', 'qAnswered', 'choices', 'ul.measure li >> text:keep them a year'),
+    row('q', 'qAnswered', 'their effect for users', 'ul.measure li >> text:For users'),
+    row('q', 'qAnswered', 'link chips with "changed since asked"', 'text:changed since asked', { why: 'the kit marks a link changed only on an open question (resolveQuestionLinks), and an open question opens the Inbox, not a peek',
+      inject: `const q = DATA.ooda.answered.find((x) => x.id === ${J(ids.qAnswered)}); q.links = [{ title: 'The mock', artifact: 'peek-mock', at: 'main', href: '#artifact/main/peek-mock', changed: true }];` }),
+    row('q', 'qAnswered', 'What it held up', `sect:What it held up >> a[href="#ticket/${encodeURIComponent(ids.ticket)}"]`),
+    row('q', 'qAnswered', 'What used it', 'sect:What used it >> li'),
+    // ---- file
+    row('file', 'file', 'Version', 'dt:Version >> text:main'),
+    row('file', 'file', 'Commits', 'dt:Commits'),
+    row('file', 'file', 'the view bar', '.viewbar'),
+    row('file', 'file', 'Rendered', '.viewbar [data-mdview="rendered"]'),
+    row('file', 'file', 'Raw', '.viewbar [data-mdview="raw"]'),
+    row('file', 'file', 'sanitized markdown', '.viewer .md[data-md="rendered"] h1'),
+    row('file', 'file', 'History as its commits', 'sect:History >> code'),
+    // ---- sensor
+    ...['State', 'Checks', 'Target', 'Uptime', 'Response time', 'Last check', 'Certificate'].map((k) => row('sensor', 'sensorHttp', `URL check: ${k}`, `dt:${k}`)),
+    row('sensor', 'sensorHttp', 'URL check: the 24-hour chart', 'sect:Last 24 hours >> svg'),
+    row('sensor', 'sensorHttp', 'URL check: the 7-day chart', 'sect:Last 7 days >> svg'),
+    row('sensor', 'sensorHttp', 'URL check: p50/p95', 'sect:Last 24 hours >> text:p95'),
+    row('sensor', 'sensorHttp', 'URL check: the target line', 'sect:Last 24 hours >> text:target p95 300ms'),
+    row('sensor', 'sensorHttp', 'URL check: failed spans', 'sect:Last 24 hours >> text:had a failed check'),
+    row('sensor', 'sensorHttp', 'URL check: failed checks', 'sect:Failed checks >> text:HTTP 503'),
+    ...['State', 'Reads', 'Triage', 'Last run', 'Today', 'Invalid lines'].map((k) => row('sensor', 'sensorReader', `reader: ${k}`, `dt:${k}`)),
+    row('sensor', 'sensorReader', 'reader: the ignored list', 'sect:Ignored >> text:a crawler, not a person'),
+    row('sensor', 'sensorReader', 'reader: its CLI command', 'sect:Ignored >> text:sensor unignore reader:exception:E2 --owner'),
+    row('sensor', 'sensorReader', 'reader: what it read', 'sect:What it read >> .fp-row'),
+  ];
+};
+// In the page: an inventory row's selectorOrText, true when the peek's body holds it, else why not.
+const INV_HAS = `(spec) => {
+  const b = document.getElementById('drawer-body');
+  if (spec.startsWith('stored:')) {
+    const type = spec.slice(7), r = PEEKS.get(peekKey(DRAWER.kind, DRAWER.id))?.record;
+    if (!r) return 'no record';
+    const want = storedRows(type, r.fields, type, { id: DRAWER.id, record: r, set_by: r.set_by ?? {} }).filter(Boolean).map((x) => x[0]);
+    const have = new Set([...(b.querySelector('section.attrs > dl.props')?.children ?? [])].filter((x) => x.tagName === 'DT').map((x) => x.textContent.trim()));
+    const missing = want.filter((l) => !have.has(l));
+    return want.length && !missing.length ? true : \`missing \${JSON.stringify(missing)} of \${JSON.stringify(want)}\`;
+  }
+  const parts = spec.split(' >> ');
+  let scope = b;
+  const head = parts[0];
+  if (head.startsWith('dt:') || head.startsWith('sect:')) {
+    parts.shift();
+    if (head.startsWith('dt:')) {
+      const dt = [...b.querySelectorAll('section.attrs dt')].find((x) => x.textContent.trim() === head.slice(3));
+      if (!dt) return \`no key \${head.slice(3)}: \${[...b.querySelectorAll('section.attrs dt')].map((x) => x.textContent.trim()).join(', ')}\`;
+      scope = dt.nextElementSibling;
+    } else {
+      const s = [...b.querySelectorAll('.psect')].find((x) => x.querySelector('.card-head')?.textContent.trim() === head.slice(5));
+      if (!s) return \`no section \${head.slice(5)}: \${[...b.querySelectorAll('.psect .card-head')].map((x) => x.textContent.trim()).join(', ')}\`;
+      scope = s.querySelector('.psect-body');
+    }
+    if (!parts.length) return scope && (scope.textContent.trim() || scope.querySelector('*')) ? true : 'empty';
+  }
+  for (const part of parts) {
+    if (part.startsWith('text:')) return scope.textContent.includes(part.slice(5)) ? true : \`no "\${part.slice(5)}" in: \${scope.textContent.replace(/\\s+/g, ' ').slice(0, 300)}\`;
+    const el = scope.querySelector(part);
+    if (!el) return \`no \${part} in: \${scope.innerHTML.slice(0, 300)}\`;
+    scope = el;
+  }
+  return true;
+}`;
 
 test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, ids, size, soon, load } = await peekPage(t, { fixture: peekFixture, name: 'peeks' });
@@ -629,13 +873,13 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
   });
 
-  // Nothing permanent in a peek (spec §2.3): every control in every kind's body is on the allow-list
-  // (the writes §2.3 keeps, and the views, fold-outs, thread starters, links and menus, each checked
-  // elsewhere and never clicked here: Open in side peek would swap the peek mid-loop), or a click on it
-  // writes nothing and leaves the peek on its record. Each Start a thread drafts a thread on its own
-  // record; the lesson's Retire it is one of them.
+  // Nothing permanent in a peek (spec §2.3): every control in every kind's body is one of the writes
+  // §2.3 keeps (never clicked here), a thread starter (each clicked below), one that moves the peek or
+  // the page (Open in side peek, the Answered link: checked elsewhere), or a click on it writes nothing
+  // and leaves the peek on its record: the views (Rendered / Raw), Copy ID and anything else. Each
+  // Start a thread drafts a thread on its own record; the lesson's Retire it is one of them.
   await t.test('no permanent action', async () => {
-    const ALLOW = '[data-hold-id], [data-correct], [data-correct-send], [data-impact], [data-reason], [data-mdview], [data-thread-on], [data-menu-open], [data-copy], [data-answered-go], summary';
+    const ALLOW = '[data-hold-id], [data-correct], [data-correct-send], [data-impact], [data-reason], [data-thread-on], [data-menu-open], [data-answered-go]';
     // a card in the peek that opens its own record's peek (a ticket card on a goal, a problem card): a
     // link (§5's peek inside a peek), not clicked in the loop; one per kind is clicked last, below
     const NAV = '[data-ticket], [data-open]';
@@ -645,21 +889,30 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     const writes = () => p.ev('window.__writes.splice(0)');
     const settle = () => new Promise((r) => setTimeout(r, 150));
     const drafted = [];
+    const CONTROLS = '#drawer-body :is(button, input, select, textarea, form)';
+    // the controls not on the allow-list, listed once before any click: each by the page's own
+    // focusKey (the selector a redraw keeps) and its place among the matches, else its tag and its
+    // place, so a redraw a click causes can't make the loop skip or repeat one
+    const listControls = () => p.ev(`(() => { const all = [...document.querySelectorAll(${JSON.stringify(CONTROLS)})];
+      return all.filter((el) => !el.matches(${JSON.stringify(`${ALLOW}, ${NAV}`)})).map((el) => { const k = focusKey(el); const sel = k ? \`#drawer-body \${k}\` : ${JSON.stringify(CONTROLS)}; return { sel, nth: [...document.querySelectorAll(sel)].indexOf(el), what: el.outerHTML.slice(0, 120) }; }); })()`);
+    const clickedPer = {};
     for (const key of Object.keys(H)) {
       const kind = await open(key);
       await soon(peekDrawn(kind), `${key}: drawn`);
       await record();
       await writes();
       const at = await p.ev('[DRAWER.kind, DRAWER.id]');
-      const n = await p.ev("document.querySelectorAll('#drawer-body button, #drawer-body input, #drawer-body select, #drawer-body textarea, #drawer-body form').length");
-      for (let i = 0; i < n; i++) {
-        const c = await p.ev(`(() => { const el = document.querySelectorAll('#drawer-body button, #drawer-body input, #drawer-body select, #drawer-body textarea, #drawer-body form')[${i}];
-          if (!el || el.matches(${JSON.stringify(`${ALLOW}, ${NAV}`)})) return null; const what = el.outerHTML.slice(0, 120); el.click(); return what; })()`);
-        if (c === null) continue;
+      const list = await listControls();
+      clickedPer[key] = 0;
+      for (const c of list) {
+        const ok = await p.ev(`(() => { const el = document.querySelectorAll(${JSON.stringify(c.sel)})[${c.nth}]; if (!el) return false; el.click(); return true; })()`);
+        assert.ok(ok, `${key}: ${c.what} is still there to click`);
+        clickedPer[key]++;
         await settle();
-        assert.deepEqual(await writes(), [], `${key}: a click on ${c} writes nothing`);
-        assert.deepEqual(await p.ev('[DRAWER.kind, DRAWER.id]'), at, `${key}: a click on ${c} leaves the peek on its record`);
+        assert.deepEqual(await writes(), [], `${key}: a click on ${c.what} writes nothing`);
+        assert.deepEqual(await p.ev('[DRAWER.kind, DRAWER.id]'), at, `${key}: a click on ${c.what} leaves the peek on its record`);
       }
+      assert.equal(clickedPer[key], list.length, `${key}: every control listed was clicked`);
       // each Start a thread (and Retire it on a lesson): a draft pinned to its record, nothing written
       const refs = await p.ev("[...document.querySelectorAll('#drawer-body [data-thread-on]')].map((b) => b.dataset.threadOn)");
       for (let i = 0; i < refs.length; i++) {
@@ -681,6 +934,11 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
       }
     }
     assert.ok(drafted.includes(`question:${ids.qAnswered}`) && drafted.includes(`decision:${ids.decisionNotMine}`), `the thread starters were clicked: ${drafted.join(' ')}`);
+    // the loop clicked something: at least one control in all (the file's views at least), and on
+    // each peek every control it listed
+    const total = Object.values(clickedPer).reduce((a, b) => a + b, 0);
+    assert.ok(total >= 1, `the loop clicked at least one control: ${JSON.stringify(clickedPer)}`);
+    t.diagnostic(`non-allowed controls clicked per peek: ${JSON.stringify(clickedPer)}`);
 
     // the lesson's Retire it: a thread starter, no knowledge post
     await open('lesson');
@@ -720,6 +978,90 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev(`location.hash = ${JSON.stringify(`#q/${encodeURIComponent(ids.qOpen)}`)}`);
     await soon(`location.hash === '#inbox' && (() => { const c = document.getElementById(${JSON.stringify(`q-${ids.qOpen}`)}); if (!c) return false; const r = c.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; })()`, 'the Inbox at the open question\'s card');
     assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
+  });
+
+  // Every detail stays (spec §2.4): one assertion per item of the design's peek inventory (the table
+  // above), read on the peek of the fixture record that draws it. A row the page draws after the peek
+  // (a thread's ticket, a sensor's series, a file's text) is read again for a few seconds first.
+  await t.test('every detail stays: the peek inventory, item by item', async () => {
+    // a decision on a standing rule, read here only (its How it changes isn't one of §2.2's cases)
+    H.decisionRule = ['decision', `#decision/${encodeURIComponent(ids.decisionRule)}`];
+    const rows = inventory(ids);
+    const kinds = new Set(rows.map((r) => H[r.on]?.[0]));
+    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'the inventory covers every peek kind');
+    const groups = new Map();
+    for (const r of rows) {
+      assert.ok(H[r.on], `${r.item}: ${r.on} is a fixture record`);
+      (groups.get(r.on) ?? groups.set(r.on, []).get(r.on)).push(r);
+    }
+    const failed = [];
+    let asserted = 0;
+    for (const [on, rs] of groups) {
+      const kind = await open(on);
+      await soon(peekDrawn(kind), `${on}: drawn`);
+      for (const r of rs.filter((x) => !x.inject)) {
+        const end = Date.now() + 8000;
+        let got = await p.ev(`(${INV_HAS})(${JSON.stringify(r.selectorOrText)})`);
+        while (got !== true && Date.now() < end) {
+          await new Promise((res) => setTimeout(res, 250));
+          got = await p.ev(`(${INV_HAS})(${JSON.stringify(r.selectorOrText)})`);
+        }
+        asserted++;
+        if (got !== true) failed.push(`${r.kind} (${on}) ${r.item}: ${r.selectorOrText}: ${got}`);
+      }
+      // injected: the patch, the redraw and the read in one turn of the page
+      const injected = rs.filter((x) => x.inject);
+      for (const r of injected) {
+        const got = await p.ev(`(() => { ${r.inject} redraw(); return (${INV_HAS})(${JSON.stringify(r.selectorOrText)}); })()`);
+        asserted++;
+        if (got !== true) failed.push(`${r.kind} (${on}) ${r.item} [injected: ${r.why}]: ${r.selectorOrText}: ${got}`);
+      }
+      // the page's own data back for the rows after: a fresh visit
+      if (injected.length) await visit();
+    }
+    assert.equal(asserted, rows.length, 'every row was read');
+    assert.deepEqual(failed, [], `inventory items missing from their peek (${failed.length} of ${rows.length})`);
+  });
+
+  // How it changes where the dashboard's own rows don't say (spec §2.2, §5): a correction read from the
+  // peek's record, with and without who made it; a defaulted question past the Answered list.
+  await t.test('How it changes from the record, and past the Answered list', async () => {
+    const howText = "[...document.querySelectorAll('#drawer-body dt')].find((x) => x.textContent.trim() === 'How it changes')?.nextElementSibling.textContent.trim()";
+    // a corrected act the dashboard holds no row for (older than its acts): the correction is the
+    // record's own, and set_by names who made it
+    await open('actCorrected');
+    await soon(peekDrawn('act'), 'the corrected act');
+    const fromRecord = await p.ev(`(() => { DATA.ooda.acts = DATA.ooda.acts.filter((x) => x.id !== ${JSON.stringify(ids.actCorrected)}); redraw(); return ${howText}; })()`);
+    assert.equal(fromRecord, 'Corrected by you: the docs can wait', 'the correction, from the record');
+    // a record whose set_by doesn't name the corrector: the correction, without "by"
+    const noBy = await p.ev(`(() => { const k = peekKey('act', ${JSON.stringify(ids.actCorrected)}); const v = structuredClone(PEEKS.get(k)); delete v.record.set_by.corrected; PEEKS.set(k, v);
+      DATA.ooda.acts = DATA.ooda.acts.filter((x) => x.id !== ${JSON.stringify(ids.actCorrected)}); redraw(); return ${howText}; })()`);
+    assert.equal(noBy, 'Corrected: the docs can wait', 'no "by undefined" when the record does not say who');
+    await visit();
+    // a defaulted question past the Answered list's 80 (the list's length is the server's): it is in
+    // no row the Inbox draws, so the fixture's one defaulted question is taken out of the list here.
+    // Its peek is read-only and How it changes starts a thread on it, not a link to a card
+    // that isn't there.
+    await open('qDefaulted');
+    await soon(peekDrawn('q'), 'the defaulted question');
+    const past = await p.ev(`(() => { DATA.ooda.answered = DATA.ooda.answered.filter((x) => x.id !== ${JSON.stringify(ids.qDefaulted)}); redraw();
+      const dd = [...document.querySelectorAll('#drawer-body dt')].find((x) => x.textContent.trim() === 'How it changes')?.nextElementSibling;
+      const b = document.getElementById('drawer-body');
+      window.__w = []; const real = window.fetch; window.fetch = (u, o) => { const m = String(o?.method ?? 'GET').toUpperCase(); if (m !== 'GET' && m !== 'HEAD') window.__w.push(m + ' ' + (u?.url ?? u)); return real(u, o); };
+      const btn = dd?.querySelector('[data-thread-on]');
+      const r = { text: dd?.textContent.trim(), on: btn?.dataset.threadOn ?? null, go: !!dd?.querySelector('[data-answered-go]'),
+        writing: [...b.querySelectorAll('[data-overrule], [data-overrule-send], input, textarea, select, form')].map((x) => x.outerHTML.slice(0, 80)) };
+      btn?.click();
+      return r; })()`);
+    assert.match(past.text, /^Settled; to raise it again/, `How it changes: ${past.text}`);
+    assert.equal(past.on, `question:${ids.qDefaulted}`, 'a Start a thread on the question');
+    assert.equal(past.go, false, 'no link to an Answered card that isn\'t there');
+    assert.deepEqual(past.writing, [], 'read-only');
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(await p.ev('TL.draft?.subject?.ref ?? null'), `question:${ids.qDefaulted}`, 'Start a thread drafts a thread pinned to the question');
+    assert.deepEqual(await p.ev('window.__w'), [], 'and writes nothing');
+    await p.ev('tlClose(); void 0');
+    await visit();
   });
 
   await t.test('notFound and loading keep the frame', async () => {
