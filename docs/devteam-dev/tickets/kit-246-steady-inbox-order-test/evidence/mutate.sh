@@ -18,6 +18,6 @@ sed -i 's/d\.questions\.map((q) => questionCard(q, o, reasonText))/[...d.questio
   echo "## mutation (reverted after the run)"
   git diff -U0 -- "$F" | grep '^[-+][^-+]' | cut -c1-160
   echo "## test"
-  timeout 900 "$NODE" --test --test-concurrency=2 test/next-step.strategy.test.mjs 2>&1 | grep -E "^ *(not )?ok |error:|expected|actual|^ *- |^ *\+ |^# (pass|fail)" | sed -E 's/port [0-9]+/port N/g; s/127\.0\.0\.1:[0-9]+/127.0.0.1:N/g; s/q-[0-9]{8}-[0-9]{9}-[a-z0-9-]+/q-…/g' || true
+  timeout 900 "$NODE" --test --test-concurrency=2 test/next-step.strategy.test.mjs 2>&1 | grep -E "^ *(not )?ok |error:|expected|actual|^ *- |^ *\+ |^# (pass|fail)|next-step\.strategy\.test\.mjs:[0-9]+" | sed -E 's/port [0-9]+/port N/g; s/127\.0\.0\.1:[0-9]+/127.0.0.1:N/g; s/file:[^ ]*\/test\//test\//g' || true
 } > "$OUT"
 cat "$OUT"
