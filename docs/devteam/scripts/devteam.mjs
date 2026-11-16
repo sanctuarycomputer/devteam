@@ -609,6 +609,21 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
+// The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
+// supervisor lands with settings set in its settings chore). Like OWNER_SETTINGS they apply as main
+// has them, so the fleet, the Settings row and the finding all read one value. Never an owner key.
+const OWNER_ASKABLE = ['max_active_tickets', 'max_active_per_component'];
+// An askable value: a whole number from 1 to 20, or null (no limit; "none" in argv).
+const askableValue = (v) => v === null || (Number.isInteger(v) && v >= 1 && v <= 20);
+function askableProblem(key, value) {
+  if (Object.hasOwn(OWNER_SETTINGS, key)) return `${key} is the owner's own setting: it changes through a PR with the owner's answer`;
+  if (key === 'links') return 'links change through link set and link land';
+  if (!OWNER_ASKABLE.includes(key)) return `${key} is not a setting the owner asks for here; only ${OWNER_ASKABLE.join(', ')}`;
+  if (!askableValue(value)) return `${key} is a whole number from 1 to 20, or none (no limit)`;
+  return null;
+}
+// An askable value as argv writes it: "none" is null, 1..20 the number, anything else undefined.
+const parseAskable = (arg) => (arg === 'none' ? null : /^(?:[1-9]|1\d|20)$/.test(arg ?? '') ? Number(arg) : undefined);
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 // Every setting the kit reads, for the Settings page (dashboardData's settings_all): the defaults'
@@ -884,6 +899,10 @@ function loadSettings() {
       settingsCache.links = pinned.links;
       local.push(...pinned.changed);
       if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
+      // the supervisor's askable settings too: the settings chore is how they change
+      const asked = OWNER_ASKABLE.filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
+      for (const k of asked) settingsCache[k] = onMain[k];
+      if (asked.length && !process.env.DEVTEAM_QUIET_ASKABLE) { process.env.DEVTEAM_QUIET_ASKABLE = '1'; warn(`${asked.join(', ')} here differs from main; it applies as on main, so change it with settings set in the settings chore`); }
     }
   }
   return settingsCache;
@@ -915,7 +934,7 @@ const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
 const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The only acts the owner writes: records of what the owner did, never calls.
-const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
+const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-setting'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -1417,11 +1436,14 @@ function integrity(o, file) {
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
-    // (goal order). Nobody else writes those classes: an agent can't make the log say the owner
-    // published, gave a tool their yes, or ordered the goals.
+    // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
+    // writes those classes: an agent can't make the log say the owner published, gave a tool their
+    // yes, ordered the goals or asked for a setting.
     if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
-    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
+    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && ['pane-answer', 'owner-setting'].includes(o.class) && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer or owner-setting act, and nothing else carries one';
+    // its shape, not today's allowlist: narrowing OWNER_ASKABLE later never breaks an old act
+    if (o.type === 'act' && cls === 'owner' && o.class === 'owner-setting' && (typeof o.key !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(o.key) || !askableValue(o.value) || o.artifact !== undefined || o.tree !== undefined)) return 'an owner-setting act names a setting (key) and its value, a whole number from 1 to 20 or null (no limit), and no artifact';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
@@ -12442,6 +12464,15 @@ function collectMetrics(since) {
   if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // the owner asked for one of the supervisor's settings and main doesn't have it yet
+  {
+    const um = goalMode(upkeepOrVirtual());
+    for (const [key, v] of Object.entries(askedSettingsView()).filter(([, x]) => x.label === ASKED_SAVED)) {
+      const words = (x) => (x === null ? 'no limit' : String(x));
+      const arg = v.asked === null ? 'none' : String(v.asked);
+      add('medium', 'owner-setting-unlanded', key, `the owner asked for ${key} ${words(v.asked)} (${v.act}); main has ${words(v.value)}`, `${um !== 'run' ? `Upkeep is ${holdWords(um)}: ` : ''}devteam.mjs chore start settings; devteam.mjs settings set ${key} ${arg} --for ${v.act}; devteam.mjs chore pr settings --title "settings: ${key} ${words(v.asked)}"; devteam.mjs merge --chore settings. While Upkeep is drained or parked, chore start and merge --chore refuse, so the value waits until Upkeep runs (or --force, logged)`);
+    }
+  }
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
@@ -12701,6 +12732,37 @@ function collectOoda() {
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
+// The Settings page's word on each askable setting: main's value (the one in force) and who set it,
+// told from the owner's latest owner-setting act and the supervisor's settings-edit acts. Never
+// says a value is the owner's that the owner didn't choose (strategy R1).
+const ASKED_SAVED = 'Saved; applies once the supervisor lands it';
+const askedShown = (v) => (v === null ? 'No limit' : String(v));
+// The newest supervisor settings-edit without --for for key, newer than sinceIso, of the value main
+// holds, with a settings-chore merge newer than it: the supervisor deliberately set or kept its own
+// value after the owner asked (a no-op edit counts). Only main is read: an edit never merged, or
+// merged before it was made, lands nothing.
+function landedOverride(key, sinceIso, mainValue) {
+  const merges = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && (a.refs ?? []).includes('chore-settings'));
+  return logObjects('act').filter((a) => a.class === 'settings-edit' && a.created_by === 'supervisor' && a.key === key && a.for === undefined && a.created_at > sinceIso && canonical(a.value) === canonical(mainValue) && merges.some((m) => m.created_at > a.created_at)).sort(byTime).at(-1) ?? null;
+}
+// Once per run: metrics and dashboard-data both read it.
+let askedMemo = null;
+function askedSettingsView() {
+  if (askedMemo) return askedMemo;
+  // main's block through mainRef(), the one way of finding main; the working tree before main has one
+  const ref = mainRef();
+  const s = (ref && settingsAt(ref, { orNull: true })) || loadSettings();
+  let all = null;
+  return (askedMemo = Object.fromEntries(OWNER_ASKABLE.map((key) => {
+    const value = s[key] ?? null;
+    const act = latestOwnerSetting(key);
+    const label = !act ? ((all ??= settingsAll()).find((e) => e.key === key)?.set ? 'Set by the supervisor' : "The kit's default")
+      : canonical(act.value) === canonical(value) ? 'Set by you'
+      : landedOverride(key, act.created_at, value) ? `Set by the supervisor (you asked for ${act.value === null ? 'no limit' : act.value})`
+      : ASKED_SAVED;
+    return [key, { value, shown: askedShown(value), label, asked: act ? act.value : null, act: act?.id ?? null }];
+  })));
+}
 function dashboardData() {
   reviewMemo = new Map();
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
@@ -12715,6 +12777,7 @@ function dashboardDataRead() {
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
+    asked_settings: askedSettingsView(),
     gates_configured: Object.keys(settings.gates ?? {}),
     // held_by: the open question holding it, or null
     tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
@@ -15796,6 +15859,7 @@ async function cmdDashboard() {
   const paneToken = (digest) => crypto.createHmac('sha256', paneSecret).update(String(digest)).digest('hex');
   const paneTokenOk = (digest, token) => { const want = Buffer.from(paneToken(digest)); const got = Buffer.from(String(token ?? '')); return got.length === want.length && crypto.timingSafeEqual(got, want); };
   const paneNonces = new Map();
+  const ownerSettingNonces = new Map();
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
@@ -16118,17 +16182,18 @@ async function cmdDashboard() {
     const isSecret = name === 'secret';
     const isReview = name === 'review-draft' || name === 'review-answer';
     const isPane = name === 'pane-answer';
+    const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-    if (!action && !isSecret && !isReview && !isPane) return send(res, 404, 'text/plain', 'not found');
+    if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
     // present. A sandboxed frame's request says Origin: null and is refused here too.
-    const strict = isSecret || isReview || isPane;
+    const strict = isSecret || isReview || isPane || isOwnerSetting;
     const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
     // A review's result or draft is up to 4 MB, plus its envelope.
-    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : 20000;
+    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
     // Bytes first, decoded once: a multibyte character split across chunks stays whole.
     const chunks = [];
     let size = 0;
@@ -16139,8 +16204,8 @@ async function cmdDashboard() {
       if (size <= cap) return void chunks.push(c);
       over = true;
       chunks.length = 0;
-      // a review body over the cap is drained and refused with a reason; one far over it is cut off
-      if (!isReview || size > 4 * cap) req.destroy();
+      // a review or setting body over the cap is drained and refused with a reason; one far over it is cut off
+      if (!(isReview || isOwnerSetting) || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
     // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
@@ -16171,6 +16236,32 @@ async function cmdDashboard() {
         if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
         paneAnswering = true;
         paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      }));
+    }
+    // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
+    // gateway's signature for it (each nonce once here, and in the log for the command it runs).
+    if (isOwnerSetting) {
+      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+      return req.on('end', () => guarded(() => {
+        const bad = () => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { key, value }' }));
+        if (over) return bad();
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        if (!isObj(parsed) || Object.keys(parsed).sort().join(',') !== 'key,value' || typeof parsed.key !== 'string' || !(parsed.value === null || Number.isInteger(parsed.value))) return bad();
+        const why = askableProblem(parsed.key, parsed.value);
+        if (why) return send(res, 400, 'application/json', JSON.stringify({ error: why }));
+        let proof = null;
+        if (threadsNeedGateway()) {
+          const boxOnly = "not saved: on a box the owner saves settings only through the box's gateway";
+          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+          const w = ownerSettingProofProblem(proof) ?? (ownerSettingNonces.has(proof.nonce) ? 'its signature was used already' : null);
+          if (w) { log(`refused /api/owner-setting: ${w}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${w})` })); }
+          const now = Date.now();
+          for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
+          ownerSettingNonces.set(proof.nonce, now);
+        }
+        ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
       }));
     }
     if (isSecret) {
@@ -16393,7 +16484,12 @@ const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'su
 // held for the pane while it asked. On a box it takes that only with the gateway's signature for
 // the press, each taken once, as a thread with the operator does.
 const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
-function paneProofProblem(proof, now = Date.now()) {
+// The owner's Save on the Settings page (gateway.mjs, ownerSettingSignature): the same, under its own name.
+const ownerSettingSigned = (port, ts, nonce, body) => Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
+const paneProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, paneSigned, now);
+const ownerSettingProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, ownerSettingSigned, now);
+// Why a dashboard press's proof isn't the gateway's for the bytes `signed` names (null when it is).
+function dashboardProofProblem(proof, signed, now = Date.now()) {
   if (!isObj(proof)) return 'it carries no signature from the gateway';
   const { port, ts, nonce, sig, body } = proof;
   if (!Number.isInteger(port) || typeof ts !== 'string' || !/^\d{13}$/.test(ts) || typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(nonce) || typeof sig !== 'string' || !/^[A-Za-z0-9_-]{80,100}$/.test(sig) || typeof body !== 'string') return 'its signature is malformed';
@@ -16401,11 +16497,53 @@ function paneProofProblem(proof, now = Date.now()) {
   const key = gatewayThreadKey();
   if (!key) return `this box has no gateway key (${BOX_THREAD_KEY})`;
   let ok = false;
-  try { ok = crypto.verify(null, paneSigned(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
+  try { ok = crypto.verify(null, signed(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
   return ok ? null : 'its signature is not the gateway\'s';
 }
 // Another account's artifact is named by its id, never its link: the log is mirrored to git.
 const noArtifactLinks = (t) => String(t ?? '').replace(/(?:https?:\/\/)?claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})\S*/g, 'artifact $1');
+// This checkout's dashboard port, as a number: the last one the running dashboard logged
+// (run/dashboard.log; a pinned --port writes no run/dashboard-port), else run/dashboard-port.
+function ownDashboardPort() {
+  const logged = [...(readText(path.join(runDir, 'dashboard.log')) ?? '').matchAll(/started on http:\/\/127\.0\.0\.1:(\d+)/g)].pop()?.[1];
+  const n = logged ? Number(logged) : readNum(path.join(runDir, 'dashboard-port'));
+  return Number.isInteger(n) ? n : null;
+}
+// The owner's requests for the supervisor's askable settings, oldest first, and the latest one.
+const ownerSettingActs = (key) => logObjects('act').filter((a) => a.class === 'owner-setting' && a.created_by === 'owner' && a.key === key).sort(byTime);
+const latestOwnerSetting = (key) => ownerSettingActs(key).at(-1) ?? null;
+// owner-setting <key> <1..20|none>: the owner asks for one of the supervisor's own settings (the
+// dashboard's Settings page runs it on Save). It writes one owner act and nothing else: the
+// supervisor lands it with settings set in its settings chore, and owner-setting-unlanded stays
+// raised until main has it. Only the dashboard's channel or the owner's own terminal runs it.
+function cmdOwnerSetting() {
+  const [key, arg] = positional;
+  if (!key || arg === undefined || positional.length !== 2) die('usage: owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor\'s settings; the dashboard\'s Settings page runs it)');
+  const { by } = ownerWriter('the owner asks for a setting on the dashboard\'s Settings page; you change your own with settings set in the settings chore');
+  if (process.env.DEVTEAM_CHANNEL !== 'dashboard' && !process.stdin.isTTY) die('owner-setting: the owner asks for a setting on the dashboard\'s Settings page or in their own terminal; you change your own with settings set in the settings chore');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`owner-setting: ${why}`);
+  // On a box every agent can reach the dashboard and run this: only the gateway's signature for the
+  // owner's Save, for this dashboard and exactly this key and value, each taken once (the log keeps
+  // the nonces past a dashboard restart).
+  let proof = null;
+  if (threadsNeedGateway()) {
+    const no = (w) => die(`owner-setting: on a box the owner saves settings only on the dashboard through the box's gateway, which signs the press, and ${w}`);
+    let b = null;
+    try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+    const p = isObj(b) ? b.proof : null;
+    const w = ownerSettingProofProblem(p);
+    if (w) no(w);
+    let signed = null;
+    try { signed = JSON.parse(Buffer.from(p.body, 'base64').toString('utf8')); } catch {}
+    if (!isObj(signed) || Object.keys(signed).sort().join(',') !== 'key,value' || signed.key !== key || signed.value !== value) no('the gateway signed another save than this one');
+    if (p.port !== ownDashboardPort()) no('that signature is for another dashboard');
+    if (logObjects('act').some((a) => a.class === 'owner-setting' && a.proof?.nonce === p.nonce)) no('that save was taken already');
+    proof = { port: p.port, ts: p.ts, nonce: p.nonce, sig: p.sig, body: p.body };
+  }
+  out(appendLog({ type: 'act', class: 'owner-setting', key, value, what: `asked for ${key} ${value === null ? 'no limit' : value}`, refs: [], reversible: true, ...(proof ? { proof } : {}) }, by).id);
+}
 function cmdPane() {
   const sub = positional[0];
   if (sub === 'question') {
@@ -19756,7 +19894,75 @@ function cmdWhoami() {
   const s = loadSettings();
   out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} home=${mainRoot} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
+// One top-level key of a settings.md's json devteam block set to value, as a text edit: the rest of
+// the block (gate order, every other key) stays byte for byte. Refused, writing nothing, when the
+// block isn't JSON, repeats a key, or the edit would read back as anything else.
+function setSettingsKey(file, key, value) {
+  const text = readText(file) ?? die(`${file}: no settings.md here`);
+  const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text) ?? die(`${file}: no json devteam block`);
+  const block = m[1];
+  // where the block is in the file: the edit goes there, never to an earlier copy of the same text
+  const at = m.index + m[0].indexOf(block);
+  const nl = block.includes('\r\n') ? '\r\n' : '\n';
+  const dups = jsonDuplicateKeys(block);
+  if (dups === undefined) die(`${file}: the json devteam block is not valid JSON`);
+  if (dups.length) die(`${file}: the json devteam block repeats ${dups.map((d) => d.join('.')).join(', ')}; fix that by hand first`);
+  const old = JSON.parse(block);
+  if (!isObj(old)) die(`${file}: the json devteam block is not an object`);
+  const v = JSON.stringify(value);
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let next;
+  if (Object.hasOwn(old, key)) {
+    const re = new RegExp(`("${esc}"\\s*:\\s*)(null|-?\\d+(?:\\.\\d+)?)(?![\\d.eE])`, 'g');
+    const hits = [...block.matchAll(re)];
+    if (hits.length !== 1) die(`${file}: ${key} isn't written as one plain number or null; set it by hand`);
+    next = block.replace(re, (_, pre) => `${pre}${v}`);
+  } else if (/^\s*\{\s*\}\s*$/.test(block)) next = `{${nl}  "${key}": ${v}${nl}}`;
+  else next = block.replace(/^(\s*\{)/, `$1${nl}  "${key}": ${v},`);
+  let parsed = null;
+  try { parsed = JSON.parse(next); } catch {}
+  const same = isObj(parsed) && jsonDuplicateKeys(next)?.length === 0 && canonical(parsed[key]) === canonical(value)
+    && Object.keys(parsed).length === Object.keys(old).length + (Object.hasOwn(old, key) ? 0 : 1)
+    && Object.keys(old).every((k) => k === key || canonical(parsed[k]) === canonical(old[k]));
+  if (!same) die(`${file}: setting ${key} would change more than that key; set it by hand`);
+  const written = text.slice(0, at) + next + text.slice(at + block.length);
+  // what is written reads back as the edit: its block, the first in the file, is the edited one
+  if (/```json devteam\s*\n([\s\S]*?)\n```/.exec(written)?.[1] !== next) die(`${file}: setting ${key} didn't land in the json devteam block; set it by hand`);
+  fs.writeFileSync(file, written);
+}
+// settings set <key> <1..20|none> [--for <act-id>]: the supervisor changes one of its askable
+// settings in its settings chore (never a working-tree edit: the file it writes is the chore
+// worktree's), with --for naming the owner's request it lands. It lands on main through chore pr
+// and merge --chore, which is when it applies.
+function settingsSet() {
+  const [, key, arg] = positional;
+  if (!key || arg === undefined || positional.length !== 3) die('usage: settings set <key> <1..20|none> [--for <act-id>]');
+  supervisorOnly('settings set');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`settings set: ${why}`);
+  const wt = path.join(mainRoot, '.worktrees', 'chore-settings');
+  if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-settings; devteam.mjs chore start settings');
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-settings is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start settings');
+  // never the main checkout under another name (a link to it), and only the settings chore's branch
+  if (realPath(wt) === realPath(mainRoot) || git(['rev-parse', '--abbrev-ref', 'HEAD'], wt) !== 'chore-settings') die('.worktrees/chore-settings is not the settings chore (its branch is not chore-settings): move what you wrote aside, then devteam.mjs chore start settings');
+  const words = (x) => (x === null ? 'no limit' : String(x));
+  const forId = flagStr('for');
+  if (flags.for !== undefined && !forId) die('settings set: --for names the owner\'s owner-setting act');
+  if (forId) {
+    const a = logGet(forId);
+    if (!a || a.type !== 'act' || a.class !== 'owner-setting' || a.created_by !== 'owner' || a.key !== key) die(`settings set: --for names the owner's owner-setting act for ${key}`);
+    const latest = latestOwnerSetting(key);
+    if (latest && latest.id !== a.id) die(`settings set: a newer request ${latest.id} asks for ${words(latest.value)}`);
+    if (a.value !== value) die(`settings set: the owner asked for ${words(a.value)}; --for applies exactly that`);
+  }
+  const file = path.join(wt, projectRel, 'settings.md');
+  setSettingsKey(file, key, value);
+  appendLog({ type: 'act', class: 'settings-edit', key, value, ...(forId ? { for: forId, refs: [forId] } : { refs: [] }), what: `set ${key} to ${words(value)} in the settings chore`, reversible: true }, 'supervisor');
+  out(`${path.relative(mainRoot, file)}: ${key} is ${words(value)}\nnext: devteam.mjs chore pr settings --title "settings: ${key} ${words(value)}", then devteam.mjs merge --chore settings`);
+}
 function cmdSettings() {
+  if (positional[0] === 'set') return settingsSet();
   const s = loadSettings();
   const key = flagStr('get');
   // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
@@ -20686,6 +20892,8 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
+  owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
@@ -20744,13 +20952,13 @@ Dashboard and releases
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
 const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
-const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
