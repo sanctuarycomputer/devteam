@@ -1449,9 +1449,11 @@ export function createGateway(opts = {}) {
   // tmux's history isn't in xterm's own scrollback. This turns a one-finger vertical swipe into wheel
   // steps on the terminal, which tmux (mouse on) reads as scrolling its history. Taps are left alone.
   const TERM_TOUCH = Buffer.from(`<script>(() => {
-  let y = null, acc = 0;
+  // y follows the finger; y0 is where it touched down, and every wheel step of the gesture goes there,
+  // kept off the last rows: tmux's status bar is the bottom row, and a wheel on it switches windows
+  let y = null, y0 = null, acc = 0;
   const STEP = 18;
-  addEventListener('touchstart', (e) => { y = e.touches.length === 1 ? e.touches[0].clientY : null; acc = 0; }, { passive: true, capture: true });
+  addEventListener('touchstart', (e) => { y = y0 = e.touches.length === 1 ? e.touches[0].clientY : null; acc = 0; }, { passive: true, capture: true });
   addEventListener('touchmove', (e) => {
     if (y === null || e.touches.length !== 1) return;
     const t = document.querySelector('.xterm-screen');
@@ -1460,10 +1462,12 @@ export function createGateway(opts = {}) {
     acc += y - ny;
     y = ny;
     const r = t.getBoundingClientRect();
+    const row = document.querySelector('.xterm-rows > div')?.getBoundingClientRect().height || 20;
+    const at = Math.min(Math.max(y0, r.top + row / 2), r.bottom - 2 * row);
     while (Math.abs(acc) >= STEP) {
       const d = acc > 0 ? STEP : -STEP;
       acc -= d;
-      t.dispatchEvent(new WheelEvent('wheel', { deltaY: d, deltaMode: 0, clientX: r.left + r.width / 2, clientY: Math.min(Math.max(ny, r.top + 1), r.bottom - 1), bubbles: true, cancelable: true }));
+      t.dispatchEvent(new WheelEvent('wheel', { deltaY: d, deltaMode: 0, clientX: r.left + r.width / 2, clientY: at, bubbles: true, cancelable: true }));
     }
     e.preventDefault();
   }, { passive: false, capture: true });

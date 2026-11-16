@@ -17,7 +17,7 @@ const script = () => {
 };
 
 // run the menu with a stub tmux that answers list-windows from `windows` and records the menu
-function menu(windows, height) {
+function menu(windows, height, width = 80) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'box-menu-'));
   try {
     fs.writeFileSync(path.join(dir, 'box-tmux-menu'), script(), { mode: 0o755 });
@@ -25,7 +25,7 @@ function menu(windows, height) {
     fs.writeFileSync(path.join(dir, 'tmux'), `#!/bin/sh
 case "$1" in
   list-windows) cat "${dir}/windows" ;;
-  display-message) case "$*" in *client_height*) echo ${height} ;; *pane_id*) echo %7 ;; esac ;;
+  display-message) case "$*" in *client_height*) echo ${height} ;; *client_width*) echo ${width} ;; *pane_id*) echo %7 ;; esac ;;
   display-menu) for a in "$@"; do printf '%s\\n' "$a"; done > "${dir}/menu" ;;
 esac
 `, { mode: 0o755 });
@@ -77,6 +77,13 @@ test('box-tmux-menu: on a short screen it fits, keeping the home windows and eac
   assert.ok(labels.includes('operator') && labels.includes('shell'));
   for (const s of ['stacks', 'website', 'stacksbot']) assert.ok(labels.includes(`* ${s}`), `${s}'s supervisor is there`);
   assert.ok(!labels.includes('ticket-1'), 'agents give way on a short screen');
+  assert.equal(labels.at(-1), 'More windows…', 'what was left out is a tap away');
+  assert.equal(args.at(-1), 'choose-tree -Zw');
+  // a narrow client: labels cut to its width, so the menu still draws
+  const narrow = items(menu([['home', '0', 'a-window-name-well-past-thirty-columns-wide', '@1']], 40, 30));
+  assert.ok(narrow.every((l) => l.length <= 22), JSON.stringify(narrow));
   // a tall screen lists them all
-  assert.ok(items(menu(windows, 80)).includes('ticket-12'));
+  const tall = items(menu(windows, 80));
+  assert.ok(tall.includes('ticket-12'));
+  assert.ok(!tall.includes('More windows…'), 'nothing left out, no More');
 });

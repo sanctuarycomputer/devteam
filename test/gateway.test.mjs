@@ -1855,8 +1855,21 @@ test('the terminal\'s page turns a swipe into wheel events on the terminal', asy
     on.touchstart(touches(400));
     on.touchmove(touches(300));
     assert.ok(wheels.length >= 5, `a 100px swipe up is several wheel steps (${wheels.length})`);
-    assert.ok(wheels.every((w) => w.type === 'wheel' && w.deltaY > 0), 'swiping up scrolls back');
+    assert.ok(wheels.every((w) => w.type === 'wheel' && w.deltaY > 0), 'a finger moving up is wheel-down: toward newer output');
     assert.ok(prevented > 0, 'the page itself does not scroll');
+    on.touchend();
+    // a finger moving down is wheel-up (older output), and a swipe ending on the bottom row, tmux's
+    // status bar, still scrolls where it touched down, never on the bar (a wheel there switches windows)
+    wheels.length = 0;
+    on.touchstart(touches(300));
+    on.touchmove(touches(599));
+    on.touchend();
+    assert.ok(wheels.length >= 5 && wheels.every((w) => w.deltaY < 0), 'a finger moving down scrolls back');
+    assert.ok(wheels.every((w) => w.clientY === 300), 'every step where the finger touched down');
+    wheels.length = 0;
+    on.touchstart(touches(599));
+    on.touchmove(touches(450));
+    assert.ok(wheels.length && wheels.every((w) => w.clientY <= 600 - 40), 'a swipe starting on the bar is kept off its rows');
     on.touchend();
     const before = wheels.length;
     on.touchstart(touches(100, 200));

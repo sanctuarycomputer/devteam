@@ -269,7 +269,12 @@ pane=$(tmux display-message -p -c "$c" '#{pane_id}')
 # tmux draws no menu taller than the client and says nothing: fit the list to its height
 h=$(tmux display-message -p -c "$c" '#{client_height}')
 case "$h" in ''|*[!0-9]*) h=24 ;; esac
-room=$((h - 2 - 4))
+# nor wider: labels are cut to the client's width (the menu's frame takes 4 columns, its keys 4)
+w=$(tmux display-message -p -c "$c" '#{client_width}')
+case "$w" in ''|*[!0-9]*) w=80 ;; esac
+cut=$((w - 8)); [ "$cut" -gt 34 ] && cut=34; [ "$cut" -lt 6 ] && cut=6
+# the scroll rows and their separator, and a separator and "More windows…" kept back in case it is cut
+room=$((h - 2 - 4 - 2))
 # the home session's windows first, then each project's agents under its name
 list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
   awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
@@ -283,6 +288,7 @@ set -- display-menu -c "$c" -t "$pane" -T "#[align=centre] Box " -x 0 -y S \
   "Stop scrolling" q "send-keys -X cancel" \
   ""
 used=0
+cut_short=0
 last=""
 while IFS="$tab" read -r s _ n id; do
   [ -n "$id" ] && [ -n "$n" ] && [ "$n" != dashboard ] || continue
@@ -290,17 +296,19 @@ while IFS="$tab" read -r s _ n id; do
   case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
   need=1
   [ "$s" != "$last" ] && [ -n "$last" ] && need=2
-  [ $((used + need)) -gt "$room" ] && break
+  [ $((used + need)) -gt "$room" ] && { cut_short=1; break; }
   [ "$need" = 2 ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
   last="$s"
   used=$((used + need))
   # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it
   # literally; a leading - would make it a disabled item, so it gets a space first
-  label=$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34 | sed 's/#/##/g; s/^-/ -/')
+  label=$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-"$cut" | sed 's/#/##/g; s/^-/ -/')
   set -- "$@" "$label" "" "switch-client -c '$c' -t '$id'"
 done <<LIST
 $list
 LIST
+# anything left out stays a tap away: tmux's own window tree, full screen
+[ "$only_sup" = 1 ] || [ "${cut_short:-0}" = 1 ] && set -- "$@" "" "More windows…" m "choose-tree -Zw"
 exec tmux "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
