@@ -286,10 +286,12 @@ try {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
     /* the second row takes the spare height: with no content yet, the nav would get half of it */
     .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
-    .main { display: contents; }
-    .pagebar { order: 0; }
-    main.page { order: 2; }
-    .side { order: 1; top: var(--bar-h); height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    /* .main spans the three rows on a subgrid, with the nav row laid over its second: the page bar and the
+       page stay inside .main's box (display: contents would leave .main no box to hold them) */
+    .main { grid-column: 1; grid-row: 1 / 4; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: subgrid; }
+    .pagebar { grid-row: 1; }
+    main.page { grid-row: 3; width: 100%; min-width: 0; }
+    .side { grid-column: 1; grid-row: 2; top: var(--bar-h); height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
     .side .eyebrow { display: none; }
     .settings { flex-direction: row; align-items: center; margin: 0 0 0 auto; border-top: 0; padding: 0 0 0 8px; flex: none; }
     .settings .foot { display: none; }
