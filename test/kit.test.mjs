@@ -1215,3 +1215,57 @@ test('covered_by on a new gate is not the supervisor\'s to add', () => {
     assert.match(`${r.out}\n${r.err}`, /it sets covered_by; a new gate the owner hasn't approved has only cmd, paths, junit, mode/);
   } finally { F.done(); }
 });
+
+test('validate --strict on a re-plan branch checks its latest design and graph verdicts hold at the head, as a first plan\'s', () => {
+  const F = threadsFixture('replan');
+  try {
+    const { goal } = F.approval();
+    F.owner(['goal', 'decide', goal, 'approve']);
+    const PL = { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'cards' };
+    const at = (wt) => ({
+      ok: (args) => F.ok(wt, args, PL),
+      strict: () => { const r = F.run(wt, ['validate', '--strict'], PL); return { status: r.status, said: `${r.out}\n${r.err}` }; },
+      commit: (msg) => { F.g(['add', '-A'], wt); F.g(['commit', '-qm', msg], wt); return F.g(['rev-parse', 'HEAD'], wt); },
+      reviews: (n, sha) => {
+        write(path.join(wt, `docs/devteam/project/reviews/cards/graph-${n}.md`), review('reviewer-a', sha));
+        write(path.join(wt, `docs/devteam/project/reviews/self-serve-billing/design-${n}.md`), review('reviewer-a', sha));
+      },
+    });
+    const STALE = [/feature cards: graph review graph-\d\.md is at \w{12}, which does not hold at HEAD/, /feature cards: design review design-\d\.md is at \w{12}, which does not hold at HEAD; review again/];
+    const stale = (w, when) => { const r = w.strict(); assert.notEqual(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.match(r.said, re, when); };
+    const fresh = (w, when) => { const r = w.strict(); assert.equal(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.doesNotMatch(r.said, re, when); };
+
+    // a first plan: reviews at its head pass; a ticket changed after them is stale
+    const wt1 = path.join(F.base, 'plan-cards');
+    F.g(['worktree', 'add', '-q', '-b', 'plan/cards', wt1, 'origin/main'], F.old);
+    const w1 = at(wt1);
+    write(path.join(wt1, 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## TL;DR\n\n- cards first\n\n## Goals\n\nadmins pay alone\n');
+    w1.ok(['feature', 'add', 'cards', '--json', JSON.stringify({ title: 'Cards', goals: [goal], preconditions: [`${goal}#1`], design: 'project/designs/self-serve-billing.md', stories: [{ id: 'CARD-S1', text: 'admin adds a card', release: 'v0.2.0' }] })]);
+    w1.ok(['ticket', 'add', 'card-01-capture', '--json', JSON.stringify({ title: 'card capture', feature: 'cards', component: 'card', kind: 'build', size: 'S', risk: 'normal', serves: ['CARD-S1'], depends_on: [], touches: ['cards/**'], done_when: ['card test passes in CI'] })]);
+    w1.reviews(1, w1.commit('plan cards'));
+    const reviewed = w1.commit('reviews');
+    fresh(w1, 'a first plan reviewed at its head');
+    w1.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
+    w1.commit('after review');
+    stale(w1, 'a first plan changed after its reviews');
+    F.g(['reset', '-q', '--hard', reviewed], wt1);
+
+    // it lands
+    F.g(['merge', '-q', '--no-ff', '-m', 'Merge pull request #1 from x/plan/cards', 'plan/cards'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.g(['worktree', 'remove', '--force', wt1], F.old);
+    F.g(['branch', '-q', '-D', 'plan/cards'], F.old);
+
+    // a re-plan: the same checks, though the feature's plan log is on main
+    const wt2 = path.join(F.base, 'replan-cards');
+    F.g(['worktree', 'add', '-q', '-b', 'plan/cards', wt2, 'origin/main'], F.old);
+    const w2 = at(wt2);
+    fresh(w2, 'a re-plan with nothing changed since its reviews');
+    w2.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
+    w2.commit('re-plan cards');
+    stale(w2, 'a re-plan changed after its reviews');
+    w2.reviews(2, F.g(['rev-parse', 'HEAD'], wt2));
+    w2.commit('re-plan reviews');
+    fresh(w2, 'a re-plan reviewed again at its head');
+  } finally { F.done(); }
+});
