@@ -815,6 +815,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
+      // its control is on Progress (one page at a time)
+      await p.ev(`location.hash = '#progress'`);
+      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
       await p.click('#left-only');
       const q = 'After the checkbox?';
       ask(q);
@@ -832,6 +835,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
       await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
+      // back to the Inbox, for the card
+      await p.ev(`location.hash = '#inbox'`);
+      await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     });
 
     await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
@@ -1470,7 +1476,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder, URL });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute, parseSettingView };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
@@ -1593,6 +1599,22 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
   assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
   assert.equal(A.tWhere(null), 'no subject');
+  // a Settings row's thread is a page subject on #settings?key=<key> (spec §8): named from its quote,
+  // else its key; a key of its own, so each row has its own pin and draft
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }), 'Settings, Workers at once, in all');
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets' }), 'Settings, max_active_tickets', 'the key, with no name to read');
+  assert.notEqual(A.tKey({ kind: 'page', view: '#settings?key=max_active_tickets' }), A.tKey({ kind: 'page', view: '#settings?key=max_active_per_component' }));
+  assert.equal(A.parseSettingView('#settings?key=max_active_tickets'), 'max_active_tickets');
+  for (const v of ['#settings?key=Bad Key', '#settings', '#settings?key=', `#settings?key=a${'b'.repeat(64)}`, '#goals?key=max_active_tickets', null]) assert.equal(A.parseSettingView(v), null, `${v} is no setting view`);
+  // a point on a Settings row: the row, with its plain name, not a spot in the section
+  const setRow = (key) => ({ dataset: { setting: key }, querySelector: (q) => (q === '.set-name' ? { textContent: ' Workers at once,\n in all ' } : null) });
+  const onSet = (row) => ({ closest: (q) => (q === '[data-setting]' ? row : null) });
+  const row1 = setRow('max_active_tickets');
+  const setHit = A.tSubjectAt(onSet(row1), 5, 5, () => sec);
+  assert.deepEqual(plain(setHit.subject), { kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }, 'no at: the row is the spot');
+  assert.equal(setHit.title, 'Setting · Workers at once, in all (max_active_tickets)');
+  assert.equal(setHit.el, row1, 'the row is what the layer outlines and places the card by');
+  assert.equal(A.tSubjectAt(onSet(setRow('Bad Key')), 200, 250, () => sec).subject.view, '#loop/observe', 'a key the page would not write is a spot in its section');
   // one pin per subject, numbered by when its first open thread began; resolved and no-subject threads get none
   const onGoal = { kind: 'item', ref: `goal:${G}` };
   const t = (id, created, subject, status = 'open') => ({ id, created_at: created, subject, status, turns: [] });
@@ -3172,6 +3194,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
+    // the field is on the Inbox page (one page at a time)
+    await p.ev(`location.hash = '#inbox'`);
+    await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
@@ -3179,11 +3204,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    await still(async () => { const g = await p.at(`${goalSel} h4`); await p.move(g.x, g.y, 8); });
+    await still(async () => { const g = await p.at('#inbox h2'); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+    await p.ev(`location.hash = '#goals'`);
+    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
@@ -3350,6 +3377,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon('TL.polling === null', 'no poll with no thread open');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');
+    // The link followed again before the Back's hashchange is handled (a loaded runner's pace, or an
+    // owner's quick click): history.go fires popstate at once and queues hashchange, so the new entry
+    // must be stamped from #goals, not from the card's entry Back left; else its × goes back two.
+    await p.ev(`addEventListener('popstate', () => { location.hash = '#talk/${T}'; }, { once: true }); void 0`);
+    await p.ev("document.getElementById('tl-c-text').focus()");
+    await p.key('Escape');
+    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals'`, 'the link followed again at once');
+    assert.equal(await p.ev('history.state.depth'), 1, 'one entry above #goals');
   });
 
   await t.test('a numbered pin on the goal, placed again after the 10 s rebuild, opening the thread without Shift', async () => {
