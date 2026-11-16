@@ -7,11 +7,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
-// { hash, ready?, opts? }: the page's head, what must be true before it is measured, and measure options
+// { hash, ready?, opts?, init? }: the page's head, what must be true before it is measured, measure
+// options, and a script run in each load before the page's own (Page.addScriptToEvaluateOnNewDocument),
+// so a page is measured with the data it draws, not its empty state
 const READY = "!document.querySelector('main.waiting')";
 const PAGES = [
   // kit-87: Settings, on the shell, whole
@@ -20,6 +22,9 @@ const PAGES = [
   // other checks ignore; with the default view it would be taken for the page's first content, whose
   // page-top is its page ticket's, so the view is a selector no element has.
   ...['overview', 'inbox', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
+  // line exist only with it)
+  { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
 ];
 
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
@@ -46,7 +51,22 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
     return;
   }
   for (const pg of PAGES) {
-    const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
-    for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${size}`);
+    if (!pg.init) {
+      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${size}`);
+      continue;
+    }
+    // with an init script: one new document (from about:blank; the dashboard serves only / and
+    // /index.html, so no query is added to force one), which keeps the script's effect at every size,
+    // as a listed page keeps its document; the script removed after
+    const { identifier } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: pg.init });
+    try {
+      await p.send('Page.navigate', { url: 'about:blank' });
+      for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      for (const [at, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${at}`);
+    } finally {
+      await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+    }
   }
 });
