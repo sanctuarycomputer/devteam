@@ -524,12 +524,16 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   await idle();
   // the server's reason (its default for an owner's drain) arrives with the next read
   await until(async () => /^(draining…|drained) · \S/.test(await p.ev(`document.querySelector('#side-state').textContent`)), 'the state line and the reason');
+  // the press over, focus is back on the pressed button (review T5-2)
+  const focused = (m) => p.ev(`document.activeElement === document.querySelector(${JSON.stringify(btn(m))})`);
+  assert.ok(await focused('drain'), 'focus back on Drain');
 
-  // Run on a held fleet: one resume
+  // Drain while draining: no post (review T5-1); Run on a held fleet: one resume
+  await p.click(btn('drain'));
   await p.click(btn('run'));
   await until(async () => (await mode()) === 'run', 'the mode run');
   await idle();
-  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }]), 'Run on a held fleet posts one resume');
+  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }]), 'Drain while draining posts nothing; Run on a held fleet posts one resume');
 
   // Park asks in place, with focus; two redraws keep it; Escape cancels with no post
   const confirming = () => p.ev(`(() => { const b = document.querySelector(${JSON.stringify(btn('park'))}); return !!b && b.textContent === 'Confirm park' && b.dataset.confirm === '1' && document.activeElement === b; })()`);
@@ -550,12 +554,20 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   await idle();
   assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }, { op: 'park' }]), 'the confirm posts one park');
 
-  // a refusal: its error in the switch, and the mode the data's again
-  await p.ev("window.__stub = 'fail'");
+  // Drain on a parked fleet: no post, and the switch says why; the mode stays park (review T5-1)
   await p.click(btn('drain'));
+  await until(() => p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '') === 'Parked: Run first, then Drain'`), 'the switch says Run first');
+  assert.equal(await mode(), 'park', 'the mode stays park');
+  assert.equal(JSON.parse(await posts()).length, 3, 'Drain on a parked fleet posts nothing');
+
+  // a refusal: its error in the switch, the mode the data's again, focus back on the button
+  await p.ev("window.__stub = 'fail'");
+  await p.click(btn('run'));
   await until(() => p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '').includes('nope')`), 'the error in the switch');
   await until(async () => (await mode()) === 'park', 'the mode back to park');
   await idle();
+  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }, { op: 'park' }, { op: 'resume' }]), 'the refused Run posted once');
+  assert.ok(await focused('run'), 'focus back on Run after a refusal');
   await p.ev('render(DATA)');
   assert.ok(await p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '').includes('nope')`), 'a redraw keeps the error');
 
