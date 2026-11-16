@@ -187,3 +187,20 @@ test('host claim: no remote, or no network, never blocks: one warning, then on',
     assert.ok(!fs.existsSync(path.join(old, 'docs/devteam/run/log')) || json(ok(old, ['questions', '--all', '--json'])).length === 0, 'nothing for the owner');
   } finally { F.done(); }
 });
+
+// A fleet held only by the owner's per-goal holds has no fleet op to mark: --move says so and
+// changes nothing, and fleet status says how to make it a move.
+test('host claim: --move on goals held by their own holds marks nothing, and says what a move needs', () => {
+  const F = fleetFixture('hostownholds');
+  const { org, old, ok, g } = F;
+  try {
+    ok(old, ['prompt', 'supervisor'], BOX);
+    const goals = json(ok(old, ['goal', '--json'], BOX)).filter((x) => !['met', 'abandoned'].includes(x.status)).map((x) => x.id);
+    for (const id of [...goals, 'upkeep']) ok(old, ['goal', 'hold', id, 'park', '--owner'], BOX);
+    const said = ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX });
+    assert.match(said, /nothing marked: \d+ goal\(s\) are held by their own holds, not a fleet op/);
+    assert.doesNotMatch(said, /marked the held fleet a move/);
+    assert.equal(claimOf(g, org).fleet, null, 'the claim stays here');
+    assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /make it a fleet op first/);
+  } finally { F.done(); }
+});
