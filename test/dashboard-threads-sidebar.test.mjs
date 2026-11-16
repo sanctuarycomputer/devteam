@@ -909,3 +909,67 @@ test('the /view/ tab', { skip: SKIP, timeout: 300000 }, async (t) => {
   assert.equal(await p.ev("location.pathname + location.hash"), '/view/artifact/viewer-mock', 'no route');
   assert.deepEqual(await p.ev("window.__asked.filter((u) => u.startsWith('/api/data'))"), [], '/api/data never asked');
 });
+
+// kit-89 done-when 9: the design's gap-audit rows, asserted in one place, on a fixture of their own.
+test('the gap-audit rows', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const F = threadsFixture('threads-gap-audit');
+  F.sup(goalArgs('Self-serve billing', 2));
+  const O = idOf(F.owner(['thread', 'new', 'An open one']));
+  F.sup(['thread', 'reply', O, 'Over to you.']);
+  const D = idOf(F.owner(['thread', 'new', 'A done one']));
+  F.owner(['thread', 'resolve', D, '--outcome', 'ok']);
+  const { p, soon } = await open(t, F, '#goals');
+  const card = "document.getElementById('tl-card')";
+  const turns = (id) => JSON.parse(F.owner(['thread', 'show', id, '--json'])).turns.map((u) => u.text);
+  const g = `#goals-list [data-subject="goal:${F.goal}"] h4`;
+
+  // 1. Pin starts a thread by pointing, without Shift: a floating draft beside the goal, pin mode ended
+  await p.click('.pagebar .tt');
+  await soon(`${IS_OPEN} && getComputedStyle(document.getElementById('threads')).transform === 'none' && getComputedStyle(document.querySelector('.main')).marginRight === '380px'`, 'the panel at rest');
+  await soon(STEADY('#tl-pinbtn'), 'Pin at rest');
+  await p.click('#tl-pinbtn');
+  await soon("TL.pin && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'true'", 'pin mode on');
+  await soon(`!!document.querySelector(${JSON.stringify(g)})`, 'the goal card');
+  await soon(STEADY(g), 'the goal card at rest');
+  const at = await p.at(g);
+  await p.move(at.x, at.y, 0);
+  await soon("!document.getElementById('tl-cursor').hidden", 'the pin without Shift');
+  await p.clickAt(at.x, at.y, 0);
+  await soon(`TL.draft?.subject?.ref === 'goal:${F.goal}' && ${card}.parentElement?.id === 'tl' && !${card}.hidden && !${card}.classList.contains('in-panel') && document.activeElement?.id === 'tl-c-text'`, 'a floating draft beside the goal');
+  // pin mode lasts "until Esc or the Pin button again" (the code's own words): still on after the click; Esc ends it
+  assert.equal(await p.ev('TL.pin'), true, 'pin mode stays on after a thread starts');
+  await p.key('Escape');
+  await soon('!TL.pin', 'pin mode ended by Esc');
+  assert.equal(await p.ev("document.getElementById('tl-pinbtn').getAttribute('aria-pressed')"), 'false', 'Pin no longer pressed');
+  assert.equal(await p.ev('!!TL.draft && !' + card + '.hidden'), true, 'the draft survives Esc');
+  await p.ev("document.getElementById('tl-c-text').focus()");
+
+  // 2. Shift+Enter sends a new thread: listed in the panel, the composer empty
+  await p.type('from the pin');
+  await p.key('Enter', 8);
+  const N = await soon(`TL.threads.find((x) => x.subject?.ref === 'goal:${F.goal}' && !String(x.id).startsWith('pending-') && !x.pending)?.id`, 'the new thread read');
+  await soon(`!!document.querySelector('#tl-list [data-tl-open="${N}"]')`, 'listed in the panel');
+  assert.equal(await p.ev("document.getElementById('tl-c-text').value"), '', 'the composer is empty');
+  await until(() => turns(N).includes('from the pin'), 'the new thread on the server');
+  await p.click('#tl-card [data-tl-close]');
+  await soon(`${card}.hidden`, 'the draft card closed');
+
+  // 3. Shift+Enter sends a reply: in an existing open thread's card
+  await p.click(`#tl-list [data-tl-open="${O}"]`);
+  await soon(`${card}.dataset.key === '${O}' && !${card}.hidden && !!document.getElementById('tl-c-text')`, "O's card");
+  await p.ev("document.getElementById('tl-c-text').focus()");
+  await p.type('a reply');
+  await p.key('Enter', 8);
+  await soon("/a reply/.test(document.getElementById('tl-c-turns').textContent)", 'the turn shows in the card');
+  await until(() => turns(O).includes('a reply'), 'the reply on the server');
+  assert.ok((await (await fetch(`http://127.0.0.1:${(await p.ev('location.port'))}/api/threads`)).text()).includes('a reply'), '/api/threads has it');
+  assert.equal(await p.ev("document.getElementById('tl-c-text').value"), '', 'the composer is empty');
+
+  // 4. A resolved thread has Reopen
+  await p.click('#th-pane [data-tl-back]');
+  await soon(STEADY('#th-pane [data-thf="resolved"]'), 'the Resolved filter at rest');
+  await p.click('#th-pane [data-thf="resolved"]');
+  await soon(`!!document.querySelector('#tl-list [data-tl-open="${D}"]')`, 'the resolved thread listed');
+  await p.click(`#tl-list [data-tl-open="${D}"]`);
+  await soon(`${card}.dataset.key === '${D}' && !${card}.hidden && !!document.querySelector('#tl-c-acts [data-tl-reopen]')`, 'Reopen on the resolved thread');
+});
