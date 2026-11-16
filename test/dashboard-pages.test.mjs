@@ -579,6 +579,8 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.ok(await focused('run'), 'focus back on Run after a refusal');
   await p.ev('render(DATA)');
   assert.ok(await p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '').includes('nope')`), 'a redraw keeps the error');
+  // a redraw with nothing changed leaves the switch's node in place (final-1 F3: a rewrite could drop a click)
+  assert.ok(await p.ev(`(() => { window.__sw = document.querySelector(${JSON.stringify(SW)}); render(DATA); render(DATA); return window.__sw === document.querySelector(${JSON.stringify(SW)}); })()`), 'two redraws keep the switch node while it shows an error');
 
   // in flight: the buttons disabled and the busy line shown, across a redraw
   await p.ev("window.__stub = 'hang'");
@@ -589,6 +591,7 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev(`!!document.querySelector(${JSON.stringify(`${SW} .err`)})`), false, 'a new press clears the old error');
   await p.ev('render(DATA)');
   assert.ok(await busy(), 'a redraw keeps the busy line');
+  assert.ok(await p.ev(`(() => { window.__sw = document.querySelector(${JSON.stringify(SW)}); render(DATA); render(DATA); return window.__sw === document.querySelector(${JSON.stringify(SW)}); })()`), 'two redraws keep the switch node while it is busy');
   await p.ev('window.__stub = null; window.__release()');
   await idle();
 
@@ -613,22 +616,26 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
 });
 
 // The Settings page (spec §8, done-whens 3, 6 and 7): every setting under its group, the two worker
-// limits set on their own rows, and Ready to move? while the fleet is held.
+// limits set on their own rows, and Ready to move? at all times, with Check now.
 test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, port, size, load, onPage } = await pagesFixture(t, 'setpage', { records: false });
   const api = async (route) => { const r = await fetch(`http://127.0.0.1:${port}${route}`); assert.equal(r.status, 200, route); return r.json(); };
   await size(1440, 900);
   await load('#overview');
   // every GET's URL in window.__gets; every POST /api/owner-setting body in window.__sets; __holdFleet
-  // holds a plain GET /api/fleet until __releaseFleet()
+  // holds a plain GET /api/fleet until __releaseFleet(); __holdCheck holds GET /api/fleet?fetch=1 until
+  // __releaseCheck(body) answers it with that body; __failCheck answers it 500 with an error
   await p.ev(`(() => {
-    window.__gets = []; window.__sets = []; window.__holdFleet = false;
+    window.__gets = []; window.__sets = []; window.__holdFleet = false; window.__holdCheck = false; window.__failCheck = false;
     const real = window.fetch;
+    const json = (body, status) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
     window.fetch = (u, o) => {
       const url = String(u);
       if (!o || !o.method || o.method === 'GET') window.__gets.push(url);
       if (url === '/api/owner-setting' && o && o.method === 'POST') window.__sets.push(JSON.parse(o.body));
       if (url === '/api/fleet' && window.__holdFleet) return new Promise((res) => { window.__releaseFleet = () => res(real(u, o)); });
+      if (url === '/api/fleet?fetch=1' && window.__failCheck) return Promise.resolve(json({ error: 'origin unreachable' }, 500));
+      if (url === '/api/fleet?fetch=1' && window.__holdCheck) return new Promise((res) => { window.__releaseCheck = (body) => res(json(body, 200)); });
       return real(u, o);
     };
   })()`);
@@ -638,10 +645,46 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   await until(() => p.ev(`!!document.querySelector('${S} [data-setting="max_active_tickets"]')`), 'the Settings rows');
   // arriving fetches and checks again, as Check did
   await until(() => p.ev("window.__gets.includes('/api/fleet?fetch=1')"), 'a fetch=1 request on arriving');
-  // no Fleet section; the switch stays in the sidebar; no card while the fleet runs
+  // no Fleet section; the switch stays in the sidebar
   assert.equal(await p.ev(`!!document.querySelector('${S} .fleet-switch')`), false, 'no fleet switch on Settings');
   assert.equal(await p.ev(`[...document.querySelectorAll('${S} .sec .lbl')].some((l) => /^fleet$/i.test(l.textContent.trim()))`), false, 'no Fleet section');
-  assert.equal(await p.ev(`!!document.querySelector('${S} .ready-card')`), false, 'no Ready to move? while the fleet runs');
+  // Ready to move? at all times (ruling m-20261116-095757248, done-when 3 as amended): on a running
+  // fleet too, ready or not, each blocker and the parity, from /api/fleet
+  const blockers = () => p.ev(`JSON.stringify([...document.querySelectorAll('${S} .ready-card .ready-blocker')].map((r) => r.textContent.trim()))`);
+  const badge = () => p.ev(`document.querySelector('${S} .ready-card .card-head .badge')?.textContent ?? null`);
+  const checkBtn = `${S} .ready-card [data-checknow]`;
+  await until(() => p.ev(`!!document.querySelector('${S} .ready-card') && !FLEET.busy && !!FLEET.data`), 'Ready to move? on a running fleet, checked');
+  const st0 = await api('/api/fleet');
+  assert.ok(Array.isArray(st0.blockers), 'fleet status');
+  await until(async () => JSON.stringify(JSON.parse(await blockers())) === JSON.stringify(st0.blockers), 'each blocker as a row on a running fleet');
+  assert.equal(await badge(), st0.ready ? 'ready to move' : 'not ready to move', 'ready or not on a running fleet');
+  if (st0.parity) assert.equal(await p.ev(`[...document.querySelectorAll('${S} .ready-card code')].map((c) => c.textContent).join()`), st0.parity.hash, 'the parity hash');
+  assert.equal(await p.ev(`document.querySelector('${checkBtn}')?.textContent ?? null`), 'Check now', 'Check now in the card');
+
+  // Check now: one fetch=1 request, the button disabled while it is out, then the fresh answer
+  await p.ev("window.__gets = []; window.__holdCheck = true; window.__releaseCheck = null; true");
+  await p.click(checkBtn);
+  await until(() => p.ev("typeof window.__releaseCheck === 'function'"), 'the Check now request out');
+  await until(() => p.ev(`document.querySelector('${checkBtn}')?.disabled === true`), 'Check now disabled while out');
+  const fresh = { ready: false, blockers: ['a fresh blocker from Check now'], parity: { hash: 'f00dcafe' } };
+  await p.ev(`window.__holdCheck = false; window.__releaseCheck(${JSON.stringify(fresh)}); true`);
+  await until(async () => (await blockers()) === JSON.stringify(fresh.blockers), 'the card shows the fresh answer');
+  assert.equal(await badge(), 'not ready to move');
+  assert.match(await p.ev(`document.querySelector('${S} .ready-card').textContent`), /f00dcafe/, 'the fresh parity');
+  await until(() => p.ev(`document.querySelector('${checkBtn}')?.disabled === false`), 'Check now enabled again');
+  assert.deepEqual(JSON.parse(await p.ev("JSON.stringify(window.__gets.filter((u) => u.startsWith('/api/fleet')))")), ['/api/fleet?fetch=1'], 'exactly one fetch=1 request');
+
+  // Check now fails: the error on the card, kept across a redraw; the button back
+  await p.ev('window.__failCheck = true');
+  await p.click(checkBtn);
+  await until(() => p.ev(`/origin unreachable/.test(document.querySelector('${S} .ready-card .err')?.textContent ?? '')`), 'the error on the card');
+  await until(() => p.ev(`document.querySelector('${checkBtn}')?.disabled === false`), 'Check now enabled after a failure');
+  await p.ev('render(DATA)');
+  assert.match(await p.ev(`document.querySelector('${S} .ready-card .err')?.textContent ?? ''`), /origin unreachable/, 'a redraw keeps the error');
+  await p.ev('window.__failCheck = false');
+  // a good check clears it
+  await p.click(checkBtn);
+  await until(() => p.ev(`!document.querySelector('${S} .ready-card .err') && !FLEET.busy`), 'a good check clears the error');
 
   // every setting, once, under its group, in settings_all's order
   const data = await api('/api/data');
@@ -738,7 +781,7 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   await until(() => p.ev(`(() => { const r = document.querySelector('${S} [data-setting="tick_minutes"]'); const t = r.querySelector('.t').getBoundingClientRect(), v = r.querySelector('.r').getBoundingClientRect(); return v.top >= t.bottom - 1; })()`), 'the value box below the name box at 690');
   await size(1440, 900);
 
-  // the fleet parked: Ready to move? with each blocker and no button, after a fetch=1 request
+  // the fleet parked: Ready to move? with each blocker and Check now, after a fetch=1 request
   assert.equal(await p.ev("fetch('/api/fleet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'park' }) }).then((r) => r.status)"), 200, 'parked');
   await until(() => p.ev("DATA.fleet && DATA.fleet.mode === 'park'"), 'the data says parked');
   await p.ev("location.hash = '#overview'");
@@ -760,7 +803,16 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   const card = await p.ev(`(() => { const c = document.querySelector('${S} .ready-card'); return { first: c === document.querySelector('${S}').firstElementChild, head: c.querySelector('.card-head').textContent, buttons: c.querySelectorAll('button').length }; })()`);
   assert.ok(card.first, 'Ready to move? first');
   assert.match(card.head, /Ready to move\?/);
-  assert.equal(card.buttons, 0, 'no button in Ready to move?');
+  assert.equal(card.buttons, 1, 'one button in Ready to move?: Check now');
+  assert.equal(await p.ev(`document.querySelector('${S} .ready-card button').textContent`), 'Check now');
+
+  // the fleet drained: the card still shows, with its blockers
+  for (const op of ['resume', 'drain']) assert.equal(await p.ev(`fetch('/api/fleet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: '${op}' }) }).then((r) => r.status)`), 200, op);
+  await until(() => p.ev("DATA.fleet && DATA.fleet.mode === 'drain'"), 'the data says draining');
+  await p.click(`${S} .ready-card [data-checknow]`);
+  await until(() => p.ev(`/^Held/.test(document.querySelector('${S} .ready-card .rowline')?.textContent ?? '') && /drain/.test(document.querySelector('${S} .ready-card .rowline').textContent) && !FLEET.busy`), 'Ready to move? while draining');
+  const st2 = await api('/api/fleet?fetch=1');
+  await until(async () => (await p.ev(`JSON.stringify([...document.querySelectorAll('${S} .ready-card .ready-blocker')].map((r) => r.textContent.trim()))`)) === JSON.stringify(st2.blockers), 'each blocker as a row while draining');
 
   // settings_all missing: the limits and the card still draw, and a line says the list can't be read
   await p.ev('FLEET.busy = true; DATA = { ...DATA, settings_all: undefined }; render(DATA)');

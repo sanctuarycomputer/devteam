@@ -2765,9 +2765,11 @@ function fleetStateLine(f, st) {
   return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
 // Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
-// page's copies with the same attribute. A slot is written only when its HTML changed, so focus and
-// a pending confirm stay; a rewrite keeps focus on the same button (the confirm is Park's), since
+// page's copies with the same attribute. A slot is written only when its HTML changed (against the last
+// string written to it: innerHTML comes back re-serialised, as disabled="" or ' for &#39;), so focus,
+// a pending confirm and a click in progress stay; a rewrite keeps focus on the same button (the confirm is Park's), since
 // the binder's Escape needs focus inside the switch.
+const FLEET_DRAWN = new WeakMap();
 function drawFleet() {
   const f = DATA?.fleet || {};
   const html = {
@@ -2776,10 +2778,11 @@ function drawFleet() {
   };
   for (const el of document.querySelectorAll('[data-fleet-slot]')) {
     const want = html[el.dataset.fleetSlot];
-    if (want === undefined || el.innerHTML === want) continue;
+    if (want === undefined || FLEET_DRAWN.get(el) === want) continue;
     const ae = document.activeElement;
     const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
     el.innerHTML = want;
+    FLEET_DRAWN.set(el, want);
     if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
   }
 }
@@ -2834,7 +2837,12 @@ bindFleetSwitch(document.querySelector('.app'), {
 async function loadFleet(fetchToo = false) {
   if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
-  try { const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`); if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now() }; } catch {}
+  drawSettings(); // Check now disabled while the read is out
+  try {
+    const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`);
+    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: null };
+    else { const j = await r.json().catch(() => ({})); FLEET.error = String(j.error ?? `HTTP ${r.status}`); }
+  } catch (e) { FLEET.error = String(e?.message ?? e); }
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
   FLEET.prevReady = !!FLEET.data?.ready;
@@ -2845,7 +2853,7 @@ async function loadFleet(fetchToo = false) {
   if (FLEET.wantFetch) { FLEET.wantFetch = false; loadFleet(true); }
 }
 
-// ---- the Settings page (kit-87 spec §8): Ready to move? while the fleet is held, then every setting
+// ---- the Settings page (kit-87 spec §8): Ready to move? at all times, then every setting
 // under its group, as settings_all gives them; the two worker limits are set on their own rows ----
 const LIMITS = ['max_active_tickets', 'max_active_per_component'];
 // each limit's control across redraws: pending (undefined: as asked; null: No limit; else 1..20), busy, error
@@ -2887,23 +2895,29 @@ function settingRowHtml(e) {
   const desc = [e.description ? esc(e.description) : '', a ? `in force: ${esc(a.shown ?? '')}` : '', a?.label ? `<span class="set-label">${esc(a.label)}</span>` : ''].filter(Boolean).join(' · ');
   return `<div class="rowline set-row${e.key === SET_MARK ? ' tl-marked' : ''}" data-setting="${esc(e.key)}"><span class="t"><span class="set-name">${esc(e.name)}</span> <code class="set-key">${esc(e.key)}</code></span><span class="r">${limit ? limitControl(e.key) : `<span class="set-val">${esc(settingText(e))}</span>`}${e.owner_only ? ` <span class="badge amber" title="${esc(e.owner_only)}">yours to change</span>` : ''}</span></div><div class="set-desc dim" data-setting-desc="${esc(e.key)}">${desc}</div>`;
 }
-// Ready to move? (fleet status), while the fleet is held: ready or not, each blocker, the parity; no button
+// Ready to move? (fleet status), at all times (ruling m-20261116-095757248): ready or not, each blocker,
+// the parity, and Check now (fetch from origin and check again), disabled while a read is out. On a
+// running fleet with nothing checked yet, the words are today's strip's.
 function readyCard(d) {
   const f = d.fleet || {};
-  if (!(f.mode || f.op)) return '';
+  const held = !!(f.mode || f.op);
   const st = FLEET.data;
-  const badge = st ? (st.ready ? '<span class="badge good">ready to move</span>' : '<span class="badge medium">not ready to move</span>') : '<span class="dim">checking…</span>';
-  const rows = [`<div class="rowline"><span class="t">Held</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
+  const badge = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge${held ? ' medium' : ''}">not ready to move</span>`) : held || FLEET.busy ? '<span class="dim">checking…</span>' : '';
+  const rows = [`<div class="rowline"><span class="t">${held ? 'Held' : 'Fleet'}</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
+  if (!st && !held && !FLEET.busy) rows.push('<div class="rowline"><span class="t dim">Park or drain the fleet to move it; Check now says what a move needs</span></div>');
+  if (FLEET.error) rows.push(`<div class="rowline"><span class="err" role="alert">Couldn't check: ${esc(FLEET.error)}</span></div>`);
   if (st) {
     for (const b of st.blockers || []) rows.push(`<div class="rowline ready-blocker"><span class="dot amber"></span><span class="t">${linkify(b)}</span></div>`);
     if (!(st.blockers || []).length) rows.push(`<div class="rowline"><span class="dot green"></span><span class="t">Nothing left before a move</span></div>`);
     if (st.parity) rows.push(`<div class="rowline"><span class="t">Parity</span><span class="r"><code>${esc(st.parity.hash)}</code></span></div>`);
   }
-  return `<div class="card ready-card"><div class="card-head"><i class="icon-truck" aria-hidden="true"></i>Ready to move?<span class="grow">${badge}</span></div><div class="rows">${rows.join('')}</div></div>`;
+  return `<div class="card ready-card"><div class="card-head"><i class="icon-truck" aria-hidden="true"></i>Ready to move?<span class="grow">${badge}</span><button type="button" class="ghost mini" data-checknow title="Fetch from origin and check again"${FLEET.busy ? ' disabled' : ''}>Check now</button></div><div class="rows">${rows.join('')}</div></div>`;
 }
 // The page, drawn from DATA on every render, on arriving and when fleet status comes back. It is
 // written only when its HTML changed, and focus goes back to the same control.
 let SET_DRAWN = null;
+// Check now was pressed and its read is out
+let CHECK_PRESSED = false;
 // the key of the row whose thread's card is open (the thread layer sets it): drawn marked, so a redraw keeps it
 let SET_MARK = null;
 function drawSettings() {
@@ -2926,6 +2940,12 @@ function drawSettings() {
   el.innerHTML = html;
   SET_DRAWN = html;
   if (at) el.querySelector(at)?.focus({ preventScroll: true });
+  // Check now is disabled while its read is out, so focus falls to the page: give it back once it ends
+  if (CHECK_PRESSED && !FLEET.busy) {
+    CHECK_PRESSED = false;
+    const now = document.activeElement;
+    if (!now || now === document.body || el.contains(now)) el.querySelector('[data-checknow]')?.focus({ preventScroll: true });
+  }
 }
 // Save: POST /api/owner-setting { key, value } through press(). The overlay shows the value asked for
 // until the server's data says so; a refusal keeps the owner's value and shows the reason by the control.
@@ -2946,6 +2966,8 @@ function saveLimit(key, value) {
 }
 $('settings').addEventListener('click', (e) => {
   if (e.shiftKey || TL.pin) return; // a thread's point, not a press
+  const c = e.target.closest('[data-checknow]');
+  if (c) { if (!c.disabled && !FLEET.busy) { CHECK_PRESSED = true; loadFleet(true); } return; }
   const b = e.target.closest('[data-limit-none], [data-limit-step], [data-limit-save]');
   if (!b || b.disabled) return;
   const key = b.dataset.limitNone ?? b.dataset.k ?? b.dataset.limitSave;
