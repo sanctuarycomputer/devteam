@@ -36,6 +36,12 @@ Your prompt may carry a **Links** block: the registry links your ticket, its com
 
 ## 4. The loop, with superpowers
 
+**Before you ask for a spec or plan review, check what first passes are most often rejected for.** Across projects, most specs and plans fail their first review, and most for the same few reasons. Check each yourself first; a pass you didn't need costs a reviewer's whole read and an hour of waiting.
+- **Every done-when is an acceptance check, and each check can fail.** Restate each done-when as one check, none dropped, merged or weakened. For each, say how it fails when the behaviour is broken: the command or test, and what would turn it red. A check that would pass against the code as it is today, or with the feature removed, is no check.
+- **The plan's TL;DR says something.** It names the approach: what changes and in which files or modules, in what order, how it is tested, and what could go wrong. "Implement the ticket" or a restated title is rejected (`quality.md` §6).
+- **The plan is buildable as written.** Every task names its files (all inside `touches`), its test first, and the command that shows it passing; a contract the ticket provides or consumes is cited by name and version.
+- **The project's own rules.** Read the rules the project's reviewers cite most (`metrics --json` → `reviews.by_stage.<spec|plan>.top_blocking_rules`), and check your draft against each.
+
 | Stage | Superpowers skill | devteam adds |
 |---|---|---|
 | spec | `brainstorming` | save to `project/tickets/<id>/spec.md` (restate the done-whens as acceptance checks; contracts provided and consumed; edge cases; out of scope); review `reviews/spec-1.md` (not on the lighter review depth's trial, `quality.md` §3); ask for `approve-spec` with a `review-request` message |
