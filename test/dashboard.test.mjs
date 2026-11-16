@@ -4259,6 +4259,8 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
   // a signal whose key holds a /: its card opens #signal/<key>
   await p.ev(`document.getElementById('drawer-close').click()`);
+  // closed once it has slid out (kit-88): until then it still covers the cards under it
+  await soon(`document.getElementById('drawer').hidden`, 'the peek closed');
   await click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
@@ -4285,6 +4287,8 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
   assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  // the peek at rest (kit-88: it reopened as the last one slid out), so the click lands where the node is
+  await soon(`getComputedStyle(document.getElementById('drawer')).transform === 'none'`, 'the peek at rest');
   await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });

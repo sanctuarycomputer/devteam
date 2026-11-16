@@ -170,7 +170,9 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   const title = () => p.ev("document.querySelector('#page-title').textContent.trim()");
   // a peek open at this hash, over this page alone, with its title in the page bar
   // (and routed: the entry stamped, as the hash changes before its hashchange is handled)
-  const peekOver = (hash, page, what) => until(async () => await peekOpen() && await p.ev(`location.hash === ${JSON.stringify(hash)} && typeof history.state?.page === 'string'`) && JSON.stringify(await shown()) === JSON.stringify([page]), what);
+  // the peek slid in (kit-88): its slide over, so a click on its × lands on it
+  const slidIn = () => p.ev("(() => { const d = document.querySelector('#drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()");
+  const peekOver = (hash, page, what) => until(async () => await peekOpen() && await slidIn() && await p.ev(`location.hash === ${JSON.stringify(hash)} && typeof history.state?.page === 'string'`) && JSON.stringify(await shown()) === JSON.stringify([page]), what);
   const closed = (page) => until(async () => !(await peekOpen()) && JSON.stringify(await shown()) === JSON.stringify([page]) && await p.ev(`location.hash === ${JSON.stringify(`#${page}`)}`), `no peek, ${page} alone`);
   // a click on what a selector finds, once it is drawn (a peek's body loads after it opens)
   const clickWhen = async (sel) => { await until(() => p.ev(`!!document.querySelector(${JSON.stringify(sel)})`), sel); await p.click(sel); };

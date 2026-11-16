@@ -279,6 +279,31 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await closePeek();
   });
 
+  await t.test('a scrim click and Escape close the peek: it slides out, then hides', async () => {
+    for (const how of ['scrim', 'Escape']) {
+      await openPeek(`#ticket/${T}`);
+      await p.ev(RECORD);
+      if (how === 'scrim') {
+        assert.equal(await p.ev("(() => { const e = document.elementFromPoint(6, 450); return e && e.id; })()"), 'scrim', 'the scrim takes the click');
+        await p.clickAt(6, 450);
+      } else await p.key('Escape');
+      await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${how}: the slide out runs`);
+      const run = await p.ev("window.__tr.find((x) => x.type === 'transitionrun')");
+      assert.equal(run.hidden, false, `${how}: shown while it slides out`);
+      await soon("window.__tr.some((x) => x.type === 'transitionend')", `${how}: the slide out ended`);
+      await soon(isClosed, `${how}: hidden once the slide ends`);
+    }
+  });
+
+  await t.test('a preview over the scrim: overlay-open shows it, and its close clears it', async () => {
+    // a fresh visit (see the viewer cases below)
+    await load('#library');
+    await p.ev("location.hash = '#preview/calm-river'");
+    await soon("!document.getElementById('artifact-view').hidden && document.body.classList.contains('overlay-open') && !document.getElementById('scrim').hidden && getComputedStyle(document.getElementById('scrim')).opacity === '1'", 'the preview over the scrim');
+    await p.click('#av-close');
+    await soon("document.getElementById('artifact-view').hidden && !document.body.classList.contains('overlay-open') && document.getElementById('scrim').hidden", 'the preview closed, overlay-open cleared');
+  });
+
   await t.test('the shared scrim: the viewer and a review show it and close on it; the viewer leaves a peek it opened over', async () => {
     const scrimShown = "(!document.getElementById('scrim').hidden && getComputedStyle(document.getElementById('scrim')).opacity === '1')";
     const scrimClick = async () => {
@@ -331,14 +356,19 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
       const tt = document.querySelector('.pagebar .tt'), tp = document.getElementById('tt-peek'), d = document.getElementById('drawer');
       const r = tp?.getBoundingClientRect(), tr = tt.getBoundingClientRect(), dr = d.getBoundingClientRect();
       const hit = r && r.width ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
+      const ttAt = document.elementFromPoint(tr.left + tr.width / 2, tr.top + tr.height / 2);
       return { ttSeen: seen(tt), ttVis: getComputedStyle(tt).visibility, tpSeen: seen(tp), right: r?.right, top: r?.top, ttTop: tr.top, drawerLeft: dr.left, hit: !!(hit && hit.closest('#tt-peek')),
-        text: tp?.textContent.trim(), ttText: tt.textContent.trim(), onBody: tp?.parentElement === document.body, ids: document.querySelectorAll('#inbox-btn-n').length, tpIds: tp ? tp.querySelectorAll('[id]').length : -1 };
+        ttOnTop: !!(ttAt && ttAt.closest('.pagebar .tt')), tpPointer: tp ? getComputedStyle(tp).pointerEvents : null, text: tp?.textContent.trim(), ttText: tt.textContent.trim(), onBody: tp?.parentElement === document.body, ids: document.querySelectorAll('#inbox-btn-n').length, tpIds: tp ? tp.querySelectorAll('[id]').length : -1 };
     })()`);
     // no peek: the mirror isn't shown, .tt is
     let v = await m();
     assert.ok(v.onBody, '#tt-peek is on <body>');
     assert.equal(v.tpSeen, false, 'no peek: #tt-peek not shown');
     assert.equal(v.ttSeen, true, 'no peek: .tt shown');
+    // and not clickable where it would sit: what is there is not it, and it takes no pointer
+    assert.equal(v.hit, false, 'no peek: elementFromPoint where #tt-peek sits is not it');
+    assert.equal(v.tpPointer, 'none', 'no peek: #tt-peek takes no pointer');
+    assert.ok(v.ttOnTop, 'no peek: .tt takes the click at its place');
     await openPeek(`#ticket/${T}`);
     await soon(`(() => { ${SEEN} return seen(document.getElementById('tt-peek')) && getComputedStyle(document.getElementById('tt-peek')).opacity === '1'; })()`, '#tt-peek shown');
     v = await m();
@@ -358,12 +388,15 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     // fades rather than pops
     const tr = await p.ev("getComputedStyle(document.getElementById('tt-peek')).transitionProperty");
     assert.match(tr, /opacity/, 'it fades');
-    // a narrow window: neither shows
-    await size(720, 800);
-    await new Promise((r) => setTimeout(r, 400));
-    v = await m();
-    assert.equal(v.tpSeen, false, '720px: #tt-peek not shown');
-    assert.equal(v.ttSeen, false, '720px: .tt not shown under the peek');
+    // no room beside the peek (840px and below): no mirror, and .tt is left as it is (under the peek)
+    for (const [w, h] of [[800, 800], [720, 800]]) {
+      await size(w, h);
+      await soon(`(() => { ${SEEN} const tp = document.getElementById('tt-peek'); return innerWidth === ${w} && getComputedStyle(tp).display === 'none' && !seen(tp); })()`, `${w}px: #tt-peek not rendered`);
+      v = await m();
+      assert.equal(v.tpSeen, false, `${w}px: #tt-peek not shown`);
+      assert.notEqual(v.ttVis, 'hidden', `${w}px: .tt not visibility: hidden`);
+      assert.equal(v.ttOnTop, false, `${w}px: .tt is under the peek`);
+    }
     await size(1440, 900);
     await soon(`(() => { ${SEEN} return seen(document.getElementById('tt-peek')) && getComputedStyle(document.getElementById('tt-peek')).opacity === '1'; })()`, '#tt-peek shown again');
     // its click is .tt's

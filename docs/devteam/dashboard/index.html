@@ -601,12 +601,13 @@ try {
   /* the scrim behind the artifact viewer, a preview and a review: the block shows it only under peek-open */
   :where(.shell).overlay-open .scrim { opacity: 1; pointer-events: auto; }
   /* the top-right button beside an open peek: a mirror of .pagebar .tt on <body>, above the scrim (20) and the
-     drawer (21), level with .tt (centred in the bar under its 1px border), --header-pad left of the peek; it fades */
-  #tt-peek { position: fixed; top: calc((var(--bar-h) - 1px - 28px) / 2); right: calc(min(720px, 100vw) + var(--header-pad)); z-index: 22; margin: 0; display: inline-flex; align-items: center; gap: 6px; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease), visibility 0s linear var(--dur); }
+     drawer (21), --header-pad left of the peek, its top set from .tt's (ttPeekPlace); it fades. Where there is
+     no room for it beside the peek (840px and below), it isn't shown and .tt stays as it is */
+  #tt-peek { position: fixed; top: 0; right: calc(min(720px, 100vw) + var(--header-pad)); z-index: 22; margin: 0; display: inline-flex; align-items: center; gap: 6px; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease), visibility 0s linear var(--dur); }
   .shell.peek-open:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
-  .shell.peek-open:not(.threads-open) .pagebar .tt { visibility: hidden; }
+  @media (min-width: 841px) { .shell.peek-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
   #tt-peek .n.q { color: var(--red-fg); }
-  @media (max-width: 760px) { #tt-peek { display: none; } }
+  @media (max-width: 840px) { #tt-peek { display: none; } }
   .attrs { margin: 2px 0 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .attrs dl { margin: 8px 0 10px; }
   .attrs dd .links { margin: 0; }
@@ -1423,9 +1424,19 @@ $('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
     for (const a of ['aria-label', 'title']) { const v = tt.getAttribute(a); if (v == null) mirror.removeAttribute(a); else if (mirror.getAttribute(a) !== v) mirror.setAttribute(a, v); }
   };
   copy();
-  new MutationObserver(copy).observe(tt, { subtree: true, characterData: true, childList: true, attributes: true });
+  ttPeekPlace();
+  new MutationObserver(() => { copy(); ttPeekPlace(); }).observe(tt, { subtree: true, characterData: true, childList: true, attributes: true });
+  if (typeof ResizeObserver === 'function') new ResizeObserver(ttPeekPlace).observe(tt);
+  addEventListener('resize', ttPeekPlace);
   mirror.addEventListener('click', () => document.querySelector('.pagebar .tt').click());
 })();
+// #tt-peek level with .tt, from where .tt is (the page bar is sticky at the window's top), whatever its size
+function ttPeekPlace() {
+  const tt = document.querySelector('.pagebar .tt'), mirror = $('tt-peek');
+  if (!tt || !mirror) return;
+  const top = `${Math.round(tt.getBoundingClientRect().top * 100) / 100}px`;
+  if (mirror.style.top !== top) mirror.style.top = top;
+}
 // Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
 // (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
 const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
@@ -3656,6 +3667,7 @@ function peekShow() {
   if (d.hidden || s.hidden) { d.hidden = false; s.hidden = false; void d.offsetWidth; }
   document.body.classList.add('peek-open');
   document.body.style.overflow = 'hidden';
+  ttPeekPlace();
 }
 function peekHide({ now = false } = {}) {
   const d = $('drawer'), body = document.body;
