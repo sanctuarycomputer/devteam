@@ -6,6 +6,22 @@ exit 0
   "caps": {
     "max_active_tickets": 5
   },
+  "asked_settings": {
+    "max_active_tickets": {
+      "value": 5,
+      "shown": "5",
+      "label": "The kit's default",
+      "asked": null,
+      "act": null
+    },
+    "max_active_per_component": {
+      "value": 2,
+      "shown": "2",
+      "label": "The kit's default",
+      "asked": null,
+      "act": null
+    }
+  },
   "gates_configured": [],
   "tickets": [
     {
