@@ -219,65 +219,46 @@
   @media (max-width: 640px) { header { flex-wrap: wrap; } nav { order: 3; flex-basis: 100%; } }
   #drop-hint { position: fixed; left: 50%; top: 52px; transform: translateX(-50%); z-index: 10; padding: 8px 14px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
   #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
-  /* the Overview: a card per project, read at a glance */
-  #overview { position: absolute; inset: 0; overflow: auto; padding: 20px 16px 40px; }
+  /* the Overview: a card per project, read at a glance. On the shell (dashboard-shell@1, kit-94): the
+     block styles the page, the grid, the cards and their heads, the pills, dots and switches; what
+     follows is the hub's own. */
+  #overview { position: absolute; inset: 0; overflow: auto; }
   #overview[hidden] { display: none; }
-  .ov-head { max-width: 1200px; margin: 0 auto 16px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
-  .ov-head h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
-  .ov-head .sum { color: var(--fg-2); }
-  .ov-grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; align-items: start; }
-  .ov-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); min-width: 0; overflow-wrap: anywhere; }
-  .ov-card.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
-  .ov-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
-  .ov-top { display: flex; align-items: center; gap: 8px; }
-  .ov-name { font: 600 15px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
-  .ov-name:hover { text-decoration: underline; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
-  .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .pill.green { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); }
-  .pill.blue { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 12%, transparent); }
-  .pill.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
-  .pill.red { color: var(--red-fg); background: color-mix(in srgb, var(--red) 12%, transparent); }
-  .ov-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .ov-card .ov-name { font: 600 14px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+  .ov-card .ov-name:hover { text-decoration: underline; }
+  /* the head's pills: the status pill keeps its size; the two long ones shrink, their words truncating */
+  .ov-card .card-head .pill { flex: none; }
+  .ov-card .card-head .pill.shrink { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+  .pill.shrink .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  a.pill { text-decoration: none; cursor: pointer; }
+  .ov-card .menu-btn { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--fg-2); font: 600 14px/1 var(--sans); cursor: pointer; }
+  .ov-card .menu-btn:hover { background: var(--hover); color: var(--fg); }
+  /* a fully blocked project (and any other red state): the blocked ticket card's treatment; its head's divider stays --line */
+  .ov-card.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .hub-why { margin: 0; color: var(--fg-2); font-size: 12.5px; }
+  .hub-body { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-start; min-width: 0; }
+  .ov-stats { flex: 1 1 200px; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
   .ov-stat { display: flex; flex-direction: column; min-width: 0; }
   .ov-stat .k { color: var(--muted); font-size: 11px; }
-  .ov-stat .v { font: 500 14px/1.3 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ov-stat .v.red { color: var(--red-fg); }
+  .ov-stat .v { font: 500 13px/1.4 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ov-stat .v.amber { color: var(--amber-fg); }
-  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font: inherit; font: 500 14px/1.3 var(--sans); }
-  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; }
-  .ov-bar { display: flex; }
+  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; color: var(--fg); }
+  .ov-act { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; overflow: hidden; }
+  .ov-act .k { color: var(--muted); font-size: 11px; }
+  .hub-goal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 12px; font-size: 12.5px; min-width: 0; }
+  .hub-goal .gt { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1 1 160px; }
+  .hub-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .hub-goal .dim, .hub-goal .w { color: var(--fg-2); flex: none; }
+  .hub-goal .gp { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1 1 220px; min-width: 0; }
+  .hub-goal .ov-bar { flex: 1 1 60px; min-width: 40px; }
+  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; display: flex; }
   .ov-bar > span { display: block; height: 100%; background: var(--green); }
   .ov-bar > span.held { background: var(--amber); }
-  .ov-pills { display: flex; gap: 6px; flex: 0 0 auto; }
-  .ov-goal { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; min-width: 0; }
-  .ov-goal .k { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
-  .ov-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .ov-goal .n { color: var(--fg-2); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-  .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; flex: 0 0 auto; }
-  .seg button { font: 500 12px/1 var(--sans); color: var(--fg-2); background: none; border: 0; padding: 6px 10px; cursor: pointer; }
-  .seg button + button { border-left: 1px solid var(--line-2); }
-  .seg button:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
-  .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
-  .seg button.confirm { background: var(--red); color: #fff; }
-  .seg button:disabled { cursor: default; opacity: .6; }
-  .seg button[aria-pressed="true"]:disabled { opacity: 1; }
-  .ov-ctl { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-  .ov-ctl .msg { font-size: 12px; color: var(--fg-2); }
-  .ov-ctl .msg.err { color: var(--red-fg); }
-  .ov-head .acts { margin-left: auto; display: flex; gap: 8px; }
-  .ov-head .acts button { font: 500 12.5px/1 var(--sans); padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); cursor: pointer; }
-  .ov-head .acts button:hover { background: var(--hover); }
-  .ov-head .acts button.confirm { background: var(--red); border-color: var(--red); color: #fff; }
-  .ov-head .ov-box { flex-basis: 100%; order: 1; color: var(--fg-2); }
-  .ov-box .amber { color: var(--amber-fg); }
-  .ov-prog { display: flex; flex-direction: column; gap: 4px; }
-  .ov-prog .k { color: var(--fg-2); font-size: 12px; }
-  .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .ov-att { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
   .ov-att li { position: relative; padding-left: 14px; font-size: 12.5px; color: var(--fg); }
   .ov-att li::before { content: ''; position: absolute; left: 2px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
   .ov-att li.red::before { background: var(--red); }
-  .ov-ok { font-size: 12.5px; color: var(--fg-2); }
+  .ov-card > .foot { padding-top: 12px; }
   .ov-mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 9px); grid-auto-columns: 9px; gap: 2px; }
   .ov-mosaic i { border-radius: 2px; background: var(--well); }
   .ov-mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); }
@@ -285,10 +266,23 @@
   .ov-mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); }
   .ov-mosaic i.l4 { background: var(--green); }
   .ov-mosaic i.pad { background: none; }
-  .ov-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
-  .ov-foot .k { color: var(--muted); font-size: 11px; }
   .ov-none { color: var(--fg-2); font-size: 12.5px; }
-  @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: minmax(0, 1fr); } }
+  /* a project's tab: its state's dot, then its name, then the Inbox button's counts for it */
+  .tab .dot { margin-right: 1px; }
+  .tab-counts { display: inline-flex; align-items: baseline; gap: 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tab-counts .dim { color: var(--muted); }
+  .tab-counts .n.q { color: var(--red-fg); }
+  .tab-counts .n.th.ok { color: var(--green-fg); }
+  .tab-counts .n.th.you { color: var(--blue-fg); }
+  .tab-counts .n.th.wait { color: var(--muted); }
+  /* a card's ⋯: a small menu, placed by the page */
+  .menu-pop { position: fixed; z-index: 45; min-width: 200px; max-width: calc(100vw - 16px); background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; display: flex; flex-direction: column; }
+  .menu-pop .mi { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; font-size: 12px; display: grid; gap: 2px; }
+  .menu-pop .mi div { display: flex; justify-content: space-between; gap: 12px; }
+  .menu-pop .mi span { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .menu-pop .mi b { font-weight: 500; overflow-wrap: anywhere; text-align: right; }
+  .menu-pop button { all: unset; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+  .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--hover); }
   /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
   #ov-body { min-width: 0; }
   #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
@@ -362,16 +356,16 @@
   @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
 </style>
 </head>
-<body>
+<body class="shell">
 <header>
   <nav id="tabs" role="tablist" aria-label="devteam instances"></nav>
-  <span id="notify"></span>
-  <span id="box-links" hidden></span>
 </header>
-<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"><div id="ov-body"></div><div id="tl-pins" class="tl-pins"></div></section></main>
+<!-- notifications and the box's links: moved off the header, into the hub's Settings -->
+<div id="hub-later" hidden><span id="notify"></span><span id="box-links" hidden></span></div>
+<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"><div id="ov-body" class="page"></div><div id="tl-pins" class="tl-pins"></div></section></main>
 <div id="drop-hint" hidden></div>
 <!-- the thread layer: outside what the Overview redraws every 10 s (the pins are in its box, beside it) -->
-<div id="tl" hidden>
+<div id="tl" class="no-shell" hidden>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
@@ -730,6 +724,7 @@ function selectTerminal() {
   if (!term.frame) {
     term.frame = document.createElement('iframe');
     term.frame.title = 'Terminal';
+    term.frame.className = 'no-shell';
     term.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
     term.frame.setAttribute('allow', 'clipboard-read; clipboard-write');
     term.frame.src = box.terminal;
@@ -754,6 +749,7 @@ function frameFor(it) {
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
+    it.frame.className = 'no-shell';
     it.frame.hidden = selected !== it.x.root;
     // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
     // never navigates this page, whatever answers in the block. A nested frame can't gain what this
@@ -899,82 +895,151 @@ function fleetControl(it) {
   else if (busy?.error) ctl.append(el('span', 'msg err', busy.error));
   return ctl;
 }
+// a project's counts, as its tab and its Inbox stat show them: red questions, then its threads in
+// their most pressing state's colour (tabCounts); on the stat, 0 when there are none
+function countsEl(x, stat = false) {
+  const { q, th } = tabCounts(x.inbox, x.threads);
+  if (!q && !th) return stat ? document.createTextNode('0') : null;
+  const c = el('span', 'tab-counts');
+  if (q) { const n = el('span', 'n q', q); n.title = plural(q, 'open question'); c.append(n); }
+  if (q && th) c.append(el('span', 'dim', '·'));
+  if (th) { const n = el('span', `n th ${th.tone}`, th.n); n.title = th.title; c.append(n); }
+  return c;
+}
+// that project's dashboard, at a place in it: its frame pointed there, its tab chosen
+function openAt(root, hash) {
+  const it = items.get(root);
+  if (!it) return;
+  frameFor(it).src = `${urlOf(it.x)}${hash}`;
+  select(root);
+}
+// a card's ⋯: its root and port, and two ways to open its dashboard
+let menuPop = null;
+function closeMenu() { if (menuPop) { menuPop.remove(); menuPop = null; } }
+function cardMenu(btn, it) {
+  const again = menuPop?.dataset.root === it.x.root;
+  closeMenu();
+  if (again) return;
+  const m = el('div', 'menu-pop');
+  m.dataset.root = it.x.root;
+  m.setAttribute('role', 'menu');
+  const mi = el('div', 'mi');
+  for (const [k, v] of [['root', it.x.root], ['port', Number(it.x.port)]]) { const d = el('div'); d.append(el('span', '', k), el('b', '', v)); mi.append(d); }
+  const open = el('button', '', 'Open its dashboard');
+  open.onclick = () => { closeMenu(); select(it.x.root); };
+  const tab = el('button', '', 'Open in a new tab');
+  tab.onclick = () => { closeMenu(); window.open(urlOf(it.x), '_blank', 'noopener'); };
+  for (const b of [open, tab]) { b.type = 'button'; b.setAttribute('role', 'menuitem'); }
+  m.append(mi, open, tab);
+  document.body.append(m);
+  menuPop = m;
+  const r = btn.getBoundingClientRect();
+  m.style.top = `${Math.round(r.bottom + 4)}px`;
+  m.style.left = `${Math.round(Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)))}px`;
+  open.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuPop) closeMenu(); });
+window.addEventListener('pointerdown', (e) => { if (menuPop && !menuPop.contains(e.target) && !e.target.closest?.('.menu-btn')) closeMenu(); }, true);
 function overviewCard(it, newest) {
   const { x } = it;
   const p = x.pulse ?? null;
   const st = stateOf(it);
   const S = STATES[st];
-  const card = el('article', `ov-card${S.tone === 'red' ? ' bad' : S.tone === 'amber' ? ' warn' : ''}`);
+  const card = el('article', `c6 card ov-card click${S.tone === 'red' ? ' blocked' : ''}`);
   card.dataset.root = x.root;
   pinOn(card, 'card', `${x.name}: ${S.label}`);
-  const top = el('div', 'ov-top');
-  const name = el('button', 'ov-name', x.name);
+  // the standard head: the name, Partly blocked and the partly-held pill when they apply, the status pill, ⋯
+  const head = el('div', 'card-head');
+  const name = el('button', 'ov-name grow', x.name);
+  name.type = 'button';
   name.dataset.k = `${x.root}:name`;
-  name.title = `Open ${x.name}'s dashboard\n${x.root}`;
+  name.title = `Open ${x.name}'s dashboard`;
   name.onclick = () => select(x.root);
-  pinOn(name, 'name', x.name);
-  const pills = el('span', 'ov-pills');
+  head.append(pinOn(name, 'name', x.name));
   // partly blocked is beside what the project is doing: it is still doing it
-  if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber', 'Partly blocked'); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; pills.append(pb); }
-  pills.append(pinOn(el('span', `pill ${S.tone}`, S.label), 'state', S.label));
-  top.append(name, pills);
-  card.append(top);
+  if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber shrink'); pb.append(el('span', 't', 'Partly blocked')); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; head.append(pb); }
+  const held = heldPill(x.fleet);
+  if (held) {
+    const a = el('a', 'pill amber shrink held-pill');
+    a.href = '#';
+    a.title = held.title;
+    a.append(el('span', 't', held.text));
+    a.onclick = (e) => { e.preventDefault(); openAt(x.root, '#goals'); };
+    head.append(a);
+  }
+  head.append(pinOn(el('span', `pill ${S.tone}`, S.label), 'state', S.label));
+  const more = el('button', 'end menu-btn', '⋯');
+  more.type = 'button';
+  more.dataset.k = `${x.root}:menu`;
+  more.setAttribute('aria-label', 'More');
+  more.setAttribute('aria-haspopup', 'menu');
+  more.onclick = () => cardMenu(more, it);
+  head.append(more);
+  card.append(head);
 
+  // a dashboard answering on a kit that sends no pulse: an older kit
+  if (!p && !it.goneAt && typeof x.inbox === 'number') { card.append(el('p', 'hub-why', 'Update its kit to see what it is doing')); return card; }
+  const body = el('div', 'hub-body');
   const stats = el('div', 'ov-stats');
-  const stat = (part, k, v, cls = '', onclick = null) => { const s_ = pinOn(el('div', 'ov-stat'), part, `${k} ${v}`); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.dataset.k = `${x.root}:inbox`; vv.title = `Open ${x.name}'s dashboard, where its Inbox is`; } s_.append(vv); stats.append(s_); };
+  const stat = (part, k, v, cls = '') => { const s_ = pinOn(el('div', 'ov-stat'), part, `${k} ${typeof v === 'string' || typeof v === 'number' ? v : v.textContent}`); s_.append(el('span', 'k', k)); const vv = typeof v === 'object' ? v : el('span', `v ${cls}`.trim(), v); s_.append(vv); stats.append(s_); return s_; };
   const kit = x.kit ?? '?';
   const nums = relNums(kit);
   const behind = newest && nums && relCmp(nums, newest) < 0;
-  stat('kit', 'Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
-  if (behind) stats.lastChild.title = `Behind the newest kit here (v${newest.join('.')})`;
-  else if (/\+local$/.test(String(kit))) stats.lastChild.title = 'This release, with local changes to the kit';
-  const inbox = typeof x.inbox === 'number' ? x.inbox : null;
-  stat('inbox', 'Inbox', inbox ?? '–', inbox ? 'red' : '', inbox ? () => select(x.root) : null);
+  const ks = stat('kit', 'Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
+  if (behind) ks.title = `Behind the newest kit here (v${newest.join('.')})`;
+  else if (/\+local$/.test(String(kit))) ks.title = 'This release, with local changes to the kit';
+  const inbox = el('button', 'v');
+  inbox.type = 'button';
+  inbox.dataset.k = `${x.root}:inbox`;
+  inbox.title = `Open ${x.name}'s Inbox`;
+  inbox.append(countsEl(x, true));
+  inbox.onclick = () => openAt(x.root, '#overview?th=inbox');
+  stat('inbox', 'Inbox', inbox);
   stat('working', 'Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
   stat('moved', 'Last moved', p ? agoText(p.last_activity) : '–');
-  card.append(stats);
+  body.append(stats);
+  if (Array.isArray(p?.activity) && p.activity.length) {
+    const act = pinOn(el('div', 'ov-act'), 'activity', 'Activity');
+    act.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
+    body.append(act);
+  }
+  card.append(body);
 
-  if (p?.goal) {
-    const g = pinOn(el('div', 'ov-goal'), 'goal', `Goal: ${p.goal.title}`);
-    const more = (Number(p.goals_open) || 1) - 1;
-    g.append(el('span', 'k', 'Goal'), el('span', 't', p.goal.title), el('span', 'n', `${p.goal.total ? `${p.goal.done} of ${p.goal.total}` : 'not planned yet'}${more > 0 ? ` · +${more} more` : ''}`));
-    g.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
-    card.append(g);
-  } else if (p && p.goals_open === 0 && st !== 'idle') { const g = el('div', 'ov-goal'); g.append(el('span', 'k', 'Goal'), el('span', 'n', 'none approved yet')); card.append(g); }
-
-  if (p) {
-    const total = p.open_tickets + p.done_tickets;
-    const prog = el('div', 'ov-prog');
-    const heldN = Math.max(0, Number(p.blocked_tickets) || 0);
-    pinOn(prog, 'progress', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged` : 'No tickets planned yet');
-    prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged${heldN ? `, ${heldN} waiting on you` : ''}` : 'No tickets planned yet'));
-    const bar = el('div', 'ov-bar');
+  // the top goal, +N more, and its merged bar: merged in green, waiting on the owner in amber
+  if (p && !it.goneAt) {
+    const g = el('div', 'hub-goal');
+    const gt = pinOn(el('span', 'gt'), 'goal', p.goal ? `Goal: ${p.goal.title}` : 'No goal approved yet');
+    gt.append(el('span', 't', p.goal ? p.goal.title : 'No goal approved yet'));
+    const moreN = (Number(p.goals_open) || 0) - 1;
+    if (p.goal && moreN > 0) gt.append(el('span', 'dim', `+${moreN} more`));
+    if (p.goal) gt.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
+    const done = Math.max(0, Number(p.done_tickets) || 0), total = done + Math.max(0, Number(p.open_tickets) || 0), heldN = Math.max(0, Number(p.blocked_tickets) || 0);
+    const words = total ? `${done} of ${total} merged${heldN ? ` · ${heldN} waiting on you` : ''}` : 'No tickets planned yet';
+    const gp = pinOn(el('span', 'gp'), 'progress', words);
+    const bar = el('span', 'ov-bar');
     const fill = el('span');
-    fill.style.width = `${total ? (p.done_tickets / total) * 100 : 0}%`;
+    fill.style.width = `${total ? (done / total) * 100 : 0}%`;
     bar.append(fill);
     if (heldN && total) { const h = el('span', 'held'); h.style.width = `${(heldN / total) * 100}%`; h.title = `${plural(heldN, 'ticket')} waiting on your answers`; bar.append(h); }
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
     bar.setAttribute('aria-valuemax', String(total));
-    bar.setAttribute('aria-valuenow', String(p.done_tickets));
-    prog.append(bar);
-    card.append(prog);
+    bar.setAttribute('aria-valuenow', String(done));
+    gp.append(bar, el('span', 'w', words));
+    g.append(gt, gp);
+    card.append(g);
   }
 
-  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
+  // what needs the owner: its alert, a dashboard that stopped answering, the pulse's lines
+  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: `Its dashboard stopped answering at ${new Date(it.goneAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`, red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
     for (const n of notes.slice(0, 5)) ul.append(pinOn(el('li', n.red ? 'red' : '', n.t), 'attention', tLine(n.t, 200)));
     card.append(ul);
-  } else if (p) card.append(el('div', 'ov-ok', st === 'idle' ? 'Nothing open. Waiting for a new goal.' : inbox ? 'Moving without you. The questions can wait.' : 'Nothing needs you.'));
-  else if (!it.goneAt && inbox !== null) card.append(el('div', 'ov-none', 'Update its kit to see what it is doing and how far along it is.'));
-
-  if (Array.isArray(p?.activity) && p.activity.length) {
-    const foot = pinOn(el('div', 'ov-foot'), 'activity', 'Activity');
-    foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
-    card.append(foot);
   }
-  if (steerable(it)) card.append(fleetControl(it));
+  const foot = el('div', 'foot');
+  if (steerable(it)) foot.append(fleetControl(it));
+  card.append(foot);
   return card;
 }
 /* box-line start */
@@ -1041,22 +1106,17 @@ const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) 
 /* hub-overview end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
+  closeMenu();
   const all = [...items.values()];
   const newest = all.map((it) => relNums(it.x.kit)).filter(Boolean).sort(relCmp).pop() ?? null;
   // what needs the owner first: stalled and gone, then waiting, then the rest by name
   all.sort((a, b) => STATES[stateOf(a)].rank - STATES[stateOf(b)].rank || String(a.x.name).localeCompare(String(b.x.name)));
-  const count = (s_) => all.filter((it) => stateOf(it) === s_).length;
-  const owed = all.reduce((n, it) => n + (typeof it.x.inbox === 'number' ? it.x.inbox : 0), 0);
-  const stuck = count('stalled') + count('gone');
-  const full = count('blocked') + count('waiting');
-  const partly = all.filter((it) => it.x.pulse?.blocking === 'partial' && stateOf(it) !== 'blocked').length;
+  const count = (...ss) => all.filter((it) => ss.includes(stateOf(it))).length;
+  // the header: this machine, and the summary
   const head = el('div', 'ov-head');
-  head.append(pinOn(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'), 'headline'));
-  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, count('parked') ? `${count('parked')} parked` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
+  head.append(pinOn(el('h2', '', 'This machine'), 'headline'));
+  const parts = !all.length ? ['No projects running'] : [plural(all.length, 'project'), ...[[count('building', 'moving', 'unknown'), 'moving'], [count('waiting'), 'waiting on you'], [count('blocked', 'stalled', 'gone'), 'blocked'], [count('parked'), 'parked']].filter(([n]) => n).map(([n, w]) => `${n} ${w}`)];
   head.append(pinOn(el('span', 'sum', parts.join(' · ')), 'summary'));
-  // the box's image and who serves its hub, on a row of its own under the rest
-  const bl = boxLine(box?.image ?? null, hubSeen);
-  if (bl) { const d = el('div', 'ov-box'); bl.forEach((x, i) => { if (i) d.append(' · '); d.append(el('span', x.amber ? 'amber' : '', x.text)); }); head.append(d); }
   // every fleet at once: Park all (confirmed), and Resume all while any is held
   const can = all.filter(steerable);
   const acts = el('div', 'acts');
@@ -1066,17 +1126,25 @@ function paintOverview() {
   if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.dataset.k = 'all:run'; b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
   if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.dataset.k = 'all:park'; b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
   if (acts.childElementCount) head.append(acts);
-  const grid = el('div', 'ov-grid');
+  // a card per project, two to a row
+  const grid = el('div', 'g12');
   // one answer in the block that isn't shaped like a hello costs its own card, not the page
-  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'ov-card bad'); c.dataset.root = it.x.root; pinOn(c, 'card', `${it.x.name}: can't be read`); c.append(el('div', 'ov-name', it.x.name), el('div', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
+  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'c6 card ov-card blocked'); c.dataset.root = it.x.root; pinOn(c, 'card', `${it.x.name}: can't be read`); const h = el('div', 'card-head'); h.append(el('b', 'ov-name grow', it.x.name)); c.append(h, el('p', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-  ovBody.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
+  ovBody.replaceChildren(head, ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
   tlDraw();
 }
+// a click on a card, off its controls, opens that project's dashboard, as its tab does (the thread
+// layer's Shift+click and Pin take their clicks first, in its capture listener)
+ovBody.addEventListener('click', (e) => {
+  const c = e.target.closest('.ov-card');
+  if (!c || !ovBody.contains(c) || e.target.closest('a, button, input, select, textarea, label, .fleet-switch, .ov-ctl, .menu-pop')) return;
+  if (items.has(c.dataset.root)) select(c.dataset.root);
+});
 // ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
 // The dock, the pin and the card of a project's dashboard (index.html, "threads"), ported: here every
 // thread is with the machine's operator, kept by the hub's server (operator/threads) and typed into
@@ -1677,26 +1745,18 @@ function tlDock() {
 }
 function paintTab(it) {
   const { x, tab } = it;
+  const S = STATES[stateOf(it)];
   tab.replaceChildren();
-  const label = document.createElement('span');
-  label.textContent = String(x.name);
-  tab.append(label);
-  if (typeof x.inbox === 'number' && x.inbox > 0) {
-    const b = document.createElement('span');
-    b.className = 'badge';
-    b.textContent = String(x.inbox);
-    b.setAttribute('aria-label', `${x.inbox} in the Inbox`);
-    tab.append(b);
-  }
+  // its state's dot (red pulses, except under reduced motion), its name, the Inbox button's counts for it
+  tab.append(el('span', `dot${S.tone ? ` ${S.tone}` : ''}${S.tone === 'red' ? ' pulse' : ''}`), el('span', '', x.name));
+  const c = countsEl(x);
+  if (c) tab.append(c);
   if (x.alert) {
-    const a = document.createElement('span');
-    a.className = 'badge';
-    a.textContent = '!';
+    const a = el('span', 'badge', '!');
     a.setAttribute('aria-label', String(x.alert));
     tab.append(a);
   }
-  const state = x.inbox === null || x.inbox === undefined ? 'starting' : `${x.inbox} in the Inbox; ${x.fleet ? `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}` : ''}`;
-  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${x.alert ? `\n${x.alert}` : ''}${it.goneAt ? '\nnot answering' : ''}`;
+  tab.title = S.label;
   if (it.frame) it.frame.title = String(x.name);
   tab.classList.toggle('gone', Boolean(it.goneAt));
 }

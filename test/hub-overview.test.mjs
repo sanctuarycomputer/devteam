@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { PORTS, bareProject, fleetFixture, json, kit, line, startDashboard, until } from './lib/kit.mjs';
+import { PORTS, bareProject, fleetFixture, freePort, json, kit, line, startDashboard, until } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -264,20 +264,15 @@ test('the box line: the image\'s release, the hub\'s, and the tools; amber when 
   for (const s of texts) { assert.equal(typeof s, 'string'); assert.match(s, /^[\w .,'+?-]+$/, s); assert.ok(!s.includes('http') && !s.includes('<'), s); }
 });
 
-test('the Overview draws the box line from box.json and the latest list', () => {
+test('the Overview draws no box line: it moved to Settings', () => {
   const html = hubHtml();
   const body = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); const rest = html.slice(i + start.length); const j = rest.search(/\n(async )?function /); return rest.slice(0, j < 0 ? undefined : j); };
-  assert.match(body('function paintOverview('), /boxLine\(box\?\.image \?\? null, hubSeen\)/, 'paintOverview draws it');
+  assert.doesNotMatch(body('function paintOverview('), /boxLine/, 'the Overview shows no box line (owner, thread t-20261115-204523188-owner)');
   assert.match(body('async function findBox('), /image: b\.image/, 'findBox keeps the image');
   const draw = body('async function draw(');
   assert.match(draw, /hubSeen = data;/, 'draw keeps the list it read');
-  assert.match(draw, /catch \{ hubSeen = null; paintOverview\(\); return; \}/, 'and forgets it, and paints, when it read none');
   assert.match(draw, /if \(!data \|\| typeof data !== 'object'\) throw/, 'JSON that is no list (null, a number) is none');
-  // each part goes in as text, amber by its class, on a row of its own
-  assert.match(body('function paintOverview('), /d\.append\(el\('span', x\.amber \? 'amber' : '', x\.text\)\)/, 'a span per part, its text as text');
-  assert.ok(!/innerHTML/.test(body('function paintOverview(')), 'no markup from the line');
-  assert.match(html, /\.ov-head \.ov-box \{ flex-basis: 100%; order: 1;/, 'its own row under the head');
-  assert.match(html, /\.ov-box \.amber \{ color: var\(--amber-fg\); \}/);
+  assert.doesNotMatch(html, /\.ov-box/, 'nor its styles');
 });
 
 // ----- the Overview's rules: a pure block of hub.html (kit-94), run here in vm -------------------
@@ -339,6 +334,246 @@ test('the Overview\'s rules: addresses a view never loses', () => {
   assert.equal(hubKey('alpha', true, 'abc123'), 'alpha-abc123', 'two of one name');
   for (const v of ['settings', 'overview', 'terminal']) assert.equal(hubKey(v, false, 'abc123'), `${v}-abc123`, v);
   assert.match(hubHtml(), /return hubKey\(it\.x\.name, twins, hex6\.get\(it\.x\.root\)\);/, 'keyOf uses it');
+});
+
+// ----- the Overview in Chrome, on hellos the test writes (kit-94) ---------------------------------
+// A hub of the test's own: one server serves hub.html, an instances.json the test changes as it goes
+// and, for a box, a box.json; and on each instance's port a stand-in dashboard that answers the
+// hub's Run, Drain and Park asks (once per nonce, after a delay or with an error when told) and says
+// what its address's hash is, each time it changes.
+function hello(name, port, over = {}) {
+  const { pulse, ...rest } = over;
+  return {
+    devteam: 1, name, root: `/srv/${name}`, port, kit: 'v0.57.0', viewer: 1, inbox: 0, threads: { you: 0, waiting: 0, ready: 0 }, fleet: { mode: 'run', workers: 1 }, ...rest,
+    pulse: pulse === null ? null : { state: 'moving', blocking: null, working: 1, last_activity: new Date().toISOString(), activity: Array(84).fill(0), activity_of: 'commits', attention: [], open_tickets: 2, done_tickets: 1, blocked_tickets: 0, goals_open: 1, goal: { title: `${name}'s goal`, done: 1, total: 3 }, ...(pulse || {}) },
+  };
+}
+const STAND_IN = `<!doctype html><meta charset="utf-8"><title>stand-in</title><script>
+const say = () => fetch('/hash?h=' + encodeURIComponent(location.hash));
+say(); addEventListener('hashchange', say);
+addEventListener('message', async (ev) => {
+  const m = ev.data;
+  if (!m || m.devteam !== 'hub-fleet' || ev.source !== parent) return;
+  const r = await (await fetch('/asked?mode=' + encodeURIComponent(m.mode) + '&all=' + (m.all === true) + '&nonce=' + encodeURIComponent(m.nonce))).json();
+  if (r.answer) parent.postMessage({ devteam: 'hub-fleet-done', nonce: m.nonce, ...r.answer }, ev.origin);
+});
+</script>`;
+async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
+  await new Promise((r) => srv.listen(port, host, r));
+  defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
+  return srv.address().port;
+}
+async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image } = {}) {
+  const F = { list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
+  F.setList = (list) => { F.list = list; };
+  for (const port of ports) {
+    F.asks.set(port, []);
+    F.hashes.set(port, []);
+    const seen = new Set();
+    await listenOn(t, http.createServer(async (q, s) => {
+      const u = new URL(q.url, 'http://x');
+      if (u.pathname === '/hash') { F.hashes.get(port).push(u.searchParams.get('h')); return s.end('{}'); }
+      if (u.pathname === '/asked') {
+        const nonce = u.searchParams.get('nonce');
+        if (seen.has(nonce)) return s.end('{"answer":null}');
+        seen.add(nonce);
+        await new Promise((r) => setTimeout(r, F.delay.get(port) ?? 0));
+        F.asks.get(port).push({ mode: u.searchParams.get('mode'), all: u.searchParams.get('all') === 'true' });
+        const err = F.fail.get(port);
+        return s.end(JSON.stringify({ answer: err ? { ok: false, error: err } : { ok: true } }));
+      }
+      s.writeHead(200, { 'content-type': 'text/html' });
+      s.end(STAND_IN);
+    }), port);
+  }
+  const hubPort = await listenOn(t, http.createServer((q, s) => {
+    const u = new URL(q.url, 'http://x');
+    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(hubHtml()); }
+    if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: hubKit, ...(image ? { image: true } : {}), instances: F.list })); }
+    if (u.pathname === '/box.json' && box) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(box(F))); }
+    s.writeHead(404, { 'content-type': 'application/json' });
+    s.end('{}');
+  }));
+  F.port = hubPort;
+  F.url = (at = '/') => `http://127.0.0.1:${hubPort}${at}`;
+  return F;
+}
+async function freePorts(n) { const out = []; while (out.length < n) { const p = await freePort(); if (!out.includes(p)) out.push(p); } return out; }
+// Chrome on the fixture's hub, at a size
+async function hubPage(t, url, { width = 1440, height = 900 } = {}) {
+  const chrome = await openChrome();
+  defer(t, () => chrome.close());
+  const p = await chrome.newPage();
+  defer(t, () => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.navigate', { url });
+  p.until = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
+  return p;
+}
+const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 };
+// in the page: a project's card, its tab
+const cardOf = (name) => `[...document.querySelectorAll('.ov-card')].find((c) => c.querySelector('.ov-name')?.textContent === ${JSON.stringify(name)})`;
+const tabOf = (name) => `[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent.startsWith(${JSON.stringify(name)}))`;
+const selectedTab = `(document.querySelector('#tabs [role=tab][aria-selected=true]')?.textContent ?? null)`;
+
+test('the Overview: a header, then two cards a row with the standard head', CHROME, async (t) => {
+  const [A, B, C] = await freePorts(3);
+  const F = await fixtureHub(t, { ports: [A, B, C] });
+  F.setList([hello('alpha', A, { pulse: { state: 'building' } }), hello('beta', B, { inbox: 1, pulse: { state: 'waiting' } }), hello('gamma', C, { pulse: { state: 'blocked', blocking: 'full', attention: ['Fully blocked: all 2 open tickets wait on your answer to 1 question'] } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('three cards', `document.querySelectorAll('.ov-card').length === 3`);
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head h2').textContent`), 'This machine');
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head [data-pin=headline]').textContent`), 'This machine', 'the headline pin is the heading');
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head .sum').textContent`), '3 projects · 1 moving · 1 waiting on you · 1 blocked');
+  const cards = await p.ev(`[...document.querySelectorAll('.ov-card')].map((c) => ({ name: c.querySelector('.ov-name').textContent, c6: c.classList.contains('c6') && c.classList.contains('card'), top: Math.round(c.getBoundingClientRect().top), last: c.querySelector('.card-head').lastElementChild.className, pills: [...c.querySelectorAll('.card-head .pill')].map((x) => x.textContent) }))`);
+  assert.deepEqual(cards.map((c) => c.name), ['gamma', 'beta', 'alpha'], 'what needs the owner first');
+  assert.ok(cards.every((c) => c.c6), 'each card .c6 of the 12');
+  assert.equal(cards[0].top, cards[1].top, 'two to a row');
+  assert.notEqual(cards[2].top, cards[0].top);
+  assert.ok(cards.every((c) => /\bmenu-btn\b/.test(c.last) && /\bend\b/.test(c.last)), '⋯ last, pinned right');
+  assert.deepEqual(cards.map((c) => c.pills), [['Fully blocked'], ['Waiting on you'], ['Building']]);
+  assert.equal(await p.ev(`document.querySelectorAll('.ov-goals, .ov-goal').length`), 0, 'no goal list');
+  assert.equal(await p.ev(`document.querySelectorAll('.hub-goal').length`), 3, 'one top goal line a card');
+  assert.deepEqual(await p.ev(`[...${cardOf('alpha')}.querySelectorAll('.ov-stat .k')].map((k) => k.textContent)`), ['Kit', 'Inbox', 'Working', 'Last moved']);
+  assert.equal(await p.ev(`!!${cardOf('alpha')}.querySelector('.ov-mosaic')`), true, 'the activity mosaic');
+  // the menu: the root and port, and opening nothing by itself
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu', `!!document.querySelector('.menu-pop')`);
+  assert.match(await p.ev(`document.querySelector('.menu-pop').textContent`), new RegExp(`/srv/beta.*${B}`));
+  assert.equal(await p.ev(selectedTab), 'Overview');
+  await p.key('Escape');
+  await p.until('the menu closed', `!document.querySelector('.menu-pop')`);
+  // a click on a card, off its controls, opens that project's dashboard as its tab does
+  await p.ev(`${cardOf('alpha')}.querySelector('.ov-mosaic').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha') && document.querySelectorAll('iframe:not([hidden])').length === 1 && document.getElementById('overview').hidden`);
+});
+
+test('the tabs: a dot by state, the state word, the Inbox counts', CHROME, async (t) => {
+  const ports = await freePorts(6);
+  const [A, B, C, D, E, Z] = ports;
+  const F = await fixtureHub(t, { ports });
+  const list = [
+    hello('alpha', A, { inbox: 3, threads: { you: 1, waiting: 1, ready: 1 }, pulse: { state: 'building' } }),
+    hello('beta', B, { threads: { you: 2, waiting: 0, ready: 0 }, pulse: { state: 'moving' } }),
+    hello('gamma', C, { threads: { you: 0, waiting: 2, ready: 0 }, pulse: { state: 'waiting' } }),
+    hello('delta', D, { pulse: { state: 'blocked', blocking: 'full' } }),
+    hello('epsilon', E, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }),
+    hello('zeta', Z, { pulse: { state: 'building' } }),
+  ];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('six tabs', `document.querySelectorAll('.ov-card').length === 6`);
+  // zeta's dashboard stops answering: off the list, its tab stays 30 s, Not answering
+  F.setList(list.slice(0, 5));
+  await p.until('zeta not answering', `${tabOf('zeta')}?.title === 'Not answering'`);
+  const tabs = await p.ev(`['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].map((n) => { const x = [...document.querySelectorAll('#tabs [role=tab]')].find((b) => b.textContent.startsWith(n)); const c = x.querySelector('.tab-counts'); return { dot: [...x.querySelector('.dot').classList].join(' '), title: x.title, q: c?.querySelector('.n.q')?.textContent ?? null, th: c?.querySelector('.n.th') ? [...c.querySelector('.n.th').classList].join(' ') + ' ' + c.querySelector('.n.th').textContent : null, counts: !!c }; })`);
+  assert.deepEqual(tabs.map((x) => x.dot), ['dot green', 'dot blue', 'dot amber', 'dot red pulse', 'dot', 'dot red pulse']);
+  assert.deepEqual(tabs.map((x) => x.title), ['Building', 'Moving', 'Waiting on you', 'Fully blocked', 'Parked', 'Not answering']);
+  assert.deepEqual(tabs.slice(0, 3).map((x) => [x.q, x.th]), [['3', 'n th ok 2'], [null, 'n th you 2'], [null, 'n th wait 2']]);
+  assert.deepEqual(tabs.slice(3).map((x) => x.counts), [false, false, false], 'nothing when both are 0');
+  assert.equal(await p.ev(`${tabOf('alpha')}.querySelector('.n.th').title`), '1 ready to accept, 1 your move');
+  assert.ok(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Overview')`), 'the Overview tab reads Overview, nothing else');
+  // the red dot pulses, except under reduced motion
+  const anim = `getComputedStyle(${tabOf('delta')}.querySelector('.dot')).animationName`;
+  assert.equal(await p.ev(anim), 'shell-ring');
+  await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  assert.equal(await p.ev(anim), 'none');
+});
+
+test('a fully blocked card: red border, head divider in --line; the Inbox stat as the tab', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A, { inbox: 2, threads: { you: 1, waiting: 0, ready: 0 }, pulse: { state: 'blocked', blocking: 'full' } }), hello('beta', B, { pulse: { state: 'building' } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('two cards', `document.querySelectorAll('.ov-card').length === 2`);
+  const colour = (v) => `(() => { const e = document.createElement('div'); e.style.color = 'var(${v})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`;
+  const red = await p.ev(colour('--red'));
+  const line = await p.ev(colour('--line'));
+  const a = await p.ev(`(() => { const c = ${cardOf('alpha')}, s = getComputedStyle(c), h = getComputedStyle(c.querySelector('.card-head')); return { cls: c.classList.contains('blocked'), top: s.borderTopColor, style: s.borderTopStyle, width: s.borderTopWidth, head: h.borderBottomColor }; })()`);
+  assert.deepEqual(a, { cls: true, top: red, style: 'solid', width: '1px', head: line });
+  assert.equal(await p.ev(`${cardOf('beta')}.classList.contains('blocked')`), false);
+  // the Inbox stat: the tab's counts, and a click opens the project's dashboard on its Inbox
+  assert.equal(await p.ev(`${cardOf('alpha')}.querySelector('[data-pin=inbox] .tab-counts').innerHTML`), await p.ev(`${tabOf('alpha')}.querySelector('.tab-counts').innerHTML`));
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('[data-pin=inbox] .v').textContent`), '0');
+  await p.ev(`${cardOf('alpha')}.querySelector('[data-pin=inbox] button').click()`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha')`);
+  await until(() => F.hashes.get(A).includes('#overview?th=inbox'), 'the dashboard at #overview?th=inbox');
+});
+
+test('the gap audit rows: top goal +N more and its bar, kit behind in amber, not answering, an old kit', CHROME, async (t) => {
+  const [A, B, C, D] = await freePorts(4);
+  const F = await fixtureHub(t, { ports: [A, B, C, D] });
+  const list = [
+    hello('alpha', A, { kit: 'v0.50.0', pulse: { goals_open: 3, goal: { title: 'Billing', done: 1, total: 4 }, open_tickets: 5, done_tickets: 3, blocked_tickets: 2 } }),
+    hello('beta', B, { pulse: { goals_open: 0, goal: null } }),
+    hello('gamma', C),
+    hello('delta', D, { pulse: null }),
+  ];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('four cards', `document.querySelectorAll('.ov-card').length === 4`);
+  const g = await p.ev(`(() => { const c = ${cardOf('alpha')}; const b = c.querySelector('.hub-goal .ov-bar'); return { text: c.querySelector('.hub-goal').textContent, now: b.getAttribute('aria-valuenow'), max: b.getAttribute('aria-valuemax') }; })()`);
+  assert.match(g.text, /^Billing\+2 more/);
+  assert.match(g.text, /3 of 8 merged · 2 waiting on you$/);
+  assert.deepEqual([g.now, g.max], ['3', '8']);
+  assert.match(await p.ev(`${cardOf('beta')}.querySelector('.hub-goal').textContent`), /^No goal approved yet/);
+  const kit = await p.ev(`(() => { const v = ${cardOf('alpha')}.querySelector('[data-pin=kit] .v'); return { amber: v.classList.contains('amber'), title: v.closest('[data-pin=kit]').title }; })()`);
+  assert.equal(kit.amber, true);
+  assert.match(kit.title, /v0\.57\.0/, 'the newest kit among the projects');
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('[data-pin=kit] .v').classList.contains('amber')`), false);
+  // an old kit: no pulse, still answering
+  const old = await p.ev(`(() => { const c = ${cardOf('delta')}; return { why: c.querySelector('.hub-why')?.textContent, stats: !!c.querySelector('.ov-stats'), goal: !!c.querySelector('.hub-goal'), sw: !!c.querySelector('.fleet-switch, .seg') }; })()`);
+  assert.deepEqual(old, { why: 'Update its kit to see what it is doing', stats: false, goal: false, sw: false });
+  // gamma stops answering
+  F.setList(list.filter((x) => x.name !== 'gamma'));
+  await p.until('gamma not answering', `${cardOf('gamma')}?.querySelector('.card-head .pill:not(.shrink)')?.textContent === 'Not answering'`);
+  const gone = await p.ev(`(() => { const c = ${cardOf('gamma')}; return { cls: c.classList.contains('blocked'), att: c.querySelector('.ov-att li')?.textContent ?? '', goal: !!c.querySelector('.hub-goal') }; })()`);
+  assert.equal(gone.cls, true);
+  assert.match(gone.att, /^Its dashboard stopped answering at /);
+  assert.equal(gone.goal, false);
+  assert.equal(await p.ev(`${tabOf('gamma')}.title`), 'Not answering');
+});
+
+test('the partly-held pill: words, hover, a click to Goals', CHROME, async (t) => {
+  const [A, B, C] = await freePorts(3);
+  const F = await fixtureHub(t, { ports: [A, B, C] });
+  F.setList([
+    hello('alpha', A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } } }),
+    hello('beta', B, { fleet: { mode: 'run', workers: 1, goals: { run: 1, drain: 1, park: 1, held: [{ title: 'Recurring checks', mode: 'park', why: 'waits on your approval' }, { title: 'Sense the outside world', mode: 'drain' }] } } }),
+    hello('gamma', C),
+  ]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('three cards', `document.querySelectorAll('.ov-card').length === 3`);
+  assert.deepEqual(await p.ev(`(() => { const x = ${cardOf('alpha')}.querySelector('.held-pill'); return [x.textContent, x.title, x.classList.contains('amber')]; })()`), ['Partly parked · 2 of 11 goals running', '9 parked, 0 draining', true]);
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('.held-pill').title`), 'Recurring checks: waits on your approval\nSense the outside world: drain');
+  assert.equal(await p.ev(`!!${cardOf('gamma')}.querySelector('.held-pill')`), false, 'no fleet.goals: no pill');
+  await p.ev(`${cardOf('alpha')}.querySelector('.held-pill').click()`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha')`);
+  await until(() => F.hashes.get(A).includes('#goals'), 'the dashboard at #goals');
+});
+
+test('720px: two cards a row, the body wraps inside each', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'), { width: 720, height: 800 });
+  await p.until('two cards', `document.querySelectorAll('.ov-card').length === 2`);
+  const r = await p.ev(`(() => { const cs = [...document.querySelectorAll('.ov-card')]; return { tops: cs.map((c) => Math.round(c.getBoundingClientRect().top)), out: cs.flatMap((c) => [...c.querySelectorAll('.hub-body *')].filter((e) => e.getBoundingClientRect().right > c.getBoundingClientRect().right + 0.5).map((e) => e.className)) }; })()`);
+  assert.equal(r.tops[0], r.tops[1], 'two to a row at 720');
+  assert.deepEqual(r.out, []);
+});
+
+test('390px: a long name and three pills stay in the head', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A] });
+  const long = 'a-project-with-a-very-long-name-indeed-xx';
+  F.setList([hello(long, A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } }, pulse: { state: 'building', blocking: 'partial', blocked_tickets: 1, open_tickets: 3 } })]);
+  const p = await hubPage(t, F.url('/'), { width: 390, height: 844 });
+  await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+  const r = await p.ev(`(() => { const h = document.querySelector('.ov-card .card-head'), hr = h.getBoundingClientRect(); const o = document.getElementById('overview'); return { pills: h.querySelectorAll('.pill').length, out: [...h.children].filter((e) => e.getBoundingClientRect().right > hr.right + 0.5 || e.getBoundingClientRect().left < hr.left - 0.5).map((e) => e.className), menuIn: h.lastElementChild.getBoundingClientRect().right <= hr.right, scroll: o.scrollWidth <= o.clientWidth }; })()`);
+  assert.deepEqual(r, { pills: 3, out: [], menuIn: true, scroll: true });
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and

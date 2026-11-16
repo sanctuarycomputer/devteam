@@ -124,9 +124,13 @@ test("today's pages can't change: every layout rule is scoped to .shell, and nei
   assert.ok(sels.filter((s) => s.includes(B)).length === sels.filter((s) => s !== ':root').length);
   const frames = [...LAYOUT.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]);
   assert.deepEqual(frames, ['shell-ring'], 'its one animation has a name of its own');
-  for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
+  // the hub adopted the shell in kit-94; the dashboard hasn't yet
+  for (const [name, src] of [['index.html', INDEX]]) {
     const rest = without(src, 'devteam-layout', 'devteam-shell-js');
     assert.doesNotMatch(rest, /class="[^"]*\bshell\b|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*\bshell\b/, `${name} has no .shell yet`);
+  }
+  for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
+    const rest = without(src, 'devteam-layout', 'devteam-shell-js');
     for (const f of frames) assert.doesNotMatch(rest, new RegExp(`@keyframes\\s+${f}\\b|animation(-name)?:[^;]*\\b${f}\\b`), `${name} has no animation of the block's name ${f}`);
   }
   // index's own --measure (78ch) still comes after the block, so it still wins there
