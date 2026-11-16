@@ -17,12 +17,16 @@ test('status names the unmerged dependencies a waiting ticket waits on, and the 
     add('w-02-merged');
     add('w-03-behind', ['w-01-first', 'w-02-merged']);
     add('w-04-alone');
+    add('w-05-planned-ahead', ['w-01-first']);
     F.g(['commit', '-qm', 'w-02-merged: done', '--allow-empty'], F.old);
     F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
     for (const id of ['w-03-behind', 'w-04-alone']) { phaseLine(id, null, 'starting', 3 * H); phaseLine(id, 'starting', 'blocked', 2 * H); }
+    // planned ahead of an unmerged dependency, now asking for its approve-plan: the supervisor's word
+    phaseLine('w-05-planned-ahead', null, 'starting', 3 * H); phaseLine('w-05-planned-ahead', 'starting', 'awaiting-word', 2 * H);
     const row = (id) => F.sup(['status']).split('\n').find((l) => new RegExp(`\\s${id}(\\s|$)`).test(l)) ?? '';
     assert.match(row('w-03-behind'), /WAITING ON w-01-first TO MERGE\]/, 'names only the dependency still unmerged');
     assert.doesNotMatch(row('w-03-behind'), /SUPERVISOR|w-02-merged/);
     assert.match(row('w-04-alone'), /WAITING ON SUPERVISOR\]/, 'no dependency: the supervisor owes it');
+    assert.match(row('w-05-planned-ahead'), /WAITING ON SUPERVISOR\]/, 'awaiting-word is the supervisor\'s word, dependencies or not');
   } finally { F.done(); }
 });
