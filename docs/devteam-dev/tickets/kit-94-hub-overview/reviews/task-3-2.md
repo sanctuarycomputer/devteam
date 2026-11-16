@@ -1,0 +1,21 @@
+# Task review, T3, pass 2
+
+- Reviewer: task-reviewer-5 (fresh subagent, claude-opus-5-5)
+- Reviewed: c2478e4af4992158649ff9ad8fd21ec4043ddaf0 (T3: dd97f26..c2478e4)
+
+Ran the four switch tests on an export of c2478e4 (Node 24.14.1, concurrency 1): 4 pass. Mutations of scratch copies, run against 'a card's switch', 'a machine op' and 'a partly held card':
+- T3-1: `${verb}…` for the machine's busy words fails 'a machine op'; dropping `fb?.asking` from `switchEl`'s `busy` fails it too. True and tested.
+- T3-4: `if (!roots.length) return;` (the old line) fails 'a machine op' ("cleared at once, not 5 s later": it still reads `Park 0 projects?`), because `onConfirm`'s `sw.set` does not repaint. Undoing `onConfirm`'s clear alone passes (the `post` clear covers it); undoing both fails. True and tested.
+- T3-5: dropping the `fleetBusy.delete(key)` line fails 'a machine op'; dropping `error: null` from the Park press's `swSet` fails it too. Dropping `error: null` from the Run confirm's `swSet` passes every test (T3-2-3).
+- One run of 'a partly held card' timed out once under a mutation that does not touch its path and passed under every other mutation, the same change included: box load, not the code.
+- T3-2 and T3-3 are deferred Minors, with their mutations still green. Deferring them is allowed. T3-6 is a wont-fix and its reason holds: spec.md:115 asks only that the cards be disabled during a machine op.
+
+Checked afresh and sound: `swGet` reads a confirm as null after 5 s, and `swSet` schedules the repaint only when it sets a confirm. `post` takes its roots when it runs, and the park filter (`!== 'park'`) matches the builder's N (running + draining). Failures are named for the machine and bare for a row. The binder hands the Run confirm to `onConfirm('run')` through `data-confirm`, and Escape works through `data-confirming`, which `switchEl` sets. A busy switch's buttons are disabled, so a double press cannot post twice. The focus restore skips disabled buttons. `setFleet` is still the only caller of `fleetAsk`. The row wrapper carries pin `fleet`. Done-when 1's switch parts (machine pressed and Mixed, Park N confirm and second press, Run resumes all, row Park confirm, busy and error) are each covered by a passing test.
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| T3-2-1 | Minor | spec.md:46 ("Pressing the mode already shared does nothing"), :63 ("pressing the current mode does nothing except Run on a partly held fleet") | hub.html `switchEl` `onPress` (the Park branch comes before `if (m === mode) return;`); test 'a machine op' (asserts `Park 0 projects?`) | On a card that is already parked, Park still asks `Confirm park`, and the second press sends the dashboard a second `park`. With every project parked, the machine's Park asks `Park 0 projects?`. The spec says pressing the current mode does nothing. The plan's `onPress` order produces this behaviour and the T3-4 fix only clears the confirm, so the new test now asserts behaviour the spec rules out. The fix: `if (m === mode && !(m === 'run' && runConfirm)) return;` before the Park branch, and change the test to expect no confirm. |  |
+| T3-2-2 | Minor | spec.md:48, :63 (the error is kept "until the next press"); T3-5's disposition ("a new press clears the switch's … error") | hub.html `onPress`, `if (m === mode) return;` | Pressing the current mode deletes the card's `fleetBusy` error but leaves `sw`'s `error`, and it does not repaint. So after a failed Drain on a running card, pressing the pressed Run keeps `it broke` on screen. A row's `sw` error also stays after a machine op that succeeds for that root, so the card shows an old failure under a mode that worked. |  |
+| T3-2-3 | Minor | T3-5's disposition ("tested") | hub.html `onPress`, `swSet(key, { confirming: 'run', error: null })` | Clearing the error on the first press of the partly held Run confirm is not tested: dropping `error: null` there passes all four tests. The test for T3-5 covers only Park's first press. |  |
+
+Verdict: APPROVE c2478e4af4992158649ff9ad8fd21ec4043ddaf0
