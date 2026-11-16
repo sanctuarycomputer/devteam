@@ -15863,7 +15863,7 @@ async function cmdDashboard() {
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
-  async function paneAnswer({ digest, option, proof }) {
+  async function paneAnswer({ digest, option, escape = false, proof }) {
     const no = (error, status = 400) => ({ status, body: { error } });
     const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
     let st = null;
@@ -15872,18 +15872,40 @@ async function cmdDashboard() {
     if (!st.ask) return no(`nothing was answered: the supervisor's terminal is not asking anything now (the question is gone)${st.problem ? `; ${st.problem}` : ''}`);
     if (st.ask.kind !== 'menu' || typeof st.target !== 'string') return no(`nothing was answered: what the supervisor's terminal shows now is answered in the terminal, not here${st.problem ? ` (${st.problem})` : ''}`);
     if (st.ask.digest !== digest) return no("nothing was answered: the question in the supervisor's terminal has changed since the page showed it; read the one showing now and answer that");
-    const opt = st.ask.options.find((o) => o.n === option);
-    if (!opt) return no(`nothing was answered: that question has no option ${option}`);
+    const opt = escape ? null : st.ask.options.find((o) => o.n === option);
+    if (!escape && !opt) return no(`nothing was answered: that question has no option ${option}`);
+    // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
+    const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
+    if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
     const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
     // once more, right before the key
-    if (!menuIn(await look())) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    const last = menuIn(await look());
+    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
     // tests only: the moment between that look and the key, in which a question can go
     const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
     if (pause > 0) await new Promise((w) => setTimeout(w, pause));
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
+    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    const finish = async (rec, keys, why, after) => {
+      if (hello) hello.supervisor_question = null;
+      refreshHello();
+      const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
+      if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
+      if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
+      return { status: 200, body: { ok: true, out: said } };
+    };
+    if (escape) {
+      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
+      const lines = await settle(st.ask.selected);
+      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
+    }
+    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     let lines = await settle(st.ask.selected);
     let keys = String(option);
     let still = menuIn(lines);
@@ -15903,13 +15925,7 @@ async function cmdDashboard() {
     // what the pane shows after: the menu took the key unless the digit is sitting in the input box
     const draft = lines ? paneDraftIn(lines) : null;
     const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    const rec = await runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, option, label: opt.label, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, keys, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
-    if (hello) hello.supervisor_question = null;
-    refreshHello();
-    const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
-    if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
-    if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal, and clear its input box if the digit is there.`, 409);
-    return { status: 200, body: { ok: true, out: said } };
+    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
@@ -16220,7 +16236,8 @@ async function cmdDashboard() {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        if (!isObj(parsed) || typeof parsed.digest !== 'string' || !/^[0-9a-f]{40}$/.test(parsed.digest) || !Number.isInteger(parsed.option) || parsed.option < 1 || parsed.option > 9 || typeof parsed.token !== 'string') return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token }' }));
+        // exactly an option's press or an Esc's, as the page sends them (paneAnswerShape): nothing else reaches the terminal
+        if (!paneAnswerShape(parsed)) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token } or { digest, escape: true, token }' }));
         if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
         let proof = null;
         if (threadsNeedGateway()) {
@@ -16235,7 +16252,7 @@ async function cmdDashboard() {
         }
         if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
         paneAnswering = true;
-        paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+        paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
       }));
     }
     // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
@@ -16483,6 +16500,17 @@ const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'su
 // page that asked. pane answered is what it runs after: the owner's act for the log, and the lines
 // held for the pane while it asked. On a box it takes that only with the gateway's signature for
 // the press, each taken once, as a thread with the operator does.
+// A press the dashboard's card sends: exactly { digest, option, token } (option 1 to 9) or exactly
+// { digest, escape: true, token }. The route takes nothing else, and on a box pane answered holds the
+// gateway's signed body to the same shape.
+function paneAnswerShape(b) {
+  if (!isObj(b) || typeof b.digest !== 'string' || !/^[0-9a-f]{40}$/.test(b.digest) || typeof b.token !== 'string') return false;
+  const keys = Object.keys(b).sort().join(',');
+  if (keys === 'digest,option,token') return Number.isInteger(b.option) && b.option >= 1 && b.option <= 9;
+  return keys === 'digest,escape,token' && b.escape === true;
+}
+// Whether a numbered menu's hint says Esc cancels it, and nowhere that Esc exits or quits.
+const paneEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
 const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
 // The owner's Save on the Settings page (gateway.mjs, ownerSettingSignature): the same, under its own name.
 const ownerSettingSigned = (port, ts, nonce, body) => Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
@@ -16560,7 +16588,10 @@ function cmdPane() {
   let b = null;
   try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
   const line1 = (x, max) => typeof x === 'string' && x.length <= max;
-  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !Number.isInteger(b.option) || b.option < 1 || b.option > 9 || !line1(b.label, 4000) || !line1(b.first, 4000) || !/^\d(, Enter)?$/.test(b.keys ?? '') || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
+  // an option (its number, its label, the keys that took it) or Esc (the Escape key, no option, no label)
+  const asOption = isObj(b) && b.escape === undefined && Number.isInteger(b.option) && b.option >= 1 && b.option <= 9 && line1(b.label, 4000) && /^\d(, Enter)?$/.test(b.keys ?? '');
+  const asEsc = isObj(b) && b.escape === true && b.option === undefined && b.label === undefined && b.keys === 'Escape';
+  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !(asOption || asEsc) || !line1(b.first, 4000) || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
   let proof = null;
   if (threadsNeedGateway()) {
     const no = (why) => die(`pane answered: on a box the owner answers only on the dashboard through the box's gateway, which signs the press, and ${why}`);
@@ -16568,14 +16599,14 @@ function cmdPane() {
     if (why) no(why);
     let signed = null;
     try { signed = JSON.parse(Buffer.from(b.proof.body, 'base64').toString('utf8')); } catch {}
-    if (!isObj(signed) || signed.digest !== b.digest || signed.option !== b.option) no('the gateway signed another press than this one');
+    if (!paneAnswerShape(signed) || signed.digest !== b.digest || signed.option !== b.option || signed.escape !== b.escape) no('the gateway signed another press than this one');
     if (logObjects('act').some((a) => a.class === 'pane-answer' && a.proof?.nonce === b.proof.nonce)) no('that press was taken already');
     proof = { port: b.proof.port, ts: b.proof.ts, nonce: b.proof.nonce, sig: b.proof.sig, body: b.proof.body };
   }
   const flat = (t, max) => { const x = noArtifactLinks(t).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return x.length > max ? `${x.slice(0, max - 1)}…` : x; };
   const about = `"${flat(b.first, 120) || '(no words above the options)'}"${typeof b.artifact === 'string' && /^[A-Za-z0-9-]{6,64}$/.test(b.artifact) ? ` (artifact ${b.artifact})` : ''}`;
-  const chose = `${b.option}. ${flat(b.label, 120)}`;
-  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}, option ${chose}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
+  const chose = asEsc ? 'Esc' : `${b.option}. ${flat(b.label, 120)}`;
+  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}${asEsc ? '' : `, option ${chose}`}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
   out(b.taken ? `answered: ${chose}` : `sent, and it may not have landed: ${chose}`);
   // the dashboard has its answer; then what was held for the pane while it asked, if it took the key
   replyNow();
