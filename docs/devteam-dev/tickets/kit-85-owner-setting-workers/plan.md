@@ -335,3 +335,15 @@ The gateway gets one more signer and a signed route. The log schema gets three a
   - `## Migration`: `max_active_tickets` and `max_active_per_component` now apply as they are on main, so a value changed in the working tree and never merged goes back to main's on upgrade. Land it through the settings chore to keep it (`chore start settings`, `settings set`, `chore pr settings`, `merge --chore settings`). This release also changes `cloud/gateway.mjs`, so the box redeploys at release;
   - `## One-way doors`: `None.`
 - [ ] Get two final reviews from other sessions (`send supervisor … --kind review-request`), then `check-ticket`, then `merge-request`.
+
+## Rulings and calls (build)
+
+Recorded at Task 0, after merging `origin/main` at 9e10983 (kit-84 merged as #283; kit-202, kit-205 and kit-173 merged too, per m-20261116-012722033).
+
+- **Order** (m-20261115-225918021, m-20261116-012722033): kit-85 followed kit-84, kit-202, kit-205 and kit-173. All four are merged, and the supervisor said go.
+- **Cap reader** (m-20261115-205220205): if the operator's PR #277 merged first, its reader would replace `capOf`. At Task 0 it is still open, so Task 1 writes `capOf` as planned. If #277 merges before Task 6's merge with main, the Task 6 merge takes its reader and drops `capOf`, keeping the route, the allowlist and null as "clear the limit".
+- **Review cap** (m-20261115-214201586): after a second round of any spec, plan or final review, Minor findings are fixed and disposed with no further pass. A third pass only confirms a Critical or Important fix, and covers only that fix. This applies to task reviews and the two finals.
+- **`CLASS_WORDS`**: kit-84's map (devteam.mjs ~1260) already has `'owner-setting': 'Asking for a setting'` and `'settings-edit': 'Changing one of its own settings'`. Task 2's step is an assertion only, and this ticket does not edit the map.
+- **`mainRef()`**: kit-84 landed it (~1790), with `mainSha()`. Every main read in this ticket goes through it, with no second ref resolver.
+- **Settings view**: kit-84 landed `settingsAll()` (~696), whose entries carry `set` (the key is in main's own block, not a default) and `value`. Its shape check `settingNum` already passes `null`, so a no-limit value shows as `null`, not withheld. Task 5 drops `mainSettingsRaw()`. "Not set on main" is `settingsAll()`'s `set === false` for the key, and main's value is `settingsAt(mainRef(), { orNull: true })[key]`. That is the same block `settingsAll()` reads, and the defaults make no difference once `set` is known.
+- **`SETTINGS_WORDS`**: kit-84 already names `max_active_tickets` and `max_active_per_component` ("Workers at once, in all", "Workers at once, per component"). Task 5's `label` is the Settings page's existing name from this map.
