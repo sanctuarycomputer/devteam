@@ -3144,13 +3144,16 @@ function showDrawer(html) {
   else if (keep) $('drawer-body').querySelector(keep)?.focus();
   for (const f of after) f();
 }
+// Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
+// over every entry this visit pushed down to the page, else in place to the page in its stamp.
 function closeDrawer() {
   DRAWER = { kind: null, id: null };
   LAST_HTML = '';
   $('drawer').hidden = true; $('scrim').hidden = true;
   document.body.style.overflow = '';
-  if (/^#(ticket|q|file|goal|planner)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
   lastFocus?.focus?.();
+  const c = closeTarget(history.state);
+  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
@@ -4060,7 +4063,9 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  if (q?.status === 'open') { closeDrawer(); showPage('inbox', { keepScroll: true }); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
+  // an open question: its entry is replaced by the Inbox (Back returns to the page the link was
+  // clicked on), and its card is brought into view
+  if (q?.status === 'open') { hideDrawer(); goHead('#inbox', { replace: true }); document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }); return; }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -4358,10 +4363,32 @@ document.addEventListener('click', (e) => {
   location.hash = card.dataset.open;
 });
 let ROUTED = false;
+// The router's history (shell.md §7): HERE is the stamp of what is on screen ({ page, depth, openedHere });
+// ROUTE_COLD is true until the visit's first route.
+let HERE = null;
+let ROUTE_COLD = true;
+// Go to a head: a new entry (assigned; hashchange routes it), or this entry replaced by it with a fresh stamp, then routed.
+function goHead(head, { replace = false } = {}) {
+  if (!replace) { location.hash = head; return; }
+  history.replaceState(stampFor({ hash: head, state: null }, HERE, ROUTE_COLD, SHELL_ROUTES), '', head);
+  route();
+}
+// The page shown under everything: its section, and on Self Improvement the tab its lt names (Observe when none).
+const LOOP_TABS = ['observe', 'orient', 'decide', 'act'];
+function showHead(p, opts) {
+  showPage(p.page, opts);
+  if (p.page === 'loop') showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe');
+}
 function route() {
+  // a new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
+  // whether this visit pushed every entry down to that page
+  if (!history.state || typeof history.state.page !== 'string') history.replaceState(stampFor({ hash: location.hash, state: history.state }, HERE, ROUTE_COLD, SHELL_ROUTES), '');
+  ROUTE_COLD = false;
+  HERE = history.state;
   const raw = location.hash.slice(1);
-  // nothing shown yet (a cold load of a link): the page it opens over
-  if (!PAGE_NOW) { const p0 = parseHead(location.hash, SHELL_ROUTES); if (p0.link !== undefined) showPage(p0.home); }
+  const p = parseHead(location.hash, SHELL_ROUTES);
+  // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
+  if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
   if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
@@ -4386,12 +4413,15 @@ function route() {
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
-  const p = parseHead(location.hash, SHELL_ROUTES);
   if (p.link !== undefined) return;
+  // th=inbox with other keys: the same <page>?th=inbox entry of the table, by the parsed page
+  const thInbox = `${p.page}?th=inbox`;
+  if (!p.redirected && p.state.th === 'inbox' && Object.hasOwn(SHELL_ROUTES.redirects, thInbox)) return void goHead(`#${String(SHELL_ROUTES.redirects[thInbox]).replace(/^#/, '')}`, { replace: true });
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
-  showPage(p.page);
+  showHead(p);
 }
-function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; } }
+// The drawer hidden, as when the route moves on (closeDrawer also closes its entry)
+function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -4407,15 +4437,16 @@ let RV_FROM = null;
 function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#inbox'; }
 
 // ---- loop tabs ----
+// The tab is the route's (the lt state key, Observe when none): a click is a history entry, and
+// showTab only draws the tab the route gives.
 let TAB = 'observe';
-try { TAB = localStorage.getItem('devteam.tab') || 'observe'; } catch {}
 function showTab(tab) {
   TAB = tab;
   document.querySelectorAll('#loop-tabs [data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   document.querySelectorAll('.loop-panel').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
-  try { localStorage.setItem('devteam.tab', tab); } catch {}
 }
-$('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) showTab(b.dataset.tab); });
+const loopTab = (tab) => goHead(tab && tab !== 'observe' ? `#loop?lt=${tab}` : '#loop');
+$('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) loopTab(b.dataset.tab); });
 showTab(TAB);
 
 // ---- presses: the page answers at once, the server catches up ----
