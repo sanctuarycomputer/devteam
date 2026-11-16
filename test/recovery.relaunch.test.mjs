@@ -244,8 +244,21 @@ test('the order: work in progress first, sessions idle on a dependency last; tie
     F.planner('p8');
     asOwner(F, ['thread', 'new', 'Split this feature', '--subject', JSON.stringify({ kind: 'item', ref: 'planner:p8' })]);
     F.worker('demo-65-plain2'); phase(F, 'demo-65-plain2', 'plan');
-    assert.deepEqual(order(F, 9), ['demo-63-build', 'demo-64-dirty', 'plan-p6', 'plan-p7', 'plan-p8', 'demo-62-plain', 'demo-65-plain2', 'demo-60-idle', 'demo-61-blocked']);
-    await until(() => F.relaunched().length === 9, 'all nine resumed');
+    // a blocked message the supervisor answered, and one followed by a later message: neither idles
+    F.worker('demo-66-answered'); phase(F, 'demo-66-answered', 'spec');
+    const asked = asWorker(F, 'demo-66-answered', ['send', 'supervisor', 'which table?', '--kind', 'blocked']).split('\n')[0];
+    dtRun(F, ['send', 'demo-66-answered', 'the new one', '--re', asked], F.env());
+    F.worker('demo-67-later'); phase(F, 'demo-67-later', 'spec');
+    asWorker(F, 'demo-67-later', ['send', 'supervisor', 'waiting on demo-60', '--kind', 'blocked']);
+    asWorker(F, 'demo-67-later', ['send', 'supervisor', 'found a way round it', '--kind', 'info']);
+    F.worker('demo-68-blocked'); phase(F, 'demo-68-blocked', 'blocked');
+    // a thread on the planner by its session name
+    F.planner('p9');
+    asOwner(F, ['thread', 'new', 'Is this one still needed?', '--subject', JSON.stringify({ kind: 'item', ref: 'planner:plan-p9' })]);
+    // the main checkout has changes of its own: a worktree that is no checkout of its own never reads them
+    write(path.join(F.root, 'stray.txt'), 'not committed\n');
+    assert.deepEqual(order(F, 13), ['demo-63-build', 'demo-64-dirty', 'plan-p6', 'plan-p7', 'plan-p8', 'plan-p9', 'demo-62-plain', 'demo-65-plain2', 'demo-66-answered', 'demo-67-later', 'demo-60-idle', 'demo-61-blocked', 'demo-68-blocked']);
+    await until(() => F.relaunched().length === 13, 'all thirteen resumed');
   } finally { F.done(); }
 });
 
