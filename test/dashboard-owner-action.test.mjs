@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PORTS, bareProject, dashboardOnFreePort } from './lib/kit.mjs';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 // the 10 s refresh at 300 ms, a poll counter, and every POST to /api/ recorded
 const initScript = `(() => {
@@ -39,7 +39,8 @@ const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
 
 test('owner-action: the named records\' own controls, Done and Can\'t right now, and Done waits for the act', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-owner-action-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 44), DEVTEAM_PORT_BASE: String(PORTS + 45), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'owner-action');
@@ -66,11 +67,11 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
   const statusOf = (id) => JSON.parse(dt(['log', '--type', 'knowledge', '--json'])).filter((o) => o.id === id).map((o) => o.status).filter(Boolean).pop();
 
   const { dash, port } = await dashboardOnFreePort(root, env);
-  t.after(() => dash.stop());
+  later(() => dash.stop());
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });

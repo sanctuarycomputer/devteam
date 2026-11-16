@@ -37,16 +37,23 @@ export async function openChrome() {
   proc.unref();
   proc.stderr.unref();
   let closing = null;
+  // A timer is pending for as long as close() is: SIGKILL at 3 s, then a 5 s bound on the exit. Chrome
+  // and its stderr are unref'd, so without one a Chrome slow to act on SIGTERM would let this process's
+  // event loop empty while close() waits for its exit, and node would cancel every test left in the
+  // file. If even SIGKILL brings no exit in 5 s, close() ends anyway.
   const close = () => (closing ??= new Promise((r) => {
-    const hard = setTimeout(() => signal('SIGKILL'), 3000);
-    const done = () => {
+    let last = null;
+    const hard = setTimeout(() => { signal('SIGKILL'); last = setTimeout(done, 5000); }, 3000);
+    function done() {
       clearTimeout(hard);
+      clearTimeout(last);
       signal('SIGKILL'); // whatever helpers outlived it
       process.off('exit', atExit);
+      proc.off('exit', done);
       proc.stderr.destroy();
       try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
       r();
-    };
+    }
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
     if (proc.exitCode !== null || proc.signalCode !== null) return done();
     proc.once('exit', done);
@@ -66,7 +73,14 @@ export async function openChrome() {
       else if (o.method === 'Runtime.executionContextsCleared') worlds.clear();
       const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(`${w.method}: ${o.error.message}`)); else w.resolve(o.result); };
     // A page that stops answering fails the call: an await nobody will ever settle hangs the run.
+    // the page's socket gone (Chrome died or closed it): every call still waiting fails, saying so
+    let ended = null;
+    ws.onclose = (e) => {
+      ended = `Chrome's page connection closed (code ${e.code}${e.reason ? `, ${e.reason}` : ''}${proc.exitCode !== null || proc.signalCode !== null ? `; Chrome exited: ${proc.exitCode ?? proc.signalCode}` : ''})`;
+      for (const [id, w] of waiting) { waiting.delete(id); w.reject(new Error(`${w.method}: ${ended}`)); }
+    };
     const send = (method, params = {}) => new Promise((resolve, reject) => {
+      if (ended) return reject(new Error(`${method}: ${ended}`));
       const id = ++seq;
       const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`${method}: no answer from Chrome in 30 s`)); }, 30000);
       timer.unref();
@@ -117,5 +131,20 @@ export async function openChrome() {
     };
     return { send, ev, evIn, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
   };
-  return { newPage, close };
+  // pid: the leader of Chrome's process group; proc, its ChildProcess, for a test of close() itself
+  return { newPage, close, pid: proc.pid, proc };
+}
+
+// A test's teardown, run last-registered first, each step on its own: a folder's removal registered
+// first runs after every stop, and one step that throws skips none of the others (node runs t.after
+// hooks in the order they were registered, and stops at the first that throws). The first error is
+// thrown once every step has run. const later = cleanup(t); later(() => dash.stop());
+export function cleanup(t) {
+  const fns = [];
+  t.after(async () => {
+    let first = null;
+    for (const f of fns.reverse()) { try { await f(); } catch (e) { first ??= e; } }
+    if (first) throw first;
+  });
+  return (f) => { fns.push(f); };
 }

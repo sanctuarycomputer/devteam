@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { CHECKS, SIZES, measure, measureAt } from './lib/measure.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -514,14 +514,15 @@ test('measure options: a page adds to prose and ignore', async () => {
 test('the measure: every check passes on the fixture at three sizes and fails on a broken copy', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   assert.deepEqual(Object.keys(BREAK).sort(), [...CHECKS].sort(), 'a break for every check');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shell-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'dashboard-shell.html');
   fs.writeFileSync(file, filled());
   const url = `file://${file}`;
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   const res = await measureAt(p, url, { ready: 'window.__ready' });
