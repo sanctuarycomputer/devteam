@@ -32,6 +32,6 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | quality.md §2 (comments and readability) | docs/devteam/scripts/devteam.mjs:5059-5065 | The comment that describes `forgeCheckFails` ("The forge's own checks on a PR at its head: pending is not passed…") now sits above the new `rollupState`, with `forgeCoverage` between them, so it reads as `rollupState`'s comment. Move it down to `forgeCheckFails` | |
+| F1 | Minor | quality.md §2 (comments and readability) | docs/devteam/scripts/devteam.mjs:5059-5065 | The comment that describes `forgeCheckFails` ("The forge's own checks on a PR at its head: pending is not passed…") now sits above the new `rollupState`, with `forgeCoverage` between them, so it reads as `rollupState`'s comment. Move it down to `forgeCheckFails` | fixed at 8b1a0e7: the comment is back above forgeCheckFails |
 
 Verdict: APPROVE b3c28ebbf19a42914c14ada029d3821e699763c9
