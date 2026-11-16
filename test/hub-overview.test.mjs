@@ -264,15 +264,18 @@ test('the box line: the image\'s release, the hub\'s, and the tools; amber when 
   for (const s of texts) { assert.equal(typeof s, 'string'); assert.match(s, /^[\w .,'+?-]+$/, s); assert.ok(!s.includes('http') && !s.includes('<'), s); }
 });
 
-test('the Overview draws no box line: it moved to Settings', () => {
+test('Settings draws the box line from box.json and the latest list; the Overview draws none', () => {
   const html = hubHtml();
   const body = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); const rest = html.slice(i + start.length); const j = rest.search(/\n(async )?function /); return rest.slice(0, j < 0 ? undefined : j); };
+  assert.match(body('function paintSettings('), /boxLine\(box\?\.image \?\? null, hubSeen\)/, 'Settings draws it');
+  assert.doesNotMatch(body('function paintSettings('), /innerHTML/, 'no markup from the line');
   assert.doesNotMatch(body('function paintOverview('), /boxLine/, 'the Overview shows no box line (owner, thread t-20261115-204523188-owner)');
   assert.match(body('async function findBox('), /image: b\.image/, 'findBox keeps the image');
   const draw = body('async function draw(');
   assert.match(draw, /hubSeen = data;/, 'draw keeps the list it read');
   assert.match(draw, /if \(!data \|\| typeof data !== 'object'\) throw/, 'JSON that is no list (null, a number) is none');
   assert.doesNotMatch(html, /\.ov-box/, 'nor its styles');
+  assert.ok(html.includes("This browser can't notify from this page"), 'the row says why when the browser cannot notify');
 });
 
 // ----- the Overview's rules: a pure block of hub.html (kit-94), run here in vm -------------------
@@ -672,6 +675,67 @@ test('a partly held card: Run asks "Run every goal?" in place, posts on the seco
     await until(() => F.asks.get(port).length === 1, `${name} asked`);
     assert.deepEqual(F.asks.get(port), [{ mode: 'run', all: false }]);
   }
+});
+
+// in the page: Settings' groups, and a row by its name
+const setGroups = `[...document.querySelectorAll('#hub-settings .sec > .lbl')].map((x) => x.textContent)`;
+const setRow = (name) => `(() => { const r = [...document.querySelectorAll('#hub-settings .set-row')].find((x) => x.querySelector('.t')?.firstChild?.textContent.trim() === ${JSON.stringify(name)}); if (!r) return null; const v = r.querySelector('.r'); return { key: r.querySelector('.set-key')?.textContent ?? null, value: [...v.childNodes].filter((n) => !(n.classList && n.classList.contains('badge'))).map((n) => n.textContent).join('').trim(), yours: !!v.querySelector('.badge.amber'), desc: r.nextElementSibling?.classList.contains('set-desc') ? r.nextElementSibling.textContent : null, link: v.querySelector('a') ? [v.querySelector('a').textContent, v.querySelector('a').getAttribute('href')] : null, amber: !!v.querySelector('.amber:not(.badge)') }; })()`;
+
+test('Settings on a laptop: from the link only, This machine and Notifications', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A], kit: 'v0.57.0' });
+  F.setList([hello('settings', A)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Settings')`), false, 'no Settings tab');
+  await p.ev(`document.querySelector('#ov-body > .ov-head a.set').click()`);
+  await p.until('Settings', `location.hash === '#settings' && !document.getElementById('settings-view').hidden`);
+  assert.deepEqual(await p.ev(`[document.getElementById('overview').hidden, document.querySelectorAll('#tabs [aria-selected=true]').length, document.getElementById('tl').hidden, document.querySelector('#hub-settings h2')?.textContent]`), [true, 0, true, 'Settings']);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Notifications']);
+  const hub = await p.ev(setRow('Hub served by kit'));
+  assert.deepEqual([hub.key, hub.value, hub.yours, hub.desc], ['hub', 'v0.57.0', false, 'the kit whose hub you are reading; each project keeps its own kit']);
+  const ni = await p.ev(setRow('New Inbox items'));
+  assert.deepEqual([ni.key, ni.yours, ni.desc], ['on this device', true, 'a notification on this device when any project asks you something']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row')].every((r) => r.nextElementSibling?.classList.contains('set-desc'))`), true, 'a description under each row');
+  assert.equal(await p.ev(`!document.querySelector('header #notify, header #box-links')`), true, 'nothing of it left in the header');
+  assert.equal(await p.ev(`!!document.querySelector('.ov-box') || /Box v/.test(document.getElementById('ov-body').textContent)`), false, 'no box line on the Overview');
+  // a cold load at #settings, with a project named settings: Settings shows, the project's key is its own
+  await p.send('Page.navigate', { url: F.url('/#settings') });
+  await p.until('Settings again', `!document.getElementById('settings-view')?.hidden && document.querySelectorAll('#tabs [role=tab]').length >= 2`);
+  await p.ev(`${tabOf('settings')}.click()`);
+  await p.until('the project', `/^#settings-[0-9a-f]{6}$/.test(location.hash)`);
+  await p.ev(`location.hash = 'settings'`);
+  await p.until('Settings once more', `!document.getElementById('settings-view').hidden`);
+  await new Promise((r) => setTimeout(r, 11000));
+  assert.equal(await p.ev(`!document.getElementById('settings-view').hidden && location.hash === '#settings'`), true, 'a draw keeps it');
+  await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview').click()`);
+  await p.until('the Overview', `!document.getElementById('overview').hidden && document.getElementById('settings-view').hidden`);
+});
+
+test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async (t) => {
+  let F;
+  F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
+    const at = (h) => `http://${h}.localhost:${F.port}/`;
+    return { box: 1, terminal: at('terminal'), instance: `http://i{port}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
+  } });
+  F.setList([]);
+  const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
+  let loaded = false;
+  for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev(`document.title`).catch(() => '')) === 'devteam'; if (!loaded) await new Promise((r) => setTimeout(r, 100)); }
+  if (!loaded) return t.skip("headless Chrome can't load hub.localhost here");
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  const rel = await p.ev(setRow('Box release'));
+  assert.deepEqual([rel.key, rel.value, rel.desc], ['DEVTEAM_KIT_RELEASE', 'v0.57.0', 'the box image this machine runs']);
+  const hub = await p.ev(setRow('Hub'));
+  assert.deepEqual([hub.key, hub.value, hub.amber], ['hub', 'hub v0.57.0', false]);
+  const cc = await p.ev(setRow('Claude Code'));
+  assert.deepEqual([cc.key, cc.value, cc.desc], ['DEVTEAM_BOX_TOOLS', '2.4.1', 'the version on this box']);
+  const pk = await p.ev(setRow('Passkeys'));
+  assert.deepEqual([pk.key, pk.link, pk.yours], ['passkeys', ['Manage', `http://auth.localhost:${F.port}/`], true]);
+  const pv = await p.ev(setRow('Previews'));
+  assert.deepEqual([pv.key, pv.link], ['previews', ['Previews', `http://previews.localhost:${F.port}/`]]);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Terminal')`), true, 'the Terminal tab stays');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
