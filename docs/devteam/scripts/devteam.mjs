@@ -604,6 +604,131 @@ const OWNER_SETTINGS = {
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
+// Every setting the kit reads, for the Settings page (dashboardData's settings_all): the defaults'
+// keys, the owner's, and the few read with neither (sensor_scrub: scrubExtra's patterns, checked by
+// merge). A key added to either map shows up with no other edit.
+const SETTINGS_READ_ONLY_HERE = ['sensor_scrub'];
+const SETTINGS_KEYS = Object.freeze([...new Set([...Object.keys(SETTINGS_DEFAULTS), ...Object.keys(OWNER_SETTINGS), ...SETTINGS_READ_ONLY_HERE])]);
+// Each setting in words: [group, name, description, show], in the page's order. show is what of the
+// value the page gets, never a credential by construction: 'value' (a narrow shape, SETTING_SHAPES,
+// with no string the scrubber would change), 'names' (an object's own keys), 'count' (how many
+// entries) or 'hidden' (nothing: a free-text command or a locator can carry a token anywhere).
+// A key with no words here reads as unnamed and hidden.
+const SETTINGS_WORDS = Object.freeze({
+  max_active_tickets: ['Fleet and capacity', 'Workers at once, in all', 'the most tickets with a worker running at the same time', 'value'],
+  max_active_per_component: ['Fleet and capacity', 'Workers at once, per component', 'the most workers at the same time within one component', 'value'],
+  max_active_planners: ['Fleet and capacity', 'Planners at once', 'the most planners running together; none means no cap', 'value'],
+  machine_memory_ceiling: ['Fleet and capacity', 'Memory ceiling', "share of the machine's memory at or above which a new worker or planner waits", 'value'],
+  tick_minutes: ['Fleet and capacity', 'Supervisor tick', 'how often the supervisor looks over everything when nothing wakes it', 'value'],
+  stale_after_minutes: ['Fleet and capacity', 'Silent session after', 'minutes without a sign of life before a worker counts as stuck', 'value'],
+  tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
+  dashboard_port: ['Fleet and capacity', 'Dashboard port', "where this dashboard listens; none means a free port in the hub's range", 'value'],
+  agent_command: ['Agents and sessions', 'Agent command', 'what starts each worker, planner and the supervisor', 'hidden'],
+  resume_command: ['Agents and sessions', 'Resume command', 'what brings a stopped session back on its own conversation', 'hidden'],
+  agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
+  worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
+  worktree_setup: ['Agents and sessions', 'Worktree setup', "a command run in each new worktree after its files are copied", 'hidden'],
+  worktree_files: ['Agents and sessions', 'Files copied into worktrees', 'untracked files each worktree needs, copied from the main checkout', 'value'],
+  usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
+  usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
+  model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
+  gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
+  ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
+  slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
+  main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
+  merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
+  merge_admin: ['Merging and checks', 'Merge past branch protection', "whether merge uses admin rights where the forge requires a review the author can't give", 'value'],
+  forge: ['Merging and checks', 'Forge', 'where PRs live: GitHub, or plain git', 'value'],
+  autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
+  hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
+  question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
+  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes', 'value'],
+  upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
+  upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
+  upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
+  upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
+  sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
+  sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
+  sensor_scrub: ['Production', 'Sensor scrub patterns', 'extra patterns scrubbed from what sensors bring back', 'count'],
+  remediations: ['Production', 'Remediations', 'the reviewed scripts that may restart, scale or roll back production', 'names'],
+  incident_slots: ['Production', 'Incident fixes past the cap', 'fix tickets that may run beyond the worker cap, so an incident never waits', 'value'],
+  secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
+  retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
+  research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
+  components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
+  links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
+});
+// The shape each 'value' setting may have to be shown; null wherever its default is null.
+const settingNum = (v) => v === null || Number.isFinite(v);
+const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
+const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
+const SETTING_SHAPES = Object.freeze({
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  merge_admin: (v) => typeof v === 'boolean',
+  forge: (v) => ['github', 'git'].includes(v),
+  merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
+  upstream_sync: (v) => ['adopt', 'ask'].includes(v),
+  release: (v) => v !== undefined && releaseProblem(v) === null,
+  upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
+  main_branch: settingName, tmux_session: settingName, project: settingName,
+  usage_sources: settingLines, ignored_checks: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
+  autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
+});
+// The hidden settings whose kit default is the kit's own constant, so the page may show it.
+const COMMAND_SETTINGS = ['agent_command', 'resume_command', 'agent_trust_command', 'usage_command', 'worktree_setup'];
+const WITHHELD = Symbol('withheld');
+// a string the page may show as it is: printable, and nothing the scrubber would change
+const plainSettingText = (s) => !UNSAFE_TEXT.test(s) && scrubText(s) === s;
+// every string in a value, an object's keys included
+const settingStrings = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(settingStrings) : isObj(v) ? Object.entries(v).flatMap(([k, x]) => [k, ...settingStrings(x)]) : []);
+// What of a setting's value the page gets, by its show kind; WITHHELD for a value off its shape.
+function shownAs(key, kind, v) {
+  if (kind === 'value') return SETTING_SHAPES[key]?.(v) && settingStrings(v).every(plainSettingText) ? v : WITHHELD;
+  if (kind === 'names') return isObj(v) ? Object.keys(v).map((k) => (plainSettingText(k) ? k : '[withheld]')) : [];
+  if (kind === 'count') return Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : 0;
+  return null;
+}
+// Every setting, in words, as main has it (the working tree's own, in local, where it differs):
+// settingsAt's block from main, else loadSettings() with source 'working tree'. Never throws on a
+// value of the wrong type: it is withheld.
+function settingsAll() {
+  const ref = mainRef();
+  const m = ref ? settingsAt(ref, { orNull: true }) : null;
+  // a settings file's own block, as written (settingsAt's regex): {} with none, null when it doesn't parse
+  const own = (text) => {
+    const b = text?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+    if (b == null) return {};
+    try { const o = JSON.parse(b); return isObj(o) ? o : {}; } catch { return null; }
+  };
+  const working = own(readText(path.join(projectDir, 'settings.md')));
+  const raw = (m ? own(git(['show', `${ref}:${projectRel}/settings.md`])) : working) ?? {};
+  const now = m ?? loadSettings();
+  const local = m && working ? { ...SETTINGS_DEFAULTS, ...working } : null;
+  // shown values compared; two withheld ones are the same only when what is under them is
+  const same = (w, raw) => (w === WITHHELD ? `withheld ${canonical(raw)}` : canonical(w));
+  const words = Object.keys(SETTINGS_WORDS);
+  const at = (k) => (words.includes(k) ? words.indexOf(k) : Infinity);
+  return [...SETTINGS_KEYS].sort((a, b) => at(a) - at(b)).map((key) => {
+    const named = SETTINGS_WORDS[key];
+    const [group, name, description, kind] = named ?? ['Other', `Unnamed setting (${key})`, '', 'hidden'];
+    const e = { key, group, name, description, shown: kind };
+    const v = shownAs(key, kind, now[key]);
+    Object.assign(e, v === WITHHELD ? { value: null, withheld: true } : { value: v });
+    if (local) {
+      const l = shownAs(key, kind, local[key]);
+      if (same(l, local[key]) !== same(v, now[key])) Object.assign(e, l === WITHHELD ? { local: null, local_withheld: true } : { local: l });
+    }
+    e.set = Object.hasOwn(raw, key);
+    if (!named) e.default = null;
+    else if (kind === 'hidden') e.default = COMMAND_SETTINGS.includes(key) ? SETTINGS_DEFAULTS[key] : null;
+    else { const d = shownAs(key, kind, SETTINGS_DEFAULTS[key] ?? (kind === 'value' ? null : {})); e.default = d === WITHHELD ? null : d; }
+    e.owner_only = OWNER_SETTINGS[key] ?? null;
+    if (!m) e.source = 'working tree';
+    return e;
+  });
+}
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -1126,6 +1251,75 @@ function ladder() {
   return (ladderCache = a);
 }
 const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
+// The rungs as the dashboard says them.
+const RUNG_PLAIN = { 1: 'asks you first', 2: 'asks, goes ahead at a deadline', 3: 'decides and tells you' };
+// Every kind of decision in plain words, for display: the constitution's classes, constitutional and
+// owner-only lists, every class the kit writes itself (OWNER_ACTS, the fleet's, the goal's), and
+// kit-85's settings acts. A name never contains a class id (the one-word ones included), so no id
+// ever shows. One entry per line: test/dashboard-data.test.mjs takes one out to check it is missed.
+const CLASS_WORDS = Object.freeze({
+  'new-feature': "Starting a feature you haven't asked for",
+  'priority-change': 'Changing what gets worked on first',
+  'release-scope': 'Moving a story to a later release',
+  'upstream-pr': 'Proposing an improvement to the kit itself',
+  'release-production': 'Shipping a release to production',
+  'production-migration': 'Changing production data',
+  'incident-fix': 'Fixing a production incident',
+  'production-remediation': 'Restarting, scaling or rolling back production',
+  'merge-word': 'Merging a ticket',
+  'approve-feature-plan': "Approving a feature's plan",
+  'merge-chore': 'Merging a chore',
+  'worker-slots': 'Starting and stopping workers',
+  'replan-within-feature': 'Replanning the tickets of a feature',
+  'add-ticket': 'Adding a ticket',
+  'approve-spec': "Approving a ticket's spec",
+  'approve-plan': "Approving a ticket's plan",
+  'approve-design-change': 'Approving a change to a design',
+  'contract-ruling': 'Ruling on a contract between pieces of work',
+  'improvement-trial': 'Trying out a process improvement',
+  'release-staging': 'Shipping a release to staging',
+  'goal-readiness': 'Saying a goal is ready to start',
+  'apply-default': "Going ahead with a question's default",
+  'withdraw-question': 'Taking back a question',
+  recovery: 'Getting stuck work going again',
+  'carry-answer': 'Applying an earlier answer of yours',
+  drain: 'Letting running work finish and starting nothing new',
+  undrain: 'Starting new work again after a wind-down',
+  'goal-hold': 'Holding a goal or letting it go',
+  'fleet-drain': 'Winding down the whole fleet',
+  'fleet-park': 'Parking the whole fleet',
+  'fleet-undrain': 'Starting the whole fleet again after a wind-down',
+  'fleet-unpark': 'Unparking the whole fleet',
+  'registry-edit': 'Changing a registry entry',
+  'goal-impact': 'Judging how much a goal matters',
+  'orient-noise': 'Ruling some signals to be noise',
+  'gate-add': 'Adding a check',
+  'one-way-door': "A change that can't be undone",
+  'check-override': 'Overriding a failing check',
+  'governance-edit': 'Changing the rules',
+  'process-edit': 'Changing how the team works',
+  'gate-change': 'Changing a check',
+  'goal-change': 'Changing a goal',
+  'strategy-change': 'Changing the strategy',
+  'goal-met': 'Saying a goal is met',
+  'registry-attest': 'Confirming the registry is complete',
+  'new-dependency': 'Adding a new dependency',
+  'artifact-publish': 'Publishing a page',
+  'pane-answer': "Answering the supervisor's terminal",
+  'goal-order': 'Putting the goals in order',
+  'goal-approval': 'Approving a goal',
+  'owner-setting': 'Asking for a setting',
+  'settings-edit': 'Changing one of its own settings',
+});
+// A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
+// in its own words, so the gap is visible and the bare id never is. No class, no name.
+// A known id in another case (decide --class DRAIN) reads as the known class.
+const className = (c) => {
+  if (c == null) return null;
+  const k = String(c).toLowerCase();
+  return Object.hasOwn(CLASS_WORDS, k) ? CLASS_WORDS[k] : `Unnamed kind (${k.replace(/-/g, ' ')})`;
+};
+const withClassName = (row) => ({ ...row, class_name: className(row.class) });
 
 // ===== 3. the schema and the log =====
 
@@ -2874,21 +3068,40 @@ function paneWaitingIn(window) {
 
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
-// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
-// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
-// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
-// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
-// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
-// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
-// is claimed (moved aside) and read again before each key, so however many passes or processes look,
-// and however stale their first read, one press happens per claim, and they stop once the text is gone.
+// window; when the pane's body (its lines above the harness footer, its chrome left out: paneBody)
+// still holds that text's tail, nothing on the pane says the agent is busy, no prompt is up (the
+// caller checked), nobody is at the pane (a tmux client on it that pressed a key lately) and the
+// text is LOST_ENTER_SECONDS old, press Enter and log it. That Enter can be lost the same way (seen
+// on a loaded machine), so the text still sitting there LOST_ENTER_SECONDS after a press gets
+// another, up to LOST_ENTER_TRIES in all, but only while the body is as it was at the last press: a
+// lost Enter on an idle pane changes nothing there (the footer, the agent list and shell counts
+// change on their own, so they're left out), while a reply, a submission or someone typing does.
+// The text is never retyped. The record is claimed (moved aside) and read again before each key, so
+// however many passes or processes look, and however stale their first read, one press happens per
+// claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
 const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
 const squash = (t) => t.replace(/[\s─-╿]+/g, '');
+// The harness's own chrome, not the pane's content: a box-drawing rule (the input box's border), a
+// running-shell count, a token counter (an agent's list line or spinner). They change on an idle
+// pane, so the lost-Enter rescue doesn't digest them. The body is the last 8 lines above the last
+// rule that aren't chrome, shell counts taken out; the text is looked for in the raw lines.
+const PANE_RULE = /^[─-╿]{8,}$/;
+const PANE_TOKENS = /[↑↓]\s*[\d.,]+\s*[km]?\s+tokens\b/i;
+const PANE_SHELLS = new RegExp(PANE_SHELL.source, 'gi');
+const paneNorm = (l) => l.replace(PANE_SHELLS, ' ').replace(/[\s·]+/g, ' ').trim();
+function paneBody(lines, tail) {
+  let end = lines.length;
+  for (let i = end - 1; i >= 0; i--) if (PANE_RULE.test(lines[i].replace(/\s+/g, ''))) { end = i + 1; break; }
+  // text below the last rule: no box under the input, so nothing below it is a footer
+  if (end < lines.length && squash(lines.slice(end).join('')).includes(tail)) end = lines.length;
+  const kept = [];
+  for (let i = end - 1; i >= 0 && kept.length < 8; i--) if (!PANE_TOKENS.test(lines[i]) && paneNorm(lines[i])) kept.unshift(i);
+  return { text: squash(lines.slice(kept[0] ?? end, end).join('')), digest: crypto.createHash('sha1').update(kept.map((i) => paneNorm(lines[i])).join('\n')).digest('hex') };
+}
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
@@ -2915,8 +3128,8 @@ function resendLostEnter(key, target, lines) {
   try { rec = readJson(file); } catch { return; }
   const tail = squash(rec.text ?? '').slice(-40);
   if (!tail || !ripe(rec)) return;
-  const bottom = lines.slice(-8);
-  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
+  const body = paneBody(lines, tail);
+  const digest = body.digest;
   const claimed = `${file}.claim-${process.pid}`;
   const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
   // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
@@ -2932,8 +3145,9 @@ function resendLostEnter(key, target, lines) {
     putBack();
     return null;
   };
-  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
-  if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
+  if (!body.text.includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
+  // every line captured, chrome and all: a footer's or a spinner's busy marker counts
+  if (lines.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
   if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
@@ -4956,6 +5170,75 @@ function strategyState() {
   const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
   return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
 }
+// governance [--json]: the kit's governance and process files, then the project's strategy and
+// exterior, each with its title, its last change on main, and whether it was changed here since the
+// kit was last synced (differs). Read from main, as strategyState is; with no main, or a project
+// outside the repo, from the working tree, with no history. One first-parent walk of main over the
+// listed files and settings.md: a file's first appearance is its newest commit, and the settings.md
+// commits are the sync candidates. A sync commit is one where upstream_base became a different
+// release tag. A file whose newest commit is a sync reads false; one touched after a sync, true; one
+// whose newest commit is older than every sync (the kit was committed before its base was first set)
+// reads null, as with no sync at all: no known release to compare it with. A sync PR that also
+// carried a local edit to a file reads false for that file: the walk can't tell the two apart, and
+// that is accepted (spec §1).
+function governanceView() {
+  const main = projectInRepo ? mainRef() : null;
+  const at = (p) => (main ? git(['show', `${main}:${p}`], projectRoot) : readText(path.join(projectRoot, p)));
+  const kitDirs = ['governance', 'process'];
+  const listed = main
+    ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
+    : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
+  const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
+  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
+  const settingsRel = `${projectRel}/settings.md`;
+  const newest = new Map();
+  const syncs = new Set();
+  // the oldest sync's place in the walk (newest first): a file whose newest commit is past it predates every sync
+  let oldestSync = -1;
+  let shallow = new Set();
+  if (main) {
+    const paths = [...kit, ...project].map((r) => r.path);
+    const walk = (merges) => git(['log', '--first-parent', ...merges, '--format=%x00%H %cI', '--name-only', main, '--', ...paths, settingsRel], projectRoot);
+    const commits = (walk(['--diff-merges=first-parent']) ?? walk(['-m']) ?? '').split('\0').slice(1).map((chunk) => {
+      const [head, ...names] = chunk.split('\n').filter(Boolean);
+      const [sha, iso] = head.split(' ');
+      return { sha, iso, names };
+    }).map((c, i) => ({ ...c, i }));
+    for (const c of commits) for (const p of c.names) if (!newest.has(p)) newest.set(p, c);
+    for (const c of commits.filter((x) => x.names.includes(settingsRel))) {
+      const base = settingsAt(c.sha, { orNull: true })?.upstream_base;
+      if (releaseParts(base) && base !== (settingsAt(`${c.sha}^1`, { orNull: true })?.upstream_base ?? null)) { syncs.add(c.sha); oldestSync = Math.max(oldestSync, c.i); }
+    }
+    const sf = git(['rev-parse', '--git-path', 'shallow'], projectRoot);
+    const text = sf && readText(path.resolve(projectRoot, sf));
+    if (text) shallow = new Set(text.split('\n').filter(Boolean));
+  }
+  const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
+    const text = at(p);
+    // init's untouched strategy template counts as not written, by its marker line, as strategyState
+    // reads it; exterior.md has no template, so it is written once it exists
+    const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
+    const c = newest.get(p);
+    const known = c && !shallow.has(c.sha);
+    const differs = group === 'project' || !syncs.size || !known || c.i > oldestSync ? null : !syncs.has(c.sha);
+    return {
+      group,
+      path: p,
+      title: text?.match(/^# (.+)/m)?.[1].trim() ?? (written ? path.basename(p, '.md') : fallback),
+      last_change: known ? c.iso : '—',
+      differs,
+      written,
+      state: !written ? 'not written yet' : differs ? 'changed here' : null,
+    };
+  });
+  return { files };
+}
+function cmdGovernance() {
+  gitReadCache = new Map();
+  const view = governanceView();
+  if (flags.json) return json(view);
+  for (const r of view.files) out(`${r.group.padEnd(10)} ${r.path}  ${r.state ?? ''}`);
+}
 // A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
 // answered strategy-change question. The one change that needs none is init's untouched template
 // arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
@@ -6517,6 +6800,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
+// owner's move), else waiting (on the supervisor).
+function threadCounts() {
+  const r = { you: 0, waiting: 0, ready: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  return r;
+}
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
@@ -8913,6 +9203,20 @@ function rankQuestions(qs, inbox = qs) {
   const ranks = inboxRanks(inbox);
   return qs.map((q) => ({ ...q, rank: ranks.get(q.id) ?? null })).sort((a, b) => (a.rank?.position ?? Infinity) - (b.rank?.position ?? Infinity) || a.asked_at.localeCompare(b.asked_at));
 }
+// What holds each item that needs the owner: a ticket id, or plan-<feature> for a planner, to the
+// open Inbox question holding it (asked for the ticket or naming it in blocks; for a planner, one of
+// its waiting_on_owner). With several, the first in Inbox order: the one the owner answers first.
+function heldByMap() {
+  const qs = rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go'));
+  const H = new Map();
+  const hold = (key, qid) => { if (!H.has(key)) H.set(key, qid); };
+  const ps = planners();
+  for (const q of qs) {
+    for (const id of [q.ticket, ...(q.blocks ?? [])].filter(Boolean)) hold(id, q.id);
+    for (const p of ps) if (p.waiting_on_owner.includes(q.id)) hold(`plan-${p.feature}`, q.id);
+  }
+  return H;
+}
 function cmdQuestions() {
   let qs = questions();
   const inbox = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
@@ -11036,6 +11340,43 @@ const isHarnessRuntime = (f) => RUNTIME_RES.some(([, re]) => re.test(f));
 // git status --porcelain, less the harness's runtime files
 const workLines = (porcelain) => (porcelain ?? '').split('\n').filter(Boolean).filter((l) => !isHarnessRuntime(l.slice(3).replace(/^"|"$/g, '').split(' -> ').pop()));
 const isRecordKeeping = (slug) => ['log', 'fleet-handoff', 'drain-handoff'].includes(slug) || /^secret-/.test(slug ?? '');
+// Upkeep's last 14 UTC days, oldest first: the chores merged, kit syncs, CI fixes (which mark the day
+// failed) and retros, each once a day. Record-keeping chores aren't upkeep; a retro-* chore's retro
+// counts as its observation. A merge act with no chore ref (an older line, a plan) is passed over.
+function upkeepDays(now = Date.now()) {
+  const DAY = 864e5;
+  const n = new Date(now);
+  const day0 = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  const days = Array.from({ length: 14 }, (_, i) => ({ starts_at: new Date(day0 - (13 - i) * DAY).toISOString(), items: [], failed: false }));
+  const seen = new Set();
+  const add = (at, kind, ref, words) => {
+    const i = Math.floor((Date.parse(at) - (day0 - 13 * DAY)) / DAY);
+    if (!(i >= 0 && i <= 13)) return;
+    const key = `${i}|${kind}|${ref}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    days[i].items.push({ kind, ref, words, at });
+    if (kind === 'ci-fix') days[i].failed = true;
+  };
+  for (const a of logObjects('act')) {
+    if (a.created_by !== 'supervisor' || !Array.isArray(a.refs)) continue;
+    const ref = a.refs[0];
+    if (a.class === 'merge-chore') {
+      const slug = typeof ref === 'string' ? ref.match(/^chore-(.+)$/)?.[1] : null;
+      if (!slug || isRecordKeeping(slug) || /^retro-/.test(slug)) continue;
+      const sync = slug.match(/^devteam-sync-(.+)$/);
+      if (sync) add(a.created_at, 'kit-sync', ref, `Kit synced to ${sync[1]}`);
+      else if (/^(ci-fix|devteam-workflow)/.test(slug)) add(a.created_at, 'ci-fix', ref, `CI fix ${slug}`);
+      else add(a.created_at, 'chore', ref, `Merged chore ${slug}`);
+    } else if (a.class === 'merge-word') {
+      const t = tickets().get(ref);
+      if (t?.feature === CHORES) add(a.created_at, 'chore', ref, `Merged ${t.title}`);
+    }
+  }
+  for (const o of logObjects('observation')) if (o.kind === 'retro' && o.created_by === 'supervisor') add(o.created_at, 'retro', o.id, 'Retro');
+  for (const d of days) d.items.sort((a, b) => a.at.localeCompare(b.at));
+  return days;
+}
 function cmdChore() {
   const [sub, slugName] = positional;
   if (sub === 'start') {
@@ -11707,6 +12048,10 @@ function collectMetrics(since) {
   const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
   const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
   if (phaseNow.size >= 2 && costPhase && totalUsd >= HOTSPOT_MIN_USD && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
+  // what holds each item (heldByMap); a ticket that can still move: active, unmerged, and not on a
+  // parked or let-go goal (that one waits by choice)
+  const H = heldByMap();
+  const live = (id) => { const t = ts.get(id); return !!t && isActive(t) && !mergeShaFor(id) && !['park', 'let-go'].includes(ticketMode(t)); };
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
     // Blocked on an open owner question (asked for it, or naming it in blocks): the next move is the
@@ -11716,9 +12061,20 @@ function collectMetrics(since) {
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
+    // the first hour of the same: blocked with nothing holding it, raised at once
+    else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
     // awaiting the word while an open owner question blocks it: the word waits on the owner
     if (p.phase === 'awaiting-word' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `waiting for the word for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     else if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
+  }
+  // a planner can't log phase blocked: it says so in a blocked message, shown while unanswered. It is
+  // held through waiting_on_owner (a question on its goal, or linking its branch), never --blocks; one
+  // parked, or whose goals are all parked or let go, waits by choice.
+  for (const p of planners()) {
+    const key = `plan-${p.feature}`;
+    if (p.parked || ['park', 'let-go'].includes(modeOf(p.goals.map((g) => logGet(g)).filter((g) => g?.type === 'goal')))) continue;
+    const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
+    if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;
@@ -12089,20 +12445,20 @@ function collectOoda() {
     // supervisor's to accept (the owner sees those too, read-only); only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
-    acts: recent(acts, 60),
-    decisions: decisionRecords().slice(0, 200),
-    trust,
-    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    acts: recent(acts, 60).map(withClassName),
+    decisions: decisionRecords().slice(0, 200).map(withClassName),
+    trust: trust.map(withClassName),
+    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k), class_name: className(k) }])),
     impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
-    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
+    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80).map(withClassName),
     // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
     // under three records the Loop shows these since the log began instead of lines; retros and rung
     // changes mark the chart, so cause sits next to effect
     learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
-    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
+    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${className(t.class)} to ${RUNG_PLAIN[e.rung]}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
     learning: learningRecords().map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
@@ -12112,18 +12468,26 @@ function dashboardData() {
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
+  const H = heldByMap();
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
     gates_configured: Object.keys(settings.gates ?? {}),
-    tickets: deriveStatus(),
+    // held_by: the open question holding it, or null
+    tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
+    // every kind of decision in plain words; each row with a class carries its class_name
+    class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
-    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')),
+    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
-    planners: planners(),
+    planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
+    threads: threadCounts(),
+    upkeep_days: upkeepDays(),
+    // every kit setting, in words; never a credential (settingsAll)
+    settings_all: settingsAll(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
     sensors: sensorStatus(),
@@ -14852,7 +15216,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -15373,6 +15737,10 @@ async function cmdDashboard() {
       if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
       const r = await run(['timeline', id, '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/governance') {
+      const r = await run(['governance', '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     // An artifact a question or ticket links to, read from git (committed content only, never a
     // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
@@ -19106,7 +19474,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -20092,6 +20460,7 @@ Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
+  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
@@ -20134,7 +20503,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
