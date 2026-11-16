@@ -3526,6 +3526,8 @@ const ATTR = {
       size: (v) => (v === 'M' ? 'M (medium)' : v === 'S' ? 'S (small)' : esc(v)), risk: (v) => (v === 'high' ? 'high (two reviewers)' : esc(v)),
       serves: (v) => v.map((x) => `${slink(x)} ${esc(String(DATA.progress?.stories?.[x]?.text ?? '').slice(0, 90))}`).join('<br>'),
       depends_on: (v) => list(v, tlink), superseded_by: (v) => tlink(v), touches: (v) => v.map((x) => `<code>${esc(x)}</code>`).join(', '),
+      // registry link ids (settings links), not a question's link objects: ATTR_COMMON's links drew them empty
+      links: (v) => v.map((x) => `<code>${esc(x)}</code>`).join(', '),
       done_when: (v) => `<ul>${v.map((x) => `<li>${linkify(x)}</li>`).join('')}</ul>`,
     },
   },

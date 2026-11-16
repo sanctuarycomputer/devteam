@@ -706,13 +706,27 @@ export function peekFixture(base, name = 'peek') {
   write(path.join(root, 'docs/guide.md'), '# The guide\n\nHow the checkout works.\n');
   ids.file = 'docs/guide.md';
   ids.governanceFile = 'docs/devteam/governance/constitution.md';
+  // a document with a diagram, an image, a page and a PDF (each file view the peek draws)
+  write(path.join(root, 'docs/flow.md'), '# The flow\n\n```mermaid\nflowchart LR\n  cart --> pay\n```\n');
+  ids.fileDiagram = 'docs/flow.md';
+  fs.writeFileSync(path.join(root, 'docs/dot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
+  ids.fileImage = 'docs/dot.png';
+  write(path.join(root, 'docs/page.html'), '<!doctype html><html><head><meta charset="utf-8"><title>A page</title></head><body><p>a page</p></body></html>\n');
+  ids.fileHtml = 'docs/page.html';
+  const pdfObjs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>'];
+  let pdf = '%PDF-1.4\n';
+  const offs = pdfObjs.map((o, i) => { const at = pdf.length; pdf += `${i + 1} 0 obj\n${o}\nendobj\n`; return at; });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${pdfObjs.length + 1}\n0000000000 65535 f \n${offs.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${pdfObjs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  write(path.join(root, 'docs/brief.pdf'), pdf);
+  ids.filePdf = 'docs/brief.pdf';
   write(path.join(root, 'docs/devteam/project/sensors/reader.mjs'), 'export default async function () { return { events: [] }; }\n');
   write(path.join(root, 'docs/devteam/project/designs/launch-checkout.md'), '# Launch checkout\n\n## TL;DR\n\nAdmins pay by card without help.\n');
   write(path.join(root, 'docs/devteam/project/designs/pay.md'), '# Pay\n\n## TL;DR\n\nAn admin pays by card on one page.\n\n## The rest\n\nDetails.\n');
   const retroDoc = (n) => `# Retro\n\n\`\`\`json devteam-retro\n${JSON.stringify({ merged: n, reverts: n - 1, escaped: 0 })}\n\`\`\`\n`;
   for (const [f, n] of [['2026-11-02', 2], ['2026-11-09', 4], ['2026-11-16', 5]]) write(path.join(root, `docs/devteam/project/retros/${f}.md`), retroDoc(n));
   const sf = path.join(root, 'docs/devteam/project/settings.md');
-  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"sensors": { "web": { "kind": "http", "url": "https://example.com/health", "slo": { "uptime": 0.99, "p95_ms": 300 } }, "reader": { "kind": "probe", "probe": "project/sensors/reader.mjs", "every_minutes": 5 } }, "gates": {}'));
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"links": { "docs-site": { "kind": "url", "url": "https://example.com/docs" } }, "sensors": { "web": { "kind": "http", "url": "https://example.com/health", "slo": { "uptime": 0.99, "p95_ms": 300 } }, "reader": { "kind": "probe", "probe": "project/sensors/reader.mjs", "every_minutes": 5 } }, "gates": {}'));
   ids.sensorHttp = 'web';
   ids.sensorReader = 'reader';
   const art = path.join(root, 'docs/devteam/project/artifacts/peek-mock');
@@ -753,7 +767,7 @@ export function peekFixture(base, name = 'peek') {
   dt(['ticket', 'add', ids.ticketMerged, '--json', JSON.stringify({ title: 'card schema', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: ['PAY-S1'], depends_on: [], touches: ['pay/schema/**'], done_when: ['the schema test passes'] })]);
   ids.ticket = 'pay-01-card';
   dt(['ticket', 'add', ids.ticket, '--json', JSON.stringify({ title: 'card capture', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'high', serves: ['PAY-S1'], depends_on: [ids.ticketMerged], touches: ['pay/**'], done_when: ['the card check passes in CI'],
-    contracts: { provides: ['card-api@1'], consumes: [] }, one_way_doors: ['where card numbers are kept'], notes: 'keep the form on one page' })]);
+    contracts: { provides: ['card-api@1'], consumes: [] }, links: ['docs-site'], one_way_doors: ['where card numbers are kept'], notes: 'keep the form on one page' })]);
   dt(['ticket', 'set', ids.ticket, '--json', JSON.stringify({ held: 'until the processor is chosen' })]);
   dt(['ticket', 'add', 'pay-02-receipt', '--json', JSON.stringify({ title: 'card receipt', feature: 'pay', component: 'pay', kind: 'build', size: 'M', risk: 'normal', serves: ['PAY-S1'], depends_on: [ids.ticket], touches: ['pay/receipt/**'], done_when: ['a receipt is sent'] })]);
   ids.ticketReplaced = 'pay-09-old-form';
@@ -821,6 +835,11 @@ export function peekFixture(base, name = 'peek') {
   dt(['goal', 'impact', ids.goal, '3', '--rationale', 'checkout moves the number the strategy watches']);
   dt(['goal', 'reading', ids.goal, '--value', '4']);
   dt(['goal', 'decide', ids.goal, 'approve', '--force', '--notes', 'go'], null);
+  // a change to the goal you approved, applied as asked (its Approved)
+  ids.qGoalChange = dt(['ask', '--class', 'goal-change', '--goal', ids.goal, '--question', 'Leave chargebacks out of the checkout goal?', '--change', JSON.stringify({ non_goals: ['refunds', 'chargebacks'] }),
+    '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', ...RATE]);
+  dt(['answer', ids.qGoalChange, 'Yes'], null);
+  dt(['goal', 'set', ids.goal, '--approved', ids.qGoalChange]);
   dt(['goal', 'hold', ids.goal, 'drain', '--reason', 'waiting on the processor']);
   // knowledge, observations, a recurring signal, a problem and an incident
   ids.observation = dt(['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
