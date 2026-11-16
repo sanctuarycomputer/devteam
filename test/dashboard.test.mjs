@@ -1476,7 +1476,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder, URL });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute, parseSettingView };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
@@ -1599,6 +1599,22 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
   assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
   assert.equal(A.tWhere(null), 'no subject');
+  // a Settings row's thread is a page subject on #settings?key=<key> (spec §8): named from its quote,
+  // else its key; a key of its own, so each row has its own pin and draft
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }), 'Settings, Workers at once, in all');
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets' }), 'Settings, max_active_tickets', 'the key, with no name to read');
+  assert.notEqual(A.tKey({ kind: 'page', view: '#settings?key=max_active_tickets' }), A.tKey({ kind: 'page', view: '#settings?key=max_active_per_component' }));
+  assert.equal(A.parseSettingView('#settings?key=max_active_tickets'), 'max_active_tickets');
+  for (const v of ['#settings?key=Bad Key', '#settings', '#settings?key=', `#settings?key=a${'b'.repeat(64)}`, '#goals?key=max_active_tickets', null]) assert.equal(A.parseSettingView(v), null, `${v} is no setting view`);
+  // a point on a Settings row: the row, with its plain name, not a spot in the section
+  const setRow = (key) => ({ dataset: { setting: key }, querySelector: (q) => (q === '.set-name' ? { textContent: ' Workers at once,\n in all ' } : null) });
+  const onSet = (row) => ({ closest: (q) => (q === '[data-setting]' ? row : null) });
+  const row1 = setRow('max_active_tickets');
+  const setHit = A.tSubjectAt(onSet(row1), 5, 5, () => sec);
+  assert.deepEqual(plain(setHit.subject), { kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }, 'no at: the row is the spot');
+  assert.equal(setHit.title, 'Setting · Workers at once, in all (max_active_tickets)');
+  assert.equal(setHit.el, row1, 'the row is what the layer outlines and places the card by');
+  assert.equal(A.tSubjectAt(onSet(setRow('Bad Key')), 200, 250, () => sec).subject.view, '#loop/observe', 'a key the page would not write is a spot in its section');
   // one pin per subject, numbered by when its first open thread began; resolved and no-subject threads get none
   const onGoal = { kind: 'item', ref: `goal:${G}` };
   const t = (id, created, subject, status = 'open') => ({ id, created_at: created, subject, status, turns: [] });

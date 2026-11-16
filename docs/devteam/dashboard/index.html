@@ -746,6 +746,7 @@ try {
   .tl-cursor circle { fill: #fff; }
   .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
   .tl-hl.spot { border-radius: 50%; }
+  .tl-marked { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
   .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
   .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
@@ -2869,13 +2870,13 @@ function limitControl(key) {
   const u = SET_UI[key], v = limitShown(key), dis = u.busy ? ' disabled' : '';
   return `<span class="limit" data-limit="${key}"><span class="seg" role="group" aria-label="Limit"><button type="button" aria-pressed="${v === null}" data-limit-none="${key}"${dis}>No limit</button><span class="stepper"><button type="button" class="ghost" data-limit-step="-1" data-k="${key}" aria-label="Fewer"${dis}>−</button><b>${v ?? '–'}</b><button type="button" class="ghost" data-limit-step="1" data-k="${key}" aria-label="More"${dis}>+</button></span></span><button type="button" class="mini" data-limit-save="${key}"${v === limitAsked(key) ? ' hidden' : ''}${dis}>Save</button>${u.busy ? '<span class="msg dim">saving…</span>' : ''}${u.error ? `<span class="err" role="alert">${esc(u.error)}</span>` : ''}</span>`;
 }
-// One setting's row (data-setting: a thread target), and its description under it. A limit's
-// description adds the value in force and the server's label for it.
-function settingRow(e) {
+// One setting's row (data-setting: a thread target, marked while its thread's card is open), and its
+// description under it. A limit's description adds the value in force and the server's label for it.
+function settingRowHtml(e) {
   const limit = LIMITS.includes(e.key);
   const a = limit ? DATA?.asked_settings?.[e.key] : null;
   const desc = [e.description ? esc(e.description) : '', a ? `in force: ${esc(a.shown ?? '')}` : '', a?.label ? `<span class="set-label">${esc(a.label)}</span>` : ''].filter(Boolean).join(' · ');
-  return `<div class="rowline set-row" data-setting="${esc(e.key)}"><span class="t"><span class="set-name">${esc(e.name)}</span> <code class="set-key">${esc(e.key)}</code></span><span class="r">${limit ? limitControl(e.key) : `<span class="set-val">${esc(settingText(e))}</span>`}${e.owner_only ? ` <span class="badge amber" title="${esc(e.owner_only)}">yours to change</span>` : ''}</span></div><div class="set-desc dim" data-setting-desc="${esc(e.key)}">${desc}</div>`;
+  return `<div class="rowline set-row${e.key === SET_MARK ? ' tl-marked' : ''}" data-setting="${esc(e.key)}"><span class="t"><span class="set-name">${esc(e.name)}</span> <code class="set-key">${esc(e.key)}</code></span><span class="r">${limit ? limitControl(e.key) : `<span class="set-val">${esc(settingText(e))}</span>`}${e.owner_only ? ` <span class="badge amber" title="${esc(e.owner_only)}">yours to change</span>` : ''}</span></div><div class="set-desc dim" data-setting-desc="${esc(e.key)}">${desc}</div>`;
 }
 // Ready to move? (fleet status), while the fleet is held: ready or not, each blocker, the parity; no button
 function readyCard(d) {
@@ -2894,6 +2895,8 @@ function readyCard(d) {
 // The page, drawn from DATA on every render, on arriving and when fleet status comes back. It is
 // written only when its HTML changed, and focus goes back to the same control.
 let SET_DRAWN = null;
+// the key of the row whose thread's card is open (the thread layer sets it): drawn marked, so a redraw keeps it
+let SET_MARK = null;
 function drawSettings() {
   const el = $('settings');
   if (!el || !DATA) return;
@@ -2907,7 +2910,7 @@ function drawSettings() {
   }
   const html = readyCard(DATA)
     + (all ? '' : `<p class="dim set-unread">The settings list can't be read from this dashboard's server; only the two worker limits show.</p>`)
-    + [...groups].map(([g, rows]) => `<div class="sec"><div class="lbl">${esc(g)}</div><div class="rows">${rows.map(settingRow).join('')}</div></div>`).join('');
+    + [...groups].map(([g, rows]) => `<div class="sec"><div class="lbl">${esc(g)}</div><div class="rows">${rows.map(settingRowHtml).join('')}</div></div>`).join('');
   if (html === SET_DRAWN) return;
   const ae = document.activeElement;
   const at = ae && el.contains(ae) ? (['limitNone', 'limitSave'].map((n) => ae.dataset[n] && `[data-${n === 'limitNone' ? 'limit-none' : 'limit-save'}="${CSS.escape(ae.dataset[n])}"]`).find(Boolean) || (ae.dataset.limitStep && `[data-limit-step="${CSS.escape(ae.dataset.limitStep)}"][data-k="${CSS.escape(ae.dataset.k)}"]`)) : null;
@@ -2923,7 +2926,7 @@ function saveLimit(key, value) {
   return press(`owner-setting:${key}`, {
     build: () => ({ action: 'owner-setting', body: { key, value } }),
     overlay: {
-      data: (d) => ({ ...d, asked_settings: { ...(d.asked_settings || {}), [key]: { ...(d.asked_settings?.[key] || {}), asked: value, act: 'saving', label: 'Saved; applies once the supervisor lands it' } } }),
+      data: (d) => ({ ...d, asked_settings: { ...(d.asked_settings || {}), [key]: { ...(d.asked_settings?.[key] || {}), asked: value, act: 'saving', label: `${SET_SAVED_LABEL.charAt(0).toUpperCase()}${SET_SAVED_LABEL.slice(1)}` } } }),
       agrees: (raw) => { const a = raw.asked_settings?.[key]; return !!a && !!a.act && a.act !== prevAct && a.asked === value; },
     },
     apply: () => { Object.assign(u, { busy: true, error: null, pending: undefined }); redrawNow(); drawSettings(); },
@@ -5104,6 +5107,9 @@ const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { c
 // equal by a test. Only ever used to replace (it is global).
 const T_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// A Settings row's view (#settings?key=<key>): its key, else null.
+const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
+const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -5116,6 +5122,14 @@ function tSubjectAt(el, x, y, sec) {
     const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
+  }
+  // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
+  // its plain name the quote
+  const row = el?.closest?.('[data-setting]');
+  const key = row?.dataset?.setting ?? '';
+  if (row && parseSettingView(`#settings?key=${key}`)) {
+    const name = tLine(row.querySelector?.('.set-name')?.textContent, 300) || key;
+    return { subject: { kind: 'page', view: `#settings?key=${key}`, quote: tCut(name, 300) }, title: tLine(`Setting · ${name} (${key})`, T_TITLE_MAX), el: row };
   }
   const s = sec(el);
   if (!s) return null;
@@ -5219,6 +5233,8 @@ function tWhere(s) {
   if (!s) return 'no subject';
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
+  // a Settings row: by the name it had when the thread began (the subject's quote), else its key
+  if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
@@ -5365,8 +5381,9 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
-  tlMark(r, hit.subject.kind !== 'item', hit.title, x, y);
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view);
+  const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
+  tlMark(r, !whole, hit.title, x, y);
 }
 function tlHide() {
   TL.hit = null;
@@ -5427,10 +5444,14 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 }, true);
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
+// A Settings row whose thread is open opens that thread (one per row; spec §8).
 function tlStart(hit) {
+  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) : null;
+  const had = key ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
-  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
   tlDraftPrune();
   tlDraw();
   tlEl('tl-c-text')?.focus();
@@ -5443,10 +5464,17 @@ function tlHome(s) {
   const k = s.ref.split(':')[0];
   return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
 }
+// A Settings row's element, as Settings draws it (null when it isn't drawn).
+const settingRow = (key) => (key ? document.querySelector(`#settings [data-setting="${CSS.escape(key)}"]`) : null);
+// The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
+const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
   if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
+  // a Settings row: its box, as an item's; none when it isn't shown
+  const set = tlSettingOf(s);
+  if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
@@ -5517,7 +5545,7 @@ function subjectHead(s) {
 }
 // On its page: an item's <details> opened and the item scrolled into view; the card placed again.
 function tlReveal(s) {
-  const el = s?.kind === 'item' ? tlHome(s) : null;
+  const el = s?.kind === 'item' ? tlHome(s) : tlSettingOf(s)?.el ?? null;
   if (el) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
@@ -5541,7 +5569,7 @@ async function tlRoute(id) {
   const head = subjectHead(t.subject);
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
-  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' });
+  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlSettingOf(t.subject) });
   await tlOpen(id, false);
   TL.route = id;
   tlReveal(t.subject);
@@ -5685,7 +5713,7 @@ function tlCardBody(t) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
+    const note = !t ? '' : (s?.kind === 'item' && !now) || tlSettingOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -5703,6 +5731,7 @@ function tlPlaceCard(t) {
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  else if (tlSettingOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
   card.classList.toggle('sheet', !!p.sheet);
@@ -5751,7 +5780,15 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlCard(); tlDock(); tlPins(); askDraw(); }
+function tlDraw() { tlMarkRow(); tlCard(); tlDock(); tlPins(); askDraw(); }
+// The open thread's Settings row is marked (.tl-marked) while its card is open: Settings draws the mark.
+function tlMarkRow() {
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const key = tlSettingOf(t?.subject)?.key ?? null;
+  if (key === SET_MARK) return;
+  SET_MARK = key;
+  drawSettings();
+}
 // What the supervisor's terminal is asking (a tool that wants a person's yes), as /api/threads has
 // it: at the top of the Inbox, in the dock and on the open thread's card, where the owner was
 // talking. A menu the kit read whole gets a button an option: a click posts the question's digest,
@@ -6000,7 +6037,8 @@ function tlPins() {
     if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
-    const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
+    const corner = g.subject.kind === 'item' || !!tlSettingOf(g.subject);
+    const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   tlPinsInto(box, pins, tlHeld);
@@ -6033,7 +6071,7 @@ function tlDock() {
   const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
+  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlSettingOf(t.subject)?.el === null;
   const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
   const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')

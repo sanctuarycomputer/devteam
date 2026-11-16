@@ -762,3 +762,96 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev(`document.querySelectorAll('${S} .set-row').length`), 2, 'only the limits');
   await p.ev('FLEET.busy = false');
 });
+
+// Every Settings row is a thread target (spec §8, done-when 8): a page subject on #settings?key=<key>
+// with the row's plain name as its quote; a second Shift+click opens that thread; its pin on the row;
+// opened from elsewhere, #settings with the row in view and marked while the card is open.
+test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const { p, port, dt, size, load, onPage } = await pagesFixture(t, 'setthreads', { records: false });
+  const api = async (route) => { const r = await fetch(`http://127.0.0.1:${port}${route}`); assert.equal(r.status, 200, route); return r.json(); };
+  const threads = async () => (await api('/api/threads')).threads;
+  const K = 'max_active_tickets', K2 = 'max_active_per_component';
+  const view = (k) => `#settings?key=${k}`;
+  const row = (k) => `#settings [data-setting="${k}"]`;
+  const box = (sel) => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(sel)})?.getBoundingClientRect(); return r && { left: r.left, right: r.right, top: r.top, bottom: r.bottom }; })()`);
+  const pinOf = (id) => `#tl-pins [data-tl-pin="${id}"]`;
+  const cardKey = () => p.ev(`document.getElementById('tl-card').hidden ? null : document.getElementById('tl-card').dataset.key`);
+  const marked = () => p.ev(`[...document.querySelectorAll('.tl-marked')].map((e) => e.dataset.setting ?? e.tagName)`);
+  // a Shift+click on the row's name (not its control); while the pin shows, the whole row is outlined
+  const shiftClick = async (k) => {
+    const at = await p.at(`${row(k)} .set-name`);
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    await until(() => p.ev("!document.getElementById('tl-cursor').hidden"), 'the pin cursor');
+    const hl = await box('#tl-hl'), r = await box(row(k));
+    assert.ok(Math.abs(hl.left - (r.left - 3)) <= 1 && Math.abs(hl.right - (r.right + 3)) <= 1 && Math.abs(hl.top - (r.top - 3)) <= 1 && Math.abs(hl.bottom - (r.bottom + 3)) <= 1, `the whole row outlined: ${JSON.stringify([hl, r])}`);
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+  };
+
+  await size(1440, 900);
+  await load('#settings');
+  await onPage('settings');
+  await until(() => p.ev(`!!document.querySelector(${JSON.stringify(row(K))}) && !!document.querySelector(${JSON.stringify(row(K2))})`), 'the Settings rows');
+  const all = (await api('/api/data')).settings_all;
+  const name = all.find((e) => e.key === K).name, name2 = all.find((e) => e.key === K2).name;
+  assert.ok(name && name2, 'settings_all names both limits');
+
+  // a Shift+click on the row: a new-thread card titled for the setting, nothing written yet
+  const before = (await threads()).length;
+  await shiftClick(K);
+  await until(async () => await cardKey() === `new:page:${view(K)}:undefined:undefined`, 'a new-thread card on the row');
+  assert.equal(await p.ev("document.getElementById('tl-c-title').textContent"), `Setting · ${name} (${K})`);
+  assert.deepEqual(await p.ev('TL.draft.subject'), { kind: 'page', view: view(K), quote: name });
+  assert.equal(await p.ev("document.activeElement.id"), 'tl-c-text', 'ready to write');
+  assert.equal((await threads()).length, before, 'nothing written yet');
+  // the first words: a thread on the row
+  await p.type('Lower this to two');
+  await p.key('Enter', 8);
+  const th = await until(async () => (await threads()).find((x) => x.subject?.view === view(K)), 'the thread in /api/threads');
+  assert.deepEqual(th.subject, { kind: 'page', view: view(K), quote: name });
+  assert.equal(th.title, `Setting · ${name} (${K})`);
+  const TA = th.id;
+  await until(async () => await cardKey() === TA, 'the card the thread');
+  // its pin on the row, at its top right
+  await until(() => p.ev(`!!document.querySelector(${JSON.stringify(pinOf(TA))})`), "the thread's pin");
+  const onCorner = async (id, k) => { const b = await box(pinOf(id)), r = await box(row(k)); return b && r && b.left <= r.right && r.right <= b.right && b.top <= r.top && r.top <= b.bottom; };
+  await until(() => onCorner(TA, K), "the pin on the row's top right");
+  // the row is marked while its card is open, and the mark survives a redraw of the page
+  await until(async () => JSON.stringify(await marked()) === JSON.stringify([K]), 'the row marked');
+  await p.ev('SET_DRAWN = null; drawSettings()');
+  assert.deepEqual(await marked(), [K], 'still marked after a redraw');
+  await p.click('[data-tl-close]');
+  await until(async () => await cardKey() === null && (await marked()).length === 0, 'closed, the mark gone');
+
+  // a second Shift+click on the row opens that thread: no new card, no new thread
+  const count = (await threads()).length;
+  await shiftClick(K);
+  await until(async () => await cardKey() === TA, 'the same thread opened');
+  assert.equal(await p.ev('TL.draft'), null, 'no draft');
+  assert.equal((await threads()).length, count, 'the thread count unchanged');
+  await p.click('[data-tl-close]');
+  await until(async () => await cardKey() === null, 'closed');
+
+  // the dock's list names the setting
+  await p.click('#tl-pill');
+  await until(() => p.ev(`!!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the dock lists it');
+  assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .tl-r .small').textContent`), `Settings, ${name}`);
+  await p.click('#tl-pill');
+
+  // a thread on the other limit's row has its own pin, on its own row
+  const TB = dt(['thread', 'new', 'Per component too', '--subject', JSON.stringify({ kind: 'page', view: view(K2), quote: name2 })], null).split('\n')[0];
+  await until(() => p.ev(`!!document.querySelector(${JSON.stringify(pinOf(TB))})`), "the other row's pin");
+  await until(() => onCorner(TB, K2), "on the other row's top right");
+  assert.ok(await onCorner(TA, K), 'the first pin still on its row');
+
+  // from Overview, a talk/ link: #settings, the row in view and marked; the mark goes with the card
+  await p.ev("location.hash = '#overview'");
+  await onPage('overview');
+  await p.ev(`location.hash = '#talk/${TA}'`);
+  await until(async () => await cardKey() === TA && JSON.stringify(await p.ev("[...document.querySelectorAll('main > section[data-page]')].filter((s) => getComputedStyle(s).display !== 'none').map((s) => s.dataset.page)")) === '["settings"]', 'the card over Settings');
+  await until(async () => { const r = await box(row(K)); return r.top >= 0 && r.bottom <= await p.ev('innerHeight'); }, 'the row in view');
+  await until(async () => JSON.stringify(await marked()) === JSON.stringify([K]), 'the row marked');
+  await p.click('[data-tl-close]');
+  await until(async () => await cardKey() === null && (await marked()).length === 0, 'closed, the mark gone');
+});
