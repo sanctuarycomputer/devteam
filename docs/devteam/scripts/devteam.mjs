@@ -12878,12 +12878,10 @@ function recoverOne() {
   if (supervisorRunningNow(rec)) return { say: 'already running' };
   if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
   const s = loadSettings();
-  // A fleet whose hold can't be read is not started.
-  let held;
-  try { held = draining() ? 'park' : fleetMode(); } catch { return { say: 'NOT started (could not read whether its fleet is held)' }; }
-  // A pause keeps its supervisor up: it answers threads and questions and keeps the Inbox and log
-  // current while nothing new starts (its prompt says so). Only a fleet held to move is left here.
-  if (held && movingFleet() && !force) return { say: `left stopped (its fleet is held to move: ${held})` };
+  // A supervisor is never down by accident: a parked or drained fleet's comes back like any other.
+  // Under a pause it answers threads and questions and keeps the Inbox and log current; under a move
+  // its prompt has it carry the move on and start nothing. It is down only when someone exited it
+  // (recoverRefusal: stopped before the restart), as the last step of a move does (supervisor.md §12).
   if (!force && !flags['was-up']) {
     const no = recoverRefusal(rec);
     if (no) return { say: no };

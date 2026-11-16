@@ -106,22 +106,19 @@ test("the tick after an upgrade: a bare pane record whose agent runs as the supe
   } finally { F.done(); }
 });
 
-test('recover: a paused fleet\'s supervisor comes back; one held to move stays stopped; --force starts it', { skip: !hasTmux }, async () => {
+test('recover: a parked or drained fleet\'s supervisor comes back, pause or move', { skip: !hasTmux }, async () => {
   const F = fixture('recheld', { resume: CLAUDE_RESUME });
   const server = privateServer();
   try {
     sessionTranscript(F);
     await seenUp(F);
     F.killSession();
-    // a pause (no --move): its supervisor keeps answering questions and the Inbox, so it comes back
-    assert.equal(F.run(['fleet', 'park', '--reason', 'throttling spend']).status, 0);
-    assert.match(recover(F, ['--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), 'a paused fleet\'s supervisor is brought back');
-    assert.equal(F.run(['fleet', 'unpark']).status, 0);
-    assert.equal(F.run(['fleet', 'park', '--move', '--reason', 'moving']).status, 0);
-    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held to move: park\)/);
-    assert.equal(F.run(['fleet', 'unpark']).status, 0);
-    assert.equal(F.run(['fleet', 'drain', '--move', '--reason', 'moving']).status, 0);
-    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held to move: (drain|park)\)/);
+    // a supervisor is down only when someone exits it: a pause, a move or a drain brings it back
+    for (const hold of [['park', '--reason', 'throttling spend'], ['park', '--move', '--reason', 'moving'], ['drain', '--move', '--reason', 'moving']]) {
+      assert.equal(F.run(['fleet', ...hold]).status, 0);
+      assert.match(recover(F, ['--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), `fleet ${hold.join(' ')}: its supervisor comes back`);
+      assert.equal(F.run(['fleet', hold[0] === 'park' ? 'unpark' : 'undrain']).status, 0);
+    }
     assert.deepEqual(F.claudeCalls(), []);
     assert.match(recover(F, ['--force', '--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), '--force: its supervisor decides');
   } finally { server.done(); F.done(); }
@@ -253,7 +250,7 @@ test('recover --machine: every repo recorded on the machine, with each repo\'s o
     write(path.join(reg, 'gone.json'), JSON.stringify({ root: path.join(A.base, 'not-a-repo') }));
     const said = A.run(['recover', '--machine', '--dry-run'], { ...asOwner, ...server.env }).stdout;
     assert.match(said, new RegExp(`^recmach-a: would resume session ${SID}`, 'm'));
-    assert.match(said, /^recmach-b: left stopped \(its fleet is held to move: park\)/m);
+    assert.match(said, /^recmach-b: (would resume|would start fresh|left stopped \(not running before)/m, 'a parked fleet is no reason to leave it stopped');
     assert.match(said, /^not-a-repo: skipped/m);
     // a repo with the kit but no settings isn't adopted: refused on its own too, nothing started
     const kitOnly = path.join(A.base, 'kit-only');
