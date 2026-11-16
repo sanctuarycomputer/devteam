@@ -29,3 +29,11 @@ Not run here: the full suite (shared box; test.yml runs it on every Node major).
 | F1, F2, F3, F5, F6 fixed, each with a test that failed first | `--test-name-pattern="^(the Overview: a header\|the partly-held pill: words\|the tabs: a dot\|the summary counts\|a fully blocked card)"` | red 4/4 before (each on its new assertion), green 5/5 after |
 | Touched files | `test/hub-overview.test.mjs`, `test/hub-measure.test.mjs`, `test/dashboard-shell.test.mjs` | 38/38, 1/1, 16/16 at 14fab7b |
 | CI (test.yml, every job) | `devteam.mjs gate ci -- gh run watch 43813798936 --exit-status` | run 43813798936 at ddd09cc: success |
+
+## After final review 2 (fixes 837ab8f2; head b5caa2a5fdd076e5de04c2521a146cef61750a09)
+
+| Check | Command | Result |
+|---|---|---|
+| F2-1 (a redraw closes the ⋯ menu, focus inside it back to its ⋯; focus elsewhere stays) and F2-2 (another view closes it), with a test that failed first | `--test-name-pattern="^the Overview: a header"` | red before ("closed by the redraw, focus on its ⋯"), green after |
+| Touched file | `test/hub-overview.test.mjs` | 38/38 |
+| CI (test.yml, every job) | `devteam.mjs gate ci -- gh run watch 43816404589 --exit-status` | attempt 1 failed only on Node 24's Chrome jobs, in `dashboard-owner-action.test.mjs` and `next-step.strategy.test.mjs` (index.html's tests; neither file nor index.html is touched here; Node 22's Chrome jobs passed); observation o-20261116-062914926; attempt 2: success, all 17 jobs |
