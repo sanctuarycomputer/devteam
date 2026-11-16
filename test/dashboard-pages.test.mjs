@@ -63,17 +63,27 @@ async function pagesFixture(t, name, { records = true } = {}) {
   await p.send('Emulation.setScrollbarsHidden', { hidden: true });
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
-  const drawn = () => until(() => p.ev("location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')"), 'the dashboard drawn');
+  // p.ev while a navigation may be under way: an evaluate that lands as the old document goes (or before
+  // the new one has a context) is "not yet", not a failure
+  const evNav = (expr) => p.ev(expr).catch((e) => { if (/navigated or closed|Cannot find context|context was destroyed|Execution context/i.test(e.message)) return false; throw e; });
+  const drawn = () => until(() => evNav("location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')"), 'the dashboard drawn');
   // a fresh visit: a new document, so its first route is a cold one
   const load = async (hash) => {
     await p.send('Page.navigate', { url: 'about:blank' });
-    await until(() => p.ev("location.href === 'about:blank'"), 'about:blank');
+    await until(() => evNav("location.href === 'about:blank'"), 'about:blank');
     await p.send('Page.navigate', { url: url(hash) });
+    await drawn();
+  };
+  // a reload: the old document marked, then a new one (without the mark) drawn
+  const reload = async () => {
+    await p.ev('window.__unloaded = false');
+    await p.send('Page.reload');
+    await until(() => evNav('window.__unloaded === undefined'), 'the reload');
     await drawn();
   };
   const shown = () => p.ev("[...document.querySelectorAll('main > section[data-page]')].filter((s) => getComputedStyle(s).display !== 'none').map((s) => s.dataset.page)");
   const onPage = (id) => until(async () => JSON.stringify(await shown()) === JSON.stringify([id]) && await p.ev(`location.hash === ${JSON.stringify(`#${id}`)}`), `page ${id} alone`);
-  return { p, port, root, ids, dt, size, url, drawn, load, shown, onPage };
+  return { p, port, root, ids, dt, size, url, drawn, load, reload, shown, onPage };
 }
 
 test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
@@ -149,7 +159,7 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
 // The router's history (spec §4, done-whens 1d and 2a-2e, the Edge cases): every entry stamped
 // { page, depth, openedHere }, a peek over the page it was clicked on, closing by closeTarget.
 test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
-  const { p, ids, load, drawn, shown, onPage } = await pagesFixture(t, 'history');
+  const { p, ids, load, reload, shown, onPage } = await pagesFixture(t, 'history');
   const T = ids.ticket;
   const state = async () => JSON.parse(await p.ev('JSON.stringify(history.state)'));
   const len = () => p.ev('history.length');
@@ -228,10 +238,7 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   await peekOver(`#ticket/${T}`, 'progress', 'and Back to the peek over Progress');
 
   // 2c: a reload keeps the stamp: the peek reopens over Progress, and × still goes back to it
-  await p.ev('window.__unloaded = false');
-  await p.send('Page.reload');
-  await until(() => p.ev("window.__unloaded === undefined"), 'the reload');
-  await drawn();
+  await reload();
   await peekOver(`#ticket/${T}`, 'progress', 'reloaded: the ticket over Progress');
   const n2c = await len();
   await p.click('#drawer-close');
@@ -345,7 +352,7 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
 // added), closing follows closeTarget; the dock's list goes to the page; a pin keeps it; pins are
 // drawn for the page shown.
 test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
-  const { p, ids, dt, size, load, drawn, shown, onPage } = await pagesFixture(t, 'threads');
+  const { p, ids, dt, size, load, reload, shown, onPage } = await pagesFixture(t, 'threads');
   const T = ids.ticket;
   // started through the owner channel (no role), as test/dashboard.test.mjs starts them
   const thread = (text, subject) => dt(['thread', 'new', text, '--subject', JSON.stringify(subject)], null).split('\n')[0];
@@ -386,10 +393,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.deepEqual(await state(), { page: '#board', depth: 1, openedHere: true }, "its stamp's page is the subject's");
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   // a reload reopens it over Board
-  await p.ev('window.__unloaded = false');
-  await p.send('Page.reload');
-  await until(() => p.ev('window.__unloaded === undefined'), 'the reload');
-  await drawn();
+  await reload();
   await cardOver(TT, 'board', 'reloaded: the card over Board');
   // × goes Back to Goals (closeTarget)
   n = await len();
@@ -673,6 +677,46 @@ test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.match(await p.ev(`document.querySelector('${S} .ready-card').textContent`), /f00dcafe/, 'the fresh parity');
   await until(() => p.ev(`document.querySelector('${checkBtn}')?.disabled === false`), 'Check now enabled again');
   assert.deepEqual(JSON.parse(await p.ev("JSON.stringify(window.__gets.filter((u) => u.startsWith('/api/fleet')))")), ['/api/fleet?fetch=1'], 'exactly one fetch=1 request');
+  assert.ok(await p.ev(`document.activeElement === document.querySelector('${checkBtn}')`), 'focus back on Check now once its check ends');
+
+  // the owner moves on while a check is out: focus stays where they put it (final-2 F2-2)
+  const elsewhere = `${S} [data-limit-none="max_active_tickets"]`;
+  await p.ev("window.__holdCheck = true; window.__releaseCheck = null; true");
+  await p.click(checkBtn);
+  await until(() => p.ev("typeof window.__releaseCheck === 'function'"), 'a second Check now out');
+  await p.ev(`document.querySelector('${elsewhere}').focus()`);
+  const ready = { ready: true, blockers: [], parity: { hash: 'beefcafe' } };
+  await p.ev(`window.__holdCheck = false; window.__releaseCheck(${JSON.stringify(ready)}); true`);
+  await until(() => p.ev(`document.querySelector('${checkBtn}')?.disabled === false`), 'the second check done');
+  assert.ok(await p.ev(`document.activeElement === document.querySelector('${elsewhere}')`), 'focus stays where the owner moved it');
+  assert.equal(await badge(), 'ready to move', 'a good check: ready');
+  assert.ok(await p.ev(`!!document.querySelector('${S} .ready-card .badge.good')`));
+
+  // a failed check after a good one: the old answer marked old, no green ready badge (final-2 F2-1)
+  await p.ev('window.__failCheck = true');
+  await p.click(checkBtn);
+  await until(() => p.ev(`!!document.querySelector('${S} .ready-card .err')`), 'the failed check on the card');
+  assert.equal(await p.ev(`!!document.querySelector('${S} .ready-card .badge.good')`), false, 'no green ready badge after a failed check');
+  assert.match(await badge(), /^last check failed; this is from \S/, 'the badge says the answer is old, and from when');
+  await p.ev('window.__failCheck = false');
+  await p.click(checkBtn);
+  await until(() => p.ev(`!document.querySelector('${S} .ready-card .err') && !FLEET.busy`), 'a good check after the failure');
+  // (this check is the server's own answer, ready or not)
+  assert.match(await badge(), /^(not )?ready to move$/, 'a good check clears the old mark');
+
+  // until the first answer, the card holds a line for what is left and one for the parity, so the rows
+  // below stay put when an answer of one blocker or none comes back
+  const rowTop = () => p.ev(`document.querySelector('${S} [data-setting="max_active_tickets"]').getBoundingClientRect().top`);
+  for (const answer of [{ ready: false, blockers: ['one thing left'], parity: { hash: 'abc12345' } }, { ready: true, blockers: [], parity: { hash: 'abc12345' } }]) {
+    await p.ev("FLEET.data = null; FLEET.error = null; window.__holdCheck = true; window.__releaseCheck = null; true");
+    await p.click(checkBtn);
+    await until(() => p.ev("typeof window.__releaseCheck === 'function'"), 'a check out with nothing known');
+    await until(() => p.ev(`!!document.querySelector('${S} .ready-card .ready-pending')`), 'the pending lines');
+    const top0 = await rowTop();
+    await p.ev(`window.__holdCheck = false; window.__releaseCheck(${JSON.stringify(answer)}); true`);
+    await until(() => p.ev(`!FLEET.busy && !document.querySelector('${S} .ready-card .ready-pending')`), 'the answer drawn');
+    assert.ok(Math.abs((await rowTop()) - top0) <= 1, `the rows stay put as the answer comes (${answer.blockers.length} blockers)`);
+  }
 
   // Check now fails: the error on the card, kept across a redraw; the button back
   await p.ev('window.__failCheck = true');
@@ -853,6 +897,8 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   await load('#settings');
   await onPage('settings');
   await until(() => p.ev(`!!document.querySelector(${JSON.stringify(row(K))}) && !!document.querySelector(${JSON.stringify(row(K2))})`), 'the Settings rows');
+  // arriving checks the fleet (fetch=1): aim at a row only once that read has answered and been drawn
+  await until(() => p.ev('!FLEET.busy && !!FLEET.data && !FLEET.wantFetch'), 'the fleet read settled');
   const all = (await api('/api/data')).settings_all;
   const name = all.find((e) => e.key === K).name, name2 = all.find((e) => e.key === K2).name;
   assert.ok(name && name2, 'settings_all names both limits');

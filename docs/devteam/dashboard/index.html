@@ -2897,15 +2897,22 @@ function settingRowHtml(e) {
 }
 // Ready to move? (fleet status), at all times (ruling m-20261116-095757248): ready or not, each blocker,
 // the parity, and Check now (fetch from origin and check again), disabled while a read is out. On a
-// running fleet with nothing checked yet, the words are today's strip's.
+// running fleet with nothing checked yet, the words are today's strip's. Until the first answer the
+// card holds a line for what is left and one for the parity, so the rows below don't jump when it comes
+// (the common answer: one blocker or none, and the parity). After a failed check the last good answer
+// stays, marked old: the badge goes neutral and says when that check was.
 function readyCard(d) {
   const f = d.fleet || {};
   const held = !!(f.mode || f.op);
   const st = FLEET.data;
-  const badge = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge${held ? ' medium' : ''}">not ready to move</span>`) : held || FLEET.busy ? '<span class="dim">checking…</span>' : '';
+  const old = !!(st && FLEET.error);
+  const badge = old ? `<span class="badge">last check failed; this is from ${esc(when(FLEET.at))}</span>` : st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge${held ? ' medium' : ''}">not ready to move</span>`) : held || FLEET.busy ? '<span class="dim">checking…</span>' : '';
   const rows = [`<div class="rowline"><span class="t">${held ? 'Held' : 'Fleet'}</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
-  if (!st && !held && !FLEET.busy) rows.push('<div class="rowline"><span class="t dim">Park or drain the fleet to move it; Check now says what a move needs</span></div>');
   if (FLEET.error) rows.push(`<div class="rowline"><span class="err" role="alert">Couldn't check: ${esc(FLEET.error)}</span></div>`);
+  if (!st) {
+    rows.push(`<div class="rowline ready-pending"><span class="t dim">${held || FLEET.busy ? 'checking what a move needs…' : 'Park or drain the fleet to move it; Check now says what a move needs'}</span></div>`);
+    rows.push('<div class="rowline ready-pending"><span class="t">Parity</span><span class="r dim">–</span></div>');
+  }
   if (st) {
     for (const b of st.blockers || []) rows.push(`<div class="rowline ready-blocker"><span class="dot amber"></span><span class="t">${linkify(b)}</span></div>`);
     if (!(st.blockers || []).length) rows.push(`<div class="rowline"><span class="dot green"></span><span class="t">Nothing left before a move</span></div>`);
@@ -2944,7 +2951,8 @@ function drawSettings() {
   if (CHECK_PRESSED && !FLEET.busy) {
     CHECK_PRESSED = false;
     const now = document.activeElement;
-    if (!now || now === document.body || el.contains(now)) el.querySelector('[data-checknow]')?.focus({ preventScroll: true });
+    // only if the owner hasn't moved on meanwhile (focus still on the page, or on Check now)
+    if (!now || now === document.body || now.matches?.('[data-checknow]')) el.querySelector('[data-checknow]')?.focus({ preventScroll: true });
   }
 }
 // Save: POST /api/owner-setting { key, value } through press(). The overlay shows the value asked for
