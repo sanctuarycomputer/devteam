@@ -564,8 +564,9 @@ export function statusWithHost(port, route, host, method = 'GET', headers = {}) 
 // merge binds each changed owner-kind entry to an act of that answer with the entry that lands.
 
 // kit-174: the Efficiency page's fixture, as kit-173's /api/data efficiency and metrics.cost carry it.
-// Every week is one kit-173 can emit: weeks[3] had no ticket and no spend (score, parts and per-point
-// figures null), this week has an escaped defect (score 31) unless defect is false (score 72), and the
+// Every week has kit-173's shape and its null rules; the numbers are picked for the page's checks, not
+// worked out by kit-173's scoring (the page computes nothing, so it can't tell): weeks[3] had no ticket
+// and no spend (score, parts and per-point figures null), this week has an escaped defect (score 31) unless defect is false (score 72), and the
 // phase 'spec' is missing from weeks 0 to 2 and 4 to 5. metrics differs from observe in a key each and
 // in output tokens, so a test can tell which one the page drew from.
 export function efficiencyFixture({ defect = true, efficiency = true, source = 'measured', suggestions, waste, weeks, threads = [] } = {}) {
