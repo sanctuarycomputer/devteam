@@ -290,6 +290,10 @@ test('POST /api/owner-setting from the page runs owner-setting', async (t) => {
   for (const v of [7.5, '7', true]) await refused(400, { key: 'max_active_tickets', value: v }, D.own, undefined, /missing or invalid fields/);
   for (const k of ownerKeys()) await refused(400, { key: k, value: 3 }, D.own, undefined, /owner's own setting/);
   await refused(400, { key: 'nope', value: 3 }, D.own, undefined, /not a setting the owner asks for/);
+  // exactly { key, value }, at most 512 bytes: the route's own checks (task-3 T3-1)
+  await refused(400, { key: 'max_active_tickets', value: 7, extra: 1 }, D.own, undefined, /missing or invalid fields: \{ key, value \}/);
+  await refused(400, { key: 'max_active_tickets' }, D.own, undefined, /missing or invalid fields: \{ key, value \}/);
+  await refused(400, `${JSON.stringify(ok7)}${' '.repeat(600)}`, D.own, undefined, /missing or invalid fields/);
   // 7.0 is the number 7 once parsed: accepted
   r = await D.post('{"key":"max_active_tickets","value":7.0}');
   assert.equal(r.status, 200, await r.clone().text());
@@ -342,11 +346,19 @@ test("on a box the save needs the gateway's owner-setting signature, once", asyn
   refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(JSON.stringify({ key: 'max_active_tickets', value: 9 })) }), /signed another/);
   refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(JSON.stringify({ key: 'max_active_per_component', value: 7 })) }), /signed another/);
   refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(body, D.port + 1) }), /another dashboard/);
+  // the signed body is exactly { key, value } (task-3 T3-2)
+  refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(JSON.stringify({ key: 'max_active_tickets', value: 7, extra: 1 })) }), /signed another/);
+  // and the reverse of domain separation at the kit: an owner-setting signature answers no pane (task-3 T3-3)
+  const press = JSON.stringify({ digest: 'a'.repeat(40), option: 1, token: 't' });
+  const pressProof = proofOf(press);
+  const pane = F.run(F.old, ['pane', 'answered', '--owner'], box, JSON.stringify({ digest: 'a'.repeat(40), option: 1, label: 'Yes', first: 'Q', keys: '1', taken: true, proof: pressProof }));
+  assert.notEqual(pane.status, 0);
+  assert.match(pane.err, /its signature is not the gateway's/);
   // a fresh, valid proof for this dashboard: the CLI takes it
   const fresh = cli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(body) }));
   assert.equal(fresh.status, 0, fresh.err);
   const n = settingActs(F).length;
-  for (const b of [JSON.stringify({ key: 'max_active_tickets', value: 7, extra: 1 }), JSON.stringify({ key: 'max_active_tickets', value: 7, pad: 'x'.repeat(600) })]) {
+  for (const b of [JSON.stringify({ key: 'max_active_tickets', value: 7, extra: 1 }), JSON.stringify({ key: 'max_active_tickets', value: 7, pad: 'x'.repeat(600) }), `${body}${' '.repeat(600)}`]) {
     r = await D.post(b, { ...D.own, ...ownerSettingSignature(priv, D.port, Buffer.from(b)) });
     assert.equal(r.status, 400, b.slice(0, 80));
   }
