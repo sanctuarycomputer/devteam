@@ -1,8 +1,8 @@
 # kit-173 verification
 
-Code head verified: `98d8b0e46779e1445d221a348e8f69b8f1060e8f` (PR #284), with origin/main (01533e3, kit-202) merged in. Commits after it add only this ticket's records.
+Code head verified: `a1e4b7022017527795446bbd7e366573efdeef93` (PR #284), with origin/main merged in (kit-202, then kit-205 at ca78a8a). Commits after it add only this ticket's records.
 
-Local runs go through `devteam.mjs gate test -- node --test --test-concurrency=2 test/efficiency-data.test.mjs test/components.test.mjs test/dashboard-data.test.mjs`: gate passed in 66.7s, pass 31, fail 0. The code at that run matches 98d8b0e; the one later commit adds only `pr-body.md`.
+Local runs go through `devteam.mjs gate test -- node --test --test-concurrency=2 test/efficiency-data.test.mjs test/components.test.mjs test/dashboard-data.test.mjs`: at a1e4b70 the gate passed in 114.5s, pass 31, fail 0. The same run at 98d8b0e, before kit-205's merge, passed in 66.7s.
 
 | # | Done-when | Command | Result |
 |---|---|---|---|
@@ -11,7 +11,7 @@ Local runs go through `devteam.mjs gate test -- node --test --test-concurrency=2
 | 3 | Observe, waste, trials | same run | `ok 10 - observe is the window's metrics plus tokens_by_phase`, `ok 11 - waste is the open spend findings` (the newest observation's id, gone once set aside), `ok 12 - trials: spend trials and their state` (newest first, running/kept/dropped, start 1 → now 6, escaped_defects_since 1). |
 | 4 | Suggestions: top five by dollars, plain words, ids SUBJECT_REF-safe, each kind's condition and effect | same run | `ok 13 - smaller model: same version one family down` (vm-loaded family table), `ok 14 - smaller-model condition and effect` ($10; none with settings sonnet at $25 or at 85%), `ok 15 - suggestion ids are valid thread subjects, cut at 110 characters`, `ok 16 - review depth and tighter specs priced per pass` ($12, $8; none without finals), `ok 17 - cache and costly tickets, the top five by dollars, and dropping out` ($58, $30, $20, $14.44, $14; k2 gone after its ack), `ok 18 - no spend items: no price per review pass, so no review suggestions`. The plain-words check (`plainWords`) and the id check against `^[a-z0-9][a-z0-9-]{0,110}$` run on the suggestions these tests produce. |
 | 5 | Golden: dashboard-data.txt gains only `efficiency`; metrics.txt unchanged | same run (`test/components.test.mjs`, G1); `git diff origin/main -- test/fixtures/g1/` | G1 passes. The diff to `dashboard-data.txt` is 180 added lines (the `efficiency` block) and 0 removed lines. `metrics.txt` isn't in the diff. |
-| 6 | test.yml passes on every job | `devteam.mjs gate ci -- gh run watch 43782111428 --exit-status --interval 60`; `gh run view 43782111428 --json conclusion,headSha,jobs` | Gate ci passed in 319.1s. Run 43782111428 at headSha 98d8b0e is `success` on all 17 jobs (kit 18/20/22/24 × chain, rest 1/2, rest 2/2; chrome 1/2 and 2/2 on 22 and 24; tests). |
+| 6 | test.yml passes on every job | `devteam.mjs gate ci -- gh run watch 43782881338 --exit-status --interval 60`; `gh run view 43782881338 --json conclusion,headSha,attempt,jobs` | Run 43782881338 at headSha a1e4b70, attempt 2: `success` on all 17 jobs (kit 18/20/22/24 × chain, rest 1/2, rest 2/2; chrome 1/2 and 2/2 on 22 and 24; tests). Gate ci passed in 71.2s. Attempt 1 failed only `kit (24, chrome 2/2)`: `test/dashboard-owner-action.test.mjs` subtest 5 `Done goes through once every record is done…` timed out waiting for the note to take focus. That test isn't this ticket's, and it passed on the same code on Node 22, on attempt 2, and in run 43782111428 at 98d8b0e (all 17 jobs `success`, before kit-205). |
 
 `test/dashboard-data.test.mjs` (kit-84, now on main) passes 6/6 with this change. Its reads now run inside `dashboardData`'s review-read memo.
 
