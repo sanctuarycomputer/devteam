@@ -691,7 +691,9 @@ try {
   .holdbar button[data-met-id].confirm { color: var(--green-fg); }
   .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
   /* --measure is in ch, so it would grow with .md's larger type: --body-measure is it resolved once, at
-     the body's 13px (a registered length inherits as px), so rendered markdown keeps the body's measure */
+     the body's 13px (a registered length inherits as px), so rendered markdown keeps the body's measure.
+     Where @property is unsupported, --body-measure inherits unresolved and .md takes the older width (its
+     own ch, about 26px wider): harmless */
   @property --body-measure { syntax: '<length>'; inherits: true; initial-value: 0px; }
   body { --body-measure: var(--measure); }
   .md { max-width: var(--body-measure); font-size: 13.5px; line-height: 1.65; }
@@ -3820,9 +3822,12 @@ function peekHide({ now = false } = {}) {
   const end = (e) => { if (e.target === d && e.propertyName === 'transform') hide(); };
   // a slide that never starts (nothing to move) ends at --dur; one that runs ends with its transitionend
   // (or its cancel), however long a loaded machine takes to draw it: once it runs, that timer is off.
-  // One that runs and sends neither (a background tab, the frame's display changed) is caught by the
-  // safety net, well past --dur, which hides only a frame still closed: never shown-but-closed
-  const timer = setTimeout(hide, dur + 100);
+  // Whether it runs is known now (getAnimations flushes the style that removing peek-open changed), not
+  // only when its transitionrun arrives, which a loaded machine can deliver after --dur: hiding then would
+  // cut the slide short. One that runs and sends neither (a background tab, the frame's display changed)
+  // is caught by the safety net, well past --dur, which hides only a frame still closed: never shown-but-closed
+  const sliding = d.getAnimations().some((a) => a.transitionProperty === 'transform');
+  const timer = sliding ? null : setTimeout(hide, dur + 100);
   const net = setTimeout(() => { if (!body.classList.contains('peek-open')) hide(); }, dur + 1000);
   const run = (e) => { if (e.target === d && e.propertyName === 'transform') clearTimeout(timer); };
   d.addEventListener('transitionrun', run);

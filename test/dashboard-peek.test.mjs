@@ -90,11 +90,16 @@ const RECORD = `(() => {
   if (!window.__tr) {
     window.__tr = [];
     for (const type of ['transitionrun', 'transitionend', 'transitioncancel']) d.addEventListener(type, (e) => { if (e.target === d && e.propertyName === 'transform') window.__tr.push({ type, hidden: d.hidden, scrim: document.getElementById('scrim').hidden }); });
-    const cl = document.body.classList, add = cl.add.bind(cl);
+    const cl = document.body.classList, add = cl.add.bind(cl), remove = cl.remove.bind(cl);
     cl.add = (...c) => { if (c.includes('peek-open') && !cl.contains('peek-open')) window.__closed = { transform: getComputedStyle(d).transform, width: d.getBoundingClientRect().width, hidden: d.hidden }; return add(...c); };
+    // closing: at the moment peek-open goes, whether the drawer is shown and its slide out has begun
+    // (getAnimations flushes the style), recorded as it happens rather than polled for afterwards
+    cl.remove = (...c) => { const was = c.includes('peek-open') && cl.contains('peek-open'); const r = remove(...c);
+      if (was) window.__out = { hidden: d.hidden, scrim: document.getElementById('scrim').hidden, sliding: d.getAnimations().some((a) => a.transitionProperty === 'transform') }; return r; };
   }
   window.__tr.length = 0;
   window.__closed = null;
+  window.__out = null;
   return true;
 })()`;
 const TX = (m) => { const v = /^matrix\(([^)]+)\)$/.exec(m); return v ? Number(v[1].split(',')[4]) : NaN; };
@@ -307,9 +312,13 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
         assert.equal(await p.ev("(() => { const e = document.elementFromPoint(6, 450); return e && e.id; })()"), 'scrim', 'the scrim takes the click');
         await p.clickAt(6, 450);
       } else await p.key('Escape');
+      await soon('!!window.__out', `${how}: peek-open removed`);
+      const out = await p.ev('window.__out');
+      assert.equal(out.sliding, true, `${how}: the slide out begins as peek-open goes`);
+      assert.equal(out.hidden, false, `${how}: shown while it slides out`);
+      assert.equal(out.scrim, false, `${how}: and the scrim`);
       await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${how}: the slide out runs`);
-      const run = await p.ev("window.__tr.find((x) => x.type === 'transitionrun')");
-      assert.equal(run.hidden, false, `${how}: shown while it slides out`);
+      assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${how}: still shown when its transitionrun arrives`);
       await soon("window.__tr.some((x) => x.type === 'transitionend')", `${how}: the slide out ended`);
       await soon(isClosed, `${how}: hidden once the slide ends`);
     }
