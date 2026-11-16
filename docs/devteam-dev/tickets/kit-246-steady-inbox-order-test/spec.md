@@ -54,3 +54,4 @@ F1: the Send wait takes the note or `Change it` (above). F2: reworded (above). F
 ## Rulings
 
 - m-20261116-163453784-supervisor: full review depth (the trial's comparison half); reproduce, fix on the page's own signal as kit-244 did, stress ×20, mutation.
+- m-20261116-170723373-supervisor: approve-spec and approve-plan at 06d6637. Build.

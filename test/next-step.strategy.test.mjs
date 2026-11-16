@@ -264,11 +264,20 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     assert.match(await p.ev(`document.querySelector('#goals-list a.title-link[href="#goal/${G}"]').closest('.card').querySelector('.card-head').textContent`), /priority 1 · moves a number the project watches/);
     await p.ev(`void (location.hash = '#goal/${G}')`);
     const key = `imp:${D}`;
-    await soon(`!!document.querySelector('[data-correct="${key}"]')`, 'the goal drawer');
+    // The drawer is drawn at once, before the goal's record (its peek) arrives, and again when it
+    // lands: the record's rows go above "Why it matters" and push Wrong? down. p.click measures and
+    // presses in two steps, so a record landing between them makes the press miss. Wait for the
+    // record: no `.loading` left and `.hist-h` there (a failed load draws no `.hist-h`).
+    await soon(`!!document.querySelector('[data-correct="${key}"]') && !!document.querySelector('#drawer-body .hist-h') && !document.querySelector('#drawer-body .loading')`, 'the goal drawer with its record');
     assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
     await p.click(`[data-correct="${key}"]`);
+    // the click's effect; and the focused field holds the drawer's redraws while the values go in
+    await soon(`document.activeElement === document.querySelector('input[data-reason="${key}"]')`, 'the correction form open');
     await p.ev(`(() => { document.querySelector('select[data-impact="${key}"]').value = '4'; document.querySelector('input[data-reason="${key}"]').value = 'the launch blocker'; })()`);
     await p.click(`[data-correct-send="${key}"]`);
+    // the press was taken: its note, or (once the server has it and a refresh redraws the drawer,
+    // which drops the note) the owner's own value's button
+    await soon(`!!document.querySelector('[data-correct-sent="${key}"]') || document.querySelector('[data-correct="${key}"]')?.textContent === 'Change it'`, 'Correction sent');
     await until(() => json(ok(old, ['goal', 'show', G])).impact.level === 4, 'the owner\'s value');
     assert.deepEqual([json(ok(old, ['goal', 'show', G])).impact.by, json(ok(old, ['goal', 'show', G])).impact.rationale], ['owner', 'the launch blocker']);
   } finally {
