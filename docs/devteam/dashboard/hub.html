@@ -719,7 +719,8 @@ const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); 
 
 // Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
 function showOnly(key) {
-  if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW ? 0 : -1; }
+  // under Settings no tab is selected, but the Overview tab stays in the tab order: the keyboard's way back
+  if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW || key === SETTINGS ? 0 : -1; }
   ovEl.hidden = key !== OVERVIEW;
   setEl.hidden = key !== SETTINGS;
   // the thread layer is the Overview's: its dock, its pins and its polls go with it
@@ -2051,7 +2052,8 @@ window.addEventListener('hashchange', () => {
 tabsEl.addEventListener('keydown', (e) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
   const roots = [...(term ? [TERM] : []), OVERVIEW, ...[...items.keys()].sort(byRoot)];
-  const i = roots.indexOf(selected);
+  // Settings has no tab: its arrows move on from the Overview's
+  const i = roots.indexOf(selected === SETTINGS ? OVERVIEW : selected);
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
   if (next) { select(next); (next === TERM ? term.tab : next === OVERVIEW ? ovTab : items.get(next).tab).focus(); }
 });

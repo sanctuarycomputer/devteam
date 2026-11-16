@@ -746,7 +746,16 @@ test('Settings on a laptop: from the link only, This machine and Notifications',
   await p.until('Settings once more', `!document.getElementById('settings-view').hidden`);
   await new Promise((r) => setTimeout(r, 11000));
   assert.equal(await p.ev(`!document.getElementById('settings-view').hidden && location.hash === '#settings'`), true, 'a draw keeps it');
-  await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview').click()`);
+  // the keyboard gets back: the Overview tab is in the tab order (none selected), and its arrows move on from it
+  const ov = `[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview')`;
+  assert.deepEqual(await p.ev(`[${ov}.tabIndex, ${ov}.getAttribute('aria-selected')]`), [0, 'false']);
+  await p.ev(`${ov}.focus()`);
+  await p.key('ArrowRight');
+  await p.until('the project after the Overview', `/^#settings-[0-9a-f]{6}$/.test(location.hash)`);
+  await p.ev(`location.hash = 'settings'`);
+  await p.until('Settings again', `!document.getElementById('settings-view').hidden`);
+  await p.ev(`${ov}.focus()`);
+  await p.key(' ');
   await p.until('the Overview', `!document.getElementById('overview').hidden && document.getElementById('settings-view').hidden`);
 });
 
@@ -803,6 +812,10 @@ test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async
   const pv = await p.ev(setRow('Previews'));
   assert.deepEqual([pv.key, pv.link], ['previews', ['Previews', `http://previews.localhost:${F.port}/`]]);
   assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Terminal')`), true, 'the Terminal tab stays');
+  // a link keeps the keyboard across the repaint
+  await p.ev(`document.querySelector('#hub-settings a[href^="http://auth."]').focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement?.textContent === 'Manage' && document.activeElement.closest('#hub-settings') !== null`), true, 'Manage keeps focus');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
