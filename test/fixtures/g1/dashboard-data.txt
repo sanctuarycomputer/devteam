@@ -1491,7 +1491,13 @@ exit 0
         }
       ]
     },
-    "trust": null,
+    "trust": {
+      "own": 0,
+      "kinds": 8,
+      "raised": 0,
+      "dropped": 0,
+      "changes": []
+    },
     "senses": null
   },
   "threads": {

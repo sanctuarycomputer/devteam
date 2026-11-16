@@ -10572,10 +10572,28 @@ function autonomyWeek(start, now, x = autonomyContext(now)) {
     with_recommendation: { count, of, share: of ? round2(count / of) : 0 },
   };
 }
+// Trust this week: the kinds of decision it takes alone (rung 3) of all, and each class's effective
+// rung moves dated this week. The walk starts from the capped start and caps every step as rungFor
+// does (its ceiling; incident-fix under release-production where merging releases), so it ends at
+// rungFor(cls); an event that leaves the rung where it was is no move.
+function autonomyTrust(now) {
+  const L = ladder();
+  const from = new Date(mondayOf(now)).toISOString();
+  const fix = releasesOnMerge() ? Math.max(2, rungFor('release-production')) : null;
+  const cap = (cls, r) => { r = Math.min(r, L.classes[cls].ceiling); return cls === 'incident-fix' && fix != null ? Math.min(r, fix) : r; };
+  const classes = Object.keys(L.classes);
+  const changes = [];
+  for (const cls of classes) {
+    let r = cap(cls, L.classes[cls].start);
+    for (const e of rungHistory(cls)) { const next = cap(cls, e.rung); if (e.at >= from && next !== r) changes.push({ class: cls, from: r, to: next, at: e.at, id: e.id }); r = next; }
+  }
+  changes.sort((a, b) => a.at.localeCompare(b.at));
+  return { own: classes.filter((c) => rungFor(c) === 3).length, kinds: classes.length, raised: changes.filter((c) => c.to > c.from).length, dropped: changes.filter((c) => c.to < c.from).length, changes };
+}
 function autonomyData(now = Date.now()) {
   const x = autonomyContext(now);
   const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
-  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: null, senses: null };
+  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: null };
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });

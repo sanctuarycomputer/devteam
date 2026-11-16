@@ -173,7 +173,8 @@ test("the operator's words count nowhere", () => {
   const F = fleetFixture('autonomy-operator');
   try {
     decisionsFixture(F);
-    const HOME = { HOME: F.home };
+    // HISTFILE: no shell the operator's commands start saves a history into the fixture's home as it goes
+    const HOME = { HOME: F.home, HISTFILE: '' };
     fs.mkdirSync(F.home, { recursive: true });
     const lines = () => json(F.ok(F.old, ['log', '--tail', '100000', '--json'], HOME)).length;
     const n = lines();
@@ -205,4 +206,36 @@ test('the server sees new lines', async (t) => {
     const second = await get();
     assert.equal(second.decisions.weeks[11].alone, first.decisions.weeks[11].alone + 1);
   } finally { await dash?.stop(); F.done(); }
+});
+
+test("trust: kinds on its own, and this week's moves", (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const F = fleetFixture('autonomy-trust');
+  try {
+    const hand = handFor(F);
+    const rows = json(F.ok(F.old, ['trust', '--json']));
+    const X = rows.find((r) => r.class !== 'incident-fix' && r.start < 3 && r.ceiling >= 3);
+    const Y = rows.find((r) => r.class !== 'incident-fix' && r.class !== X?.class && r.start < 2 && r.ceiling >= 2);
+    assert.ok(X && Y, `the ladder needs a class that can rise to 3 and another that can rise to 2: ${JSON.stringify(rows.map((r) => [r.class, r.start, r.ceiling]))}`);
+    const trustAnswer = (cls, rung, ms) => {
+      const q = hand('supervisor', { type: 'question', kind: 'trust', class: cls, question: `May I decide ${cls} at rung ${rung}?`, recommendation: 'Yes', options: ['Yes', 'No'] }, ms);
+      hand('owner', { type: 'question', op: 'set', id: q, answer: 'Yes', autonomy: { class: cls, rung } }, ms + 60000);
+      return q;
+    };
+    // an earlier week's move: not counted this week
+    trustAnswer(Y.class, 2, h(9, 1, 9));
+    const qX = trustAnswer(X.class, 3, M + span() * 0.3);
+    const dY = hand('supervisor', { type: 'decision', class: Y.class, what: `went ahead on ${Y.class}`, authority: 'rung', rung: 2 }, M + span() * 0.5);
+    hand('owner', { type: 'decision', op: 'set', id: dY, corrected: { reason: 'too soon' } }, M + span() * 0.6);
+    const T = autonomy(F).trust;
+    assert.equal(T.raised, 1);
+    assert.equal(T.dropped, 1);
+    assert.deepEqual(T.changes.map(({ at, ...c }) => c), [{ class: X.class, from: X.start, to: 3, id: qX }, { class: Y.class, from: 2, to: 1, id: dY }]);
+    assert.ok(T.changes.every((c) => Date.parse(c.at) >= M), JSON.stringify(T.changes));
+    assert.ok(T.changes[0].at <= T.changes[1].at, 'oldest first');
+    const now = json(F.ok(F.old, ['trust', '--json']));
+    assert.equal(T.kinds, now.length);
+    assert.equal(T.own, now.filter((r) => r.rung === 3).length);
+    assert.ok(T.own >= 1, 'X is at 3 now');
+  } finally { F.done(); }
 });
