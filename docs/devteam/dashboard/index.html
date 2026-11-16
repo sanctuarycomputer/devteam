@@ -1255,6 +1255,8 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
+// until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
+// governance file's home below then opens over Overview); kit-93 swaps both
 const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
