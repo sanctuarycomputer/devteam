@@ -1129,6 +1129,240 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 });
 
+// Every row and card opens its record (spec §2.5, AC6): Board's ticket cards and Progress rows on a
+// click and on Enter; every record card's title link and its ⋯ menu's Open in side peek; the one Copy
+// ID; a click on the ⋯, a link or a control inside a card does only its own thing; the ticket and
+// incident cards look as they did as buttons; peekFor gives every opener's hash, which route() opens.
+test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const { p, ids, size, soon, load } = await peekPage(t, { fixture: peekFixture, name: 'rows' });
+  await size(1440, 900);
+  const J = JSON.stringify;
+  // Chrome's navigation throttle (see 'the peeks'): past NAV_BUDGET navigations a fresh visit
+  const NAV_BUDGET = 120;
+  const visit = async (hash) => {
+    await load(hash);
+    await p.ev("window.__navn = 0; navigation.addEventListener('navigate', () => { window.__navn++; }); void 0");
+  };
+  await visit('#board');
+  // on a page, no peek open
+  const on = async (hash) => {
+    if (await p.ev('window.__navn') > NAV_BUDGET) await visit(hash);
+    else if (await p.ev(`location.hash !== ${J(hash)}`)) await p.ev(`location.hash = ${J(hash)}; void 0`);
+    await soon(`location.hash === ${J(hash)} && !document.body.classList.contains('peek-open') && document.getElementById('drawer').hidden`, `on ${hash}`);
+  };
+  // the peek a data-open value names: its hash (decoded) and its kind's drawer, open
+  const opened = (open, what) => soon(`(() => { const want = ${J(open)}; const k = want.startsWith('file?') ? 'file' : want.split('/')[0];
+    return decodeURIComponent(location.hash.slice(1)) === decodeURIComponent(want) && DRAWER.kind === k && !document.getElementById('drawer').hidden; })()`, what);
+  const settle = () => new Promise((r) => setTimeout(r, 200));
+  const enter = (expr) => p.ev(`(() => { const el = ${expr}; el.focus(); if (document.activeElement !== el) return 'not focused';
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); return true; })()`);
+  const CARDS = '.card[data-open], .tcard[data-open]';
+  const T = ids.ticket;
+  const tcard = `document.querySelector('#board [data-ticket="${T}"]')`;
+
+  await t.test('Board: a ticket card opens on a click and on Enter', async () => {
+    await on('#board');
+    await soon(`!!${tcard}`, 'the ticket on Board');
+    assert.deepEqual(await p.ev(`(() => { const c = ${tcard}; return [c.tagName, c.getAttribute('role'), c.getAttribute('tabindex'), decodeURIComponent(c.dataset.open ?? '')]; })()`), ['DIV', 'button', '0', `ticket/${T}`]);
+    await p.ev(`${tcard}.click(); void 0`);
+    await opened(`ticket/${T}`, 'a click on the card');
+    await on('#board');
+    assert.equal(await enter(tcard), true);
+    await opened(`ticket/${T}`, 'Enter on the focused card');
+  });
+
+  await t.test('Progress: a row opens on a click and on Enter', async () => {
+    await on('#progress');
+    await soon("!!document.querySelector('#w-features .row')", 'the feature rows');
+    const rows = await p.ev("[...document.querySelectorAll('#w-features .row, #w-stories .row, #w-releases .row, #w-waves .row')].map((r) => [r.dataset.open ?? null, r.getAttribute('tabindex')])");
+    assert.ok(rows.length >= 4, `rows: ${J(rows)}`);
+    for (const [open, tab] of rows) assert.ok(open && tab === '0', `every Progress row opens its record and takes focus: ${J(rows)}`);
+    for (const [box, kind] of [['#w-features', 'feature'], ['#w-stories', 'story'], ['#w-releases', 'release'], ['#w-waves', 'wave']]) {
+      await on('#progress');
+      const row = `document.querySelector('${box} .row[data-open]')`;
+      const open = await p.ev(`${row}.dataset.open`);
+      assert.equal(open.split('/')[0], kind, `${box}: its record's kind`);
+      await p.ev(`${row}.querySelector('.meter').click(); void 0`);
+      await opened(open, `${box}: a click on the row`);
+      await on('#progress');
+      assert.equal(await enter(row), true);
+      await opened(open, `${box}: Enter on the focused row`);
+    }
+  });
+
+  // each page's record cards, where they are drawn
+  const PLACES = [['#goals', '#goals-list'], ['#board', '#board-cols'], ['#loop?lt=observe', '#observations'], ['#loop?lt=orient', '#debt, #clusters, #problems, #knowledge'], ['#loop?lt=decide', '#decisions-feed'], ['#loop?lt=act', '#acts-feed'], ['#sensors', '#incidents, #sensor-feed']];
+  const cardsIn = (sel) => `[...document.querySelectorAll(${J(sel)})].flatMap((x) => [...x.querySelectorAll(${J(CARDS)})])`;
+  const DEC = 'const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } };';
+
+  await t.test('every record card: one ⋯ with Open in side peek and Copy ID, a title link, no Open link', async () => {
+    const kinds = new Set();
+    for (const [page, sel] of PLACES) {
+      await on(page);
+      await soon(`${cardsIn(sel)}.length > 0`, `${page}: its cards`);
+      const cards = await p.ev(`(() => { ${DEC} return ${cardsIn(sel)}.map((c) => { const own = dec('#' + c.dataset.open);
+        const menus = [...c.querySelectorAll('details.menu')].filter((m) => m.closest(${J(CARDS)}) === c);
+        const pop = menus[0]?.querySelector('.pop'), mo = pop?.querySelector('[data-menu-open]'), cp = pop?.querySelector('[data-copy]');
+        return { open: c.dataset.open, menus: menus.length, openIn: mo ? [mo.textContent.trim(), dec('#' + mo.dataset.menuOpen) === own] : null, copy: cp ? cp.textContent.trim() : null,
+          title: [...c.querySelectorAll('a[href]')].some((a) => dec(a.getAttribute('href')) === own), openLinks: [...c.querySelectorAll('a')].filter((a) => a.textContent.trim() === 'Open').length }; }); })()`);
+      for (const c of cards) {
+        kinds.add(decodeURIComponent(c.open).split('/')[0]);
+        assert.deepEqual(c, { open: c.open, menus: 1, openIn: ['Open in side peek', true], copy: 'Copy ID', title: true, openLinks: 0 }, `${page}: ${c.open}`);
+      }
+    }
+    for (const k of ['goal', 'ticket', 'observation', 'signal', 'problem', 'lesson', 'act', 'decision']) assert.ok(kinds.has(k), `a ${k} card was checked: ${[...kinds].join(' ')}`);
+    // no goal card keeps an Open link (Upkeep's included)
+    await on('#goals');
+    assert.equal(await p.ev("[...document.querySelectorAll('#goals .card.goal a')].filter((a) => a.textContent.trim() === 'Open').length"), 0, 'no Open link on a goal card');
+  });
+
+  await t.test('a card opens on its title, on Open in side peek, and on a click on itself', async () => {
+    for (const [page, sel] of PLACES) {
+      await on(page);
+      const n = await p.ev(`${cardsIn(sel)}.length`);
+      for (let i = 0; i < n; i++) {
+        const card = `${cardsIn(sel)}[${i}]`;
+        await on(page);
+        const open = await p.ev(`${card}.dataset.open`);
+        await p.ev(`(() => { ${DEC} const c = ${card}; [...c.querySelectorAll('a[href]')].find((a) => dec(a.getAttribute('href')) === dec('#' + c.dataset.open)).click(); })(); void 0`);
+        await opened(open, `${page}: ${open}, its title link`);
+        await on(page);
+        await p.ev(`(() => { const d = ${card}.querySelector('details.menu'); d.open = true; window.__menu = d; d.querySelector('[data-menu-open]').click(); })(); void 0`);
+        await opened(open, `${page}: ${open}, Open in side peek`);
+        assert.equal(await p.ev('window.__menu.open'), false, `${page}: ${open}, the menu closes`);
+        if (i === 0) {
+          await on(page);
+          await p.ev(`${card}.click(); void 0`);
+          await opened(open, `${page}: ${open}, a click on the card`);
+        }
+      }
+    }
+    // Enter on a focused goal and incident card (a ticket card's: above)
+    for (const [page, sel] of [['#goals', '#goals-list .card.goal[data-open]'], ['#sensors', '#incidents .tcard[data-open]']]) {
+      await on(page);
+      const el = `document.querySelector(${J(sel)})`;
+      const open = await p.ev(`${el}.dataset.open`);
+      assert.deepEqual(await p.ev(`[${el}.getAttribute('role'), ${el}.getAttribute('tabindex')]`), ['button', '0'], `${sel}: a button to the keyboard`);
+      assert.equal(await enter(el), true);
+      await opened(open, `${sel}: Enter on the focused card`);
+    }
+  });
+
+  await t.test('Copy ID copies the id; copy refused says Select and copy', async (st) => {
+    await on('#board');
+    const copy = (ok) => p.ev(`(async () => { window.__copied = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: (s) => { window.__copied.push(s); return ${ok ? 'Promise.resolve()' : "Promise.reject(new Error('refused'))"}; } } });
+      const d = ${tcard}.querySelector('details.menu'); d.open = true; const b = d.querySelector('[data-copy]'); window.__cp = b; b.click(); return true; })()`);
+    await copy(true);
+    await soon("window.__cp.textContent === 'Copied'", 'Copied');
+    assert.deepEqual(await p.ev('window.__copied'), [T], 'called with the id');
+    await settle();
+    assert.equal(await p.ev("location.hash === '#board' && !document.body.classList.contains('peek-open')"), true, 'Copy ID opens nothing');
+    await st.test('copy refused', async () => {
+      await on('#board');
+      await copy(false);
+      await soon("window.__cp.textContent === 'Select and copy'", 'Select and copy');
+      assert.deepEqual(await p.ev('window.__copied'), [T]);
+      assert.equal(await p.ev(`${tcard}.querySelector('details.menu .kv code')?.textContent`), T, 'the id is there to select');
+    });
+  });
+
+  await t.test('inner controls keep their click', async () => {
+    const still = async (page, what) => {
+      await settle();
+      assert.equal(await p.ev(`location.hash === ${J(page)} && !document.body.classList.contains('peek-open') && document.getElementById('drawer').hidden`), true, `${what}: no peek, still on ${page}`);
+    };
+    // the ⋯: on a ticket card and on a goal card, it only opens its menu
+    for (const [page, el] of [['#board', tcard], ['#goals', "document.querySelector('#goals-list .card.goal[data-open]')"]]) {
+      await on(page);
+      await p.ev(`(() => { const d = ${el}.querySelector('details.menu'); d.open = false; window.__menu = d; d.querySelector('summary').click(); })(); void 0`);
+      await still(page, `${page}: the ⋯`);
+      assert.equal(await p.ev('window.__menu.open'), true, `${page}: the ⋯ opened its menu`);
+      await p.ev('window.__menu.open = false; void 0');
+    }
+    // a hold button on a goal card: its first Let go asks to confirm, and opens nothing
+    await on('#goals');
+    await p.ev(`(() => { const b = document.querySelector('#goals-list .card.goal[data-open] [data-hold-id][data-mode="let-go"]'); window.__hb = b; b.click(); })(); void 0`);
+    await still('#goals', 'Let go');
+    assert.equal(await p.ev('window.__hb.textContent'), 'Confirm let go', 'the hold button did its own thing');
+    // a link to another record inside a card: it goes there, not to the card's own peek
+    let found = null;
+    for (const [page, sel] of PLACES) {
+      await on(page);
+      found = await p.ev(`(() => { ${DEC} const cs = ${cardsIn(sel)};
+        for (let i = 0; i < cs.length; i++) { const own = dec('#' + cs[i].dataset.open); const a = [...cs[i].querySelectorAll('a[href^="#"]')].find((x) => { const h = dec(x.getAttribute('href')); return h !== own && /^#(ticket|goal|feature|lesson|decision|act|problem|observation)\\//.test(h); });
+          if (a) { a.click(); return { own, href: dec(a.getAttribute('href')) }; } }
+        return null; })()`);
+      if (found) break;
+    }
+    assert.ok(found, 'a card with a link to another record');
+    await soon(`decodeURIComponent(location.hash) === ${J(found.href)}`, `the link's own peek: ${found.href}`);
+    await settle();
+    assert.equal(await p.ev('decodeURIComponent(location.hash)'), found.href, `not the card's own ${found.own}`);
+  });
+
+  await t.test('a ticket card and an incident card look as they did as buttons', async () => {
+    // the values today's button.tcard rules and the .tcard rule set (index.html, before kit-88's §2.5):
+    // padding 8px 10px, font-size 12px, text-align left, cursor pointer, border-radius 6px, width 100%
+    const look = (el) => p.ev(`(() => { const c = ${el}, s = getComputedStyle(c), col = c.parentElement, cs = getComputedStyle(col);
+      const inner = col.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      return { padding: s.padding, fontSize: s.fontSize, textAlign: s.textAlign, cursor: s.cursor, borderRadius: s.borderRadius, width: Math.abs(c.getBoundingClientRect().width - inner) < 0.5 }; })()`);
+    const WAS = { padding: '8px 10px', fontSize: '12px', textAlign: 'left', cursor: 'pointer', borderRadius: '6px', width: true };
+    await on('#board');
+    assert.deepEqual(await look(tcard), WAS, 'the Board ticket card');
+    await on('#sensors');
+    await soon("!!document.querySelector('#incidents .tcard')", 'the incident board');
+    assert.deepEqual(await look("document.querySelector('#incidents .tcard')"), WAS, 'the incident card');
+  });
+
+  await t.test('peekFor: every opener kind\'s hash, opened through route()', async () => {
+    const ON = { ticket: 'ticket', goal: 'goal', feature: 'feature', story: 'story', release: 'release', wave: 'wave', milestone: 'milestone', act: 'act', decision: 'decision', retro: 'retro', lesson: 'lesson', problem: 'problem', thread: 'thread', planner: 'planner', q: 'qAnswered', file: 'file', sensor: 'sensorHttp', observation: 'observation', signal: 'signal', learning: 'learning' };
+    assert.deepEqual((await p.ev('Object.keys(OPENERS())')).sort(), Object.keys(ON).sort(), 'a fixture record for every opener kind');
+    const H = peekHashes(ids);
+    for (const [k, key] of Object.entries(ON)) {
+      const h = await p.ev(`peekFor(${J(k)}, ${J(ids[key])})`);
+      assert.equal(h, H[key][1], `${k}: the opener's hash`);
+      await on('#board');
+      await p.ev(`location.hash = peekFor(${J(k)}, ${J(ids[key])}); void 0`);
+      await soon(`DRAWER.kind === ${J(k)} && !document.getElementById('drawer').hidden`, `${k}: route() opens its peek`);
+    }
+    assert.equal(await p.ev("peekFor('file', 'docs/a b.md')"), '#file?path=docs%2Fa%20b.md');
+  });
+});
+
+// The binder's half of dbTable rows (spec §2.5, AC6): on the shell fixture, filled as
+// dashboard-shell.test.mjs fills it, a table bound with an onOpen that opens its row's record in the
+// fixture's drawer opens it on a click and on Enter.
+test('rows and cards: a dbTable row opens its record on the shell fixture', { skip: SKIP, timeout: 120000 }, async (t) => {
+  const INDEX = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  const block = (name) => { const a = INDEX.indexOf(`/* ${name} start */`), b = INDEX.indexOf(`/* ${name} end */`); assert.ok(a >= 0 && b > a, name); return INDEX.slice(a, b + `/* ${name} end */`.length); };
+  const filled = fs.readFileSync(new URL('./fixtures/dashboard-shell.html', import.meta.url), 'utf8')
+    .replace('/* slot: devteam-ui tokens */', () => block('devteam-ui tokens'))
+    .replace('/* slot: devteam-layout */', () => block('devteam-layout'))
+    .replace('/* slot: devteam-shell-js */', () => block('devteam-shell-js'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dbrows-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'dashboard-shell.html');
+  fs.writeFileSync(file, filled);
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `file://${file}` });
+  await until(() => p.ev('window.__ready === true').catch(() => false), 'the fixture drawn');
+  await p.ev(`document.body.classList.remove('peek-open');
+    bindDbTable(document.getElementById('table-card'), { onOpen: (i) => { document.querySelector('#drawer h2').textContent = ROWS[i][0]; document.body.classList.add('peek-open'); } }); void 0`);
+  const peek = () => p.ev("[document.body.classList.contains('peek-open'), document.querySelector('#drawer h2').textContent]");
+  await p.ev("document.querySelector('#table-card tr[data-row=\"1\"] td').click(); void 0");
+  assert.deepEqual(await peek(), [true, 'kit-2'], 'a click on a row opens its record');
+  await p.ev("document.body.classList.remove('peek-open'); void 0");
+  assert.equal(await p.ev(`(() => { const tr = document.querySelector('#table-card tr[data-row="0"]'); tr.focus(); if (document.activeElement !== tr) return false;
+    tr.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); return true; })()`), true, 'the row takes focus');
+  assert.deepEqual(await peek(), [true, 'kit-10'], 'Enter on a focused row opens its record');
+});
+
 // Every label an opener draws has a tooltip (spec §2.2): the row labels the openers and ATTR pass, in
 // index.html's source, each in KEY_TIPS (read from the page's own source in a vm). A label with no
 // entry would draw a key with no title, which the peek test above also catches on the fixture's peeks.
