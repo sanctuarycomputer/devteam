@@ -1497,6 +1497,7 @@ function renderEfficiency(d) {
   const el = $('efficiency');
   if (!el || el.__html === html) return;
   el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
   el.innerHTML = html;
   fitCharts();
 }
@@ -1505,13 +1506,14 @@ function renderEfficiency(d) {
 // .fit[data-fit=<key>] element, drawn by FIT_DRAW[key](el, W) whenever its width changes ----
 const weekName = (i, n) => (i === n - 1 ? 'this week' : i === n - 2 ? 'last week' : `${n - 1 - i} weeks ago`);
 const effNum = (x) => typeof x === 'number' && Number.isFinite(x);
-// a path through the points, broken at every null: one M per run
-const gapPath = (v, X, Y) => { let d = '', run = false; v.forEach((x, i) => { if (!effNum(x)) { run = false; return; } d += `${run ? 'L' : 'M'}${X(i).toFixed(1)},${Y(x).toFixed(1)}`; run = true; }); return d; };
+// a path through the points, broken at every null: one M per run; a run of one point is a dot (a
+// zero-length line, which a round cap shows)
+const gapPath = (v, X, Y) => { let d = ''; v.forEach((x, i) => { if (!effNum(x)) return; const p = `${X(i).toFixed(1)},${Y(x).toFixed(1)}`; d += effNum(v[i - 1]) ? `L${p}` : `M${p}${effNum(v[i + 1]) ? '' : `L${p}`}`; }); return d; };
 // a sparkline over the weeks, scaled to its own non-null values
 function spark(v, label) {
   const xs = v.filter(effNum), max = xs.length ? Math.max(...xs) : 1, min = xs.length ? Math.min(...xs) : 0;
   const X = (i) => 1 + (i * 78) / Math.max(1, v.length - 1), Y = (x) => (max === min ? 9 : 17 - (15 * (x - min)) / (max - min));
-  return `<svg class="sparkline" viewBox="0 0 80 18" width="100%" height="24" preserveAspectRatio="none" role="img" aria-label="${esc(label)}, the last 12 weeks"><path fill="none" stroke="var(--series-1)" stroke-width="1.5" vector-effect="non-scaling-stroke" d="${gapPath(v, X, Y)}"/></svg>`;
+  return `<svg class="sparkline" viewBox="0 0 80 18" width="100%" height="24" preserveAspectRatio="none" role="img" aria-label="${esc(label)}, the last 12 weeks"><path fill="none" stroke="var(--series-1)" stroke-width="1.5" stroke-linecap="round" vector-effect="non-scaling-stroke" d="${gapPath(v, X, Y)}"/></svg>`;
 }
 // a score over the weeks, oldest first, on a fixed axis (0 to 100 by default): this week last and
 // marked, last week marked, its value labelled; a null week has no point and breaks the line
@@ -1545,7 +1547,8 @@ addEventListener('resize', () => requestAnimationFrame(fitCharts));
 
 // Spend by phase, each week: a stacked bar a week, one segment per phase key (the union of the weeks'
 // keys, the most spent over the 12 weeks at the bottom; ties by key); a week with no spend is an empty slot
-const EFF_COLORS = ['var(--series-1)', 'var(--amber)', 'var(--green)', 'var(--red)', 'color-mix(in srgb, var(--series-1) 50%, var(--surface))', 'color-mix(in srgb, var(--amber) 50%, var(--surface))', 'color-mix(in srgb, var(--green) 50%, var(--surface))', 'var(--muted)'];
+// the page's own colour tokens (it defines only --series-1), never the error colour, cycled past the end
+const EFF_COLORS = ['var(--series-1)', 'var(--amber)', 'var(--green)', 'color-mix(in srgb, var(--series-1) 50%, var(--surface))', 'color-mix(in srgb, var(--amber) 50%, var(--surface))', 'color-mix(in srgb, var(--green) 50%, var(--surface))', 'var(--muted)'];
 const effUsd = (x) => `$${+(+x).toFixed(2)}`;
 function effPhaseKeys(weeks) {
   const tot = {};
@@ -1608,9 +1611,49 @@ function effScore(e) {
     <div class="score-mod score-counts">${counts.map(([k, v, s, t]) => `<div class="stat mini"${tip(t)}><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
     <div class="score-mod"><h4 class="props-h">Spend by phase, each week</h4><div class="fit" data-fit="eff-phase" data-v="${sig}"></div></div>`;
 }
-// filled by the task that follows
-function effWaste() { return effNone(); }
-function effSuggestions() { return effNone('None this week'); }
+// Waste: the open spend findings, each in plain words; one with an observation opens its peek (a click
+// or Enter), one whose observation isn't logged yet (id null) is plain text
+const EFF_WASTE_WORDS = { 'cost-hotspot': 'cost hotspot', 'costly-ticket': 'costly ticket', 'low-cache-hit': 'low cache hits', 'cost-per-point-rising': 'cost per point rising', 'unpriced-model': 'unpriced model' };
+function effWaste(ws) {
+  if (!ws.length) return effNone();
+  return `<div class="rows">${ws.map((w) => {
+    const k = Object.hasOwn(EFF_WASTE_WORDS, String(w.kind)) ? EFF_WASTE_WORDS[w.kind] : words(w.kind);
+    const open = typeof w.id === 'string' && w.id ? ` data-open="observation/${esc(w.id)}" tabindex="0" role="link"${subj('observation', w.id, w.detail)}` : '';
+    return `<div class="rowline"${open}><span class="dot amber"></span><span class="t" title="${esc(w.detail)}">${linkify(w.detail)}</span><span class="r">${esc(k)}</span></div>`;
+  }).join('')}</div>`;
+}
+// Suggestions (ported from the mock; kit-99 reuses it for Trust): numbered, no buttons; each item is
+// data-sugg="<id>" and its data-title is the title a thread on it starts with. A click or Enter starts
+// a thread on its page subject, or opens the open one (effSuggGo, below).
+function suggestionsList(xs) {
+  if (!xs.length) return effNone('None this week');
+  return `<ol class="sugg">${xs.map((x, i) => `<li class="sugg-i" data-sugg="${esc(x.id)}" data-title="${esc(tLine(`${x.title} · ${x.what}`, T_TITLE_MAX))}" tabindex="0" role="link" title="Start a thread about this suggestion"><span class="sugg-n">${i + 1}</span><div class="sugg-b"><span class="sugg-go">${esc(x.title)}</span><div class="sugg-w">${esc(x.what)}</div><div class="sugg-m">${esc(x.evidence)}</div><div class="sugg-e">Estimated effect: ${esc(x.effect)}</div></div></li>`).join('')}</ol>`;
+}
+const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smaller-model': 'Use a smaller model where it fits', cache: 'Keep the prompt cache', 'costly-ticket': 'Find where a costly ticket\'s spend went', 'tighter-specs': 'Write tighter specs' };
+function effSuggestions(xs) {
+  return suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(EFF_SUGG_WORDS, String(x.kind)) ? EFF_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
+}
+// A suggestion's thread: on the page subject #efficiency?suggestion=<id> (tlStart opens the open one,
+// as a Settings row's); placed by the item, from the click's point or, by Enter, the item's right edge
+function effSuggGo(it, x, y) {
+  const view = suggView(it.dataset.sugg);
+  const title = tLine(it.dataset.title, T_TITLE_MAX);
+  tlStart({ subject: { kind: 'page', view, quote: tCut(title, 300) }, title, el: it, x, y });
+}
+document.addEventListener('click', (e) => {
+  const it = e.target.closest?.('#efficiency [data-sugg]');
+  if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  if (String(window.getSelection?.() ?? '')) return;
+  e.preventDefault();
+  effSuggGo(it, e.clientX, e.clientY);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  const t = e.target;
+  // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
+  if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
+  if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
+});
 
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
 // Each is [value, label, group]; the board and the burn-up both follow the one chosen.
@@ -5350,6 +5393,10 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 // A Settings row's view (#settings?key=<key>): its key, else null.
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
+// A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
+const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,180})$/;
+const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
+const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -5362,6 +5409,12 @@ function tSubjectAt(el, x, y, sec) {
     const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
+  }
+  // a suggestion on Efficiency (kit-174): its page subject, the item its spot, its title the quote
+  const sg = el?.closest?.('#efficiency [data-sugg]');
+  if (sg) {
+    const title = tLine(sg.dataset.title, T_TITLE_MAX);
+    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg), quote: tCut(title, 300) }, title, el: sg };
   }
   // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
   // its plain name the quote
@@ -5474,6 +5527,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return 'Efficiency';
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
@@ -5621,7 +5675,7 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view);
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null;
   const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, !whole, hit.title, x, y);
 }
@@ -5686,12 +5740,12 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 // the owner sends the first words.
 // A Settings row whose thread is open opens that thread (one per row; spec §8).
 function tlStart(hit) {
-  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) : null;
-  const had = key ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) ?? parseSuggView(hit.subject.view) : null;
+  const had = key !== null ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
   if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
-  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key !== null ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
   tlDraftPrune();
   tlDraw();
   tlEl('tl-c-text')?.focus();
@@ -5709,11 +5763,15 @@ const settingRow = (key) => (key ? document.querySelector(`#settings [data-setti
 // The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
 const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
+// A suggestion's item on Efficiency, for its page subject (kit-174): its id, and the item if drawn
+const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#efficiency [data-sugg="${CSS.escape(id)}"]`) }; };
+// The row a page subject is about: a Settings row's, or a suggestion's
+const tlRowOf = (s) => tlSettingOf(s) ?? tlSuggOf(s);
 function tlTargetRect(s) {
   if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
   // a Settings row: its box, as an item's; none when it isn't shown
-  const set = tlSettingOf(s);
+  const set = tlRowOf(s);
   if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
@@ -5785,7 +5843,7 @@ function subjectHead(s) {
 }
 // On its page: an item's <details> opened and the item scrolled into view; the card placed again.
 function tlReveal(s) {
-  const el = s?.kind === 'item' ? tlHome(s) : tlSettingOf(s)?.el ?? null;
+  const el = s?.kind === 'item' ? tlHome(s) : tlRowOf(s)?.el ?? null;
   if (el) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
@@ -5809,7 +5867,7 @@ async function tlRoute(id) {
   const head = subjectHead(t.subject);
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
-  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlSettingOf(t.subject) });
+  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlRowOf(t.subject) });
   await tlOpen(id, false);
   TL.route = id;
   tlReveal(t.subject);
@@ -5951,9 +6009,9 @@ function tlCardBody(t) {
   const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id), REFUSED.get(q.id)?.n ?? null, (DATA?.questions || []).find((x) => x.id === q.id)?.links_moved ?? null, oaSig((DATA?.questions || []).find((x) => x.id === q.id))])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
-    const now = t ? tlHome(s) : null;
+    const now = t ? tlHome(s) ?? tlSuggOf(s)?.el ?? null : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : (s?.kind === 'item' && !now) || tlSettingOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
+    const note = !t ? '' : (s?.kind === 'item' && !now) || tlRowOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -5971,7 +6029,7 @@ function tlPlaceCard(t) {
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
-  else if (tlSettingOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
+  else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
   card.classList.toggle('sheet', !!p.sheet);
@@ -6277,7 +6335,7 @@ function tlPins() {
     if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
-    const corner = g.subject.kind === 'item' || !!tlSettingOf(g.subject);
+    const corner = g.subject.kind === 'item' || !!tlRowOf(g.subject);
     const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
@@ -6311,7 +6369,7 @@ function tlDock() {
   const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlSettingOf(t.subject)?.el === null;
+  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRowOf(t.subject)?.el === null;
   const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
   const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, effThread, efficiencyFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 // A wait on a condition in the page.
@@ -237,5 +237,188 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
     await fitted('fitted at 1440 again');
     const at1440 = await fits();
     assert.ok(at390[0][2] < at1440[0][2], `narrower at 390: ${JSON.stringify(at390)} ${JSON.stringify(at1440)}`);
+  });
+
+  await t.test('charts draw when their page comes into view', async () => {
+    await load(efficiencyFixture(), '#overview');
+    // drawn while hidden: no width, so no chart yet
+    await soon("!!document.querySelector('#efficiency [data-fit=\"eff-score\"]')", 'the card, hidden');
+    assert.equal(await p.ev("document.querySelectorAll('#efficiency [data-fit] svg').length"), 0);
+    await p.ev("location.hash = '#efficiency'; void 0");
+    await charts();
+  });
+
+  await t.test('charts follow new data', async () => {
+    const now = () => p.ev("[document.querySelectorAll('#efficiency [data-fit=\"eff-score\"] circle').length, document.querySelectorAll('#efficiency [data-fit=\"eff-phase\"] rect[data-i=\"0\"]').length]");
+    assert.deepEqual(await now(), [11, 3]);
+    // an old week changes (only the charts read it): both charts are drawn again
+    await p.ev("window.__fx.efficiency.weeks[0] = { ...window.__fx.efficiency.weeks[0], score: null, usd_by_phase: {} }; void 0");
+    await soon("document.querySelectorAll('#efficiency [data-fit=\"eff-score\"] circle').length === 10 && document.querySelectorAll('#efficiency [data-fit=\"eff-phase\"] rect[data-i=\"0\"]').length === 0", 'both charts redrawn');
+  });
+
+  // ---- Waste and Suggestions ----
+  const SEC = (l) => `[...document.querySelectorAll('#efficiency .card > .sec')].find((s) => s.querySelector('.lbl')?.textContent.trim() === ${JSON.stringify(l)})`;
+  const ITEM = (id) => `document.querySelector('#efficiency [data-sugg="' + CSS.escape(${JSON.stringify(id)}) + '"]')`;
+  const VIEW = (id) => `#efficiency?suggestion=${encodeURIComponent(id)}`;
+  const overlaps = (a, b) => `(() => { const r = ${a}, q = ${b}; return !!r && !!q && r.left < q.right && r.right > q.left && r.top < q.bottom && r.bottom > q.top; })()`;
+  const TH = 't-20261116-000000001-owner';
+  const openThread = (id = 'eff-costly-ticket-kit-87', extra = {}) => effThread({ id: TH, subject: { kind: 'page', view: VIEW(id), quote: 'x' }, title: "Find where a costly ticket's spend went · Look at where kit-87 spent its dollars", ...extra });
+  const focusKey = async (sel, k = 'Enter') => { await p.ev(`(${sel}).focus(); void 0`); await p.key(k); };
+
+  await t.test('waste in plain words', async () => {
+    await load(efficiencyFixture());
+    await drawn();
+    const rows = await p.ev(`[...${SEC('Waste')}.querySelectorAll('.rowline')].map((r) => ({ t: r.textContent.replace(/\\s+/g, ' ').trim(), r: r.querySelector('.r').textContent.trim(), tab: r.getAttribute('tabindex'), open: r.dataset.open ?? null, href: r.getAttribute('href') }))`);
+    assert.equal(rows.length, 2);
+    assert.match(rows[0].t, /kit-87 cost 3\.1× the median merged ticket per point \(\$254\)/);
+    assert.match(rows[1].t, /58% of input tokens were cache reads, under 60%/);
+    assert.deepEqual(rows.map((r) => r.r), ['costly ticket', 'low cache hits']);
+    for (const r of rows) assert.doesNotMatch(r.t, /costly-ticket|low-cache-hit/);
+    assert.equal(rows[0].open, 'observation/o-20261115-000000001-supervisor');
+    assert.deepEqual([rows[1].tab, rows[1].open, rows[1].href], [null, null, null]);
+  });
+
+  await t.test('waste opens its observation', async () => {
+    const first = `${SEC('Waste')}.querySelectorAll('.rowline')[0]`;
+    await p.ev(`(${first}).click(); void 0`);
+    await soon("location.hash.includes('observation/o-20261115-000000001-supervisor')", 'the peek, by a click');
+    await p.ev("location.hash = '#efficiency'; void 0");
+    await soon("location.hash === '#efficiency' && !!document.querySelector('#efficiency .rowline')", 'back on Efficiency');
+    await focusKey(first);
+    await soon("location.hash.includes('observation/o-20261115-000000001-supervisor')", 'the peek, by Enter');
+    await p.ev("location.hash = '#efficiency'; void 0");
+    await soon("location.hash === '#efficiency'", 'back on Efficiency');
+    await p.ev(`(${SEC('Waste')}.querySelectorAll('.rowline')[1]).click(); void 0`);
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('location.hash'), '#efficiency');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('suggestions numbered, in words, no buttons', async () => {
+    const items = await p.ev(`[...${SEC('Suggestions')}.querySelectorAll('.sugg-i')].map((i) => ({ n: i.querySelector('.sugg-n').textContent.trim(), go: i.querySelector('.sugg-go').textContent.trim(), t: i.textContent }))`);
+    assert.deepEqual(items.map((i) => i.n), ['1', '2', '3', '4']);
+    assert.deepEqual(items.map((i) => i.go), ["Find where a costly ticket's spend went", 'Use a smaller model where it fits', 'Keep the prompt cache', 'Suggestion']);
+    for (const i of items) assert.doesNotMatch(i.t, /costly-ticket|smaller-model|mystery/);
+    assert.match(items[1].t, /claude-opus-5-5 took 97% of spend/);
+    assert.match(items[1].t, /Estimated effect: about \$75 a week/);
+    assert.equal(await p.ev(`${SEC('Suggestions')}.querySelectorAll('button').length`), 0);
+  });
+
+  await t.test('a suggestion starts a thread on its page subject and writes nothing else', async () => {
+    await p.ev('window.__writes.length = 0; void 0');
+    await p.click('#efficiency [data-sugg="eff-smaller-model-claude-opus-5-5"]');
+    const view = VIEW('eff-smaller-model-claude-opus-5-5');
+    await soon(`TL.draft?.subject?.view === ${JSON.stringify(view)}`, 'a draft on the suggestion');
+    assert.equal(await p.ev('TL.draft.subject.kind'), 'page');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    await p.click('#tl-c-text');
+    await p.type('try it');
+    await p.click('[data-tl-send]');
+    await soon('window.__writes.length >= 1', 'the thread posted');
+    await new Promise((r) => setTimeout(r, 600));
+    const w = await p.ev('window.__writes');
+    assert.equal(w.length, 1, JSON.stringify(w));
+    assert.equal(w[0].method, 'POST');
+    assert.equal(w[0].url, '/api/thread-new');
+    const body = JSON.parse(w[0].body);
+    assert.equal(body.subject.kind, 'page');
+    assert.equal(body.subject.view, view);
+    await p.ev('tlClose(); void 0');
+    await focusKey(ITEM('eff-cache-prompt-cache'));
+    await soon(`TL.draft?.subject?.view === ${JSON.stringify(VIEW('eff-cache-prompt-cache'))}`, 'a draft by Enter');
+    assert.equal(await p.ev('window.__writes.length'), 1);
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test('an open thread is opened, not doubled', async () => {
+    await load(efficiencyFixture({ threads: [openThread(), effThread({ id: 't-20261116-000000002-owner', status: 'resolved', subject: { kind: 'page', view: VIEW('eff-cache-prompt-cache') } })] }));
+    await drawn();
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH)})`, 'the threads read');
+    await p.click('#efficiency [data-sugg="eff-costly-ticket-kit-87"]');
+    await soon(`TL.open === ${JSON.stringify(TH)}`, 'the open thread opened');
+    assert.equal(await p.ev('TL.draft'), null);
+    await p.ev('tlClose(); void 0');
+    await p.click('#efficiency [data-sugg="eff-cache-prompt-cache"]');
+    await soon(`TL.draft?.subject?.view === ${JSON.stringify(VIEW('eff-cache-prompt-cache'))}`, 'a resolved thread does not count');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test("where a suggestion's thread lives", async () => {
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#efficiency?suggestion=eff-x' })"), 'Efficiency');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#trust' })"), 'Trust Ladder');
+    assert.equal(await p.ev("tWhere({ kind: 'page', view: '#loop/decide' })"), 'Loop, Decide');
+    const s = JSON.stringify(openThread().subject);
+    assert.equal(await p.ev(`tlRowOf(${s}).el === ${ITEM('eff-costly-ticket-kit-87')}`), true);
+    await soon(overlaps(`document.querySelector('#tl-pins [data-tl-pin="${TH}"]')?.getBoundingClientRect()`, `${ITEM('eff-costly-ticket-kit-87')}.getBoundingClientRect()`), 'the pin on the item');
+    // an id a selector or a query would choke on
+    const odd = 'eff-cache-a.b:c&x=1';
+    const one = [{ id: odd, kind: 'cache', what: 'Resume sessions', evidence: 'restarts', effect: 'about $1 a week', usd: 1, per: 'week' }];
+    await load(efficiencyFixture({ suggestions: one }));
+    await drawn();
+    await p.click('#efficiency .sugg-i');
+    await soon("TL.draft?.subject?.view === '#efficiency?suggestion=eff-cache-a.b%3Ac%26x%3D1'", 'the encoded view');
+    await p.ev('tlClose(); void 0');
+    await load(efficiencyFixture({ suggestions: one, threads: [openThread(odd)] }));
+    await drawn();
+    await soon(overlaps(`document.querySelector('#tl-pins [data-tl-pin="${TH}"]')?.getBoundingClientRect()`, `${ITEM(odd)}.getBoundingClientRect()`), 'its pin on the item');
+  });
+
+  await t.test('the dock brings a suggestion thread home', async () => {
+    await load(efficiencyFixture({ threads: [openThread()] }), '#overview');
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH)})`, 'the threads read');
+    assert.equal(await p.ev(`tlTargetRect(${JSON.stringify(openThread().subject)})`), null);
+    assert.equal(await p.ev(`!!document.querySelector('#tl-pins [data-tl-pin="${TH}"]')`), false);
+    await p.ev(`(document.querySelector('[data-tl-open="${TH}"]') ?? { click: () => tlOpen(${JSON.stringify(TH)}) }).click(); void 0`);
+    await soon("location.hash.startsWith('#efficiency') && PAGE_NOW === 'efficiency'", 'on Efficiency');
+    await soon(`(() => { const r = ${ITEM('eff-costly-ticket-kit-87')}.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; })()`, 'the item in view');
+    await soon(overlaps(`document.querySelector('#tl-pins [data-tl-pin="${TH}"]')?.getBoundingClientRect()`, `${ITEM('eff-costly-ticket-kit-87')}.getBoundingClientRect()`), 'the pin on the item');
+  });
+
+  await t.test('no false "changed since"', async () => {
+    await p.ev(`tlOpen(${JSON.stringify(TH)}); void 0`);
+    await soon("!document.getElementById('tl-card').hidden && !!document.getElementById('tl-c-ctx').textContent", 'the card');
+    assert.doesNotMatch(await text('#tl-c-ctx'), /changed since/);
+    await p.ev('tlClose(); void 0');
+    const fx = efficiencyFixture({ threads: [openThread()] });
+    fx.efficiency.suggestions[0].what = 'Look somewhere else';
+    await load(fx);
+    await drawn();
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH)})`, 'the threads read');
+    await p.ev(`tlOpen(${JSON.stringify(TH)}); void 0`);
+    await soon("/changed since/.test(document.getElementById('tl-c-ctx').textContent)", 'changed since, when the title differs');
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test('Enter places the draft by the item', async () => {
+    await load(efficiencyFixture());
+    await drawn();
+    await focusKey(ITEM('eff-cache-prompt-cache'));
+    await soon('!!TL.draft', 'a draft');
+    const at = await soon("(() => { const c = document.getElementById('tl-card'); if (c.hidden) return null; const r = c.getBoundingClientRect(); return [r.left, r.top, r.width, innerWidth, innerHeight]; })()", 'the card placed');
+    for (const v of at) assert.ok(Number.isFinite(v), JSON.stringify(at));
+    assert.ok(at[0] >= 0 && at[0] < at[3] && at[1] >= 0 && at[1] < at[4], JSON.stringify(at));
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test('redraw keeps the suggestion thread', async () => {
+    await load(efficiencyFixture({ threads: [openThread()] }));
+    await drawn();
+    await soon(`TL.threads.some((t) => t.id === ${JSON.stringify(TH)})`, 'the threads read');
+    await p.ev(`tlOpen(${JSON.stringify(TH)}); void 0`);
+    await soon(overlaps(`document.querySelector('#tl-pins [data-tl-pin="${TH}"]')?.getBoundingClientRect()`, `${ITEM('eff-costly-ticket-kit-87')}.getBoundingClientRect()`), 'the pin on the item');
+    await p.ev(`window.__held = ${ITEM('eff-costly-ticket-kit-87')}; window.__held.focus(); void 0`);
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(await p.ev('document.activeElement === window.__held && window.__held.isConnected'), true);
+    assert.equal(await p.ev(overlaps(`document.querySelector('#tl-pins [data-tl-pin="${TH}"]')?.getBoundingClientRect()`, `${ITEM('eff-costly-ticket-kit-87')}.getBoundingClientRect()`)), true);
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test('none this week', async () => {
+    await load(efficiencyFixture({ suggestions: [], waste: [] }));
+    await drawn();
+    assert.match(await p.ev(`${SEC('Suggestions')}.textContent`), /None this week/);
+    assert.match(await p.ev(`${SEC('Waste')}.textContent`), /None/);
+    assert.deepEqual(await p.ev('window.__errors'), []);
   });
 });
