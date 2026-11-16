@@ -4,9 +4,11 @@
 // them, null is "no limit" wherever a cap is read, and a finding stays raised until main has the value.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { monoFixture, json, line, kit } from './lib/kit.mjs';
+import { monoFixture, json, line, kit, freePort, startDashboard, until } from './lib/kit.mjs';
+import { ownerSettingSignature, paneSignature } from '../cloud/gateway.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const month = () => new Date().toISOString().slice(0, 7);
@@ -233,4 +235,111 @@ test('CLASS_WORDS names both classes', () => {
     assert.equal(d.class_words['owner-setting'], 'Asking for a setting');
     assert.equal(d.class_words['settings-edit'], 'Changing one of its own settings');
   } finally { F.done(); }
+});
+
+// A dashboard on a port of its own (--port, so run/dashboard-port isn't written and the port comes
+// from run/dashboard.log), and posts as the page's own.
+async function dashFor(t, F, env = {}) {
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env(env), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const own = { origin: B, 'sec-fetch-site': 'same-origin' };
+  const post = (body, headers = own, type = 'application/json') => fetch(`${B}/api/owner-setting`, { method: 'POST', headers: { 'content-type': type, ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+  return { B, port, own, post };
+}
+const settingActs = (F) => logLines(F).filter((l) => l.type === 'act' && l.class === 'owner-setting');
+const ownerKeys = () => [...fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8').match(/const OWNER_SETTINGS = \{([\s\S]*?)\};/)[1].matchAll(/([a-z_]+):/g)].map((m) => m[1]);
+
+test('POST /api/owner-setting from the page runs owner-setting', async (t) => {
+  const F = monoFixture('owner-setting-route');
+  t.after(() => F.done());
+  F.lines(F.STD);
+  const D = await dashFor(t, F);
+  let r = await D.post({ key: 'max_active_tickets', value: 7 });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal((await r.json()).ok, true);
+  let acts = settingActs(F);
+  assert.equal(acts.length, 1);
+  assert.deepEqual([acts[0].by, acts[0].channel, acts[0].key, acts[0].value], ['owner', 'dashboard', 'max_active_tickets', 7]);
+  r = await D.post({ key: 'max_active_tickets', value: null });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal(settingActs(F).at(-1).value, null);
+  const n = settingActs(F).length;
+  const refused = async (status, body, headers, type, re) => {
+    const x = await D.post(body, headers, type);
+    assert.equal(x.status, status, `${JSON.stringify(body)} ${JSON.stringify(headers)} ${type}`);
+    if (re) assert.match((await x.json()).error, re);
+    assert.equal(settingActs(F).length, n, 'nothing written');
+  };
+  const ok7 = { key: 'max_active_tickets', value: 7 };
+  for (const h of [{}, { origin: D.B }, { 'sec-fetch-site': 'same-origin' }, { origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' }]) await refused(403, ok7, h);
+  await refused(403, ok7, D.own, 'text/plain');
+  for (const v of [0, 21]) await refused(400, { key: 'max_active_tickets', value: v }, D.own, undefined, /whole number from 1 to 20/);
+  for (const v of [7.5, '7', true]) await refused(400, { key: 'max_active_tickets', value: v }, D.own, undefined, /missing or invalid fields/);
+  for (const k of ownerKeys()) await refused(400, { key: k, value: 3 }, D.own, undefined, /owner's own setting/);
+  await refused(400, { key: 'nope', value: 3 }, D.own, undefined, /not a setting the owner asks for/);
+  // 7.0 is the number 7 once parsed: accepted
+  r = await D.post('{"key":"max_active_tickets","value":7.0}');
+  assert.equal(r.status, 200, await r.clone().text());
+  acts = settingActs(F);
+  assert.equal(acts.length, n + 1);
+  assert.equal(acts.at(-1).value, 7);
+});
+
+test("on a box the save needs the gateway's owner-setting signature, once", async (t) => {
+  const F = monoFixture('owner-setting-box');
+  t.after(() => F.done());
+  F.lines(F.STD);
+  const pair = crypto.generateKeyPairSync('ed25519');
+  const priv = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const pub = path.join(F.base, 'thread-key.pub');
+  fs.writeFileSync(pub, pair.publicKey.export({ type: 'spki', format: 'pem' }));
+  const box = { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: pub };
+  const D = await dashFor(t, F, box);
+  const body = JSON.stringify({ key: 'max_active_tickets', value: 7 });
+  const signed = (sig) => D.post(body, { ...D.own, ...sig });
+  let r = await D.post(body);
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /on a box the owner saves settings only through the box's gateway/);
+  const other = crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+  for (const [why, sig] of [
+    ['another key', ownerSettingSignature(other, D.port, Buffer.from(body))],
+    ['another port', ownerSettingSignature(priv, D.port + 1, Buffer.from(body))],
+    ['another body', ownerSettingSignature(priv, D.port, Buffer.from(body.replace('7', '8')))],
+    ['too old', ownerSettingSignature(priv, D.port, Buffer.from(body), Date.now() - 10 * 60000)],
+    ['a pane-answer signature', paneSignature(priv, D.port, Buffer.from(body))],
+  ]) {
+    r = await signed(sig);
+    assert.equal(r.status, 403, why);
+  }
+  assert.equal(settingActs(F).length, 0);
+  const sig = ownerSettingSignature(priv, D.port, Buffer.from(body));
+  r = await signed(sig);
+  assert.equal(r.status, 200, await r.clone().text());
+  const [act] = settingActs(F);
+  assert.deepEqual([act.by, act.value, act.proof.nonce, act.proof.port], ['owner', 7, sig['x-devteam-gateway-nonce'], D.port]);
+  r = await signed(sig);
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /used already/);
+  // the command the dashboard runs: the log remembers the nonce past a restart
+  const cli = (args, input) => F.run(F.old, ['owner-setting', ...args], { ...box, ...DASH }, input);
+  const refusedCli = (args, input, re) => { const x = cli(args, input); assert.notEqual(x.status, 0, x.out); assert.match(x.err, re); };
+  refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: act.proof }), /taken already/);
+  refusedCli(['max_active_tickets', '7'], '', /on a box the owner saves settings only on the dashboard through the box's gateway/);
+  const proofOf = (b, port = D.port) => { const h = ownerSettingSignature(priv, port, Buffer.from(b)); return { port, ts: h['x-devteam-gateway-ts'], nonce: h['x-devteam-gateway-nonce'], sig: h['x-devteam-gateway-sig'], body: Buffer.from(b).toString('base64') }; };
+  refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(JSON.stringify({ key: 'max_active_tickets', value: 9 })) }), /signed another/);
+  refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(JSON.stringify({ key: 'max_active_per_component', value: 7 })) }), /signed another/);
+  refusedCli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(body, D.port + 1) }), /another dashboard/);
+  // a fresh, valid proof for this dashboard: the CLI takes it
+  const fresh = cli(['max_active_tickets', '7'], JSON.stringify({ proof: proofOf(body) }));
+  assert.equal(fresh.status, 0, fresh.err);
+  const n = settingActs(F).length;
+  for (const b of [JSON.stringify({ key: 'max_active_tickets', value: 7, extra: 1 }), JSON.stringify({ key: 'max_active_tickets', value: 7, pad: 'x'.repeat(600) })]) {
+    r = await D.post(b, { ...D.own, ...ownerSettingSignature(priv, D.port, Buffer.from(b)) });
+    assert.equal(r.status, 400, b.slice(0, 80));
+  }
+  assert.equal(settingActs(F).length, n);
+  assert.equal(F.run(F.old, ['log-check'], box).status, 0);
 });

@@ -15794,6 +15794,7 @@ async function cmdDashboard() {
   const paneToken = (digest) => crypto.createHmac('sha256', paneSecret).update(String(digest)).digest('hex');
   const paneTokenOk = (digest, token) => { const want = Buffer.from(paneToken(digest)); const got = Buffer.from(String(token ?? '')); return got.length === want.length && crypto.timingSafeEqual(got, want); };
   const paneNonces = new Map();
+  const ownerSettingNonces = new Map();
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
@@ -16116,17 +16117,18 @@ async function cmdDashboard() {
     const isSecret = name === 'secret';
     const isReview = name === 'review-draft' || name === 'review-answer';
     const isPane = name === 'pane-answer';
+    const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-    if (!action && !isSecret && !isReview && !isPane) return send(res, 404, 'text/plain', 'not found');
+    if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
     // present. A sandboxed frame's request says Origin: null and is refused here too.
-    const strict = isSecret || isReview || isPane;
+    const strict = isSecret || isReview || isPane || isOwnerSetting;
     const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
     // A review's result or draft is up to 4 MB, plus its envelope.
-    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : 20000;
+    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
     // Bytes first, decoded once: a multibyte character split across chunks stays whole.
     const chunks = [];
     let size = 0;
@@ -16137,8 +16139,8 @@ async function cmdDashboard() {
       if (size <= cap) return void chunks.push(c);
       over = true;
       chunks.length = 0;
-      // a review body over the cap is drained and refused with a reason; one far over it is cut off
-      if (!isReview || size > 4 * cap) req.destroy();
+      // a review or setting body over the cap is drained and refused with a reason; one far over it is cut off
+      if (!(isReview || isOwnerSetting) || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
     // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
@@ -16169,6 +16171,32 @@ async function cmdDashboard() {
         if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
         paneAnswering = true;
         paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      }));
+    }
+    // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
+    // gateway's signature for it (each nonce once here, and in the log for the command it runs).
+    if (isOwnerSetting) {
+      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+      return req.on('end', () => guarded(() => {
+        const bad = () => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { key, value }' }));
+        if (over) return bad();
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        if (!isObj(parsed) || Object.keys(parsed).sort().join(',') !== 'key,value' || typeof parsed.key !== 'string' || !(parsed.value === null || Number.isInteger(parsed.value))) return bad();
+        const why = askableProblem(parsed.key, parsed.value);
+        if (why) return send(res, 400, 'application/json', JSON.stringify({ error: why }));
+        let proof = null;
+        if (threadsNeedGateway()) {
+          const boxOnly = "not saved: on a box the owner saves settings only through the box's gateway";
+          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+          const w = ownerSettingProofProblem(proof) ?? (ownerSettingNonces.has(proof.nonce) ? 'its signature was used already' : null);
+          if (w) { log(`refused /api/owner-setting: ${w}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${w})` })); }
+          const now = Date.now();
+          for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
+          ownerSettingNonces.set(proof.nonce, now);
+        }
+        ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
       }));
     }
     if (isSecret) {
@@ -16391,7 +16419,12 @@ const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'su
 // held for the pane while it asked. On a box it takes that only with the gateway's signature for
 // the press, each taken once, as a thread with the operator does.
 const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
-function paneProofProblem(proof, now = Date.now()) {
+// The owner's Save on the Settings page (gateway.mjs, ownerSettingSignature): the same, under its own name.
+const ownerSettingSigned = (port, ts, nonce, body) => Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
+const paneProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, paneSigned, now);
+const ownerSettingProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, ownerSettingSigned, now);
+// Why a dashboard press's proof isn't the gateway's for the bytes `signed` names (null when it is).
+function dashboardProofProblem(proof, signed, now = Date.now()) {
   if (!isObj(proof)) return 'it carries no signature from the gateway';
   const { port, ts, nonce, sig, body } = proof;
   if (!Number.isInteger(port) || typeof ts !== 'string' || !/^\d{13}$/.test(ts) || typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(nonce) || typeof sig !== 'string' || !/^[A-Za-z0-9_-]{80,100}$/.test(sig) || typeof body !== 'string') return 'its signature is malformed';
@@ -16399,11 +16432,18 @@ function paneProofProblem(proof, now = Date.now()) {
   const key = gatewayThreadKey();
   if (!key) return `this box has no gateway key (${BOX_THREAD_KEY})`;
   let ok = false;
-  try { ok = crypto.verify(null, paneSigned(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
+  try { ok = crypto.verify(null, signed(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
   return ok ? null : 'its signature is not the gateway\'s';
 }
 // Another account's artifact is named by its id, never its link: the log is mirrored to git.
 const noArtifactLinks = (t) => String(t ?? '').replace(/(?:https?:\/\/)?claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})\S*/g, 'artifact $1');
+// This checkout's dashboard port, as a number: the last one the running dashboard logged
+// (run/dashboard.log; a pinned --port writes no run/dashboard-port), else run/dashboard-port.
+function ownDashboardPort() {
+  const logged = [...(readText(path.join(runDir, 'dashboard.log')) ?? '').matchAll(/started on http:\/\/127\.0\.0\.1:(\d+)/g)].pop()?.[1];
+  const n = logged ? Number(logged) : readNum(path.join(runDir, 'dashboard-port'));
+  return Number.isInteger(n) ? n : null;
+}
 // The owner's requests for the supervisor's askable settings, oldest first, and the latest one.
 const ownerSettingActs = (key) => logObjects('act').filter((a) => a.class === 'owner-setting' && a.created_by === 'owner' && a.key === key).sort(byTime);
 const latestOwnerSetting = (key) => ownerSettingActs(key).at(-1) ?? null;
@@ -16419,7 +16459,25 @@ function cmdOwnerSetting() {
   const value = parseAskable(arg);
   const why = askableProblem(key, value === undefined ? NaN : value);
   if (why) die(`owner-setting: ${why}`);
-  out(appendLog({ type: 'act', class: 'owner-setting', key, value, what: `asked for ${key} ${value === null ? 'no limit' : value}`, refs: [], reversible: true }, by).id);
+  // On a box every agent can reach the dashboard and run this: only the gateway's signature for the
+  // owner's Save, for this dashboard and exactly this key and value, each taken once (the log keeps
+  // the nonces past a dashboard restart).
+  let proof = null;
+  if (threadsNeedGateway()) {
+    const no = (w) => die(`owner-setting: on a box the owner saves settings only on the dashboard through the box's gateway, which signs the press, and ${w}`);
+    let b = null;
+    try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+    const p = isObj(b) ? b.proof : null;
+    const w = ownerSettingProofProblem(p);
+    if (w) no(w);
+    let signed = null;
+    try { signed = JSON.parse(Buffer.from(p.body, 'base64').toString('utf8')); } catch {}
+    if (!isObj(signed) || Object.keys(signed).sort().join(',') !== 'key,value' || signed.key !== key || signed.value !== value) no('the gateway signed another save than this one');
+    if (p.port !== ownDashboardPort()) no('that signature is for another dashboard');
+    if (logObjects('act').some((a) => a.class === 'owner-setting' && a.proof?.nonce === p.nonce)) no('that save was taken already');
+    proof = { port: p.port, ts: p.ts, nonce: p.nonce, sig: p.sig, body: p.body };
+  }
+  out(appendLog({ type: 'act', class: 'owner-setting', key, value, what: `asked for ${key} ${value === null ? 'no limit' : value}`, refs: [], reversible: true, ...(proof ? { proof } : {}) }, by).id);
 }
 function cmdPane() {
   const sub = positional[0];
