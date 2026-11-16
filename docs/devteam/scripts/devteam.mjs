@@ -10410,6 +10410,8 @@ const weekStartOf = (week) => { const [y, w] = String(week).split('-W').map(Numb
 // process-wide memos) reset for fn and put back after. Git facts (mergedAt) replay as they are.
 function withLogAt(cut, fn) {
   const full = readLog();
+  // no line newer than cut (this week's cut is in the future): the log as it is, with no refold
+  if (full.lines.every((l) => l.at <= cut)) return fn();
   const saved = { logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX };
   try {
     const lines = full.lines.filter((l) => l.at <= cut);
@@ -10512,6 +10514,115 @@ function learningRecords() {
   const byWeek = new Map();
   for (const o of logObjects('observation').filter((x) => isLearningRecord(x) && /^\d{4}-W\d{2}$/.test(x.week ?? '') && ['informed', 'autonomous', 'trusted'].every((k) => x.figures?.[k] && typeof x.figures[k] === 'object')).sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b))) if (!byWeek.has(o.week)) byWeek.set(o.week, o);
   return [...byWeek.values()];
+}
+// ===== the Trust Score's data (the dashboard design's Autonomy pages › Trust; kit-98) =====
+
+// The fleet's own authority: a call made without asking. An owner's answer or a default was asked.
+const OWN_AUTHORITY = ['rung', 'standing-rule', 'constitution'];
+// The owner's standing rules: a preference, or a rule for a kind of decision; a fact decides nothing.
+const isOwnerRule = (k) => writerClass(k.created_by) === 'owner' && (k.kind === 'preference' || String(k.scope ?? '').startsWith('class:'));
+const round2 = (x) => Math.round(x * 100) / 100;
+// What every week reads, read once per request: the stored records by week, the log's first line,
+// the fleet's calls, the questions, the owner's goal decisions and standing rules, and the
+// intervals in which a question waited on the owner (open ones end now).
+function autonomyContext(now) {
+  const first = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
+  const qs = questions();
+  const goalAts = [];
+  // every goal, Upkeep's too (logObjects leaves it out; decisionRecords reads it)
+  for (const g of readLog().byType.get('goal') ?? []) for (const u of g.updates ?? []) if (writerClass(u.by) === 'owner' && (u.decision || u.status !== undefined || u.hold !== undefined)) goalAts.push(u.at);
+  return {
+    now, first, qs, goalAts, merges: mergeTimes(),
+    records: new Map(learningRecords().map((r) => [r.week, r])),
+    calls: calls().map((c) => ({ c, own: OWN_AUTHORITY.includes(authorityOfCall(c)), corrected: correctionOf(c)?.at ?? null })),
+    ruleAts: logObjects('knowledge').filter(isOwnerRule).map((k) => k.created_at),
+    waits: qs.map((q) => [Date.parse(q.asked_at), q.answered_at ? Date.parse(q.answered_at) : now]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]),
+  };
+}
+// One week of the score (start: its Monday 00:00 UTC, ms). merged, corrected and with the
+// recommendation come from its learning record: stored, else computed for this week or a week since
+// the log began, else nothing (a missing figure reads 0). The rest is counted from the log on read.
+function autonomyWeek(start, now, x = autonomyContext(now)) {
+  const week = isoWeekOf(start), end = start + WEEK;
+  const fromIso = new Date(start).toISOString(), cutIso = new Date(end - 1).toISOString();
+  const inW = (at) => typeof at === 'string' && at >= fromIso && at <= cutIso;
+  const rec = x.records.get(week) ?? null;
+  const live = !rec && end > x.first ? learningFigures(week, x.merges) : null;
+  const R = rec?.figures ?? live?.figures ?? {};
+  const num = (v) => (Number.isFinite(v) ? v : 0);
+  const alone = x.calls.filter(({ c, own, corrected }) => own && inW(c.created_at) && !(corrected && corrected <= cutIso)).length;
+  const settled = x.qs.filter((q) => ['answered', 'defaulted'].includes(q.status) && inW(q.answered_at));
+  const asked = settled.length + x.goalAts.filter(inW).length + x.ruleAts.filter(inW).length;
+  const corrected = num(R.trusted?.corrections);
+  const decisions = alone + asked + corrected;
+  const answers = settled.filter((q) => q.status === 'answered').length;
+  const merged = num(R.autonomous?.merged);
+  // a declared re-ask, less one that only follows a withdrawn question whose linked page moved
+  const linksMoved = (q) => x.qs.some((p) => p.status === 'withdrawn' && p.answered_at <= q.asked_at && (p.class ?? null) === (q.class ?? null) && nearlySameQuestion(p.question, q.question) && artifactLinksMoved(p));
+  const askedAgain = x.qs.filter((q) => q.new_because && inW(q.asked_at) && !linksMoved(q)).length;
+  // the hours in which at least one question waited: the union of the intervals, clipped to the week
+  let waited = 0, upto = start;
+  for (const [a, b] of x.waits) { const s = Math.max(a, upto), e = Math.min(b, end); if (e > s) { waited += e - s; upto = e; } }
+  const count = num(R.trusted?.agreed), of = num(R.trusted?.answered);
+  return {
+    starts_at: fromIso, record: rec?.id ?? null,
+    alone, asked, corrected, decisions, score: decisions ? Math.round((100 * alone) / decisions) : 0,
+    lessons: start === mondayOf(now) ? live?.lists.knowledge ?? [] : [],
+    merged, answers, merged_per_answer: round2(merged / Math.max(1, answers)),
+    asked_again: askedAgain, hours_waiting: Math.round(waited / 360000) / 10,
+    with_recommendation: { count, of, share: of ? round2(count / of) : 0 },
+  };
+}
+// Trust this week: the kinds of decision it takes alone (rung 3) of all, and each class's effective
+// rung moves dated this week. The walk starts from the capped start and caps every step as rungFor
+// does (its ceiling; incident-fix under release-production where merging releases), so it ends at
+// rungFor(cls); an event that leaves the rung where it was is no move.
+function autonomyTrust(now) {
+  const L = ladder();
+  const from = new Date(mondayOf(now)).toISOString();
+  const fix = releasesOnMerge() ? Math.max(2, rungFor('release-production')) : null;
+  const cap = (cls, r) => { r = Math.min(r, L.classes[cls].ceiling); return cls === 'incident-fix' && fix != null ? Math.min(r, fix) : r; };
+  const classes = Object.keys(L.classes);
+  const changes = [];
+  for (const cls of classes) {
+    let r = cap(cls, L.classes[cls].start);
+    for (const e of rungHistory(cls)) { const next = cap(cls, e.rung); if (e.at >= from && next !== r) changes.push({ class: cls, from: r, to: next, at: e.at, id: e.id }); r = next; }
+  }
+  changes.sort((a, b) => a.at.localeCompare(b.at));
+  return { own: classes.filter((c) => rungFor(c) === 3).length, kinds: classes.length, raised: changes.filter((c) => c.to > c.from).length, dropped: changes.filter((c) => c.to < c.from).length, changes };
+}
+// sensor discover runs CLIs with 30 s timeouts, too slow for a request: each run leaves what it
+// found here, and Senses reads that. A cache only: missing or malformed reads as no discovery.
+const DISCOVERY_CACHE = 'sensor-discovery.json';
+function writeDiscoveryCache(d) {
+  const names = (xs) => (Array.isArray(xs) ? xs.map((x) => (isStr(x) ? x : x?.name ?? x?.sensor?.name)).filter(isStr) : []);
+  try {
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(runPath(DISCOVERY_CACHE), `${JSON.stringify({ at: nowIso(), sensors: names(d.sensors), proposals: names(d.proposals), missing: names(d.missing), outside: names(d.outside?.proposals) })}\n`);
+  } catch {}
+}
+function readDiscoveryCache() {
+  const c = jsonOr(runPath(DISCOVERY_CACHE), null);
+  const list = (k) => Array.isArray(c?.[k]) && c[k].every(isStr);
+  return isObj(c) && isStr(c.at) && ['sensors', 'proposals', 'missing', 'outside'].every(list) ? c : null;
+}
+// Senses: what it needs to see (the sensors in place and what discovery proposed, found missing or
+// was told of from outside), what it has (no credential needed, the credential posted, or working:
+// a sensor that reads has its access), and what works (ok, or an http sensor up). has ⊆ in place ⊆
+// needed, so needed >= has.
+function autonomySenses() {
+  const rows = sensorStatus();
+  const c = readDiscoveryCache();
+  const sorted = (xs) => [...new Set(xs)].sort();
+  const working = sorted(rows.filter((r) => ['ok', 'up'].includes(r.state)).map((r) => r.name));
+  const has = sorted(rows.filter((r) => !(r.credentials ?? []).length || working.includes(r.name) || sensorCredentialState(r.name).status === 'posted').map((r) => r.name));
+  const needed = sorted([...rows.map((r) => r.name), ...(c ? [...c.proposals, ...c.missing, ...c.outside] : [])]);
+  return { needed: needed.length, has: has.length, working: working.length, missing: needed.filter((n) => !has.includes(n)), names: { needed, has, working }, discovered_at: c?.at ?? null };
+}
+function autonomyData(now = Date.now()) {
+  const x = autonomyContext(now);
+  const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
+  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: autonomySenses() };
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });
@@ -12879,6 +12990,7 @@ function dashboardDataRead() {
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
+    autonomy: autonomyData(),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
     // every kit setting, in words; never a credential (settingsAll)
@@ -16434,8 +16546,8 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md (every done-when an acceptance check that can fail, a TL;DR that names the approach, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, a TL;DR that names the approach and matches the plan, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -19732,6 +19844,8 @@ async function cmdSensor() {
       appendLog({ type: 'observation', source: 'sensors', subject: 'sensors', kind: 'discovery', detector: 'sensor', detail: `production: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''}`).join(', ') || 'no host found'}; trackers: ${d.trackers.map((t) => t.tracker).join(', ') || 'none'}; ${d.sensors.length} sensor(s), ${d.proposals.length} to start${d.gaps.length ? `; gaps: ${d.gaps.join('; ')}` : ''}`.slice(0, 900), severity: d.gaps.length ? 2 : 0, valence: 0, source_ref: discoveryKey(), source_key: `sensors:discovery:${today}` }, 'supervisor');
       d.asked = askSensorCredentials(d.missing);
     }
+    // after --record's role check, so a refused run leaves nothing
+    writeDiscoveryCache(d);
     if (flags.json) return json(d);
     out(`where it runs: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''} (${h.from})`).join(', ') || 'nothing found'}`);
     for (const n of d.notes) out(`  ${n}`);

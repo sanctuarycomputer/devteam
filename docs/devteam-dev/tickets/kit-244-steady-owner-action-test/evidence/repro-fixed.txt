@@ -1,0 +1,4 @@
+# REPRO answered cards shown while reads are held: true
+# REPRO measured after settling: {"x":601.640625,"y":449.734375,"atTheMeasuredPoint":"TEXTAREA"}
+# pass 6
+# fail 0
