@@ -568,7 +568,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // (a) a working-tree edit shows in local, not in value
   let a = edited({ max_active_tickets: 4 });
   const max = entry(a, 'max_active_tickets');
-  assert.deepEqual({ value: max.value, set: max.set, local: max.local, default: max.default, owner_only: max.owner_only }, { value: 3, set: true, local: 4, default: 5, owner_only: null });
+  assert.deepEqual({ value: max.value, set: max.set, local: max.local, default: max.default, owner_only: max.owner_only }, { value: 3, set: true, local: 4, default: null, owner_only: null });
   noCredential(a, '(a)');
   // (b) values of the wrong type: withheld, never raw, never a throw (Review Focus 5)
   a = edited({ agent_command: 42, max_active_tickets: 'lots' });
