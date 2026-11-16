@@ -6,8 +6,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { PORTS, bareProject, dashboardOnFreePort, peekFixture, until } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, kit, peekFixture, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
@@ -481,7 +482,16 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon("!document.body.classList.contains('peek-open')", 'back on Board');
     // set until it takes: Chrome drops a same-document navigation now and then when a page makes many
     // in a row (the hash stays as it was, with no hashchange), which a walk over thirty peeks does
-    await soon(`location.hash === ${JSON.stringify(hash)} || (location.hash = ${JSON.stringify(hash)}, false)`, `${key}: its hash`);
+    // in a row (the hash stays as it was, with no hashchange), which a walk over thirty peeks does. The
+    // re-sets are counted and told, so an app that put the hash back would show here, not pass unseen
+    const h = JSON.stringify(hash);
+    // with the hashes read in between: '#board' alone is a dropped navigation; any other is the app moving it
+    const told = async () => `set again ${await p.ev('window.__resets')} times; read in between: ${JSON.stringify(await p.ev('[...window.__seen]'))}`;
+    await p.ev(`window.__resets = 0; window.__seen = new Set(); location.hash = ${h}; void 0`);
+    await soon(`location.hash === ${h} || (window.__resets++, window.__seen.add(location.hash), location.hash = ${h}, false)`, `${key}: its hash`).catch(async (e) => {
+      throw new Error(`${e.message} (${await told()})`);
+    });
+    if (await p.ev('window.__resets') > 0) t.diagnostic(`${key}: ${hash} ${await told()}`);
     return kind;
   };
 
@@ -547,6 +557,30 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(untipped, [], 'every key has a tooltip');
   });
 
+  await t.test('may correct: only a call whose row the Decide tab draws', async () => {
+    // the last row the Decide tab draws and the first it doesn't, both the fixture's calls
+    const edge = await p.ev('(() => { const rs = DATA.ooda.decisions.filter((r) => !routine(r)); return { n: DECIDE_SHOWN, all: rs.length, last: rs[DECIDE_SHOWN - 1], first: rs[DECIDE_SHOWN], mine: rs.findIndex((r) => r.id === ' + JSON.stringify(ids.decisionNotMine) + ') }; })()');
+    assert.equal(edge.n, 80);
+    assert.ok(edge.all > edge.n, `more calls than the tab draws: ${edge.all}`);
+    assert.ok(edge.mine >= edge.n, `decisionNotMine is past the tab's rows: at ${edge.mine}`);
+    for (const r of [edge.last, edge.first]) assert.equal(r.kind, 'decision', `${r.id}: a decision`);
+    // on the tab: the last drawn row has its Correct, the first undrawn one has no row
+    await p.ev("location.hash = '#loop?lt=decide'");
+    await soon(`!!document.querySelector('#decisions-feed [data-correct="dec:${edge.last.id}"]')`, 'the 80th row with its Correct');
+    assert.equal(await p.ev(`!!document.querySelector('#decisions-feed [data-dec^="decision:${edge.first.id}:"]')`), false, 'no row for the 81st');
+    const howOf = async (id) => {
+      await p.ev("location.hash = '#board'");
+      await soon("!document.body.classList.contains('peek-open')", 'back on Board');
+      await p.ev(`location.hash = ${JSON.stringify(`#decision/${encodeURIComponent(id)}`)}`);
+      await soon(`DRAWER.id === ${JSON.stringify(id)} && !!document.querySelector('#drawer-body section.attrs')`, `${id}: its peek`);
+      return p.ev("[...document.querySelectorAll('#drawer-body dt')].find((x) => x.textContent.trim() === 'How it changes').nextElementSibling.innerHTML");
+    };
+    assert.match(await howOf(edge.last.id), /href="#loop\?lt=decide"/, 'the 80th: Correct, on its row');
+    assert.match(await howOf(edge.first.id), new RegExp(`data-thread-on="decision:${edge.first.id}"`), 'the 81st: Start a thread');
+    await p.ev("location.hash = '#board'");
+    await soon("!document.body.classList.contains('peek-open')", 'back on Board');
+  });
+
   await t.test('an answered card is anchored once: in the Inbox, never in a peek', async () => {
     await p.ev("location.hash = '#inbox'");
     await soon(`!!document.getElementById('a-${ids.qDefaulted}')`, 'the defaulted card in the Answered list');
@@ -586,4 +620,22 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
     await soon(peekDrawn('ticket'), 'the ticket peek, loaded');
   });
+});
+
+// Every label an opener draws has a tooltip (spec §2.2): the row labels the openers and ATTR pass, in
+// index.html's source, each in KEY_TIPS (read from the page's own source in a vm). A label with no
+// entry would draw a key with no title, which the peek test above also catches on the fixture's peeks.
+test('every opener label has a tip in KEY_TIPS', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  const KEY_TIPS = vm.runInNewContext(`(${/const KEY_TIPS = (\{[\s\S]*?\n\});/.exec(html)[1]})`);
+  const cut = (from, to) => { const a = html.indexOf(from), b = html.indexOf(to, a); assert.ok(a >= 0 && b > a, `${from} … ${to}`); return html.slice(a, b); };
+  const src = cut('const ATTR_COMMON = {', '// ---- peeks: one fetch per object') + cut('function openSensor(', '// Mermaid fenced blocks');
+  const labels = new Set();
+  // [label, value, tip] rows and attrRow(label, …); a value that is a string or array literal is a
+  // learning figure's table row or chart group, not a key
+  for (const m of src.matchAll(/(?:\[|attrRow\()\s*'([A-Z][^'\n]*)',(?!\s*['[])/g)) labels.add(m[1]);
+  for (const m of src.matchAll(/label: \{([^}]*)\}/g)) for (const v of m[1].matchAll(/:\s*'([^']+)'/g)) labels.add(v[1]);
+  for (const l of ['ID', 'How it changes', 'Created', 'Last changed', 'Record', 'Status', 'Under', 'Stage', 'Fix']) assert.ok(labels.has(l), `the scan finds ${l}`);
+  assert.ok(labels.size > 60, `labels found: ${labels.size}`);
+  assert.deepEqual([...labels].filter((l) => !KEY_TIPS[l]), [], 'labels with no tip');
 });

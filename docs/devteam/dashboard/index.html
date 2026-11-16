@@ -3380,6 +3380,10 @@ function decisionUnder(r) {
 // A routine act (a merge the gates passed, a worker started, a default applied) is its own call under
 // the constitution; it is in the Act tab, and here only on request, so judgment calls stay in view.
 const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution';
+// The Decide tab draws at most this many rows; with its filters as they start (no routine acts, any
+// writer, any class), the rows it draws are decideRows(o): a call has its Correct only there.
+const DECIDE_SHOWN = 80;
+const decideRows = (o) => (o?.decisions || []).filter((r) => !routine(r)).slice(0, DECIDE_SHOWN);
 // A decision that is complete in itself: a noise ruling explains a signal, and no act carries it out.
 const NO_ACT_CLASSES = ['orient-noise'];
 function renderDecisions(o) {
@@ -3393,7 +3397,7 @@ function renderDecisions(o) {
   const only = $('dec-corrected').checked;
   const rows = all.filter((r) => (!fw || r.who === fw) && (!sel.value || r.class === sel.value) && (!only || r.correction || r.kind === 'correction'));
   const key = (r) => `${r.kind}:${r.id}:${r.at}`;
-  $('decisions-feed').innerHTML = rows.length ? rows.slice(0, 80).map((r) => {
+  $('decisions-feed').innerHTML = rows.length ? rows.slice(0, DECIDE_SHOWN).map((r) => {
     const mine = r.who === 'supervisor' && ['decision', 'act'].includes(r.kind);
     const open = r.kind === 'decision' ? `#decision/${encodeURIComponent(r.id)}` : r.kind === 'act' ? `#act/${encodeURIComponent(r.id)}` : r.kind === 'answer' ? `#q/${encodeURIComponent(r.id)}` : r.kind === 'goal' ? `#goal/${encodeURIComponent(r.id)}` : r.kind === 'rule' ? `#lesson/${encodeURIComponent(r.id)}` : r.id.startsWith('d-') ? `#decision/${encodeURIComponent(r.id)}` : `#act/${encodeURIComponent(r.id)}`;
     const under = decisionUnder(r);
@@ -3450,7 +3454,7 @@ const KEY_TIPS = {
   Reviews: 'Every review of it and its verdict.', Blocks: 'Tickets that wait on it.', Wave: 'The tickets that can be built alongside it.', 'Ships in': 'The release it ships in.', Spent: 'What its worker and reviewers have spent.',
   Branch: 'Its git branch.', Merged: 'The merge commit, once merged.', Feature: 'The feature it belongs to.', Release: 'The release it ships in.', Text: 'The story in one sentence.', Releases: 'Releases its stories and tickets target.',
   Waves: 'Waves its unfinished tickets are in.', Planner: 'A planner working on it now.', 'Plan reviews': 'Reviews of its plan.', Tagged: 'Whether the release has been tagged.', 'Waiting on': 'What must finish first.',
-  Goal: 'The goal it serves.', By: 'The date it is due.', Target: 'What it checks, and what counts as good.', Tickets: 'How many tickets it holds.',
+  Goal: 'The goal it serves.', By: 'The date it is due.', Target: 'What it checks, and what counts as good.', Tickets: 'How many tickets it holds.', 'One-way doors': 'Choices it makes that can\'t be undone.', Source: 'Where it came from.',
   Question: 'What was asked, in full.', Class: 'The kind of decision it settles.', Scope: 'How far it reaches.', Ticket: 'The ticket it is about.', Recommendation: 'What the supervisor recommends.', Options: 'The options it weighed.',
   Default: 'What happens at the deadline if you don\'t answer.', Deadline: 'When the default applies.', Answer: 'The answer it was given.', 'Why asked': 'Why it came to you, and its rung.', Autonomy: 'The trust it moved, if any.',
   Stake: 'How much rides on the answer.', Urgency: 'How soon it matters.', Settled: 'When it was answered, defaulted or withdrawn.', Took: 'How long it waited for you.', Matched: 'Whether your answer matched the recommendation.',
@@ -3467,7 +3471,8 @@ const KEY_TIPS = {
   Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
 };
-const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : `${label}.`);
+// none of the three: no tip (and the peek test's "every key has a tooltip" fails)
+const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : '');
 // A property row for props(): [label, value, tip], or null when there is no value to show.
 const attrRow = (label, html, tip, field) => (html === '' || html == null || html === false ? null : [label, html, keyTip(label, tip, field)]);
 const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
@@ -3606,19 +3611,24 @@ function howItChanges(kind, rec = {}) {
   const id = rec.id;
   const tip = KEY_TIPS['How it changes'];
   const corrected = (c) => `Corrected by ${esc(who(c.by))}: ${esc(c.reason)}`;
+  // a correction from the dashboard's row, else from the record itself (one older than the dashboard holds)
+  const fromRecord = () => { const c = rec.record?.fields?.corrected; return c ? { reason: c.reason, by: rec.record?.set_by?.corrected?.by } : null; };
   const correctRow = (lt) => `Correct, on its row in Self Improvement: <a class="linkish" href="#loop?lt=${lt}">${lt === 'act' ? 'Act' : 'Decide'}</a>`;
   let html;
   switch (kind) {
     case 'act': {
       const a = (DATA?.ooda?.acts || []).find((x) => x.id === id) ?? rec;
       const dec = a.decision ?? rec.record?.fields?.decision;
-      html = a.correction ? corrected(a.correction) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctRow('act');
+      const ac = a.correction ?? fromRecord();
+      html = ac ? corrected(ac) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctRow('act');
       break;
     }
     case 'decision': {
-      // the owner may correct a call that has its row in Self Improvement (the supervisor's, on the dashboard: today's mine)
-      const r = (DATA?.ooda?.decisions || []).find((x) => x.id === id && ['decision', 'act'].includes(x.kind));
-      html = r?.correction ? corrected(r.correction) : r && r.who === 'supervisor' ? correctRow('decide') : `${threadOn('decision', id)}`;
+      // the owner may correct a call whose row the Decide tab draws with its Correct (today's mine, in decideRows)
+      const call = (x) => x.id === id && ['decision', 'act'].includes(x.kind);
+      const c = (DATA?.ooda?.decisions || []).find(call)?.correction ?? fromRecord();
+      const r = decideRows(DATA?.ooda).find(call);
+      html = c ? corrected(c) : r && r.who === 'supervisor' ? correctRow('decide') : threadOn('decision', id);
       break;
     }
     case 'q': {
@@ -3773,10 +3783,13 @@ function peekHide({ now = false } = {}) {
   if (now || d.hidden || !(dur > 0)) return hide();
   const end = (e) => { if (e.target === d && e.propertyName === 'transform') hide(); };
   // a slide that never starts (nothing to move) ends at --dur; one that runs ends with its transitionend
+  // (or its cancel), however long a loaded machine takes to draw it: once it runs, the timer is off
   const timer = setTimeout(hide, dur + 100);
+  const run = (e) => { if (e.target === d && e.propertyName === 'transform') clearTimeout(timer); };
+  d.addEventListener('transitionrun', run);
   d.addEventListener('transitionend', end);
   d.addEventListener('transitioncancel', end);
-  PEEK_HIDE = { cancel: () => { clearTimeout(timer); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
+  PEEK_HIDE = { cancel: () => { clearTimeout(timer); d.removeEventListener('transitionrun', run); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
 }
 // Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
 // over every entry this visit pushed down to the page, else in place to the page in its stamp.

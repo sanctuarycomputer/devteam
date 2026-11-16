@@ -668,8 +668,8 @@ export function dataRewriteInit(fx) {
 // written them for the rest (acts, decisions, problems, signals, learning, a retro, a message), and
 // files committed on main. Returns the project and the id of each record; Task 4 adds to it.
 // decision rests on qDefaulted (authority default), so its "The answer it rests on" is a defaulted
-// answered card. decisionNotMine is older than the dashboard's 200 newest calls (200 later ones),
-// so no row on Self Improvement can correct it.
+// answered card. decisionNotMine is older than the 80 rows the Decide tab draws (81 later calls), so
+// no row on Self Improvement has its Correct.
 export const PEEK_LONG = `Should the checkout keep the card form on one page, ${'with every field the processor asks for and every one it may ask for later, '.repeat(3)}or split it?`;
 export function peekFixture(base, name = 'peek') {
   const root = bareProject(base, name);
@@ -750,7 +750,8 @@ export function peekFixture(base, name = 'peek') {
   ids.actCorrected = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved the docs up', refs: [ids.goal], reversible: true }, 3 * H - 3000);
   dt(['correct', ids.actCorrected, '--reason', 'the docs can wait'], null);
   ids.decisionNotMine = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'an old call', authority: 'rung', refs: [], reversible: true }, 40 * DAY);
-  for (let i = 0; i < 200; i++) hand('supervisor', { type: 'decision', class: 'priority-change', what: `a later call ${i + 1}`, authority: 'rung', refs: [], reversible: true }, 20 * DAY - i * 60000);
+  // 81 later calls: with the newer rows above them, decisionNotMine is past the 80 the Decide tab draws
+  for (let i = 0; i < 81; i++) hand('supervisor', { type: 'decision', class: 'priority-change', what: `a later call ${i + 1}`, authority: 'rung', refs: [], reversible: true }, 20 * DAY - i * 60000);
   // last week's learning record and a closed retro
   // last week's ISO week (its Thursday's year and week)
   const th = new Date(T0 - 7 * DAY);
