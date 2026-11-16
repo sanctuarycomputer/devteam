@@ -25,8 +25,8 @@ I read the fix diff and the report addenda and ran no tests. No hunk is inside t
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| N1 | Minor | quality §3 (a test must be able to fail on the defect it guards) | test/dashboard-peek.test.mjs (no case); index.html:3615 | `fromRecord` (F3) has no test. The fixture's corrected act is in `DATA.ooda`, so the row path always answers and `fromRecord` is never exercised. Failure: a typo in the record path ships green, and an old corrected call reads "Start a thread" or "Correct, on its row". Cover it by dropping the call from `DATA.ooda` (as the fixture's old decision already is) and correcting it, or by injecting `DATA`. | |
-| N2 | Minor | spec §2.2 | index.html:3615 | When `set_by.corrected` is missing, `by` is undefined and `who(undefined)` gives "Corrected by undefined: …". The `correct` command always writes it, so this is theoretical. | |
+| N1 | Minor | quality §3 (a test must be able to fail on the defect it guards) | test/dashboard-peek.test.mjs (no case); index.html:3615 | `fromRecord` (F3) has no test. The fixture's corrected act is in `DATA.ooda`, so the row path always answers and `fromRecord` is never exercised. Failure: a typo in the record path ships green, and an old corrected call reads "Start a thread" or "Correct, on its row". Cover it by dropping the call from `DATA.ooda` (as the fixture's old decision already is) and correcting it, or by injecting `DATA`. | fixed a1510c7: a test drops the corrected act's row from DATA.ooda and still expects Corrected by |
+| N2 | Minor | spec §2.2 | index.html:3615 | When `set_by.corrected` is missing, `by` is undefined and `who(undefined)` gives "Corrected by undefined: …". The `correct` command always writes it, so this is theoretical. | fixed a1510c7: guard at index.html ~3613, no 'by undefined'; tested |
 
 F5 stays carried to Task 4.
 
