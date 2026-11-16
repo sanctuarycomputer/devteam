@@ -349,13 +349,13 @@ test('an Esc the menu does not clear is reported as an option that may not have 
   assert.equal(heldFor(F, pane).length, 1, 'nothing held was typed after it');
 });
 
-// A numbered menu whose Esc exits (as a folder-trust form's does): drawn here, a stand-in that only
-// writes down what it is sent.
-function exitMenuPane(F) {
+// A numbered menu whose Esc doesn't say it cancels (it exits, as a folder-trust form's does, or quits,
+// or the menu names no Esc at all): drawn here, a stand-in that only writes down what it is sent.
+function exitMenuPane(F, hint = 'Enter to confirm · Esc to exit') {
   const dir = fs.mkdtempSync(path.join(F.base, 'exit-'));
   const keys = path.join(dir, 'keys.txt');
   fs.writeFileSync(path.join(dir, 'agent.mjs'), `import fs from 'node:fs';
-const draw = () => process.stdout.write('\\x1b[2J\\x1b[H' + ['stand-in supervisor', '─'.repeat(100), ' Do you trust the files in this folder?', '', ' ❯ 1. Yes, proceed', '   2. No, exit', '', ' Enter to confirm · Esc to exit'].join('\\n') + '\\n');
+const draw = () => process.stdout.write('\\x1b[2J\\x1b[H' + ['stand-in supervisor', '─'.repeat(100), ' Do you trust the files in this folder?', '', ' ❯ 1. Yes, proceed', '   2. No, exit', '', ' ' + ${JSON.stringify(hint)}].join('\\n') + '\\n');
 process.stdin.setRawMode(true);
 process.stdin.on('data', (d) => { fs.appendFileSync(${JSON.stringify(keys)}, String(d)); draw(); });
 draw();
@@ -386,19 +386,21 @@ test('Esc never reaches the usage-limit menu, a dialog with no numbers, or a num
   assert.equal((await D.post({ digest: d.digest, escape: true, token: 'f'.repeat(64) })).status, 403);
   assert.equal(pane.typed(), '1\r', 'nor the dialog');
   assert.equal(acts(F).length, 0);
-  // a numbered menu, with a token, whose Esc exits: refused before any key
-  const G = threadsFixture('pane-esc-exit');
-  later(() => G.done());
-  const ex = exitMenuPane(G);
-  const E = await dash(later, G, ex);
-  const m = await E.question();
-  assert.match(m.hint, /Esc to exit/);
-  assert.match(m.token, /^[0-9a-f]{64}$/, 'an option may answer it');
-  r = await E.post(esc(m));
-  assert.equal(r.status, 400, await r.clone().text());
-  assert.match((await r.json()).error, /Esc here may not cancel/);
-  assert.equal(ex.typed(), '', 'no Escape sent');
-  assert.equal(acts(G).length, 0);
+  // a numbered menu, with a token, whose Esc exits or quits, or that names no Esc: refused before any key
+  for (const [i, hint] of ['Enter to confirm · Esc to exit', 'Esc to cancel · Esc to quit', 'Enter to confirm'].entries()) {
+    const G = threadsFixture(`pane-esc-exit-${i}`);
+    later(() => G.done());
+    const ex = exitMenuPane(G, hint);
+    const E = await dash(later, G, ex);
+    const m = await E.question();
+    assert.equal(m.hint, hint);
+    assert.match(m.token, /^[0-9a-f]{64}$/, 'an option may answer it');
+    r = await E.post(esc(m));
+    assert.equal(r.status, 400, `${hint}: ${await r.clone().text()}`);
+    assert.match((await r.json()).error, /Esc here may not cancel/);
+    assert.equal(ex.typed(), '', `no Escape sent (${hint})`);
+    assert.equal(acts(G).length, 0);
+  }
 });
 
 test('pane answered --owner takes an Esc only from the owner, only in its own shape', () => {
