@@ -396,7 +396,8 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await linkOn('goals', `#talk/${TT}`);
   await cardOver(TT, 'board', 'the card over Board');
   assert.equal(await len(), n + 1, 'the talk/ link adds one entry');
-  assert.deepEqual(await state(), { page: '#board', depth: 1, openedHere: true }, "its stamp's page is the subject's");
+  // since kit-89 (spec §2.5) the subject's page head carries the card's thread (t)
+  assert.deepEqual(await state(), { page: `#board?t=${TT}`, depth: 1, openedHere: true }, "its stamp's page is the subject's");
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   // a reload reopens it over Board
   await reload();
@@ -415,7 +416,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   // cold: over Board, × in place to #board
   await load(`#talk/${TT}`);
   await cardOver(TT, 'board', 'cold: the card over Board');
-  assert.deepEqual(await state(), { page: '#board', depth: 1, openedHere: false });
+  assert.deepEqual(await state(), { page: `#board?t=${TT}`, depth: 1, openedHere: false });
   n = await len();
   await p.click('[data-tl-close]');
   await shut('board', 'cold ×: #board');
@@ -426,20 +427,22 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('overview');
   await linkOn('overview', `#talk/${TO}`);
   await cardOver(TO, 'loop', 'the Orient thread over the Loop');
-  assert.equal((await state()).page, '#loop?lt=orient');
+  assert.equal((await state()).page, `#loop?lt=orient&t=${TO}`);
   assert.equal(await p.ev("document.querySelector('#loop-tabs [aria-selected=\"true\"]')?.dataset.tab"), 'orient', 'on Orient');
   await p.click('[data-tl-close]');
   await shut('overview', '× back to Overview');
   await linkOn('overview', `#talk/${TM}`);
   await cardOver(TM, 'sensors', 'the Sensors thread over Sensors');
-  assert.equal((await state()).page, '#sensors');
+  assert.equal((await state()).page, `#sensors?t=${TM}`);
   await p.click('[data-tl-close]');
   await shut('overview', '× back to Overview');
   // a subject not drawn: since kit-89 (spec §2.4, §2.5) an in-panel thread, so the link opens the Threads panel
   // on it over the page it was clicked on, the recorded page head given th and t
   await linkOn('overview', `#talk/${TG}`);
   await until(async () => await cardOn(TG) && await p.ev(`location.hash === ${JSON.stringify(`#talk/${TG}`)} && history.state?.page === ${JSON.stringify(`#overview?th=open&t=${TG}`)} && !!document.querySelector('#th-card-slot > #tl-card.in-panel')`) && JSON.stringify(await shown()) === '["overview"]', 'a thread on a ticket not drawn, in the panel over Overview');
-  await go('#overview');
+  // closed by the panel's × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+  await until(() => p.ev("getComputedStyle(document.getElementById('threads')).transform === 'none'"), 'the panel at rest');
+  await p.click('#th-close');
   await until(async () => await cardShut() && await hash() === '#overview' && !(await p.ev("document.body.classList.contains('threads-open')")), 'the panel and the card closed, on Overview');
 
   // the Threads panel's list on Overview: the row is one entry to Board's head with the thread (t) and the panel kept (th)
@@ -462,21 +465,24 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await until(() => cardShut(), 'closed');
   assert.equal(await hash(), '#board?th=open', 'closed on Board, t gone');
   assert.equal(await len(), n + 1, 'one entry: t taken away');
-  await go('#board');
+  // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+  await p.click('#th-close');
   await until(async () => await hash() === '#board' && !(await p.ev("document.body.classList.contains('threads-open')")) && await p.ev("getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, Board at rest');
 
   // pins: the ticket thread's on Board; a pin keeps the page and opens the card; none on Overview
+  // (since kit-89, spec §2.5: opening a thread from a pin is a Threads change, one entry with its t; × takes t away)
   await until(() => pinned(TT), "the ticket thread's pin on Board");
   n = await len();
   await p.click(`#tl-pins [data-tl-pin="${TT}"]`);
   await until(() => cardOn(TT), 'the pin opens the card');
-  assert.equal(await hash(), '#board', 'the pin keeps the page');
-  assert.equal(await len(), n, 'and adds no entry');
+  assert.equal(await hash(), `#board?t=${TT}`, 'the pin keeps the page');
+  assert.equal(await len(), n + 1, 'and adds one entry');
   await p.click('[data-tl-close]');
   await until(() => cardShut(), 'closed');
 
-  // a card opened from outside a route closes in place, even over a #talk/ entry (review T4-1): with
-  // #talk/<TT> open over Board, B's pin opens B's card; its × moves no history and leaves the hash
+  // over a #talk/ entry (review T4-1): with #talk/<TT> open over Board, B's pin opens B's card. Since kit-89
+  // (spec §2.5) the pin is a Threads change: under talk/ a change of t replaces the talk/ entry with the page head
+  // and B's t (no entry added), and B's × takes t away, a new entry; Board stays
   await go(`#talk/${TT}`);
   await cardOver(TT, 'board', 'the ticket thread over Board');
   await until(() => pinned(TB), "the Board thread's pin");
@@ -484,10 +490,12 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   // clicked on the pin itself (the open card may lie over it)
   await p.ev(`document.querySelector('#tl-pins [data-tl-pin="${TB}"]').click()`);
   await until(() => cardOn(TB), "B's card, from its pin");
+  assert.equal(await hash(), `#board?t=${TB}`, 'the talk/ entry replaced');
+  assert.equal(await len(), n, 'history.length unchanged');
   await p.click('[data-tl-close]');
   await until(() => cardShut(), "B's card closed");
-  assert.equal(await hash(), `#talk/${TT}`, 'the hash unchanged');
-  assert.equal(await len(), n, 'history.length unchanged');
+  assert.equal(await hash(), '#board', 't taken away');
+  assert.equal(await len(), n + 1, 'one entry');
   assert.deepEqual(await shown(), ['board'], 'still on Board');
 
   await go('#overview');

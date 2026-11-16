@@ -575,20 +575,22 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon(`location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)}`, 'reloaded: A in the panel');
   assert.equal(await p.ev(STORE), JSON.stringify({ th: 'open', t: A }), 'remembered');
 
-  // a fresh tab on #goals, /api/threads held 3 s by its own init script: the stored keys written into its hash
-  // at once, kept while the read is held, the store unchanged; A opens in the panel when the read lands
+  // a fresh tab on #goals, /api/threads held by its own init script (at least 3 s, then until the test lets it go,
+  // so a loaded box can't end the hold before the checks): the stored keys written into its hash at once, kept
+  // while the read is held, the store unchanged; A opens in the panel when the read lands
   const q = await chrome.newPage();
   t.after(() => q.close());
   await q.send('Page.enable');
   await q.send('Runtime.enable');
   await q.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-  await q.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const t0 = Date.now(); const rf = window.fetch; window.fetch = async (u, o) => { if (String(u).startsWith('/api/threads')) await new Promise((r) => setTimeout(r, Math.max(0, t0 + 3000 - Date.now()))); return rf(u, o); }; })()` });
+  await q.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const t0 = Date.now(); const gate = new Promise((r) => { window.__let = r; }); const rf = window.fetch; window.fetch = async (u, o) => { if (String(u).startsWith('/api/threads')) { await gate; await new Promise((r) => setTimeout(r, Math.max(0, t0 + 3000 - Date.now()))); } return rf(u, o); }; })()` });
   await q.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
   const soonQ = soonIn(q, 30000);
   await soonQ(`typeof DATA === "object" && DATA !== null && location.hash === '#goals?th=open&t=${A}'`, 'the remembered keys in the new tab');
   assert.deepEqual(await q.ev(`[TL.have, location.hash, ${STORE}, document.body.classList.contains('threads-open')]`), [0, `#goals?th=open&t=${A}`, JSON.stringify({ th: 'open', t: A }), true], 'held: t kept, the store unchanged, the panel open');
   await pause(1000);
   assert.deepEqual(await q.ev(`[TL.have, location.hash, ${STORE}]`), [0, `#goals?th=open&t=${A}`, JSON.stringify({ th: 'open', t: A })], 'still held, still kept');
+  await q.ev('window.__let(); void 0');
   await soonQ(`TL.have > 0 && ${IN_PANEL(A)} && location.hash === '#goals?th=open&t=${A}'`, 'A in the panel once the read lands');
   await q.close();
   // the first tab in front again: a tab behind another runs no transitions after a reload

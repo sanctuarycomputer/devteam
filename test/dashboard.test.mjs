@@ -3385,7 +3385,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`addEventListener('popstate', () => { location.hash = '#talk/${T}'; }, { once: true }); void 0`);
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.key('Escape');
-    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals'`, 'the link followed again at once');
+    // (the subject's page head carries the card's t since kit-89, spec §2.5)
+    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals?t=${T}'`, 'the link followed again at once');
     assert.equal(await p.ev('history.state.depth'), 1, 'one entry above #goals');
   });
 
@@ -3588,9 +3589,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`location.hash = '#goals?th=open&t=${X}'`);
     await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'the title as written');
     assert.equal(await p.ev(`!!document.querySelector('#tl img, #threads img') || !!window.__xss`), false, 'no element made from the title');
+    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
     await click('[data-tl-back]');
-    await p.ev(`location.hash = '#goals'`);
-    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
+    // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+    await soon(`location.hash === '#goals?th=open' && !!document.querySelector('#tl-list')`, 'the list');
+    await click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && location.hash === '#goals'`, 'the panel closed');
     F.owner(['thread', 'resolve', X]);
     await p.ev('tlRefresh()');
     await click(`[data-tl-pin="${T}"]`);
@@ -3693,7 +3697,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
     // the panel closed (by its ×, pressed in place: the card may sit over it)
     await p.ev(`document.getElementById('th-close').click(); void 0`);
-    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
+    // and the page at rest after its slide back (the card on it placed again), so the next press lands where it was found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed');
+    await p.ev(FRAMES);
   });
 
   await t.test('a press on Resolve across a read still opens the form', async () => {
