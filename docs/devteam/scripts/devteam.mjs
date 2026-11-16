@@ -1693,6 +1693,12 @@ function holdRefusal(h, cur, curBy, cls) {
     const p = cur.prior ?? { mode: 'run' };
     return h.mode === p.mode && (h.fleet ?? null) === (p.fleet ?? null) ? null : `undoing ${h.undoes} puts back ${p.mode}${p.fleet ? ` (${p.fleet})` : ''}, not ${h.mode}`;
   }
+  // A fleet op in force marked a move (fleet park|drain --move on a held fleet): the same hold with move
+  // added, nothing else changed. It only releases the claim, which unpark then park --move could too.
+  if (h.fleet && h.move && cur.fleet === h.fleet && !cur.move) {
+    const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    return h.mode === cur.mode && same(h.prior, cur.prior) && (h.reason ?? null) === (cur.reason ?? null) ? null : 'marking a fleet op a move changes nothing else in its hold';
+  }
   // A fleet op only tightens (drain a running goal, park one not parked) and records what it replaced.
   if (h.fleet) {
     if (!['drain', 'park'].includes(h.mode)) return 'a fleet op drains or parks';
@@ -3926,12 +3932,12 @@ function fleetOpInForce() {
   const hs = holdableGoals().map((g) => g.hold).filter((h) => h?.fleet);
   return hs.sort((a, b) => b.fleet.localeCompare(a.fleet))[0] ?? null;
 }
-// The fleet is held to move to another machine: a fleet op made with --move, or an old drain (which
-// was only ever for a move). A pause (throttling, waiting on the owner) keeps the machine's claim.
 // How many holdable goals (Upkeep included) are running, draining and parked: a fleet whose goals
 // are mixed is partly held, which fleetMode alone (every goal one way, or null) can't say. The hub's
 // Overview and machine status read it, so a fleet with most goals parked never looks fully running.
 const goalModeCounts = () => { const c = { run: 0, drain: 0, park: 0 }; for (const g of holdableGoals()) { const m = goalMode(g); if (m in c) c[m]++; } return c; };
+// The fleet is held to move to another machine: a fleet op made with --move, or an old drain (which
+// was only ever for a move). A pause (throttling, waiting on the owner) keeps the machine's claim.
 const movingFleet = () => !!draining() || !!fleetOpInForce()?.move;
 const newFleetId = () => { const at = nowIso(); return `f-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
 // A session's goals: a worker's ticket's; a planner's feature line's, its questions', or its launch's.
@@ -17529,6 +17535,22 @@ function fleetOp(mode) {
     writeHold(g, { mode, reason, fleet: op, host, ...(move ? { move: true } : {}), prior }, by);
     changed.push(isUpkeep(g) ? 'upkeep' : g.id);
   }
+  // a pause already in force becomes a move with --move: mark each held goal's hold a move (same op),
+  // so the claim is released, without unparking and re-sending the park rulings
+  if (!changed.length && move) {
+    const marked = [];
+    for (const g of holdableGoals()) {
+      const m = goalMode(g);
+      if (m === 'run' || !g.hold || g.hold.move) continue;
+      writeHold(g, { ...g.hold, move: true }, by);
+      marked.push(isUpkeep(g) ? 'upkeep' : g.id);
+    }
+    if (!marked.length) return out(`every goal is already held as a move; nothing to do`);
+    logCache = null;
+    if (by === 'supervisor') { hostCheck(); appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `marked the held fleet on ${host} a move: ${reason}`, refs: marked.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor'); }
+    out(`marked the held fleet a move: ${marked.length} goal(s), Upkeep included; this machine releases its claim`);
+    return out('then: fleet status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
+  }
   if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
   // only a move releases the claim, so the machine it moves to may take it over; a pause keeps it here
   logCache = null;
@@ -17874,7 +17896,7 @@ function drainedPreface() {
 // compare-and-swap push (--force-with-lease on that one ref) means two machines taking it at once
 // can't both win. The supervisor's start (prompt supervisor, recover, fleet unpark|undrain) and its
 // tick (observe-metrics, and wait every 10 minutes) read it, and refresh it while they hold it;
-// fleet park|drain marks it released for a move; fleet status and fleet host show it. Nothing else
+// fleet park|drain --move marks it released for a move (a pause keeps it); fleet status and fleet host show it. Nothing else
 // touches the network for it.
 //
 // The claim grants nothing. It is coordination between machines, not trust: no check anywhere reads
@@ -17969,7 +17991,7 @@ const minutesAgo = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? 'l
 // The refusal, in plain words: who holds the repo, when it was last seen, and how to hand over.
 function hostRefusal(claim, age) {
   const lapses = new Date(Date.parse(claim.at) + HOST_FRESH_MS).toISOString();
-  return `${claim.hostname} is supervising this repo (machine ${claim.machine}), last seen ${minutesAgo(age)} (${claim.at}). One machine supervises a repo at a time, so a second supervisor here would write over its work: this machine (${hostName()}) won't supervise it. To move it here: on ${claim.hostname}, park or drain the fleet (fleet park or fleet drain, supervisor.md §12), then start the supervisor here again. If ${claim.hostname} is gone (dead, or rebuilt without its disk), its claim lapses 45 minutes after it was last seen (at ${lapses}) and the next start anywhere takes over; the owner, sure it is gone, can free it now from any terminal of theirs (node docs/devteam/scripts/devteam.mjs fleet host --release), or take it for the machine they run that on (fleet host --take).`;
+  return `${claim.hostname} is supervising this repo (machine ${claim.machine}), last seen ${minutesAgo(age)} (${claim.at}). One machine supervises a repo at a time, so a second supervisor here would write over its work: this machine (${hostName()}) won't supervise it. To move it here: on ${claim.hostname}, mark the fleet a move (fleet park --move or fleet drain --move, supervisor.md §12; a park or drain without --move is a pause and keeps the claim there), then start the supervisor here again. If ${claim.hostname} is gone (dead, or rebuilt without its disk), its claim lapses 45 minutes after it was last seen (at ${lapses}) and the next start anywhere takes over; the owner, sure it is gone, can free it now from any terminal of theirs (node docs/devteam/scripts/devteam.mjs fleet host --release), or take it for the machine they run that on (fleet host --take).`;
 }
 // The claim this machine would write now: its heartbeat, and the fleet's hold as this log has it.
 function hostClaimBody(prev) {
@@ -20972,10 +20994,9 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
-  fleet drain | park [--reason r] [--owner]   every goal at once (Upkeep included): drain sets running goals to drain, park sets every goal not parked to park; each records what it replaced
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
   handoff [--file f] [--supervisor]   a parked worker or planner: the note (stdin) as an empty "devteam handoff: <name>" commit on its branch, pushed; the supervisor: an annotated devteam-handoff/<op> tag on origin
-  fleet park|drain [--reason r] [--move]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
+  fleet park|drain [--reason r] [--move] [--owner]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
   fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
   fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
   drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)

@@ -77,7 +77,7 @@ Requirements: git (2.38 or later once you draw component lines: coverage compute
 
 Every goal, and the built-in Upkeep goal that owns chores, has a toggle on the dashboard: **Run**, **Drain** (nothing new starts; what's running finishes and merges), **Park** (sessions commit their work, push, leave a handoff commit and stop) and **Let go** (reversible). The strip at the top of the dashboard holds or resumes every goal at once and says whether the fleet can move (`process/supervisor.md` §12).
 
-**Moving to another machine.** On the old one, park the fleet from the dashboard, or tell the supervisor ("Park the fleet; I'm moving it to my new laptop"). Fleet drain works too, more slowly: every ticket in flight finishes first. It runs:
+**Moving to another machine.** On the old one, tell the supervisor ("Park the fleet; I'm moving it to my new laptop"): a move is `fleet park --move`. The dashboard's Park all and Drain buttons pause the fleet on this machine and keep its claim, so they don't start a move; a paused fleet becomes a move with `fleet park --move`. Fleet drain works too, more slowly: every ticket in flight finishes first. It runs:
 
 ```
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet park --move --reason "moving to a new laptop"

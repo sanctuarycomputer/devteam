@@ -2662,7 +2662,7 @@ function fleetStrip() {
   const f = DATA?.fleet || {};
   const mode = f.mode;
   const st = FLEET.data;
-  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
+  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">a move is fleet park --move (or drain --move) from the supervisor; Park all and Drain here pause; Check says what a move needs</span>';
   const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
   const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
   // parked or drained only once fleet status says the move is ready; until then it is a transition

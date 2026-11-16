@@ -45,7 +45,7 @@ test('host claim: a live claim from another machine refuses a start, the same ma
     const no = run(neu, ['prompt', 'supervisor'], MAC);
     assert.equal(no.status, 1);
     assert.match(no.out, /^Do not supervise this repo from this machine\. the-box is supervising this repo \(machine box-0000000001\), last seen (less than a minute|a minute|\d+ minutes) ago/);
-    assert.match(no.out, /park or drain the fleet/);
+    assert.match(no.out, /mark the fleet a move \(fleet park --move or fleet drain --move/);
     assert.match(no.out, /lapses 45 minutes after it was last seen/);
     assert.doesNotMatch(no.out, /You are the supervisor/);
     assert.equal(claimOf(g, org).machine, BOX.DEVTEAM_MACHINE_ID, 'a refusal writes nothing');
@@ -122,15 +122,19 @@ test('host claim: a parked or drained fleet hands the claim to the machine it mo
     assert.equal(claimOf(g, org).fleet, null, 'a pause keeps the claim');
     assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /parked as a pause on this machine, not a move/);
     assert.match(ok(old, ['prompt', 'supervisor'], { ...SUP, ...BOX }), /a pause on this machine, not a move/);
-    assert.equal(run(neu, ['prompt', 'supervisor'], MAC).status, 1, 'another machine still may not take a paused fleet');
+    const refused = run(neu, ['prompt', 'supervisor'], MAC);
+    assert.equal(refused.status, 1, 'another machine still may not take a paused fleet');
+    assert.match(refused.out, /fleet park --move or fleet drain --move/, 'the refusal says how to move, not how to pause');
     const paused = json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet;
     assert.equal(paused.mode, 'park');
     assert.equal(paused.moving, false, 'a pause is not a move');
     assert.equal(paused.goals.run, 0);
     assert.ok(paused.goals.park >= 1, 'every goal counted as parked');
-    ok(old, ['fleet', 'unpark'], { ...SUP, ...BOX });
-    // park on the box to move it: the claim says so at once
-    ok(old, ['fleet', 'park', '--move', '--reason', 'moving to the mac'], { ...SUP, ...BOX });
+    // the paused fleet becomes a move with --move: no unpark, no second round of park rulings
+    const marked = ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX });
+    assert.match(marked, /marked the held fleet a move/);
+    assert.doesNotMatch(marked, /nothing to do|told .* to commit/);
+    assert.match(ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX }), /already held as a move; nothing to do/);
     assert.equal(claimOf(g, org).fleet, 'park');
     assert.equal(json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet.moving, true, 'a park with --move is a move');
     assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /supervising machine: the-box \(machine box-0000000001, this machine\), last seen .*its fleet parked for a move/);
