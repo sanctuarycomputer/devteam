@@ -270,12 +270,12 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # Everything else goes straight to tmux, arguments untouched: every tmux call the kit makes runs this.
 COPY --chmod=755 <<'EOF' /usr/local/bin/tmux
 #!/bin/sh
-s='' l='' w='' o=1 k=''
+s='' l='' w='' o=1 k='' at=''
 for a do
   case $w in S) s=$a; w=; continue ;; L) l=$a; w=; continue ;; x) w=; continue ;; esac
   if [ -n "$o" ]; then
     case $a in
-      --) o=; continue ;;
+      --) o='' at=1; continue ;;
       -?*) r=${a#-}
         while [ -n "$r" ]; do
           c=${r%"${r#?}"}; r=${r#?}
@@ -283,16 +283,18 @@ for a do
         done
         continue ;;
     esac
-    o=
+    o='' at=1
   fi
-  case $a in kill-ser|kill-serv|kill-serve|kill-server|kill-ser\;|kill-serv\;|kill-serve\;|kill-server\;) k=1 ;; esac
+  # only a command's name: the first word, and the first after a ; (not send-keys' text, a target)
+  if [ -n "$at" ]; then case $a in kill-ser|kill-serv|kill-serve|kill-server|kill-ser\;|kill-serv\;|kill-serve\;|kill-server\;) k=1 ;; esac; fi
+  case $a in *\;) at=1 ;; *) at= ;; esac
 done
 if [ -n "$TMUX_TMPDIR" ] && [ -n "$TMUX" ] && [ -z "$s$l" ]; then
   case ${TMUX%%,*} in "${TMUX_TMPDIR%/}"/*) ;; *) unset TMUX TMUX_PANE ;; esac
 fi
 if [ -n "$k" ] && [ "$DEVTEAM_ALLOW_KILL_SERVER" != 1 ]; then
   d=${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)
-  if [ -n "$s" ]; then t=$s; elif [ -n "$l" ]; then t=$d/$l; elif [ -n "$TMUX" ]; then t=${TMUX%%,*}; else t=$d/default; fi
+  if [ -n "$s" ]; then t=$s; elif [ -n "$l" ]; then t=$d/$l; elif [ -n "${TMUX%%,*}" ]; then t=${TMUX%%,*}; else t=$d/default; fi
   box=/tmp/tmux-$(id -u dev 2>/dev/null)/default
   if [ "$t" = "$box" ] || [ "$t" -ef "$box" ]; then
     echo "tmux: kill-server refused: this would stop every supervisor on the box; use a private server: tmux -S <socket> …" >&2
@@ -631,7 +633,7 @@ start_dashboards() {
 }
 # start_recover: box-recover, in the background, into ~/.box/recover.log. One at a time (a second
 # waits for the first, then runs: it is safe to run again), so a restore never races the boot's.
-start_recover() { ( flock -w 900 9 || exit 1; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" & }
+start_recover() { ( flock -w 3600 9 || { note "box-recover: another run held it for an hour; this one did not run"; exit 1; }; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" & }
 start_dashboards
 # The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
 # resumed on its old conversation can reach for a command from before the deploy, and every supervisor
@@ -640,40 +642,52 @@ start_dashboards
 start_recover
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
-# tmux not answering (a call timing out) leaves the list as it was. First, the hub's window comes
-# back if it is gone (closed, or the whole home session with it); hub_window starts no tmux server.
-# A list-windows that fails for a moment can add a second hub window; it only retries the port.
-# Then a lost tmux server: on 2026-11-16 a test's kill-server, run in a pane, stopped the box's,
-# and with it every supervisor, worker, dashboard and the operator. The server's pid changed (the
-# terminal or anything else started a new one), or no server, or no operator window: the box is
-# brought back as at a boot, from the list as it stood the minute before, never from the new
-# server, which has nobody on it yet. That list holds only what was running: what the owner stopped
-# (back at a shell, or closed) was off it already. Every step is safe to run again, so a loss that
-# repeats only restores again. Pane ids start again at %0 on a new server, so the noted panes go,
-# as at boot; with the same server (only the operator gone) they are still right and stay. Not
-# while the box stops (devteam-box marks it before it closes the server).
-srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null)
+# tmux not answering (a call timing out) leaves everything as it was. First, a lost tmux server: on
+# 2026-11-16 a test's kill-server, run in a pane, stopped the box's, and with it every supervisor,
+# worker, dashboard and the operator. The server's pid changed (the terminal or anything else
+# started a new one), or no server: the box is brought back as at a boot, from the list as it stood
+# the minute before, never from the new server, which has nobody on it yet. That list holds only
+# what was running: what the owner stopped (back at a shell, or closed) was off it already. Every
+# step is safe to run again, so a loss that repeats only restores again. Pane ids start again at %0
+# on a new server, so the noted panes go, as at boot. Not while the box stops (devteam-box marks it
+# before it closes the server). With the same server, a missing operator window comes back alone.
+# Then the hub's window, if it is gone (closed, or the whole home session with it); hub_window
+# starts no tmux server. A list-windows that fails for a moment can add a second hub window; it
+# only retries the port.
+# note_srv: the server's pid; empty when tmux didn't answer in time (the next answer is taken as
+# the box's), lost when no server answered (the next one seen is a new server: restore).
+note_srv() { srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null); case $? in 0) ;; 124) srv= ;; *) srv=lost ;; esac; }
+note_srv
 while :; do
   sleep 60
   [ -e "$HOME/.box/stopping" ] && continue
-  timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
   now_srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null); rc=$?
   [ "$rc" = 124 ] && continue
-  if [ "$rc" != 0 ] || [ "$now_srv" != "$srv" ] || ! timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx operator; then
-    if [ "$now_srv" = "$srv" ]; then
-      note "the operator's window is gone (tmux server ${srv:-none}): bringing it back, then every dashboard and box-recover (~/.box/recover.log)"
-    else
-      note "tmux server lost (pid ${srv:-none}, now ${now_srv:-none}): bringing the box back as at a boot: the operator, the hub, every dashboard, then box-recover (~/.box/recover.log)"
-      if [ -s "$up" ]; then now=$(date +%s); sed "s/^/$now /" "$up" >> "$up.boot"; fi
+  wins=$(timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null); [ "$?" = 124 ] && continue
+  [ -z "$srv" ] && [ "$rc" = 0 ] && srv=$now_srv
+  if [ "$rc" != 0 ] || [ "$now_srv" != "$srv" ]; then
+    [ -e "$HOME/.box/stopping" ] && continue
+    note "tmux server lost (pid $srv, now ${now_srv:-none}): bringing the box back as at a boot: the operator, the hub, every dashboard, then box-recover (~/.box/recover.log)"
+    # once per server lost: a restore that found no server to start tries again, and adds nothing twice.
+    # A supervisor its own kit marked stopped on the old server (the owner closed it since the list
+    # was last kept) stays stopped.
+    if [ "$srv" != lost ]; then
+      if [ -s "$up" ]; then now=$(date +%s); while IFS= read -r r; do grep -Eq '"up": *false' "$r/docs/devteam/run/supervisor-up.json" 2>/dev/null || echo "$now $r"; done < "$up" >> "$up.boot"; fi
       rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
     fi
     start_operator lost
     timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
     start_dashboards
-    start_recover
-    srv=$(timeout 20 tmux display-message -p '#{pid}' 2>/dev/null)
+    [ -e "$HOME/.box/stopping" ] || start_recover
+    note_srv
     continue
   fi
+  # the same server, only the operator's window gone: just that comes back (nothing else was lost)
+  if ! printf '%s\n' "$wins" | grep -qx operator; then
+    note "the operator's window is gone (tmux server $srv): bringing it back"
+    start_operator lost
+  fi
+  timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
   panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     r=${k%/docs/devteam/scripts/devteam.mjs}
