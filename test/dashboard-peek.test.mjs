@@ -629,6 +629,99 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
   });
 
+  // Nothing permanent in a peek (spec §2.3): every control in every kind's body is on the allow-list
+  // (the writes §2.3 keeps, and the views, fold-outs, thread starters, links and menus, each checked
+  // elsewhere and never clicked here: Open in side peek would swap the peek mid-loop), or a click on it
+  // writes nothing and leaves the peek on its record. Each Start a thread drafts a thread on its own
+  // record; the lesson's Retire it is one of them.
+  await t.test('no permanent action', async () => {
+    const ALLOW = '[data-hold-id], [data-correct], [data-correct-send], [data-impact], [data-reason], [data-mdview], [data-thread-on], [data-menu-open], [data-copy], [data-answered-go], summary';
+    // a card in the peek that opens its own record's peek (a ticket card on a goal, a problem card): a
+    // link (§5's peek inside a peek), not clicked in the loop; one per kind is clicked last, below
+    const NAV = '[data-ticket], [data-open]';
+    // every non-GET fetch, recorded (again on each fresh visit open() starts)
+    const record = () => p.ev(`(() => { if (window.__writes) return; window.__writes = []; const real = window.fetch;
+      window.fetch = (u, o) => { const m = String(o?.method ?? (u instanceof Request ? u.method : 'GET')).toUpperCase(); if (m !== 'GET' && m !== 'HEAD') window.__writes.push(\`\${m} \${u?.url ?? u}\`); return real(u, o); }; })(); void 0`);
+    const writes = () => p.ev('window.__writes.splice(0)');
+    const settle = () => new Promise((r) => setTimeout(r, 150));
+    const drafted = [];
+    for (const key of Object.keys(H)) {
+      const kind = await open(key);
+      await soon(peekDrawn(kind), `${key}: drawn`);
+      await record();
+      await writes();
+      const at = await p.ev('[DRAWER.kind, DRAWER.id]');
+      const n = await p.ev("document.querySelectorAll('#drawer-body button, #drawer-body input, #drawer-body select, #drawer-body textarea, #drawer-body form').length");
+      for (let i = 0; i < n; i++) {
+        const c = await p.ev(`(() => { const el = document.querySelectorAll('#drawer-body button, #drawer-body input, #drawer-body select, #drawer-body textarea, #drawer-body form')[${i}];
+          if (!el || el.matches(${JSON.stringify(`${ALLOW}, ${NAV}`)})) return null; const what = el.outerHTML.slice(0, 120); el.click(); return what; })()`);
+        if (c === null) continue;
+        await settle();
+        assert.deepEqual(await writes(), [], `${key}: a click on ${c} writes nothing`);
+        assert.deepEqual(await p.ev('[DRAWER.kind, DRAWER.id]'), at, `${key}: a click on ${c} leaves the peek on its record`);
+      }
+      // each Start a thread (and Retire it on a lesson): a draft pinned to its record, nothing written
+      const refs = await p.ev("[...document.querySelectorAll('#drawer-body [data-thread-on]')].map((b) => b.dataset.threadOn)");
+      for (let i = 0; i < refs.length; i++) {
+        await p.ev(`document.querySelectorAll('#drawer-body [data-thread-on]')[${i}].click(); void 0`);
+        await settle();
+        const d = await p.ev('TL.draft && { ref: TL.draft.subject?.kind === "item" ? TL.draft.subject.ref : null, title: TL.draft.title }');
+        assert.equal(d?.ref, refs[i], `${key}: ${refs[i]} drafts a thread on its record`);
+        assert.ok(d.title, `${key}: the draft has its record's title`);
+        assert.deepEqual(await writes(), [], `${key}: ${refs[i]} writes nothing`);
+        drafted.push(refs[i]);
+        await p.ev('tlClose(); void 0');
+      }
+      // a card that opens its record: the peek moves to that record, and nothing is written
+      const nav = await p.ev(`(() => { const el = document.querySelector('#drawer-body :is(button, input, select, textarea, form):is(${NAV})'); if (!el) return null; const what = el.outerHTML.slice(0, 120); el.click(); return what; })()`);
+      if (nav !== null) {
+        await soon(`DRAWER.id !== ${JSON.stringify(at[1])}`, `${key}: ${nav} opens its record`);
+        await settle();
+        assert.deepEqual(await writes(), [], `${key}: a click on ${nav} writes nothing`);
+      }
+    }
+    assert.ok(drafted.includes(`question:${ids.qAnswered}`) && drafted.includes(`decision:${ids.decisionNotMine}`), `the thread starters were clicked: ${drafted.join(' ')}`);
+
+    // the lesson's Retire it: a thread starter, no knowledge post
+    await open('lesson');
+    await soon(peekDrawn('lesson'), 'the lesson peek');
+    await record();
+    await writes();
+    assert.equal(await p.ev("document.querySelectorAll('#drawer-body [data-know]').length"), 0, 'no [data-know] in the lesson peek');
+    const retire = await p.ev("(() => { const b = [...document.querySelectorAll('#drawer-body button')].find((x) => x.textContent.trim() === 'Retire it'); return b ? { on: b.dataset.threadOn ?? null, type: b.type } : null; })()");
+    assert.deepEqual(retire, { on: `lesson:${ids.lesson}`, type: 'button' }, 'Retire it starts a thread on the lesson');
+    await p.ev("[...document.querySelectorAll('#drawer-body button')].find((x) => x.textContent.trim() === 'Retire it').click(); void 0");
+    await settle();
+    assert.equal(await p.ev("TL.draft?.subject?.ref ?? null"), `lesson:${ids.lesson}`, 'Retire it: a draft pinned to the lesson');
+    assert.deepEqual(await writes(), [], 'Retire it posts nothing');
+    await p.ev('tlClose(); void 0');
+
+    // read-only answered cards: no Overrule in the defaulted question's peek, nor in the decision's
+    // "The answer it rests on" (the fixture's decision rests on the defaulted question)
+    for (const key of ['qDefaulted', 'qAnswered', 'qWithdrawn', 'decision']) {
+      const kind = await open(key);
+      await soon(peekDrawn(kind), `${key}: drawn`);
+      assert.equal(await p.ev("document.querySelectorAll('#drawer-body [data-overrule], #drawer-body [data-overrule-send]').length"), 0, `${key}: no Overrule in the peek`);
+    }
+    assert.ok(await p.ev(`[...document.querySelectorAll('#drawer-body .psect')].some((s) => s.querySelector('.card-head')?.textContent.trim() === 'The answer it rests on' && !!s.querySelector('a[href="#q/${encodeURIComponent(ids.qDefaulted)}"]'))`), 'the decision rests on the defaulted question');
+
+    // the defaulted question's How it changes: the Inbox, its Answered list open, its card's Overrule focused
+    await open('qDefaulted');
+    await soon(peekDrawn('q'), 'the defaulted question');
+    await p.ev(`document.querySelector('#drawer-body [data-answered-go="${ids.qDefaulted}"]').click(); void 0`);
+    await soon(`location.hash === '#inbox' && document.getElementById('answered-wrap').open && document.activeElement === document.querySelector('#a-${ids.qDefaulted} [data-overrule]')`, 'the Inbox, the Answered list open, the card\'s Overrule focused');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'the peek closed');
+    assert.ok(await p.ev(`(() => { const r = document.getElementById('a-${ids.qDefaulted}').getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; })()`), 'the card in view');
+    await p.ev("document.getElementById('answered-wrap').open = false; void 0");
+
+    // an open question's link: the Inbox at its card, no peek
+    await p.ev("location.hash = '#board'");
+    await soon("location.hash === '#board' && !document.body.classList.contains('peek-open')", 'back on Board');
+    await p.ev(`location.hash = ${JSON.stringify(`#q/${encodeURIComponent(ids.qOpen)}`)}`);
+    await soon(`location.hash === '#inbox' && (() => { const c = document.getElementById(${JSON.stringify(`q-${ids.qOpen}`)}); if (!c) return false; const r = c.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; })()`, 'the Inbox at the open question\'s card');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
+  });
+
   await t.test('notFound and loading keep the frame', async () => {
     const frame = (what, note) => p.ev(`(() => { const b = document.getElementById('drawer-body'), dts = [...b.querySelectorAll('section.attrs dl.props dt')].map((x) => x.textContent.trim()), last = b.lastElementChild;
       return { first: b.firstElementChild?.matches('section.attrs'), id: dts[0], how: dts.includes('How it changes'), history: last?.matches('.psect') && last.querySelector('.card-head')?.textContent.trim() === 'History', note: last?.querySelector('.psect-body')?.textContent.trim() }; })()`).then((m) => {

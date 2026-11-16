@@ -2377,6 +2377,7 @@ function qblock(text, links) {
 }
 // the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
+// In a peek (inPeek) it is read-only: no anchor, and no Overrule, which stays on the Inbox's card (kit-88 spec §2.3).
 function answeredCard(q, { inPeek = false } = {}) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
   return `<div class="card small"${inPeek ? '' : ` id="a-${esc(q.id)}"`}${subj('question', q.id, qplain(q.question, q.links))}>
@@ -2387,7 +2388,7 @@ function answeredCard(q, { inPeek = false } = {}) {
     ${q.standing_rule ? `<div class="muted">Standing rule: ${esc(q.standing_rule)}</div>` : ''}
     ${q.kind === 'review' ? `<div class="meta"><a class="linkish" href="#review/${encodeURIComponent(q.id)}">See the review as you answered it</a>${q.result_status && !['verified', 'declined'].includes(q.result_status) ? ` <span class="badge high">${esc(q.result_status)}</span>` : ''}</div>` : ''}
     <div class="meta${q.channel === 'thread' && q.turn_thread ? ' from-thread' : ''}">${esc(how)}${q.channel === 'thread' && q.turn_thread ? `: <a class="linkish" href="#talk/${encodeURIComponent(q.turn_thread)}">${esc(q.turn_thread_title || 'a conversation with the supervisor')}</a>` : ''}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
-    ${q.status === 'defaulted' ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
+    ${q.status === 'defaulted' && !inPeek ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
   </div>`;
 }
 
@@ -4457,7 +4458,7 @@ function openLesson(id) {
     ] })}
     ${k.plain ? `<p>${esc(k.plain)}</p>` : ''}
     ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
-    ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>` : ''}
+    ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button type="button" class="ghost" data-thread-on="${esc(`lesson:${k.id}`)}">Retire it</button></div>` : ''}
     ${lineageBlock(p)}
     ${obs.length ? psect('The signals it came from', obsList(obs)) : ''}
     ${citedBlock(p, k)}
@@ -5926,6 +5927,34 @@ function tlStart(hit) {
   tlDraw();
   tlEl('tl-c-text')?.focus();
 }
+// A peek's Start a thread (and a lesson's Retire it): a thread pinned to the record, as a Shift+click on
+// its card starts, placed at the button; it posts nothing (kit-88 spec §2.2, §2.3).
+document.addEventListener('click', (e) => {
+  const b = e.target.closest?.('[data-thread-on]');
+  if (!b) return;
+  const ref = b.dataset.threadOn;
+  const r = b.getBoundingClientRect();
+  const title = tLine($('drawer-bar-title')?.querySelector('.dtitle')?.textContent, T_TITLE_MAX) || T_KIND[ref.split(':')[0]];
+  tlStart({ subject: { kind: 'item', ref, quote: tCut(title, 300) }, title, x: r.left + r.width / 2, y: r.top + r.height / 2 });
+});
+// A defaulted question's How it changes: the Inbox, its Answered list open, the question's card in
+// view with its Overrule field focused (the target rides on the click: the head keeps no such key).
+document.addEventListener('click', (e) => {
+  const a = e.target.closest?.('[data-answered-go]');
+  if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  const qid = a.dataset.answeredGo;
+  const go = () => {
+    if (location.hash !== '#inbox') return;
+    $('answered-wrap').open = true;
+    const card = document.getElementById(`a-${qid}`);
+    card?.scrollIntoView({ block: 'center' });
+    card?.querySelector('[data-overrule]')?.focus({ preventScroll: true });
+  };
+  if (location.hash === '#inbox') { hideDrawer(); go(); return; }
+  addEventListener('hashchange', go, { once: true });
+  location.hash = '#inbox';
+});
 // The one element a subject's pin and card follow: the one in its home section (an observation is
 // also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
 function tlHome(s) {
@@ -7141,6 +7170,7 @@ document.addEventListener('click', async (ev) => {
       : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }));
     return;
   }
+  // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)
   const know = ev.target.closest('[data-know]');
   if (know) {
     const kid = know.dataset.know, status = know.dataset.status;
@@ -7152,7 +7182,7 @@ document.addEventListener('click', async (ev) => {
     press(`k:${kid}`, {
       build: () => ({ action: 'knowledge', body: { id: kid, status, ...(note ? { note } : {}) } }),
       overlay: { data: (d) => ({ ...d, ooda: { ...d.ooda, knowledge: d.ooda.knowledge.filter((k) => !pending(k)) } }), agrees: (raw) => !raw.ooda.knowledge.some(pending) },
-      apply: () => { drafts[`know:${kid}`] = typed; if (know.closest('.card')) know.closest('.card').remove(); else { know.disabled = true; know.textContent = status === 'retired' ? 'Retiring…' : 'Saving…'; } },
+      apply: () => { drafts[`know:${kid}`] = typed; know.closest('.card')?.remove(); },
       onOk: () => { delete drafts[`know:${kid}`]; },
       errId: kid,
     });
