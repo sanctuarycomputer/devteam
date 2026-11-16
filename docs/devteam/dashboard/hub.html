@@ -961,6 +961,9 @@ function countsEl(x, stat = false) {
   if (q) { const n = el('span', 'n q', q); n.title = plural(q, 'open question'); c.append(n); }
   if (q && th) c.append(el('span', 'dim', '·'));
   if (th) { const n = el('span', `n th ${th.tone}`, th.n); n.title = th.title; c.append(n); }
+  // the numbers' words, for a screen reader
+  c.setAttribute('role', 'img');
+  c.setAttribute('aria-label', [q ? plural(q, 'open question') : '', th ? th.title : ''].filter(Boolean).join(', '));
   return c;
 }
 // that project's dashboard, at a place in it: its frame pointed there, its tab chosen
@@ -972,7 +975,14 @@ function openAt(root, hash) {
 }
 // a card's ⋯: its root and port, and two ways to open its dashboard
 let menuPop = null;
-function closeMenu() { if (menuPop) { menuPop.remove(); menuPop = null; } }
+// closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
+function closeMenu(back = false) {
+  if (!menuPop) return;
+  const root = menuPop.dataset.root;
+  menuPop.remove();
+  menuPop = null;
+  if (back) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${root}:menu`)?.focus({ preventScroll: true });
+}
 function cardMenu(btn, it) {
   const again = menuPop?.dataset.root === it.x.root;
   closeMenu();
@@ -995,7 +1005,7 @@ function cardMenu(btn, it) {
   m.style.left = `${Math.round(Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)))}px`;
   open.focus({ preventScroll: true });
 }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuPop) closeMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuPop) closeMenu(true); });
 window.addEventListener('pointerdown', (e) => { if (menuPop && !menuPop.contains(e.target) && !e.target.closest?.('.menu-btn')) closeMenu(); }, true);
 function overviewCard(it, newest) {
   const { x } = it;
@@ -1019,6 +1029,7 @@ function overviewCard(it, newest) {
   if (held) {
     const a = el('a', 'pill amber shrink held-pill');
     a.href = '#';
+    a.dataset.k = `${x.root}:held`;
     a.title = held.title;
     a.append(el('span', 't', held.text));
     a.onclick = (e) => { e.preventDefault(); openAt(x.root, '#goals'); };
@@ -1055,7 +1066,7 @@ function overviewCard(it, newest) {
   inbox.type = 'button';
   inbox.dataset.k = `${x.root}:inbox`;
   inbox.title = `Open ${x.name}'s Inbox`;
-  inbox.append(countsEl(x, true));
+  inbox.append(typeof x.inbox === 'number' ? countsEl(x, true) : document.createTextNode('–'));
   inbox.onclick = () => openAt(x.root, '#overview?th=inbox');
   stat('inbox', 'Inbox', inbox);
   stat('working', 'Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
@@ -1169,7 +1180,6 @@ const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) 
 /* hub-overview end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
-  closeMenu();
   const all = [...items.values()];
   const newest = all.map((it) => relNums(it.x.kit)).filter(Boolean).sort(relCmp).pop() ?? null;
   // what needs the owner first: stalled and gone, then waiting, then the rest by name
@@ -1185,6 +1195,7 @@ function paintOverview() {
   const acts = el('div', 'acts');
   const set = el('a', 'set', 'Settings');
   set.href = '#settings';
+  set.dataset.k = 'overview:settings';
   // beside the machine switch, inside it (the block styles it there); alone when there is none
   if (can.length) { const mm = machineMode(can.map(modeOf)); const m = switchEl('machine', { scope: 'machine', mode: mm.mode, counts: mm.counts }); m.querySelector('.fleet-switch').append(set); acts.append(m); } else acts.append(set);
   head.append(acts);

@@ -446,11 +446,31 @@ test('the Overview: a header, then two cards a row with the standard head', CHRO
   await p.until('the menu', `!!document.querySelector('.menu-pop')`);
   assert.match(await p.ev(`document.querySelector('.menu-pop').textContent`), new RegExp(`/srv/beta.*${B}`));
   assert.equal(await p.ev(selectedTab), 'Overview');
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(`!!document.querySelector('.menu-pop')`), true, 'a redraw leaves an open menu open');
   await p.key('Escape');
   await p.until('the menu closed', `!document.querySelector('.menu-pop')`);
+  assert.equal(await p.ev(`document.activeElement?.dataset.k ?? null`), '/srv/beta:menu', 'Escape gives the keyboard back to ⋯');
+  // the Settings link keeps the keyboard across a redraw
+  await p.ev(`document.querySelector('#ov-body > .ov-head a.set').focus()`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(`document.activeElement?.matches('#ov-body > .ov-head a.set') ?? false`), true, 'Settings link keeps focus');
   // a click on a card, off its controls, opens that project's dashboard as its tab does
   await p.ev(`${cardOf('alpha')}.querySelector('.ov-mosaic').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
   await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha') && document.querySelectorAll('iframe:not([hidden])').length === 1 && document.getElementById('overview').hidden`);
+});
+
+test('the summary counts stalled and gone as blocked; a starting project shows no Inbox count', CHROME, async (t) => {
+  const [A, B, C, D] = await freePorts(4);
+  const F = await fixtureHub(t, { ports: [A, B, C, D] });
+  const list = [hello('alpha', A, { pulse: { state: 'stalled' } }), hello('beta', B), hello('gamma', C, { inbox: null, pulse: null }), hello('delta', D, { inbox: null })];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('four cards', `document.querySelectorAll('.ov-card').length === 4`);
+  assert.equal(await p.ev(`${cardOf('delta')}.querySelector('[data-pin=inbox] .v').textContent`), '–', 'not 0: it has not said');
+  F.setList(list.filter((x) => x.name !== 'beta'));
+  await p.until('beta gone', `${cardOf('beta')}?.querySelector('.card-head .pill:not(.shrink)')?.textContent === 'Not answering'`);
+  assert.match(await p.ev(`document.querySelector('#ov-body > .ov-head .sum').textContent`), /· 2 blocked/);
 });
 
 test('the tabs: a dot by state, the state word, the Inbox counts', CHROME, async (t) => {
@@ -477,6 +497,7 @@ test('the tabs: a dot by state, the state word, the Inbox counts', CHROME, async
   assert.deepEqual(tabs.slice(0, 3).map((x) => [x.q, x.th]), [['3', 'n th ok 2'], [null, 'n th you 2'], [null, 'n th wait 2']]);
   assert.deepEqual(tabs.slice(3).map((x) => x.counts), [false, false, false], 'nothing when both are 0');
   assert.equal(await p.ev(`${tabOf('alpha')}.querySelector('.n.th').title`), '1 ready to accept, 1 your move');
+  assert.equal(await p.ev(`${tabOf('alpha')}.querySelector('.tab-counts').getAttribute('aria-label')`), '3 open questions, 1 ready to accept, 1 your move', 'words for a screen reader');
   assert.ok(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Overview')`), 'the Overview tab reads Overview, nothing else');
   // the red dot pulses, except under reduced motion
   const anim = `getComputedStyle(${tabOf('delta')}.querySelector('.dot')).animationName`;
@@ -552,6 +573,9 @@ test('the partly-held pill: words, hover, a click to Goals', CHROME, async (t) =
   assert.deepEqual(await p.ev(`(() => { const x = ${cardOf('alpha')}.querySelector('.held-pill'); return [x.textContent, x.title, x.classList.contains('amber')]; })()`), ['Partly parked · 2 of 11 goals running', '9 parked, 0 draining', true]);
   assert.equal(await p.ev(`${cardOf('beta')}.querySelector('.held-pill').title`), 'Recurring checks: waits on your approval\nSense the outside world: drain');
   assert.equal(await p.ev(`!!${cardOf('gamma')}.querySelector('.held-pill')`), false, 'no fleet.goals: no pill');
+  await p.ev(`${cardOf('alpha')}.querySelector('.held-pill').focus()`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(`document.activeElement?.classList.contains('held-pill') && document.activeElement.closest('.ov-card') === ${cardOf('alpha')}`), true, 'the pill keeps focus across a redraw');
   await p.ev(`${cardOf('alpha')}.querySelector('.held-pill').click()`);
   await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha')`);
   await until(() => F.hashes.get(A).includes('#goals'), 'the dashboard at #goals');
