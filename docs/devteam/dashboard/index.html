@@ -330,6 +330,8 @@ try {
   :where(.no-shell) .card.small { padding: 10px 12px; }
   .card[data-open] { cursor: pointer; }
   .card[data-open]:hover { background: var(--hover); }
+  .card[data-open]:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .card a.title-link:not(.linkish):hover { text-decoration: underline; text-underline-offset: 3px; }
   .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
   .lineage .diagram svg { max-width: 100%; height: auto; }
   .lineage a.lineage-node { cursor: pointer; }
@@ -2295,6 +2297,9 @@ function questionCard(q, o, reasonText, copy = false) {
 const menuOf = (id, rows = [], open = null) => `<details class="menu"><summary aria-label="Details"><i class="icon-ellipsis" aria-hidden="true"></i></summary><div class="pop"><div class="kv">${id ? `<span>ID</span><code>${esc(id)}</code>` : ''}${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${v}</span>`).join('')}</div>${id ? `<button class="ghost" data-copy="${esc(id)}">Copy ID</button>` : ''}${open ? `<button type="button" class="ghost" data-menu-open="${esc(open)}">Open in side peek</button>` : ''}</div></details>`;
 // The same menu for a record card with no cardHead (a Board or Loop card): one ⋯ per card.
 const cardMenu = (kind, id, rows = []) => menuOf(id, rows, `${kind}/${id}`);
+// A card's title (its main line, already escaped HTML) as the link to the card's own record: each run
+// of it outside the links it holds (a ticket, a question) links to the record, and those keep theirs.
+const titled = (href, html) => String(html).split(/(<a\b[^>]*>[\s\S]*?<\/a>)/).map((x, i) => (i % 2 || !x.trim() ? x : `<a class="title-link" href="${esc(href)}">${x}</a>`)).join('');
 // A card's title bar: an icon and a label on the left, ids and timestamps tucked in a ⋯ menu.
 function cardHead(icon, label, { extra = '', id = null, rows = [], open = null } = {}) {
   const menu = id || rows.length || open ? menuOf(id, rows, open) : '';
@@ -3346,25 +3351,25 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} data-open="observation/${esc(encodeURIComponent(x.id))}">${cardMenu('observation', x.id)}<span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
-      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, <a class="linkish" href="#observation/${encodeURIComponent(x.id)}">${when(x.created_at)}</a></div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
+    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(x.id))}">${cardMenu('observation', x.id)}${titled(peekFor('observation', x.id), `<span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}`)}
+      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
   const debt = o.debt?.signals || [];
   const taught = o.debt?.incidents || [];
   $('debt').innerHTML = debt.length || taught.length ? debt.map((x) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}">${cardMenu('signal', x.key)}<a class="linkish" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
-    <div class="card small"${subj('problem', x.id, x.title)} data-open="problem/${esc(encodeURIComponent(x.id))}">${cardMenu('problem', x.id)}<span class="badge">incident</span><a class="linkish" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
+    <div class="card small" role="button" tabindex="0" data-open="signal/${esc(encodeURIComponent(x.key))}">${cardMenu('signal', x.key)}<a class="linkish title-link" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
+    <div class="card small"${subj('problem', x.id, x.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(x.id))}">${cardMenu('problem', x.id)}<span class="badge">incident</span><a class="linkish title-link" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}">${cardMenu('signal', c.key)}<a class="linkish" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
+    <div class="card small" role="button" tabindex="0" data-open="signal/${esc(encodeURIComponent(c.key))}">${cardMenu('signal', c.key)}<a class="linkish title-link" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"${subj('problem', p.id, p.title)} data-open="problem/${esc(encodeURIComponent(p.id))}">${cardMenu('problem', p.id)}<span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"${subj('problem', p.id, p.title)} role="button" tabindex="0" data-open="problem/${esc(encodeURIComponent(p.id))}">${cardMenu('problem', p.id)}<span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish title-link" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter(ownerLesson);
   const agents = o.knowledge.filter((k) => k.status === 'candidate' && !ownerLesson(k));
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (agents.length ? `<details class="agents-lessons"><summary>The agents' own lessons, waiting for the supervisor (${agents.length})</summary><p class="small muted">About how the agents work: the supervisor keeps or retires these itself once the evidence is plain. You can read each one, and retire any lesson from its card.</p>${agents.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}<a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge">${esc(k.kind)}</span></a>${linkify(k.statement)} <span class="muted">· applies to ${esc(scopeWords(k.scope))}</span></div>`).join('')}</details>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}<a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (agents.length ? `<details class="agents-lessons"><summary>The agents' own lessons, waiting for the supervisor (${agents.length})</summary><p class="small muted">About how the agents work: the supervisor keeps or retires these itself once the evidence is plain. You can read each one, and retire any lesson from its card.</p>${agents.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} role="button" tabindex="0" data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}${titled(peekFor('lesson', k.id), `<span class="badge">${esc(k.kind)}</span>${linkify(k.statement)}`)} <span class="muted">· applies to ${esc(scopeWords(k.scope))}</span></div>`).join('')}</details>` : '') +
+    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} role="button" tabindex="0" data-open="lesson/${esc(encodeURIComponent(k.id))}">${cardMenu('lesson', k.id)}${titled(peekFor('lesson', k.id), `<span class="badge good">${esc(k.kind)}</span>${linkify(k.statement)}`)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become lessons: the supervisor keeps the ones about how the agents work, and sends you any that would change something you set.');
 
   // Trust Ladder
@@ -3381,9 +3386,9 @@ function renderOoda(o) {
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} data-open="act/${esc(encodeURIComponent(a.id))}">
-      <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
-        <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
+    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} role="button" tabindex="0" data-open="act/${esc(encodeURIComponent(a.id))}">
+      <div><div class="act-head">${titled(peekFor('act', a.id), v.head)}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
+        <div class="meta">${when(a.created_at)} · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
@@ -3425,10 +3430,10 @@ function renderDecisions(o) {
     const under = decisionUnder(r);
     const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
     return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} data-open="${esc(open.slice(1))}">
-      <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} role="button" tabindex="0" data-open="${esc(open.slice(1))}">
+      <div><div class="act-head">${titled(open, `<span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}`)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
-        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
+        <div class="meta">${esc(when(r.at))} · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
         ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
         ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
       </div>
@@ -4172,7 +4177,7 @@ function renderMonitoring(d) {
   const feed = d.sensor_feed || [];
   $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta"><a class="linkish" href="${esc(peekFor('observation', o.id))}">${esc(when(o.created_at))}</a> · ${subjectLink(o.subject)}</div></div>${cardMenu('observation', o.id)}</div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} role="button" tabindex="0" data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${titled(peekFor('observation', o.id), `${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}`)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div>${cardMenu('observation', o.id)}</div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
 function openSensor(name) {
   drawerFor('sensor', name);

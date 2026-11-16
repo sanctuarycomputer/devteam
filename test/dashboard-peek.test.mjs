@@ -913,6 +913,7 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     const listControls = () => p.ev(`(() => { const all = [...document.querySelectorAll(${JSON.stringify(CONTROLS)})];
       return all.filter((el) => !el.matches(${JSON.stringify(`${ALLOW}, ${NAV}`)})).map((el) => { const k = focusKey(el); const sel = k ? \`#drawer-body \${k}\` : ${JSON.stringify(CONTROLS)}; return { sel, nth: [...document.querySelectorAll(sel)].indexOf(el), what: el.outerHTML.slice(0, 120) }; }); })()`);
     const clickedPer = {};
+    const navClicked = [];
     for (const key of Object.keys(H)) {
       const kind = await open(key);
       await soon(peekDrawn(kind), `${key}: drawn`);
@@ -943,13 +944,17 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
         await p.ev('tlClose(); void 0');
       }
       // a card that opens its record: the peek moves to that record, and nothing is written
-      const nav = await p.ev(`(() => { const el = document.querySelector('#drawer-body :is(button, input, select, textarea, form):is(${NAV})'); if (!el) return null; const what = el.outerHTML.slice(0, 120); el.click(); return what; })()`);
+      const nav = await p.ev(`(() => { const el = [...document.querySelectorAll('#drawer-body :is(${NAV})')].find((x) => x.dataset.open && decodeURIComponent(x.dataset.open) !== decodeURIComponent(location.hash.slice(1))); if (!el) return null; const what = el.outerHTML.slice(0, 120); const open = el.dataset.open; el.click(); return { what, open }; })()`);
       if (nav !== null) {
-        await soon(`DRAWER.id !== ${JSON.stringify(at[1])}`, `${key}: ${nav} opens its record`);
+        const want = decodeURIComponent(nav.open), k = want.startsWith('file?') ? 'file' : want.split('/')[0];
+        await soon(`decodeURIComponent(location.hash.slice(1)) === ${JSON.stringify(want)} && DRAWER.kind === ${JSON.stringify(k)} && !document.getElementById('drawer').hidden`, `${key}: ${nav.what} opens its record ${want}`);
         await settle();
-        assert.deepEqual(await writes(), [], `${key}: a click on ${nav} writes nothing`);
+        assert.notDeepEqual(await p.ev('[DRAWER.kind, DRAWER.id]'), at, `${key}: the peek moved off its record`);
+        assert.deepEqual(await writes(), [], `${key}: a click on ${nav.what} writes nothing`);
+        navClicked.push(key);
       }
     }
+    assert.ok(navClicked.includes('goal'), `a card in a peek was clicked, the goal peek's at least: ${navClicked.join(' ')}`);
     assert.ok(drafted.includes(`question:${ids.qAnswered}`) && drafted.includes(`decision:${ids.decisionNotMine}`), `the thread starters were clicked: ${drafted.join(' ')}`);
     // the loop clicked something: at least one control in all (the file's views at least), and on
     // each peek every control it listed
@@ -1204,7 +1209,8 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
         const menus = [...c.querySelectorAll('details.menu')].filter((m) => m.closest(${J(CARDS)}) === c);
         const pop = menus[0]?.querySelector('.pop'), mo = pop?.querySelector('[data-menu-open]'), cp = pop?.querySelector('[data-copy]');
         return { open: c.dataset.open, menus: menus.length, openIn: mo ? [mo.textContent.trim(), dec('#' + mo.dataset.menuOpen) === own] : null, copy: cp ? cp.textContent.trim() : null,
-          title: [...c.querySelectorAll('a[href]')].some((a) => dec(a.getAttribute('href')) === own), openLinks: [...c.querySelectorAll('a')].filter((a) => a.textContent.trim() === 'Open').length }; }); })()`);
+          title: (() => { const tl = [...c.querySelectorAll('a.title-link')].filter((a) => a.closest(${J(CARDS)}) === c && !a.closest('details.menu'));
+            return tl.length > 0 && tl.every((a) => dec(a.getAttribute('href')) === own && !a.closest('.meta')) && (!!tl[0].closest('h4, .t, .act-head') || !!tl[0].querySelector(':scope > b, :scope > .badge')); })(), openLinks: [...c.querySelectorAll('a')].filter((a) => a.textContent.trim() === 'Open').length }; }); })()`);
       for (const c of cards) {
         kinds.add(decodeURIComponent(c.open).split('/')[0]);
         assert.deepEqual(c, { open: c.open, menus: 1, openIn: ['Open in side peek', true], copy: 'Copy ID', title: true, openLinks: 0 }, `${page}: ${c.open}`);
@@ -1224,7 +1230,7 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
         const card = `${cardsIn(sel)}[${i}]`;
         await on(page);
         const open = await p.ev(`${card}.dataset.open`);
-        await p.ev(`(() => { ${DEC} const c = ${card}; [...c.querySelectorAll('a[href]')].find((a) => dec(a.getAttribute('href')) === dec('#' + c.dataset.open)).click(); })(); void 0`);
+        await p.ev(`(() => { ${DEC} const c = ${card}; c.querySelector('a.title-link').click(); })(); void 0`);
         await opened(open, `${page}: ${open}, its title link`);
         await on(page);
         await p.ev(`(() => { const d = ${card}.querySelector('details.menu'); d.open = true; window.__menu = d; d.querySelector('[data-menu-open]').click(); })(); void 0`);
@@ -1245,6 +1251,30 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.deepEqual(await p.ev(`[${el}.getAttribute('role'), ${el}.getAttribute('tabindex')]`), ['button', '0'], `${sel}: a button to the keyboard`);
       assert.equal(await enter(el), true);
       await opened(open, `${sel}: Enter on the focused card`);
+    }
+    // a Loop card and a Sensors card (spec §2.5: a card that stands for a record, role=button, tabindex=0)
+    for (const [page, sel] of [['#loop?lt=observe', '#observations .card[data-open]'], ['#sensors', '#sensor-feed .card[data-open]']]) {
+      await on(page);
+      await soon(`!!document.querySelector(${J(sel)})`, `${sel}: drawn`);
+      assert.equal(await p.ev(`[...document.querySelectorAll(${J(sel)})].every((c) => c.getAttribute('role') === 'button' && c.getAttribute('tabindex') === '0')`), true, `${sel}: every card a button to the keyboard`);
+      const el = `document.querySelector(${J(sel)})`;
+      const open = await p.ev(`${el}.dataset.open`);
+      assert.equal(await enter(el), true);
+      await opened(open, `${sel}: Enter on the focused card`);
+      // Enter on a link inside one: the link's own thing (a link to another record goes there; the
+      // title link to its own), never the card's handler; a real Enter on a focused link follows it
+      await on(page);
+      const link = await p.ev(`(() => { ${DEC} const cs = [...document.querySelectorAll(${J(sel)})];
+        for (let i = 0; i < cs.length; i++) { const own = dec('#' + cs[i].dataset.open); const a = [...cs[i].querySelectorAll('a[href^="#"]')].filter((x) => !x.closest('details.menu')).find((x) => dec(x.getAttribute('href')) !== own) || cs[i].querySelector('a.title-link');
+          if (a) { window.__a = a; return { own, href: dec(a.getAttribute('href')) }; } }
+        return null; })()`);
+      assert.ok(link, `${sel}: a card with a link`);
+      assert.equal(await p.ev(`(() => { const a = window.__a; a.focus(); if (document.activeElement !== a) return 'not focused';
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }); a.dispatchEvent(ev); return ev.defaultPrevented ? 'the card took it' : true; })()`), true, `${sel}: Enter on a link is left to the link`);
+      await p.ev('window.__a.click(); void 0');
+      await soon(`decodeURIComponent(location.hash) === ${J(link.href)}`, `${sel}: the link's own place: ${link.href}`);
+      await settle();
+      assert.equal(await p.ev('decodeURIComponent(location.hash)'), link.href, `${sel}: still the link's, not the card's (${link.own})`);
     }
   });
 
