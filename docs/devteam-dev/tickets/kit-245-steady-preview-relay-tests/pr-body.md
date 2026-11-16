@@ -9,14 +9,15 @@ On 2026-11-16, two of `test/gateway.test.mjs`'s preview tests got a 503 from the
 - **The gateway sent both 503s itself.** Either its preview map lacked the name right after `pollPush`, or its connect to 127.0.0.1 failed (any error for the socket test; an error other than ECONNREFUSED for the `::1` POST, which skips the `::1` retry).
 - **Candidates, none confirmed:**
   - **A dev port equal to the gateway's never-bound terminal port.** The gateway drops such a preview from its map. It fits both failures, but `freePort()` handed back that port 0 times in 2000 tries here, so two hits six minutes apart would be improbable.
-  - **For the `::1` POST only:** another process listening on 127.0.0.1 at the number `freePort()` had just freed.
   - **A transient loopback connect error on a busy runner.** The Node 18 and 20 shards also run the chrome group.
-  - Another process holding the port before the dev server bound it doesn't fit: the old `listen` would have thrown EADDRINUSE, not led to a 503.
+- **Ruled out:**
+  - Another process holding the port before the dev server bound it: the old `listen` would have thrown EADDRINUSE, not led to a 503.
+  - For the `::1` POST, a listener on 127.0.0.1 at the same number: the gateway would have relayed its answer, or sent a 502, not this 503.
 - **Not reproduced here:** 13 Node 18 runs, including the file beside its CI neighbours on 4 pinned cores. These two are the only preview-test failures in the last 150 `test.yml` runs.
 
-So the change rules out the first candidate by construction, and makes any recurrence name its cause: the probe's failure message gives the ports and the gateway's own `/dev/` rows (`answers` or `not answering`).
+So the change rules out the first candidate by construction for the two dev servers on 127.0.0.1. The `::1` server (`cool-owl`) still takes its port from `freePort()`, because a port given at listen on `::1` could be in use on 127.0.0.1. A collision there now fails at the probe, naming the ports. Any recurrence names its cause: the probe's failure message gives the ports and the gateway's own `/dev/` rows (`answers` or `not answering`).
 
-- Both tests' dev servers listen on port 0 and take the port from their own `listening` address (`devServer`), never one the gateway refuses.
+- Both tests' main dev servers (on 127.0.0.1) listen on port 0 and take the port from their own `listening` address (`devServer`), never one the gateway refuses. The `::1` server keeps `freePort()` (see above) and is checked by the probe.
 - Before anything is asserted, one probe goes through the relay (`previewReady`). It must get the app's own body on the first try, with no second hub read. It is **never retried**, so it can't hide a gateway defect. A failure names the dev, terminal, hub and instance ports and the gateway's own `/dev/` rows.
 - In the ws test, a frame that never comes back fails after 5 s instead of hanging the file. The first socket is closed in `finally`.
 - `test-stress.yml` takes `node: 18`.
