@@ -172,6 +172,7 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
 
   // narrow: the panel covers the page, Shift over it shows no pin
   await size(720, 800);
+  await soon("innerWidth === 720 && getComputedStyle(document.querySelector('.pagebar .tt')).visibility === 'visible'", 'at 720');
   await p.click('.pagebar .tt');
   await soon(`${isOpen} && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'open at 720');
   const mid = await p.ev("(() => { const r = document.getElementById('threads').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()");

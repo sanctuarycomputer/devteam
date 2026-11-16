@@ -153,8 +153,10 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
     await onPage('overview');
     // the Inbox button opens the Threads panel over the page (kit-89); the Inbox page is the nav's
     await p.click('#inbox-btn');
-    await until(() => p.ev("location.hash === '#overview?th=open' && document.body.classList.contains('threads-open')"), 'the Threads panel over Overview');
-    await onPage('overview');
+    await until(() => p.ev("location.hash === '#overview?th=open' && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'"), 'the Threads panel over Overview, at rest');
+    assert.deepEqual(await shown(), ['overview'], 'Overview still shown under the panel');
+    await p.click('#th-close');
+    await until(() => p.ev("!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, the page at rest');
   }
 });
 
