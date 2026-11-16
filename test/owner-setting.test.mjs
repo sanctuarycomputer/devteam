@@ -45,11 +45,11 @@ test('max_active_* apply as on main: a working-tree edit in the main checkout is
     edit((j) => { j.max_active_tickets = 3; j.max_active_per_component = 1; });
     const r = run(old, ['settings', '--get', 'max_active_tickets'], SUP);
     assert.equal(r.status, 0, r.err);
-    assert.equal(r.out, '5', "main's value applies");
+    assert.equal(r.out, '', "main's value applies: unset, no cap");
     const warning = /max_active_tickets, max_active_per_component here differs from main; it applies as on main, so change it with settings set in the settings chore/;
     assert.match(r.err, warning);
     assert.equal(count(r.err, warning), 1, 'named once per process');
-    assert.equal(ok(old, ['settings', '--get', 'max_active_per_component'], SUP), '2');
+    assert.equal(ok(old, ['settings', '--get', 'max_active_per_component'], SUP), '');
 
     // an owner key and an askable key both edited: each line once
     edit((j) => { j.gates = { tidy: { cmd: 'true' } }; });
@@ -67,69 +67,33 @@ test('max_active_* apply as on main: a working-tree edit in the main checkout is
   } finally { F.done(); }
 });
 
-test('null means no limit wherever a cap is read', () => {
+// The readers are kit PR #277's (capOf: a positive number is a cap, null or 0 none; ruling
+// m-20261116-021912584). What kit-85 adds is the pin: null on main reaches them as main has it, and
+// a working-tree number doesn't.
+test('null on main reads as no cap through the kit\'s reader, whatever the working tree says', () => {
   const F = monoFixture('askable-null');
-  const { old, ok, run, edit, g } = F;
+  const { old, ok, edit, g } = F;
   const hand = handFor(F);
   const none = path.join(F.base, 'no-such-file');
   const ENV = { ...SUP, DEVTEAM_CGROUP: none, DEVTEAM_MEMINFO: none };
-  const setMain = (patch) => { edit((j) => Object.assign(j, patch)); g(['commit', '-qam', `settings ${JSON.stringify(patch)}`], old); g(['push', '-q', 'origin', 'main'], old); };
   try {
-    // two incident slots: with one worker active, null read as 0 would raise the fix-ready line (task-1 T1-2)
-    // no planner slots, so the draft goal waiting for one raises no memory-full of its own (task-1 T1-1)
-    F.lines(F.STD, { max_active_tickets: null, max_active_per_component: null, incident_slots: 2, max_active_planners: 0 });
-    // a goal with one feature holding the three open tickets: two ready and the fix
-    const G = ok(old, ['goal', 'add', '--title', 'Floor', '--outcome', 'the floor holds', '--measure', 'gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'none', '--preconditions', 'a'], SUP);
-    ok(old, ['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Floor', target: 0, preconditions: [1], tickets: 3 }])], SUP);
-    ok(old, ['feature', 'add', 'floor', '--json', JSON.stringify({ title: 'Floor', goals: [G], preconditions: [`${G}#1`], stories: [{ id: 'FL-S1', text: 'the floor holds', release: 'v1.0.0' }] })], SUP);
-    ok(old, ['ticket', 'add', 'web-01-a', '--json', ticketJson('web-01-a', { feature: 'floor' })], SUP);
-    ok(old, ['ticket', 'add', 'web-02-b', '--json', ticketJson('web-02-b', { feature: 'floor' })], SUP);
-    ok(old, ['ticket', 'add', 'web-00-busy', '--json', ticketJson('web-00-busy')], SUP);
-    // one worker counted active in web: a build phase of its own
+    F.lines(F.STD, { max_active_tickets: null, max_active_per_component: null });
+    ok(old, ['ticket', 'add', 'web-00-busy', '--json', ticketJson('web-00-busy', { touches: ['web/busy/**'] })], SUP);
+    ok(old, ['ticket', 'add', 'web-01-a', '--json', ticketJson('web-01-a', { touches: ['web/a/**'] })], SUP);
     hand('web-00-busy', { type: 'phase', to: 'build' }, 60000);
-    // an open incident and its fix ticket
-    hand('supervisor', { type: 'problem', title: 'web errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [], fingerprints: ['web:log:E1'], sensor: 'web' }, 50000);
-    hand('supervisor', { type: 'ticket', id: 'fx-01-web', title: 'web errors', feature: 'floor', component: 'web', kind: 'fix', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['no errors'] }, 40000);
-
-    const ready = run(old, ['ready'], ENV);
-    assert.equal(ready.status, 0, ready.err);
-    assert.match(ready.out, /^active workers: 1 \(no limit\)$/m);
-    assert.doesNotMatch(ready.out, /for fix tickets/);
-    assert.doesNotMatch(ready.out, /component at cap/);
-    assert.match(ready.out, /web-01-a/);
-    assert.equal(json(ok(old, ['ready', '--json'], ENV)).caps.max_active_tickets, null);
-
+    // a working-tree cap of 1 in the main checkout: ignored, main's null applies
+    edit((j) => { j.max_active_tickets = 1; j.max_active_per_component = 1; });
+    const ready = ok(old, ['ready'], ENV);
+    assert.match(ready, /^active workers: 1\/no cap$/m);
+    assert.doesNotMatch(ready, /component at cap/);
+    assert.deepEqual(json(ok(old, ['ready', '--json'], ENV)).caps, { max_active_tickets: null, max_active_per_component: null, incident_slots: json(ok(old, ['ready', '--json'], ENV)).caps.incident_slots });
     const idle = json(ok(old, ['metrics', '--json'], ENV)).findings.filter((f) => f.kind === 'idle-capacity');
     assert.equal(idle.length, 1, JSON.stringify(idle));
-    assert.match(idle[0].subject, /ready/);
-    assert.doesNotMatch(idle[0].subject, /fix ready/);
-    assert.match(idle[0].detail, /no limit/);
-    assert.doesNotMatch(idle[0].detail, /null/);
-
-    // memory-full with one incident slot, so neither of its branches holds under the old null reading
-    // (with two slots its fix branch would: 1 < null + 2)
-    setMain({ incident_slots: 1 });
-    const meminfo = path.join(F.base, 'meminfo');
-    fs.writeFileSync(meminfo, 'MemTotal:       16777216 kB\nMemFree:          524288 kB\nMemAvailable:    1677722 kB\n');
-    const full = json(ok(old, ['metrics', '--json'], { ...ENV, DEVTEAM_MEMINFO: meminfo })).findings.find((f) => f.kind === 'memory-full');
-    assert.ok(full, 'memory-full is raised with no limit');
-    assert.match(full.detail, /no limit/);
-    assert.doesNotMatch(full.detail, /waiting for a planner/, 'raised for the ready tickets, not for planning');
-    assert.doesNotMatch(full.detail, /null/);
-
-    // the forecast: no limit runs the goal's open tickets at once (3), not one at a time
-    const forecast = () => json(ok(old, ['goal', 'show', G], ENV)).forecast;
-    const atNull = forecast();
-    assert.equal(atNull.slots, 3);
-    setMain({ max_active_tickets: 3 });
-    assert.deepEqual(forecast(), atNull);
-    setMain({ max_active_tickets: 1 });
-    assert.notDeepEqual(forecast(), atNull);
-
-    // the control: a finite cap of 1 reaches the fix-ready line
-    const fix = json(ok(old, ['metrics', '--json'], ENV)).findings.filter((f) => f.kind === 'idle-capacity');
-    assert.ok(fix.some((f) => /fix ready/.test(f.subject)), JSON.stringify(fix));
-    assert.match(ok(old, ['ready'], ENV), /^active workers: 1\/1 \(\+1 for fix tickets\)$/m);
+    assert.match(idle[0].detail, /1\/no cap workers active/);
+    // landed on main, the 1 applies
+    g(['commit', '-qam', 'caps of 1'], old); g(['push', '-q', 'origin', 'main'], old);
+    assert.match(ok(old, ['ready'], ENV), /^active workers: 1\/1$/m);
+    assert.equal(json(ok(old, ['metrics', '--json'], ENV)).findings.filter((f) => f.kind === 'idle-capacity').length, 0);
   } finally { F.done(); }
 });
 
@@ -427,7 +391,7 @@ test("settings set is the supervisor's alone", () => {
       assert.notEqual(r.status, 0, role);
       if (role === 'operator') assert.match(r.err, /the operator only reads/);
     }
-    assert.equal(ok(old, ['settings', '--get', 'max_active_tickets'], { DEVTEAM_ROLE: 'operator' }), '5', 'the operator still reads');
+    assert.equal(run(old, ['settings', '--get', 'max_active_tickets'], { DEVTEAM_ROLE: 'operator' }).status, 0, 'the operator still reads');
     assert.equal(fs.readFileSync(path.join(choreWt(F), SETTINGS_REL), 'utf8'), before);
     assert.equal(editActs(F).length, 0);
   } finally { F.done(); }
@@ -510,7 +474,7 @@ test('owner-setting-unlanded and the Settings label follow main, a landed overri
     F.lines(F.STD);
     // 1. no act, key not on main
     let v = view();
-    assert.deepEqual(v, { value: 5, shown: '5', label: "The kit's default", asked: null, act: null });
+    assert.deepEqual(v, { value: null, shown: 'No limit', label: "The kit's default", asked: null, act: null });
     assert.equal(unlanded().length, 0);
     // 2. no act, main sets 4
     F.edit((j) => { j.max_active_tickets = 4; }); g(['commit', '-qam', 'four'], old); g(['push', '-q', 'origin', 'main'], old);

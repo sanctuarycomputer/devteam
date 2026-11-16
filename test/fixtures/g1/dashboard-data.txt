@@ -4,19 +4,19 @@ exit 0
   "project": "g1",
   "kit": "unreleased",
   "caps": {
-    "max_active_tickets": 5
+    "max_active_tickets": null
   },
   "asked_settings": {
     "max_active_tickets": {
-      "value": 5,
-      "shown": "5",
+      "value": null,
+      "shown": "No limit",
       "label": "The kit's default",
       "asked": null,
       "act": null
     },
     "max_active_per_component": {
-      "value": 2,
-      "shown": "2",
+      "value": null,
+      "shown": "No limit",
       "label": "The kit's default",
       "asked": null,
       "act": null
@@ -1284,9 +1284,9 @@ exit 0
       "name": "Workers at once, in all",
       "description": "the most tickets with a worker running at the same time",
       "shown": "value",
-      "value": 5,
+      "value": null,
       "set": false,
-      "default": 5,
+      "default": null,
       "owner_only": null
     },
     {
@@ -1295,9 +1295,9 @@ exit 0
       "name": "Workers at once, per component",
       "description": "the most workers at the same time within one component",
       "shown": "value",
-      "value": 2,
+      "value": null,
       "set": false,
-      "default": 2,
+      "default": null,
       "owner_only": null
     },
     {

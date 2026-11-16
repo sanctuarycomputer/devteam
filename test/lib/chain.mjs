@@ -91,7 +91,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(bad, /precondition 1 is in milestones 1 and 2/);
     must(['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Cards on file', target: 40, by: '2027-01-31', preconditions: [1], tickets: 4 }, { title: 'Self-serve prices', target: 80, preconditions: [2], tickets: 6 }])], { role: 'sup' });
     assert.doesNotMatch(must(['goal', 'check', G]), /^  milestones:/m);
-    assert.match(must(['goal', 'forecast', G]), /1\. Cards on file: 40 % by 2027-01-31; about 4 tickets, unplanned; 1 waves to here at 5 slots[\s\S]*no measured rate yet/);
+    assert.match(must(['goal', 'forecast', G]), /1\. Cards on file: 40 % by 2027-01-31; about 4 tickets, unplanned; 1 waves to here at 8 slots[\s\S]*no measured rate yet/);
     const A1 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify(design)], { role: 'sup' });
     assert.match(json(must(['questions', '--id', A1, '--json']))[0].context, /Forecast \(computed\)/, 'the approval carries the forecast');
     assert.match(dt(['answer', A1, 'Approve']).err, /goal decide/, 'answered only as a goal decision');
@@ -4221,10 +4221,10 @@ http.createServer((req, res) => {
       fs.appendFileSync(ownerFile, act('owner', pub));
       must(['log-check']);
       for (const [by, body, re] of [
-        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish, pane-answer, goal-order only/],
+        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish, pane-answer, goal-order, owner-setting only/],
         ['owner', { ...pub, class: 'pane-answer' }, /a pane-answer act says what was answered and names no artifact/],
         ['supervisor', { class: 'pane-answer', what: 'answered it myself' }, /pane-answer is the owner's/],
-        ['owner', { ...pub, proof: { nonce: 'x' } }, /proof is the gateway's signature on the owner's pane-answer act/],
+        ['owner', { ...pub, proof: { nonce: 'x' } }, /proof is the gateway's signature on the owner's pane-answer or owner-setting act/],
         ['owner', { ...pub, tree: undefined }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'unpublish' }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'shout', tree: undefined }, /publish with its tree or unpublish without one/],
