@@ -904,7 +904,7 @@ function swSet(key, patch) {
 async function post(key, m) {
   const can = [...items.values()].filter(steerable);
   const roots = key === 'machine' ? can.filter((it) => (m === 'run' ? modeOf(it) !== 'run' : m === 'drain' ? modeOf(it) === 'run' : modeOf(it) !== 'park')).map((it) => it.x.root) : [key];
-  if (!roots.length) return;
+  if (!roots.length) return void swSet(key, { confirming: null });
   const verb = { park: 'Parking', drain: 'Draining', run: 'Resuming' }[m];
   swSet(key, { confirming: null, busy: key === 'machine' ? `${verb} ${plural(roots.length, 'project')}…` : `${verb}…`, error: null });
   await setFleet(roots, m);
@@ -929,12 +929,14 @@ function switchEl(key, { scope, mode, counts, runConfirm = false }) {
   }
   bindFleetSwitch(div, {
     onPress: (m) => {
-      if (m === 'park') return swSet(key, { confirming: 'park' });
-      if (m === 'run' && runConfirm) return swSet(key, { confirming: 'run' });
+      // a new press: the last error (this switch's, or a machine op's on this card) goes
+      if (fleetBusy.get(key)?.error) fleetBusy.delete(key);
+      if (m === 'park') return swSet(key, { confirming: 'park', error: null });
+      if (m === 'run' && runConfirm) return swSet(key, { confirming: 'run', error: null });
       if (m === mode) return;
       post(key, m);
     },
-    onConfirm: (m) => { post(key, m); },
+    onConfirm: (m) => { sw.set(key, { ...swGet(key), confirming: null }); post(key, m); },
     onCancel: () => swSet(key, { confirming: null }),
   });
   return div;

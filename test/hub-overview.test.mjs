@@ -654,6 +654,41 @@ test("a card's switch: Park confirms, busy, error; pressing the current mode doe
   await p.until('the error', `${cardOf('beta')}.querySelector('.fleet-switch .err')?.textContent === 'it broke'`);
 });
 
+test('a machine op: its busy words, the cards disabled while it runs; a confirm with nothing to do clears; a new press clears the error', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the machine switch', `!!${kBtn('machine:drain')}`);
+  F.delay.set(A, 1500);
+  F.delay.set(B, 1500);
+  await p.ev(`${kBtn('machine:drain')}.click()`);
+  await p.until('busy', `document.querySelector('#ov-body > .ov-head .fleet-switch .msg')?.textContent === 'Draining 2 projects…'`);
+  assert.equal(await p.ev(`[...document.querySelectorAll('.ov-card .fleet-switch [data-fleet]')].every((b) => b.disabled)`), true, "the cards' buttons wait for it");
+  assert.equal(await p.ev(`[...document.querySelectorAll('.ov-card .fleet-switch .msg')].map((m) => m.textContent).join()`), 'Draining…,Draining…');
+  await until(() => F.asks.get(A).length && F.asks.get(B).length, 'both asked');
+  await p.until('done', `!document.querySelector('#ov-body .fleet-switch .msg')`);
+  F.delay.clear();
+  // every project parked: the machine's Park has nothing to do, and its confirm doesn't stay up
+  F.setList([hello('alpha', A, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }), hello('beta', B, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } })]);
+  await p.send('Page.reload');
+  await p.until('parked', `${kBtn('machine:park')}?.getAttribute('aria-pressed') === 'true'`);
+  await p.ev(`${kBtn('machine:park')}.click()`);
+  await p.until('the confirm', `${textK('machine:park')} === 'Park 0 projects?'`);
+  await p.ev(`${kBtn('machine:park')}.click()`);
+  await new Promise((r) => setTimeout(r, 1000));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'cleared at once, not 5 s later');
+  // an error, then a new press: the error goes
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  await p.send('Page.reload');
+  await p.until('running', `!!${kBtn('/srv/alpha:drain')} && ${kBtn('/srv/alpha:run')}.getAttribute('aria-pressed') === 'true'`);
+  F.fail.set(A, 'it broke');
+  await p.ev(`${kBtn('/srv/alpha:drain')}.click()`);
+  await p.until('the error', `${cardOf('alpha')}.querySelector('.fleet-switch .err')?.textContent === 'it broke'`);
+  await p.ev(`${kBtn('/srv/alpha:park')}.click()`);
+  await p.until('the confirm, the error gone', `${textK('/srv/alpha:park')} === 'Confirm park' && !${cardOf('alpha')}.querySelector('.fleet-switch .err')`);
+});
+
 test('a partly held card: Run asks "Run every goal?" in place, posts on the second press, Escape cancels', CHROME, async (t) => {
   const [A, B] = await freePorts(2);
   const F = await fixtureHub(t, { ports: [A, B] });
