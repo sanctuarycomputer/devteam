@@ -506,6 +506,10 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   const posts = () => p.ev('JSON.stringify(window.__posts)');
   const mode = () => p.ev(`document.querySelector(${JSON.stringify(SW)})?.dataset.mode ?? null`);
   const btn = (m) => `${SW} [data-fleet="${m}"]`;
+  // where Run sits: the switch must not move under the owner's pointer while its busy line, its error or
+  // the state line come and go (the settings area sits at the sidebar's foot, so a line growing below
+  // the buttons would push them up)
+  const place = () => p.ev(`(() => { const r = document.querySelector(${JSON.stringify(btn('run'))}).getBoundingClientRect(); return JSON.stringify([r.left, r.top]); })()`);
   const idle = () => until(() => p.ev(`![...document.querySelectorAll(${JSON.stringify(`${SW} button`)})].some((b) => b.disabled) && SAVING === 0`), 'the switch idle');
 
   // what the area holds; what goes
@@ -518,6 +522,7 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev(`document.querySelector('#side-state').textContent`), 'running');
 
   // Run on a running fleet: no post; Drain: one post, then the mode shows drain
+  const at0 = await place();
   await p.click(btn('run'));
   await p.click(btn('drain'));
   await until(async () => (await posts()) !== '[]', 'the drain posted');
@@ -526,6 +531,7 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   await idle();
   // the server's reason (its default for an owner's drain) arrives with the next read
   await until(async () => /^(draining…|drained) · \S/.test(await p.ev(`document.querySelector('#side-state').textContent`)), 'the state line and the reason');
+  assert.equal(await place(), at0, 'the switch stays put as the state line takes the reason');
   // the press over, focus is back on the pressed button (review T5-2)
   const focused = (m) => p.ev(`document.activeElement === document.querySelector(${JSON.stringify(btn(m))})`);
   assert.ok(await focused('drain'), 'focus back on Drain');
@@ -559,6 +565,7 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   // Drain on a parked fleet: no post, and the switch says why; the mode stays park (review T5-1)
   await p.click(btn('drain'));
   await until(() => p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '') === 'Parked: Run first, then Drain'`), 'the switch says Run first');
+  assert.equal(await place(), at0, 'the switch stays put as its error shows');
   assert.equal(await mode(), 'park', 'the mode stays park');
   assert.equal(JSON.parse(await posts()).length, 3, 'Drain on a parked fleet posts nothing');
 
@@ -578,6 +585,7 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click(btn('run'));
   const busy = () => p.ev(`[...document.querySelectorAll(${JSON.stringify(`${SW} button`)})].every((b) => b.disabled) && (document.querySelector(${JSON.stringify(`${SW} .msg`)})?.textContent ?? '') !== ''`);
   await until(() => busy(), 'the switch busy');
+  assert.equal(await place(), at0, 'the switch stays put as its busy line shows');
   assert.equal(await p.ev(`!!document.querySelector(${JSON.stringify(`${SW} .err`)})`), false, 'a new press clears the old error');
   await p.ev('render(DATA)');
   assert.ok(await busy(), 'a redraw keeps the busy line');

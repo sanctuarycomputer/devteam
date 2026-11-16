@@ -266,6 +266,15 @@ try {
   .settings .fleet-switch { padding: 0 4px; }
   .settings .fleet-state { font-size: 11.5px; color: var(--muted); padding: 0 4px; line-height: 1.4; }
   .settings .fleet-state b { font-weight: 500; color: var(--fg-2); }
+  /* The area sits at the sidebar's foot (margin-top: auto), so a line growing below the switch's buttons
+     pushes them up under the owner's pointer. Every line that comes and goes there keeps its room:
+     the switch's busy or error line, the state line's second line (the reason), the foot's error. */
+  @media (min-width: 901px) {
+    .settings .fleet-switch .msg, .settings .fleet-switch .err { flex-basis: 100%; line-height: 16px; }
+    .settings .fleet-switch:not(:has(> .msg, > .err))::after { content: ''; flex-basis: 100%; height: 16px; }
+    .settings .fleet-state { min-height: 2.8em; }
+    .settings .foot #err { display: block; min-height: 1.6em; }
+  }
   .main { min-width: 0; }
   .pagebar .tt { margin-top: 0; }
   .pagebar .tt .n.q { color: var(--red-fg); }
