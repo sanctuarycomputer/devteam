@@ -12440,6 +12440,15 @@ function collectMetrics(since) {
   if (!drained && ready.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${capText(active, settings.max_active_tickets)} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
   if (memFull && (idlePlanning || (!drained && ((ready.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${capText(active, settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
+  // the owner asked for one of the supervisor's settings and main doesn't have it yet
+  {
+    const um = goalMode(upkeepOrVirtual());
+    for (const [key, v] of Object.entries(askedSettingsView()).filter(([, x]) => x.label === ASKED_SAVED)) {
+      const words = (x) => (x === null ? 'no limit' : String(x));
+      const arg = v.asked === null ? 'none' : String(v.asked);
+      add('medium', 'owner-setting-unlanded', key, `the owner asked for ${key} ${words(v.asked)} (${v.act}); main has ${words(v.value)}`, `${um !== 'run' ? `Upkeep is ${holdWords(um)}: ` : ''}devteam.mjs chore start settings; devteam.mjs settings set ${key} ${arg} --for ${v.act}; devteam.mjs chore pr settings --title "settings: ${key} ${words(v.asked)}"; devteam.mjs merge --chore settings. While Upkeep is drained or parked, chore start and merge --chore refuse, so the value waits until Upkeep runs (or --force, logged)`);
+    }
+  }
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
@@ -12699,6 +12708,32 @@ function collectOoda() {
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
+// The Settings page's word on each askable setting: main's value (the one in force) and who set it,
+// told from the owner's latest owner-setting act and the supervisor's settings-edit acts. Never
+// says a value is the owner's that the owner didn't choose (strategy R1).
+const ASKED_SAVED = 'Saved; applies once the supervisor lands it';
+const askedShown = (v) => (v === null ? 'No limit' : String(v));
+// The newest supervisor settings-edit without --for for key, newer than sinceIso, of the value main
+// holds, with a settings-chore merge newer than it: the supervisor deliberately set or kept its own
+// value after the owner asked (a no-op edit counts). Only main is read: an edit never merged, or
+// merged before it was made, lands nothing.
+function landedOverride(key, sinceIso, mainValue) {
+  const merges = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && (a.refs ?? []).includes('chore-settings'));
+  return logObjects('act').filter((a) => a.class === 'settings-edit' && a.created_by === 'supervisor' && a.key === key && a.for === undefined && a.created_at > sinceIso && canonical(a.value) === canonical(mainValue) && merges.some((m) => m.created_at > a.created_at)).sort(byTime).at(-1) ?? null;
+}
+function askedSettingsView() {
+  const s = loadSettings();
+  const all = settingsAll();
+  return Object.fromEntries(OWNER_ASKABLE.map((key) => {
+    const value = s[key] ?? null;
+    const act = latestOwnerSetting(key);
+    const label = !act ? (all.find((e) => e.key === key)?.set ? 'Set by the supervisor' : "The kit's default")
+      : canonical(act.value) === canonical(value) ? 'Set by you'
+      : landedOverride(key, act.created_at, value) ? `Set by the supervisor (you asked for ${act.value === null ? 'no limit' : act.value})`
+      : ASKED_SAVED;
+    return [key, { value, shown: askedShown(value), label, asked: act ? act.value : null, act: act?.id ?? null }];
+  }));
+}
 function dashboardData() {
   reviewMemo = new Map();
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
@@ -12713,6 +12748,7 @@ function dashboardDataRead() {
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
+    asked_settings: askedSettingsView(),
     gates_configured: Object.keys(settings.gates ?? {}),
     // held_by: the open question holding it, or null
     tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),

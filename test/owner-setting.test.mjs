@@ -476,3 +476,99 @@ test("settings set refuses a settings block it can't edit safely", () => {
     assert.equal(editActs(F).length, 1);
   } finally { F.done(); }
 });
+
+test('owner-setting-unlanded and the Settings label follow main, a landed override and Upkeep', () => {
+  const F = monoFixture('owner-setting-label');
+  const { old, ok, run, g } = F;
+  const ENV = { ...SUP, DEVTEAM_CGROUP: path.join(F.base, 'none'), DEVTEAM_MEMINFO: path.join(F.base, 'none') };
+  const view = () => json(ok(old, ['dashboard-data'], ENV)).asked_settings.max_active_tickets;
+  const unlanded = () => json(ok(old, ['metrics', '--json'], ENV)).findings.filter((f) => f.kind === 'owner-setting-unlanded');
+  const ask = (v) => ok(old, ['owner-setting', 'max_active_tickets', v], DASH);
+  // a settings chore from main: fn edits it, then it lands through merge --chore
+  const chore = (fn) => { if (fs.existsSync(choreWt(F))) clearChore(F); ok(old, ['chore', 'start', 'settings'], SUP); fn(); };
+  const land = (title) => {
+    ok(old, ['chore', 'pr', 'settings', '--title', title], SUP);
+    prFile(F, title);
+    const m = run(old, ['merge', '--chore', 'settings'], SUP);
+    assert.equal(m.status, 0, `${m.out}\n${m.err}`);
+    g(['fetch', '-q', 'origin'], old);
+  };
+  const SAVED = "Saved; applies once the supervisor lands it";
+  try {
+    F.lines(F.STD);
+    // 1. no act, key not on main
+    let v = view();
+    assert.deepEqual(v, { value: 5, shown: '5', label: "The kit's default", asked: null, act: null });
+    assert.equal(unlanded().length, 0);
+    // 2. no act, main sets 4
+    F.edit((j) => { j.max_active_tickets = 4; }); g(['commit', '-qam', 'four'], old); g(['push', '-q', 'origin', 'main'], old);
+    assert.equal(view().label, 'Set by the supervisor');
+    // 3. the owner asks for 7
+    const a7 = ask('7');
+    v = view();
+    assert.deepEqual(v, { value: 4, shown: '4', label: SAVED, asked: 7, act: a7 });
+    let [f] = unlanded();
+    assert.equal(f.severity, 'medium');
+    assert.equal(f.subject, 'max_active_tickets');
+    assert.equal(f.detail, `the owner asked for max_active_tickets 7 (${a7}); main has 4`);
+    for (const re of [/chore start settings/, new RegExp(`settings set max_active_tickets 7 --for ${a7}`), /chore pr settings --title/, /merge --chore settings/, /waits until Upkeep runs/]) assert.match(f.suggestion, re);
+    assert.doesNotMatch(f.suggestion, /^Upkeep is/);
+    // 4. an override without --for, in the chore, not merged: nothing clears
+    chore(() => ok(old, ['settings', 'set', 'max_active_tickets', '3'], SUP));
+    assert.equal(view().label, SAVED);
+    assert.equal(unlanded().length, 1);
+    // 5. that chore merged: main has 3
+    land('settings: max_active_tickets 3');
+    assert.equal(view().label, 'Set by the supervisor (you asked for 7)');
+    assert.equal(view().value, 3);
+    assert.equal(unlanded().length, 0);
+    // 6. the owner asks for 3
+    ask('3');
+    assert.equal(view().label, 'Set by you');
+    // 7. no limit, asked and landed with --for
+    const aNone = ask('none');
+    assert.equal(view().label, SAVED);
+    chore(() => ok(old, ['settings', 'set', 'max_active_tickets', 'none', '--for', aNone], SUP));
+    land('settings: max_active_tickets no limit');
+    v = view();
+    assert.deepEqual(v, { value: null, shown: 'No limit', label: 'Set by you', asked: null, act: aNone });
+    assert.equal(unlanded().length, 0);
+    // 8. Upkeep parked, and a new ask: the fix leads with it
+    ok(old, ['goal', 'hold', 'upkeep', 'park', '--owner', '--reason', 'a test']);
+    const a2 = ask('2');
+    [f] = unlanded();
+    assert.match(f.suggestion, /^Upkeep is parked: /);
+    assert.match(f.detail, new RegExp(`\\(${a2}\\); main has no limit$`));
+    ok(old, ['goal', 'hold', 'upkeep', 'run', '--owner']);
+    // 9. a no-op override: main at 3, the owner asks for 5, an unrelated settings merge lands, then
+    // the supervisor keeps 3 (the file unchanged)
+    chore(() => ok(old, ['settings', 'set', 'max_active_tickets', '3'], SUP));
+    land('settings: max_active_tickets 3');
+    const a5 = ask('5');
+    chore(() => F.edit((j) => { j.tick_minutes = 9; }, choreWt(F)));
+    land('settings: tick_minutes 9');
+    assert.equal(view().label, SAVED, 'a settings merge newer than the ask, but none newer than any edit');
+    chore(() => { ok(old, ['settings', 'set', 'max_active_tickets', '3'], SUP); F.edit((j) => { j.stale_after_minutes = 50; }, choreWt(F)); });
+    assert.equal(view().label, SAVED, 'before its merge the edit clears nothing, though main already holds its value');
+    assert.equal(unlanded().length, 1);
+    land('settings: keep 3, stale_after_minutes 50');
+    v = view();
+    assert.deepEqual([v.label, v.asked, v.act], ['Set by the supervisor (you asked for 5)', 5, a5]);
+    assert.equal(unlanded().length, 0);
+    // 9b. main moves on without an edit (a commit from another clone): the override it landed is no
+    // longer what main holds, so it no longer answers the ask
+    const other = path.join(F.base, 'other');
+    g(['clone', '-q', F.org, other], F.base);
+    for (const [k, x] of [['user.email', 'o@o'], ['user.name', 'o']]) g(['config', k, x], other);
+    F.edit((j) => { j.max_active_tickets = 4; }, other);
+    g(['commit', '-qam', 'four, by hand'], other); g(['push', '-q', 'origin', 'main'], other);
+    g(['fetch', '-q', 'origin'], old);
+    assert.deepEqual([view().label, view().value], [SAVED, 4]);
+    // 10. an override that never merged clears nothing for a newer ask
+    ask('6');
+    chore(() => ok(old, ['settings', 'set', 'max_active_tickets', '5'], SUP));
+    assert.equal(view().label, SAVED);
+    assert.equal(unlanded().length, 1);
+    assert.equal(run(old, ['log-check']).status, 0);
+  } finally { F.done(); }
+});
