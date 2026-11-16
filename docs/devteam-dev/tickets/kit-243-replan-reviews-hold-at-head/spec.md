@@ -8,6 +8,7 @@
 
 ## Rulings
 
+- m-20261116-153543205-supervisor: the --plan amendment is accepted (inside touches); add an acceptance test for check-pr on a detached plan head (stale refused, fresh passes); the final review tries to break --plan (wrong or missing feature name; a ticket PR unaffected).
 - m-20261116-152938511-supervisor: lighter review depth (trial a-20261116-152814133): no separate spec/plan/task reviews; supervisor reads spec and plan before approve-spec/approve-plan; full adversarial final review.
 
 ## Acceptance checks
@@ -16,6 +17,8 @@
 2. Same branch: after new graph and design reviews at the head (APPROVE), `validate --strict` passes.
 3. A first plan (plan log not on main) still fails with stale reviews and passes with reviews at the head.
 4. A re-plan whose reviews hold at the head passes (covered by 2).
+5. The merge gate: `check-pr --head-ref plan/<fid>` (which validates the head detached, naming the feature with `--plan`) refuses a stale review and passes a fresh one, on a first plan and on a re-plan (m-20261116-153543205-supervisor).
+6. `--plan` can't weaken anything: missing or not a string, validate falls back to the branch name; a wrong name only changes which landed feature is re-checked (a landed feature that isn't named stays history, as before); a ticket PR returns before validate runs and is unaffected. The final review tries to break these.
 
 ## Contracts
 

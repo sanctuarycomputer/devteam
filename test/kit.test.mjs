@@ -1252,10 +1252,12 @@ test('validate --strict on a re-plan branch checks its latest design and graph v
     w1.reviews(1, w1.commit('plan cards'));
     const reviewed = w1.commit('reviews');
     fresh(w1, 'a first plan reviewed at its head');
+    let g = gate(wt1);
+    assert.equal(g.status, 0, `check-pr on a first plan reviewed at its head: ${g.said}`);
     w1.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
     w1.commit('after review');
     stale(w1, 'a first plan changed after its reviews');
-    let g = gate(wt1);
+    g = gate(wt1);
     assert.notEqual(g.status, 0, g.said);
     for (const re of STALE) assert.match(g.said, re, 'check-pr on a first plan changed after its reviews');
     F.g(['reset', '-q', '--hard', reviewed], wt1);
