@@ -263,6 +263,9 @@ try {
   .settings a.set i { font-size: 15px; width: 16px; text-align: center; color: var(--muted); }
   .settings .foot { font-size: 11px; color: var(--muted); line-height: 1.6; padding: 0 4px; }
   #side-fleet:empty, #side-state:empty { display: none; }
+  .settings .fleet-switch { padding: 0 4px; }
+  .settings .fleet-state { font-size: 11.5px; color: var(--muted); padding: 0 4px; line-height: 1.4; }
+  .settings .fleet-state b { font-weight: 500; color: var(--fg-2); }
   .main { min-width: 0; }
   .pagebar .tt { margin-top: 0; }
   .pagebar .tt .n.q { color: var(--red-fg); }
@@ -279,6 +282,7 @@ try {
     .side .eyebrow { display: none; }
     .settings { flex-direction: row; align-items: center; margin: 0 0 0 auto; border-top: 0; padding: 0 0 0 8px; flex: none; }
     .settings .foot { display: none; }
+    .settings .fleet-switch, .settings .fleet-state { white-space: nowrap; flex-wrap: nowrap; }
     .settings a.set { white-space: nowrap; padding: 5px 8px; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
@@ -596,10 +600,6 @@ try {
   .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
   .holdbar .seg2 button.confirm { color: var(--red); }
   .holdbar button[data-met-id].confirm { color: var(--green-fg); }
-  .fleet-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; background: var(--surface); }
-  .fleet-strip .grow { flex: 1 1 auto; }
-  .fleet-strip details { width: 100%; }
-  .fleet-strip ul { margin: 6px 0 0 18px; padding: 0; }
   .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
   .md { max-width: var(--measure); font-size: 13.5px; line-height: 1.65; }
   .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
@@ -790,8 +790,8 @@ try {
   <div class="eyebrow">Autonomy</div>
   <nav class="nav" data-group="autonomy"></nav>
   <div class="settings" role="group" aria-label="Fleet settings">
-    <div id="side-fleet"></div>
-    <div id="side-state"></div>
+    <div id="side-fleet" data-fleet-slot="switch"></div>
+    <div id="side-state" class="fleet-state" data-fleet-slot="state"></div>
     <a class="set" href="#settings"><i class="icon-settings" aria-hidden="true"></i>Settings</a>
     <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
   </div>
@@ -805,7 +805,6 @@ try {
   <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
   <section id="overview" class="no-shell" data-page="overview">
-    <div id="fleet-strip" class="fleet-strip"></div>
     <div id="down-banner" class="down-banner" role="alert" hidden></div>
     <div class="grid" id="stats"></div>
   </section>
@@ -2711,7 +2710,7 @@ function holdControl(id, h, { letGo = true, status = null, restoring = false } =
   if (restoring) return `<div class="holdbar"><span class="muted small">Restoring: it comes back parked…</span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   if (status === 'abandoned') return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold"><button type="button" data-hold-id="${esc(id)}" data-mode="restore">Restore (parked)</button></span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   const cur = h?.mode || 'run';
-  const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the strip at the top to resume it</span>' : '';
+  const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the fleet switch in the sidebar to resume it</span>' : '';
   const btn = (m, label) => `<button type="button" data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
   return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
 }
@@ -2727,21 +2726,66 @@ function upkeepCard(u) {
 }
 // Can the fleet move? The mode is in the data; readiness comes from fleet status, asked for apart.
 let FLEET = { at: 0, data: null, busy: false };
-function fleetStrip() {
-  const f = DATA?.fleet || {};
-  const mode = f.mode;
-  const st = FLEET.data;
-  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
-  const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
-  const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
-  // parked or drained only once fleet status says the move is ready; until then it is a transition
+// The fleet switch (the settings area; spec §7): what the page keeps across redraws, so the 10-second
+// redraw never drops a pending confirm, a busy line or a refusal.
+const FLEET_UI = { confirming: false, busy: null, error: null };
+// the switch's mode is the fleet's: run unless a fleet op holds it
+const fleetMode = (f) => (f?.mode === 'park' ? 'park' : f?.mode === 'drain' ? 'drain' : 'run');
+// the state line under the switch: parked or drained only once fleet status says the move is ready;
+// until then it is a transition
+function fleetStateLine(f, st) {
+  f = f || {};
   const settled = !!(st && st.ready);
-  const label = mode === 'park' ? `<b>${settled ? 'Fleet parked' : 'Fleet parking…'}</b>` : mode === 'drain' ? `<b>${settled ? 'Fleet drained' : 'Fleet draining…'}</b>` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
-  const btns = mode || f.op
-    ? '<button type="button" data-fleet="resume">Resume</button>'
-    : '<button type="button" class="ghost" data-fleet="drain">Drain all</button><button type="button" class="ghost" data-fleet="park">Park all</button>';
-  return `<i class="icon-truck" aria-hidden="true"></i>${label}${f.reason ? ` <span class="muted">· ${esc(f.reason)}</span>` : ''}<span class="grow"></span>${ready}${parity}<span class="row-inline">${btns}<button type="button" class="ghost" data-fleet="check" title="Fetch from origin and check again">Check</button></span><span class="err" id="e-fleet"></span>${left}`;
+  const words = f.mode === 'park' ? (settled ? 'parked' : 'parking…') : f.mode === 'drain' ? (settled ? 'drained' : 'draining…') : f.op ? 'partly held (a goal was set apart after the fleet op)' : 'running';
+  return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
+// Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
+// page's copies with the same attribute. A slot is written only when its HTML changed, so focus and
+// a pending confirm stay; a rewrite keeps focus on the same button (the confirm is Park's), since
+// the binder's Escape needs focus inside the switch.
+function drawFleet() {
+  const f = DATA?.fleet || {};
+  const html = {
+    switch: fleetSwitch({ scope: 'project', mode: fleetMode(f), confirming: FLEET_UI.confirming, busy: FLEET_UI.busy, error: FLEET_UI.error }),
+    state: fleetStateLine(f, FLEET.data),
+  };
+  for (const el of document.querySelectorAll('[data-fleet-slot]')) {
+    const want = html[el.dataset.fleetSlot];
+    if (want === undefined || el.innerHTML === want) continue;
+    const ae = document.activeElement;
+    const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
+    el.innerHTML = want;
+    if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
+  }
+}
+// One fleet op through press(): the overlay shows the mode at once, the busy line holds the switch
+// while the request is out, and a refusal shows in the switch with the mode the data's again.
+function postFleet(op) {
+  const fleetNow = { drain: { mode: 'drain' }, park: { mode: 'park' }, resume: { mode: null, op: null } }[op];
+  if (!fleetNow) return;
+  Object.assign(FLEET_UI, { confirming: false, busy: { drain: 'asking the fleet to drain…', park: 'asking the fleet to park…', resume: 'asking the fleet to run…' }[op], error: null });
+  press('fleet', {
+    build: () => ({ action: 'fleet', body: { op } }),
+    overlay: { data: (d) => ({ ...d, fleet: { ...(d.fleet || {}), ...fleetNow, reason: fleetNow.mode ? d.fleet?.reason ?? null : null } }), agrees: (raw) => (raw.fleet?.mode ?? null) === (fleetNow.mode ?? null) },
+    apply: () => { FLEET = { ...FLEET, data: null, at: 0 }; redrawNow(); drawFleet(); },
+    onOk: () => { FLEET_UI.busy = null; drawFleet(); loadFleet(); },
+    onError: (error) => { Object.assign(FLEET_UI, { busy: null, error: `Not saved: ${error}` }); },
+    errId: 'fleet',
+  });
+}
+bindFleetSwitch(document.querySelector('.app'), {
+  // Park asks first, in place; any other press cancels a pending confirm. Run resumes only a held fleet.
+  onPress: (m) => {
+    if (m === 'park') { FLEET_UI.confirming = true; drawFleet(); return; }
+    FLEET_UI.confirming = false;
+    const f = DATA?.fleet || {};
+    if (m === 'drain') postFleet('drain');
+    else if (m === 'run' && (f.mode || f.op)) postFleet('resume');
+    else drawFleet();
+  },
+  onConfirm: () => postFleet('park'),
+  onCancel: () => { FLEET_UI.confirming = false; drawFleet(); },
+});
 async function loadFleet(fetchToo = false) {
   if (FLEET.busy) return;
   FLEET.busy = true;
@@ -2749,7 +2793,7 @@ async function loadFleet(fetchToo = false) {
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
   FLEET.prevReady = !!FLEET.data?.ready;
-  if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
+  drawFleet();
   // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
   if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? RAW);
 }
@@ -4817,8 +4861,8 @@ function render(d) {
 
   renderOoda(o);
   renderMonitoring(d);
-  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
-  if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
+  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Settings
+  drawFleet();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
@@ -6216,23 +6260,6 @@ document.addEventListener('click', async (ev) => {
       restore: () => { const b = document.querySelector(`[data-met-id="${CSS.escape(id)}"]`); if (b) { b.disabled = false; b.textContent = 'Mark met'; } },
       onOk: () => { redraw(); },
       errId: `met-${id}`,
-    });
-    return;
-  }
-  const fb = ev.target.closest('[data-fleet]');
-  if (fb) {
-    const op = fb.dataset.fleet;
-    if (op === 'check') { fb.disabled = true; await loadFleet(true); return; }
-    if (op === 'park' && !fb.classList.contains('confirm')) { fb.classList.add('confirm'); fb.textContent = 'Confirm: park every session'; setTimeout(() => { fb.classList.remove('confirm'); fb.textContent = 'Park all'; }, 6000); return; }
-    // the strip is redrawn only without a pending confirm on it: this press is that confirm
-    fb.classList.remove('confirm');
-    const fleetNow = { drain: { mode: 'drain' }, park: { mode: 'park' }, resume: { mode: null, op: null }, undrain: { mode: null }, unpark: { mode: null } }[op] ?? {};
-    press('fleet', {
-      build: () => ({ action: 'fleet', body: { op } }),
-      overlay: { data: (d) => ({ ...d, fleet: { ...(d.fleet || {}), ...fleetNow, reason: fleetNow.mode ? d.fleet?.reason ?? null : null } }), agrees: (raw) => (raw.fleet?.mode ?? null) === (fleetNow.mode ?? null) },
-      apply: () => { FLEET = { ...FLEET, data: null, at: 0 }; redrawNow(); },
-      onOk: () => { loadFleet(); },
-      errId: 'fleet',
     });
     return;
   }

@@ -477,3 +477,115 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('overview');
   assert.equal(await pinned(TT), false, 'no pin for it on Overview, redrawn on the page change');
 });
+
+// The settings area (spec §7, §9): the shared fleet switch, its state line, the Settings link and the
+// updated time; each press posts once through the switch's binder; Park asks in place; the switch keeps
+// its confirm, busy line and error across redraws; the Overview fleet strip and Check are gone.
+test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const { p, size, load } = await pagesFixture(t, 'settings', { records: false });
+  await size(1440, 900);
+  await load('#overview');
+  // every POST /api/fleet body, in window.__posts; __stub 'fail' answers 500, 'hang' holds the request
+  // until __release() (which then answers 500)
+  await p.ev(`(() => {
+    window.__posts = []; window.__stub = null;
+    const real = window.fetch;
+    const nope = () => new Response(JSON.stringify({ error: 'nope' }), { status: 500, headers: { 'content-type': 'application/json' } });
+    window.fetch = (u, o) => {
+      if (String(u) === '/api/fleet' && o && o.method === 'POST') {
+        window.__posts.push(JSON.parse(o.body));
+        if (window.__stub === 'fail') return Promise.resolve(nope());
+        if (window.__stub === 'hang') return new Promise((res) => { window.__release = () => res(nope()); });
+      }
+      return real(u, o);
+    };
+  })()`);
+  const SW = '.settings .fleet-switch[data-scope="project"]';
+  const posts = () => p.ev('JSON.stringify(window.__posts)');
+  const mode = () => p.ev(`document.querySelector(${JSON.stringify(SW)})?.dataset.mode ?? null`);
+  const btn = (m) => `${SW} [data-fleet="${m}"]`;
+  const idle = () => until(() => p.ev(`![...document.querySelectorAll(${JSON.stringify(`${SW} button`)})].some((b) => b.disabled) && SAVING === 0`), 'the switch idle');
+
+  // what the area holds; what goes
+  await until(() => p.ev(`!!document.querySelector(${JSON.stringify(SW)})`), 'the fleet switch in the settings area');
+  assert.ok(await p.ev(`!!document.querySelector('.settings a[href="#settings"]')`), 'the Settings link');
+  assert.match(await p.ev(`document.querySelector('.settings #when').textContent`), /^updated /, 'the updated time');
+  assert.equal(await p.ev(`!!document.querySelector('#fleet-strip')`), false, 'no fleet strip');
+  assert.equal(await p.ev(`!!document.querySelector('[data-fleet="check"]')`), false, 'no Check');
+  assert.equal(await mode(), 'run');
+  assert.equal(await p.ev(`document.querySelector('#side-state').textContent`), 'running');
+
+  // Run on a running fleet: no post; Drain: one post, then the mode shows drain
+  await p.click(btn('run'));
+  await p.click(btn('drain'));
+  await until(async () => (await posts()) !== '[]', 'the drain posted');
+  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }]), 'Run on a running fleet posts nothing; Drain posts once');
+  await until(async () => (await mode()) === 'drain', 'the mode drain');
+  await idle();
+  // the server's reason (its default for an owner's drain) arrives with the next read
+  await until(async () => /^(draining…|drained) · \S/.test(await p.ev(`document.querySelector('#side-state').textContent`)), 'the state line and the reason');
+
+  // Run on a held fleet: one resume
+  await p.click(btn('run'));
+  await until(async () => (await mode()) === 'run', 'the mode run');
+  await idle();
+  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }]), 'Run on a held fleet posts one resume');
+
+  // Park asks in place, with focus; two redraws keep it; Escape cancels with no post
+  const confirming = () => p.ev(`(() => { const b = document.querySelector(${JSON.stringify(btn('park'))}); return !!b && b.textContent === 'Confirm park' && b.dataset.confirm === '1' && document.activeElement === b; })()`);
+  await p.click(btn('park'));
+  await until(() => confirming(), 'Confirm park, focused');
+  await p.ev('render(DATA); render(DATA)');
+  assert.ok(await confirming(), 'two redraws keep the confirm and its focus');
+  await p.key('Escape');
+  await until(() => p.ev(`document.querySelector(${JSON.stringify(btn('park'))}).textContent === 'Park'`), 'Escape restores Park');
+  assert.equal(await p.ev(`!!document.querySelector(${JSON.stringify(`${SW} [data-confirm]`)})`), false);
+  assert.equal(JSON.parse(await posts()).length, 2, 'Escape posts nothing');
+
+  // Park, confirm: one park
+  await p.click(btn('park'));
+  await until(() => confirming(), 'Confirm park again');
+  await p.click(btn('park'));
+  await until(async () => (await mode()) === 'park', 'the mode park');
+  await idle();
+  assert.equal(await posts(), JSON.stringify([{ op: 'drain' }, { op: 'resume' }, { op: 'park' }]), 'the confirm posts one park');
+
+  // a refusal: its error in the switch, and the mode the data's again
+  await p.ev("window.__stub = 'fail'");
+  await p.click(btn('drain'));
+  await until(() => p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '').includes('nope')`), 'the error in the switch');
+  await until(async () => (await mode()) === 'park', 'the mode back to park');
+  await idle();
+  await p.ev('render(DATA)');
+  assert.ok(await p.ev(`(document.querySelector(${JSON.stringify(`${SW} .err`)})?.textContent ?? '').includes('nope')`), 'a redraw keeps the error');
+
+  // in flight: the buttons disabled and the busy line shown, across a redraw
+  await p.ev("window.__stub = 'hang'");
+  await p.click(btn('run'));
+  const busy = () => p.ev(`[...document.querySelectorAll(${JSON.stringify(`${SW} button`)})].every((b) => b.disabled) && (document.querySelector(${JSON.stringify(`${SW} .msg`)})?.textContent ?? '') !== ''`);
+  await until(() => busy(), 'the switch busy');
+  assert.equal(await p.ev(`!!document.querySelector(${JSON.stringify(`${SW} .err`)})`), false, 'a new press clears the old error');
+  await p.ev('render(DATA)');
+  assert.ok(await busy(), 'a redraw keeps the busy line');
+  await p.ev('window.__stub = null; window.__release()');
+  await idle();
+
+  // the state line's words, from the data and fleet status
+  const line = (fleet, st) => p.ev(`(() => { FLEET.busy = true; FLEET.data = ${JSON.stringify(st)}; render({ ...DATA, fleet: ${JSON.stringify(fleet)} }); return document.querySelector('#side-state').textContent; })()`);
+  assert.equal(await line({ mode: null, op: null, reason: null }, null), 'running');
+  assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, null), 'draining… · quiet week');
+  assert.equal(await line({ mode: 'drain', op: 'f-1', reason: 'quiet week' }, { ready: true, blockers: [] }), 'drained · quiet week');
+  assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: false, blockers: ['x'] }), 'parking… · new laptop');
+  assert.equal(await line({ mode: 'park', op: 'f-1', reason: 'new laptop' }, { ready: true, blockers: [] }), 'parked · new laptop');
+  assert.equal(await line({ mode: null, op: 'f-1', reason: 'set apart' }, null), 'partly held (a goal was set apart after the fleet op) · set apart');
+  await p.ev('FLEET.busy = false; redrawNow()');
+
+  // on a phone the switch sits in the nav row
+  await size(390, 844);
+  await until(() => p.ev(`(() => {
+    const sw = document.querySelector(${JSON.stringify(SW)}), side = document.querySelector('.side');
+    sw.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const r = sw.getBoundingClientRect(), s = side.getBoundingClientRect();
+    return getComputedStyle(sw).display !== 'none' && r.width > 0 && r.height > 0 && r.top >= s.top && r.bottom <= s.bottom && r.left >= -1 && r.right <= innerWidth + 1 && s.top < 200;
+  })()`), 'the switch in the nav row at 390');
+});
