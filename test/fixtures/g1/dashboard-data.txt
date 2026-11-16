@@ -1226,6 +1226,274 @@ exit 0
       "unknown": 0
     }
   },
+  "autonomy": {
+    "decisions": {
+      "score": {
+        "this_week": 100,
+        "last_week": 0
+      },
+      "this_week": {
+        "record": null,
+        "alone": 5,
+        "asked": 0,
+        "corrected": 0,
+        "decisions": 5,
+        "score": 100,
+        "lessons": [
+          "k-<sha>-<sha>-owner"
+        ],
+        "merged": 1,
+        "answers": 0,
+        "merged_per_answer": 1,
+        "asked_again": 0,
+        "with_recommendation": {
+          "count": 0,
+          "of": 0,
+          "share": 0
+        }
+      },
+      "last_week": {
+        "record": null,
+        "alone": 0,
+        "asked": 0,
+        "corrected": 0,
+        "decisions": 0,
+        "score": 0,
+        "lessons": [],
+        "merged": 0,
+        "answers": 0,
+        "merged_per_answer": 0,
+        "asked_again": 0,
+        "with_recommendation": {
+          "count": 0,
+          "of": 0,
+          "share": 0
+        }
+      },
+      "weeks": [
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 5,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 5,
+          "score": 100,
+          "lessons": [
+            "k-<sha>-<sha>-owner"
+          ],
+          "merged": 1,
+          "answers": 0,
+          "merged_per_answer": 1,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        }
+      ]
+    },
+    "trust": null,
+    "senses": null
+  },
   "threads": {
     "you": 0,
     "waiting": 0,

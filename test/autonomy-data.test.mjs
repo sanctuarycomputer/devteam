@@ -1,0 +1,208 @@
+// The Trust Score's data (kit-98): /api/data's autonomy, from hand-written fixture logs with known
+// answers. decisions: each of the last 12 calendar weeks, its counts from the weekly learning record
+// (stored, else computed) and the rest counted from the log on read; trust: the kinds it decides
+// alone and this week's rung moves; senses: what it needs, has and sees working.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fleetFixture, json, line, dashboardOnFreePort } from './lib/kit.mjs';
+
+const DAY = 86400000;
+const HOUR = 3600000;
+const WEEK = 7 * DAY;
+const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+const mondayOf = (ms) => { const d = new Date(ms); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() + 6) % 7) * DAY; };
+const isoWeek = (ms) => {
+  const m = mondayOf(ms);
+  const y = new Date(m + 3 * DAY).getUTCFullYear();
+  return `${y}-W${String(1 + Math.round((m - mondayOf(Date.UTC(y, 0, 4))) / WEEK)).padStart(2, '0')}`;
+};
+// The fixture's clock: M is this Monday 00:00 UTC, week k of the 12 starts at W(k), and h(k, d, hh)
+// is d days and hh hours into it. This week's lines sit at M + span × f, so they are in the past and
+// inside this week however soon after Monday 00:00 the test runs; under 10 minutes in, the tests
+// that need them skip.
+const M = mondayOf(Date.now());
+const span = () => Date.now() - M;
+const W = (k) => M - (11 - k) * WEEK;
+const h = (k, d, hh) => W(k) + d * DAY + hh * HOUR;
+const TOO_SOON = 'within 10 minutes of Monday 00:00 UTC this week has no room for its lines';
+const tooSoon = () => span() < 10 * 60000;
+
+// A line as the kit would have written it at ms, in its writer's file; each id a millisecond apart.
+function handFor(F) {
+  const logDir = path.join(F.old, 'docs/devteam/run/log');
+  let n = 0;
+  return (by, o, ms) => {
+    const d = new Date(ms + (n++ % 1000));
+    const id = o.id ?? `${{ observation: 'o', decision: 'd', act: 'a', knowledge: 'k', question: 'q', goal: 'g', thread: 't', turn: 'u' }[o.type]}-${stamp(d)}-${by}`;
+    const file = ['owner', 'supervisor'].includes(by) ? `${by}-${d.toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`;
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, file), line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: d.toISOString(), by }));
+    return id;
+  };
+}
+const autonomy = (F, env = {}) => json(F.ok(F.old, ['dashboard-data'], env)).autonomy;
+// hours_waiting moves with the clock while a question is open
+const timeless = (weeks) => weeks.map(({ hours_waiting, ...w }) => w);
+const floor10 = (x) => Math.floor(x * 10) / 10;
+const ceil10 = (x) => Math.ceil(x * 10) / 10;
+const PRIO = 'Should we raise the importer rewrite above the billing export work';
+
+// The main fixture: the log's first line is in week 6, a stored record for week 7, the owner's
+// decisions of every kind in week 8, a correction in week 9, a question left open from week 10.
+function decisionsFixture(F) {
+  const hand = handFor(F);
+  const rung = (what, ms) => hand('supervisor', { type: 'decision', class: 'priority-change', what, authority: 'rung', rung: 3 }, ms);
+  const X = {};
+  X.d6 = rung('raised the importer', h(6, 1, 9));
+  X.goal = hand('supervisor', { type: 'goal', title: 'Faster imports', status: 'draft' }, h(6, 2, 9));
+  X.d7 = rung('raised the exporter', h(7, 1, 9));
+  // week 8
+  X.d1 = rung('lowered the docs', h(8, 1, 9));
+  X.q1 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: 'Ship the cache now?', recommendation: 'Yes', options: ['Yes', 'No'] }, h(8, 1, 10));
+  X.q2 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: 'Move the nightly job to Sunday?', options: ['Yes', 'No'], default: 'Yes' }, h(8, 1, 11));
+  X.P = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: PRIO, options: ['Yes', 'No'], links: [{ artifact: 'gone-page', at: 'main', sha256: 'ab'.repeat(32) }] }, h(8, 1, 12));
+  hand('supervisor', { type: 'question', op: 'set', id: X.P, status: 'withdrawn' }, h(8, 1, 12.5));
+  X.Q = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: PRIO.replace('importer', 'uploader'), options: ['Yes', 'No'], new_because: 'the page it linked changed' }, h(8, 1, 13));
+  hand('owner', { type: 'question', op: 'set', id: X.q1, answer: 'Yes' }, h(8, 1, 13));
+  hand('supervisor', { type: 'question', op: 'set', id: X.Q, status: 'withdrawn' }, h(8, 1, 13.2));
+  X.a1 = hand('supervisor', { type: 'act', class: 'priority-change', what: 'shipped the cache', approved_by: X.q1 }, h(8, 1, 13.5));
+  X.q3 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'other-class', question: 'Should the nightly backup move to the eastern region now', options: ['Yes', 'No'], new_because: 'the region went down again' }, h(8, 1, 14));
+  hand('supervisor', { type: 'question', op: 'set', id: X.q3, status: 'withdrawn' }, h(8, 1, 14.2));
+  hand('supervisor', { type: 'question', op: 'set', id: X.q2, status: 'defaulted' }, h(8, 1, 16));
+  X.a2 = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved the nightly job', approved_by: X.q2 }, h(8, 1, 16.5));
+  hand('owner', { type: 'goal', op: 'set', id: X.goal, hold: { mode: 'drain', reason: 'a pause' } }, h(8, 2, 0));
+  hand('owner', { type: 'goal', op: 'set', id: X.goal, decision: { verdict: 'approve' } }, h(8, 2, 1));
+  X.pref = hand('owner', { type: 'knowledge', kind: 'preference', statement: 'Prefer small PRs', scope: 'project', status: 'accepted' }, h(8, 2, 2));
+  X.rule = hand('owner', { type: 'knowledge', kind: 'lesson', statement: 'Raise the importer first', scope: 'class:priority-change', status: 'accepted' }, h(8, 2, 3));
+  X.fact = hand('owner', { type: 'knowledge', kind: 'fact', statement: 'The importer runs nightly', scope: 'project', status: 'accepted' }, h(8, 2, 4));
+  X.d2 = rung('raised the uploader', h(8, 3, 9));
+  X.d3 = rung('raised the mailer', h(8, 3, 10));
+  hand('owner', { type: 'decision', op: 'set', id: X.d3, corrected: { reason: 'not the mailer' } }, h(8, 3, 11));
+  X.t = hand('owner', { type: 'thread', title: 'About imports', status: 'open' }, h(8, 4, 9));
+  hand('owner', { type: 'turn', thread: X.t, text: 'How are imports going?' }, h(8, 4, 9.1));
+  // week 7's stored record, written in week 8: its figures differ from what a recompute gives
+  X.rec = hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: isoWeek(W(7)), source_key: `learning:${isoWeek(W(7))}`, detail: 'week 7',
+    figures: { informed: {}, autonomous: { merged: 4 }, trusted: { calls: 5, corrections: 1, agreed: 2, answered: 3 } } }, h(8, 5, 9));
+  // week 9: d2 corrected; the class rule retired
+  hand('owner', { type: 'decision', op: 'set', id: X.d2, corrected: { reason: 'not the uploader' } }, h(9, 1, 0));
+  hand('owner', { type: 'knowledge', op: 'set', id: X.rule, status: 'retired' }, h(9, 1, 1));
+  // week 10: q5 asked two hours before this Monday and left open
+  X.q5 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: 'Archive the old exports?', options: ['Yes', 'No'] }, W(11) - 2 * HOUR);
+  return { hand, rung, X };
+}
+const ZERO = { record: null, alone: 0, asked: 0, corrected: 0, decisions: 0, score: 0, lessons: [], merged: 0, answers: 0, merged_per_answer: 0, asked_again: 0, hours_waiting: 0, with_recommendation: { count: 0, of: 0, share: 0 } };
+
+test('twelve weeks, oldest first, ending this Monday', () => {
+  const F = fleetFixture('autonomy-weeks');
+  try {
+    decisionsFixture(F);
+    const { weeks } = autonomy(F).decisions;
+    assert.equal(weeks.length, 12);
+    assert.equal(weeks[11].starts_at, new Date(M).toISOString());
+    for (let i = 1; i < 12; i++) assert.equal(Date.parse(weeks[i].starts_at) - Date.parse(weeks[i - 1].starts_at), WEEK, `week ${i}`);
+  } finally { F.done(); }
+});
+
+test("each week's decisions from the record and the log", (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const F = fleetFixture('autonomy-decisions');
+  try {
+    const { rung, X } = decisionsFixture(F);
+    // this week, from what the fixture's own init wrote: the baseline d4 adds to
+    const base = autonomy(F).decisions.weeks[11];
+    X.d4 = rung('raised the billing export', M + span() * 0.5);
+    const tBefore = Date.now();
+    const A = autonomy(F);
+    const tAfter = Date.now();
+    const { weeks } = A.decisions;
+    for (let k = 0; k <= 5; k++) assert.deepEqual({ ...weeks[k], starts_at: undefined }, { ...ZERO, starts_at: undefined }, `week ${k}`);
+    const row = (k, want) => { for (const [f, v] of Object.entries(want)) assert.deepEqual(weeks[k][f], v, `week ${k} ${f}`); };
+    row(6, { record: null, alone: 1, asked: 0, corrected: 0, decisions: 1, score: 100, answers: 0, asked_again: 0, hours_waiting: 0 });
+    row(7, { record: X.rec, alone: 1, asked: 0, corrected: 1, decisions: 2, score: 50, merged: 4, answers: 0, merged_per_answer: 4, with_recommendation: { count: 2, of: 3, share: 0.67 }, lessons: [] });
+    row(8, { record: null, alone: 2, asked: 6, corrected: 1, decisions: 9, score: 22, answers: 1, merged: 0, merged_per_answer: 0, with_recommendation: { count: 1, of: 1, share: 1 }, asked_again: 1, hours_waiting: 6, lessons: [] });
+    row(9, { record: null, alone: 0, asked: 0, corrected: 1, decisions: 1, score: 0, hours_waiting: 0 });
+    row(10, { record: null, alone: 0, asked: 0, corrected: 0, decisions: 0, score: 0, hours_waiting: 2 });
+    row(11, { record: null, alone: base.alone + 1, asked: base.asked, corrected: base.corrected });
+    assert.equal(weeks[11].score, Math.round((100 * weeks[11].alone) / weeks[11].decisions));
+    const hw = weeks[11].hours_waiting;
+    assert.ok(floor10((tBefore - M) / HOUR) <= hw && hw <= ceil10((tAfter - M) / HOUR), `this week's hours waiting ${hw}`);
+    assert.ok(weeks[11].lessons.includes(X.pref) && weeks[11].lessons.includes(X.fact) && !weeks[11].lessons.includes(X.rule), JSON.stringify(weeks[11].lessons));
+    assert.deepEqual(A.decisions.score, { this_week: weeks[11].score, last_week: 0 });
+    assert.deepEqual(A.decisions.this_week, weeks[11]);
+    assert.deepEqual(A.decisions.last_week, weeks[10]);
+    if (base.decisions === 0) assert.equal(weeks[11].score, 100, 'd4 alone this week');
+  } finally { F.done(); }
+});
+
+test('a stored record wins over a recompute; a week with no decisions reads 0', () => {
+  const F = fleetFixture('autonomy-record');
+  try {
+    const { X } = decisionsFixture(F);
+    const { weeks } = autonomy(F).decisions;
+    // the log alone gives week 7 no corrections and no merges; the record says 1 and 4
+    assert.equal(weeks[7].record, X.rec);
+    assert.deepEqual([weeks[7].corrected, weeks[7].merged], [1, 4]);
+    for (const k of [0, 1, 2, 3, 4, 5, 10]) {
+      assert.equal(weeks[k].score, 0, `week ${k}`);
+      for (const [f, v] of Object.entries(weeks[k])) if (!['starts_at', 'record', 'lessons', 'with_recommendation'].includes(f)) assert.equal(typeof v, 'number', `week ${k} ${f}`);
+    }
+    // a rule retired later still counts in the week it was made
+    assert.equal(weeks[8].asked, 6);
+  } finally { F.done(); }
+});
+
+test('a stored record missing a figure reads 0; a question open since before the 12 weeks counts from each week', () => {
+  const F = fleetFixture('autonomy-missing');
+  try {
+    const hand = handFor(F);
+    hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: 'Keep the old importer?', options: ['Yes', 'No'] }, W(0) - DAY);
+    const rec = hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: isoWeek(W(7)), source_key: `learning:${isoWeek(W(7))}`, detail: 'week 7',
+      figures: { informed: {}, autonomous: {}, trusted: { answered: 2, corrections: 0 } } }, h(8, 0, 1));
+    const { weeks } = autonomy(F).decisions;
+    assert.equal(weeks[7].record, rec);
+    assert.deepEqual(weeks[7].with_recommendation, { count: 0, of: 2, share: 0 });
+    assert.equal(weeks[7].merged, 0);
+    for (let k = 0; k <= 10; k++) assert.equal(weeks[k].hours_waiting, 168, `week ${k}`);
+  } finally { F.done(); }
+});
+
+test("the operator's words count nowhere", () => {
+  const F = fleetFixture('autonomy-operator');
+  try {
+    decisionsFixture(F);
+    const HOME = { HOME: F.home };
+    fs.mkdirSync(F.home, { recursive: true });
+    const lines = () => json(F.ok(F.old, ['log', '--tail', '100000', '--json'], HOME)).length;
+    const n = lines();
+    const before = autonomy(F, HOME).decisions.weeks;
+    F.run(F.old, ['operator-thread', 'new', 'the importer looks slow tonight'], HOME);
+    // no supervisor pane to type into: it writes no line and exits 1 or 3
+    const env = { ...F.env(HOME) };
+    delete env.DEVTEAM_ROLE;
+    const told = spawnSync(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'machine', 'tell', '--in', F.base, '--', path.basename(F.old), 'raise the importer'], { cwd: F.old, env, encoding: 'utf8' });
+    assert.ok([1, 3].includes(told.status), `machine tell: ${told.status} ${told.stderr}`);
+    assert.equal(lines(), n, 'no line in the project log');
+    assert.deepEqual(timeless(autonomy(F, HOME).decisions.weeks), timeless(before));
+  } finally { F.done(); }
+});
+
+test('the server sees new lines', async (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const F = fleetFixture('autonomy-server');
+  let dash = null;
+  try {
+    const { rung } = decisionsFixture(F);
+    const D = await dashboardOnFreePort(F.old, F.env());
+    dash = D.dash;
+    const get = async () => (await (await fetch(`http://127.0.0.1:${D.port}/api/data`)).json()).autonomy;
+    const first = await get();
+    const cli = autonomy(F);
+    assert.deepEqual(timeless(first.decisions.weeks), timeless(cli.decisions.weeks));
+    rung('raised the payments retry', M + span() * 0.6);
+    const second = await get();
+    assert.equal(second.decisions.weeks[11].alone, first.decisions.weeks[11].alone + 1);
+  } finally { await dash?.stop(); F.done(); }
+});

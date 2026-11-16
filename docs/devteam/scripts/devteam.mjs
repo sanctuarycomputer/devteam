@@ -10410,6 +10410,8 @@ const weekStartOf = (week) => { const [y, w] = String(week).split('-W').map(Numb
 // process-wide memos) reset for fn and put back after. Git facts (mergedAt) replay as they are.
 function withLogAt(cut, fn) {
   const full = readLog();
+  // no line newer than cut (this week's cut is in the future): the log as it is, with no refold
+  if (full.lines.every((l) => l.at <= cut)) return fn();
   const saved = { logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX };
   try {
     const lines = full.lines.filter((l) => l.at <= cut);
@@ -10512,6 +10514,68 @@ function learningRecords() {
   const byWeek = new Map();
   for (const o of logObjects('observation').filter((x) => isLearningRecord(x) && /^\d{4}-W\d{2}$/.test(x.week ?? '') && ['informed', 'autonomous', 'trusted'].every((k) => x.figures?.[k] && typeof x.figures[k] === 'object')).sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b))) if (!byWeek.has(o.week)) byWeek.set(o.week, o);
   return [...byWeek.values()];
+}
+// ===== the Trust Score's data (the dashboard design's Autonomy pages › Trust; kit-98) =====
+
+// The fleet's own authority: a call made without asking. An owner's answer or a default was asked.
+const OWN_AUTHORITY = ['rung', 'standing-rule', 'constitution'];
+// The owner's standing rules: a preference, or a rule for a kind of decision; a fact decides nothing.
+const isOwnerRule = (k) => writerClass(k.created_by) === 'owner' && (k.kind === 'preference' || String(k.scope ?? '').startsWith('class:'));
+const round2 = (x) => Math.round(x * 100) / 100;
+// What every week reads, read once per request: the stored records by week, the log's first line,
+// the fleet's calls, the questions, the owner's goal decisions and standing rules, and the
+// intervals in which a question waited on the owner (open ones end now).
+function autonomyContext(now) {
+  const first = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
+  const qs = questions();
+  const goalAts = [];
+  for (const g of logObjects('goal')) for (const u of g.updates ?? []) if (writerClass(u.by) === 'owner' && (u.decision || u.status !== undefined || u.hold !== undefined)) goalAts.push(u.at);
+  return {
+    now, first, qs, goalAts, merges: mergeTimes(),
+    records: new Map(learningRecords().map((r) => [r.week, r])),
+    calls: calls().map((c) => ({ c, own: OWN_AUTHORITY.includes(authorityOfCall(c)), corrected: correctionOf(c)?.at ?? null })),
+    ruleAts: logObjects('knowledge').filter(isOwnerRule).map((k) => k.created_at),
+    waits: qs.map((q) => [Date.parse(q.asked_at), q.answered_at ? Date.parse(q.answered_at) : now]).filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]),
+  };
+}
+// One week of the score (start: its Monday 00:00 UTC, ms). merged, corrected and with the
+// recommendation come from its learning record: stored, else computed for this week or a week since
+// the log began, else nothing (a missing figure reads 0). The rest is counted from the log on read.
+function autonomyWeek(start, now, x = autonomyContext(now)) {
+  const week = isoWeekOf(start), end = start + WEEK;
+  const fromIso = new Date(start).toISOString(), cutIso = new Date(end - 1).toISOString();
+  const inW = (at) => typeof at === 'string' && at >= fromIso && at <= cutIso;
+  const rec = x.records.get(week) ?? null;
+  const live = !rec && end > x.first ? learningFigures(week, x.merges) : null;
+  const R = rec?.figures ?? live?.figures ?? {};
+  const num = (v) => (Number.isFinite(v) ? v : 0);
+  const alone = x.calls.filter(({ c, own, corrected }) => own && inW(c.created_at) && !(corrected && corrected <= cutIso)).length;
+  const settled = x.qs.filter((q) => ['answered', 'defaulted'].includes(q.status) && inW(q.answered_at));
+  const asked = settled.length + x.goalAts.filter(inW).length + x.ruleAts.filter(inW).length;
+  const corrected = num(R.trusted?.corrections);
+  const decisions = alone + asked + corrected;
+  const answers = settled.filter((q) => q.status === 'answered').length;
+  const merged = num(R.autonomous?.merged);
+  // a declared re-ask, less one that only follows a withdrawn question whose linked page moved
+  const linksMoved = (q) => x.qs.some((p) => p.status === 'withdrawn' && p.answered_at <= q.asked_at && (p.class ?? null) === (q.class ?? null) && nearlySameQuestion(p.question, q.question) && artifactLinksMoved(p));
+  const askedAgain = x.qs.filter((q) => q.new_because && inW(q.asked_at) && !linksMoved(q)).length;
+  // the hours in which at least one question waited: the union of the intervals, clipped to the week
+  let waited = 0, upto = start;
+  for (const [a, b] of x.waits) { const s = Math.max(a, upto), e = Math.min(b, end); if (e > s) { waited += e - s; upto = e; } }
+  const count = num(R.trusted?.agreed), of = num(R.trusted?.answered);
+  return {
+    starts_at: fromIso, record: rec?.id ?? null,
+    alone, asked, corrected, decisions, score: decisions ? Math.round((100 * alone) / decisions) : 0,
+    lessons: start === mondayOf(now) ? live?.lists.knowledge ?? [] : [],
+    merged, answers, merged_per_answer: round2(merged / Math.max(1, answers)),
+    asked_again: askedAgain, hours_waiting: Math.round(waited / 360000) / 10,
+    with_recommendation: { count, of, share: of ? round2(count / of) : 0 },
+  };
+}
+function autonomyData(now = Date.now()) {
+  const x = autonomyContext(now);
+  const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
+  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: null, senses: null };
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });
@@ -12879,6 +12943,7 @@ function dashboardDataRead() {
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
+    autonomy: autonomyData(),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
     // every kit setting, in words; never a credential (settingsAll)
