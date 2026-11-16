@@ -21,3 +21,11 @@ rule; CI runs the full suite). The local run below is from the T5 run at 27ef42d
 Screenshots (Overview and Settings, light and dark, 1440 and 390): `shots/`.
 
 Not run here: the full suite (shared box; test.yml runs it on every Node major).
+
+## After final review 1 (fixes 14fab7b, head ddd09cc219dd6f50402bce7f3b700687e8173573)
+
+| Check | Command | Result |
+|---|---|---|
+| F1, F2, F3, F5, F6 fixed, each with a test that failed first | `--test-name-pattern="^(the Overview: a header\|the partly-held pill: words\|the tabs: a dot\|the summary counts\|a fully blocked card)"` | red 4/4 before (each on its new assertion), green 5/5 after |
+| Touched files | `test/hub-overview.test.mjs`, `test/hub-measure.test.mjs`, `test/dashboard-shell.test.mjs` | 38/38, 1/1, 16/16 at 14fab7b |
+| CI (test.yml, every job) | `devteam.mjs gate ci -- gh run watch 43813798936 --exit-status` | run 43813798936 at ddd09cc: success |
