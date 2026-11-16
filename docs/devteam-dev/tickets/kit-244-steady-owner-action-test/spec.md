@@ -48,3 +48,4 @@ F1: the shrink's timing is corrected above. F2: the stronger page signal is in a
 - m-20261116-072003301-supervisor: tight spec and plan, one combined review, build after kit-87 merges.
 
 - m-20261116-074413911-supervisor: approve-spec and approve-plan at c2a98f5; build now on this branch, merge main in once kit-87 merges, then CI and finals.
+- m-20261116-075633105-supervisor: take the final review now; after kit-87 only a delta pass, and only if its merge changes the test file. Keep #296 draft until then.
