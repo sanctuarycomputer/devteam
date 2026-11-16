@@ -144,3 +144,4 @@
 - `m-20261115-234500335-supervisor`: done-when changed: Numbers back to ten tiles, then the Autonomy row of four scores with 12-week lines; amend, one combined re-review of the delta, re-approval.
 - `m-20261115-235051446-supervisor`: re-approved spec and plan at 117800a.
 - `m-20261116-000030161-supervisor` (graph-20): also wait on `kit-242`; draw the Autonomy row from the data tickets' shape; Bugs merged inside Numbers; one delta review, then re-approval.
+- `m-20261116-000703166-supervisor`: re-approved spec and plan at d7e00ec, no extra pass; the first task review (reviews/task-1.md) confirms delta-3's F1 explicitly (the shape check at the four score paths against the G1 golden), and every task review brief names it until it is confirmed.
