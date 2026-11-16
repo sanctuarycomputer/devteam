@@ -351,7 +351,8 @@ test('smaller-model condition and effect', (t) => {
     const OPUS = 'us.anthropic.Claude-Opus-5-5-20261001';
     E.addTicket('eff-30-a'); E.phase('eff-30-a', 'build', thisWeekAt(E, 0.1));
     const s = (usd, phase, model = OPUS) => E.spend('eff-30-a', { usd, phase, model, atMs: thisWeekAt(E, 0.2) });
-    s(20, 'build'); s(17, 'final-review'); s(5, 'spec'); s(3, 'build', 'claude-sonnet-5-5');
+    // $17 of opus in each phase the estimate leaves out: final-review, review, plan, planning (spec below)
+    s(20, 'build'); s(5, 'final-review'); s(4, 'review'); s(4, 'plan'); s(4, 'planning'); s(5, 'spec'); s(3, 'build', 'claude-sonnet-5-5');
     assert.deepEqual(E.data().efficiency.suggestions, [], '$45 this week: not above $50');
     s(15, 'spec');
     const a = E.data().efficiency.suggestions;
@@ -386,24 +387,27 @@ test('review depth and tighter specs priced per pass', (t) => {
   const E = effFixture('eff-depth');
   try {
     if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
-    // per pass: X ($4 in final-review and $2 in review over 2 final records) 3, Y 4, Z 5: median 4
+    // per pass: X ($5 in final-review and $5 in review, over final-1.md and final-1b.md) 5, Y 4,
+    // Z 8: median 5, X's. Counted without review spend X is 2.5 (median 4); without the track
+    // letter X is 10 (median 8). W1 and W2 (1 each) merged before the 12 weeks: counted, median 4.
     const finals = [];
-    for (const [id, k, usd, n] of [['eff-32-x', 6, [4, 2], 2], ['eff-32-y', 7, [4], 1], ['eff-32-z', 8, [10], 2]]) {
+    for (const [id, k, usd, files] of [['eff-32-x', 6, [5, 5], ['final-1.md', 'final-1b.md']], ['eff-32-y', 7, [4], ['final-1.md']], ['eff-32-z', 8, [16], ['final-1.md', 'final-2.md']], ['eff-32-w1', -2, [1], ['final-1.md']], ['eff-32-w2', -3, [1], ['final-1.md']]]) {
       E.shipped(id, k, 0, { spends: [{ usd: 1 }, ...usd.map((u, j) => ({ role: 'reviewer', phase: j ? 'review' : 'final-review', usd: u }))] });
-      for (let p = 1; p <= n; p++) { E.reviewFile(id, `final-${p}.md`, 'APPROVE'); finals.push(path.join(E.old, 'docs/devteam/project/tickets', id, 'reviews', `final-${p}.md`)); }
+      for (const f of files) { E.reviewFile(id, f, 'APPROVE'); finals.push(path.join(E.old, 'docs/devteam/project/tickets', id, 'reviews', f)); }
     }
     // this week: one S/normal ticket with 3 spec and plan records; four M tickets with 3 of 4 first
-    // plan reviews asking for changes, and 2 later plan passes
+    // plan reviews asking for changes, and 2 later plan passes; their first task reviews are 2 of 4
+    // CHANGES, which is not more than half
     E.shipped('eff-32-s', 11, 0, { spends: [{ usd: 1 }] });
     for (const f of ['spec-1.md', 'spec-2.md', 'plan-1.md']) E.reviewFile('eff-32-s', f, 'APPROVE');
-    ['b', 'c', 'd', 'e'].forEach((x, j) => { const id = `eff-32-${x}`; E.shipped(id, 11, j + 1, { size: 'M', spends: [{ usd: 1 }] }); E.reviewFile(id, 'plan-1.md', j < 3 ? 'CHANGES' : 'APPROVE'); if (j < 2) E.reviewFile(id, 'plan-2.md', 'APPROVE'); });
+    ['b', 'c', 'd', 'e'].forEach((x, j) => { const id = `eff-32-${x}`; E.shipped(id, 11, j + 1, { size: 'M', spends: [{ usd: 1 }] }); E.reviewFile(id, 'task-1.md', j < 2 ? 'CHANGES' : 'APPROVE'); E.reviewFile(id, 'plan-1.md', j < 3 ? 'CHANGES' : 'APPROVE'); if (j < 2) E.reviewFile(id, 'plan-2.md', 'APPROVE'); });
     E.land();
     const eff = E.data().efficiency;
     if (weekMoved(E, eff)) return t.skip('the run crossed Monday 00:00 UTC');
     const s = byId(eff.suggestions);
-    assert.deepEqual(Object.keys(s).sort(), ['eff-review-depth-s-normal', 'eff-tighter-specs-plan']);
-    assert.deepEqual([s['eff-review-depth-s-normal'].usd, s['eff-review-depth-s-normal'].per], [12, 'week'], '3 passes at $4');
-    assert.deepEqual([s['eff-tighter-specs-plan'].usd, s['eff-tighter-specs-plan'].per], [8, 'week'], '2 later plan passes at $4');
+    assert.deepEqual(Object.keys(s).sort(), ['eff-review-depth-s-normal', 'eff-tighter-specs-plan'], 'no tighter-specs for task at 2 of 4');
+    assert.deepEqual([s['eff-review-depth-s-normal'].usd, s['eff-review-depth-s-normal'].per], [15, 'week'], '3 passes at $5');
+    assert.deepEqual([s['eff-tighter-specs-plan'].usd, s['eff-tighter-specs-plan'].per], [10, 'week'], '2 later plan passes at $5');
     assert.deepEqual(eff.suggestions.map((x) => x.id), ['eff-review-depth-s-normal', 'eff-tighter-specs-plan'], 'by dollars');
     plainWords(eff.suggestions);
     for (const f of finals) fs.rmSync(f);
@@ -415,7 +419,9 @@ test('cache and costly tickets, the top five by dollars, and dropping out', (t) 
   const E = effFixture('eff-cache');
   try {
     if (tooEarly(E)) return t.skip('fewer than 10 minutes into this week');
-    for (const i of [0, 1, 2, 3, 4]) E.shipped(`eff-33-m${i}`, 9, i, { spends: [{ usd: 5 }] });
+    // six merged S tickets, $3 $3 $3 $5 $5 $5: the finding's median is the element at floor(6 / 2), $5
+    // (an average of the middle two would be $4)
+    for (const i of [0, 1, 2, 3, 4, 5]) E.shipped(`eff-33-m${i}`, 9, i, { spends: [{ usd: i < 3 ? 3 : 5 }] });
     E.addTicket('eff-33-k', 'M'); E.phase('eff-33-k', 'build', thisWeekAt(E, 0.1));
     E.spend('eff-33-k', { usd: 40, input: 6e6, cache_read: 4e6, atMs: thisWeekAt(E, 0.2) });
     E.land();
