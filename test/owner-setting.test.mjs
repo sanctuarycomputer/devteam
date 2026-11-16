@@ -353,3 +353,126 @@ test("on a box the save needs the gateway's owner-setting signature, once", asyn
   assert.equal(settingActs(F).length, n);
   assert.equal(F.run(F.old, ['log-check'], box).status, 0);
 });
+
+const SETTINGS_REL = 'docs/devteam/project/settings.md';
+const blockOf = (f) => JSON.parse(fs.readFileSync(f, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]);
+const choreWt = (F) => path.join(F.old, '.worktrees/chore-settings');
+const editActs = (F) => logLines(F).filter((l) => l.type === 'act' && l.class === 'settings-edit');
+// the PR file merge --chore reads, as link-edits.test.mjs writes it
+const prFile = (F, title) => { fs.mkdirSync(path.join(F.old, 'docs/devteam/run/pr'), { recursive: true }); fs.writeFileSync(path.join(F.old, 'docs/devteam/run/pr/chore-settings.md'), `# chore-settings: ${title}\n\n## One-way doors\n\nNone.\n`); };
+// after a settings chore merged: the next one starts afresh from main (plan Task 0's fixture note)
+const clearChore = (F) => { F.g(['worktree', 'remove', '--force', choreWt(F)], F.old); F.g(['branch', '-D', 'chore-settings'], F.old); };
+
+test("settings set applies the owner's act in the settings chore, and lands through merge --chore", () => {
+  const F = monoFixture('settings-set');
+  const { old, ok, run, g } = F;
+  try {
+    F.lines(F.STD);
+    const before = fs.readFileSync(path.join(old, SETTINGS_REL), 'utf8');
+    const id = ok(old, ['owner-setting', 'max_active_tickets', '7'], DASH);
+    const wt = ok(old, ['chore', 'start', 'settings'], SUP).trim();
+    assert.equal(fs.realpathSync(wt), fs.realpathSync(choreWt(F)));
+    const set = run(old, ['settings', 'set', 'max_active_tickets', '7', '--for', id], SUP);
+    assert.equal(set.status, 0, set.err);
+    assert.match(set.out, /chore pr settings/);
+    assert.equal(blockOf(path.join(wt, SETTINGS_REL)).max_active_tickets, 7);
+    const diff = g(['diff', '-U0', '--', SETTINGS_REL], wt).split('\n').filter((l) => /^[+-][^+-]/.test(l));
+    assert.equal(diff.filter((l) => l.startsWith('+')).length, 1, diff.join('\n'));
+    assert.ok(diff.filter((l) => l.startsWith('-')).length <= 1, diff.join('\n'));
+    assert.equal(fs.readFileSync(path.join(old, SETTINGS_REL), 'utf8'), before, "the main checkout's file is unchanged");
+    const [e] = editActs(F);
+    assert.deepEqual([e.by, e.key, e.value, e.for, e.refs, e.what], ['supervisor', 'max_active_tickets', 7, id, [id], 'set max_active_tickets to 7 in the settings chore']);
+    assert.match(run(old, ['settings', 'set', 'max_active_tickets', '6', '--for', id], SUP).err, /asked for 7/);
+    assert.match(run(old, ['settings', 'set', 'links', '3'], SUP).err, /link set and link land/);
+    for (const k of ownerKeys()) assert.match(run(old, ['settings', 'set', k, '3'], SUP).err, /owner's own setting/, k);
+    assert.equal(editActs(F).length, 1, 'nothing more logged');
+    ok(old, ['chore', 'pr', 'settings', '--title', 'settings: max_active_tickets 7'], SUP);
+    prFile(F, 'settings: max_active_tickets 7');
+    const m = run(old, ['merge', '--chore', 'settings'], SUP);
+    assert.equal(m.status, 0, `${m.out}\n${m.err}`);
+    g(['fetch', '-q', 'origin'], old);
+    assert.equal(JSON.parse(g(['show', `origin/main:${SETTINGS_REL}`], old).match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]).max_active_tickets, 7);
+    assert.ok(logLines(F).some((l) => l.type === 'act' && l.class === 'merge-chore' && (l.refs ?? []).includes('chore-settings')), 'a merge-chore act for chore-settings');
+    // a superseded request is never applied: the newer one is named
+    clearChore(F);
+    const newer = ok(old, ['owner-setting', 'max_active_tickets', '8'], DASH);
+    ok(old, ['chore', 'start', 'settings'], SUP);
+    assert.match(run(old, ['settings', 'set', 'max_active_tickets', '7', '--for', id], SUP).err, new RegExp(`a newer request ${newer} asks for 8`));
+    assert.match(run(old, ['settings', 'set', 'max_active_per_component', '7', '--for', newer], SUP).err, /--for names the owner's owner-setting act for max_active_per_component/);
+    assert.equal(editActs(F).length, 1);
+  } finally { F.done(); }
+});
+
+test("settings set is the supervisor's alone", () => {
+  const F = monoFixture('settings-set-roles');
+  const { old, ok, run } = F;
+  try {
+    F.lines(F.STD);
+    ok(old, ['chore', 'start', 'settings'], SUP);
+    const before = fs.readFileSync(path.join(choreWt(F), SETTINGS_REL), 'utf8');
+    for (const role of ['worker', 'planner', 'operator']) {
+      const r = run(old, ['settings', 'set', 'max_active_tickets', '4'], { DEVTEAM_ROLE: role });
+      assert.notEqual(r.status, 0, role);
+      if (role === 'operator') assert.match(r.err, /the operator only reads/);
+    }
+    assert.equal(ok(old, ['settings', '--get', 'max_active_tickets'], { DEVTEAM_ROLE: 'operator' }), '5', 'the operator still reads');
+    assert.equal(fs.readFileSync(path.join(choreWt(F), SETTINGS_REL), 'utf8'), before);
+    assert.equal(editActs(F).length, 0);
+  } finally { F.done(); }
+});
+
+test('settings set adds to a chore that holds other edits', () => {
+  const F = monoFixture('settings-set-adds');
+  const { old, ok } = F;
+  try {
+    F.lines(F.STD);
+    ok(old, ['chore', 'start', 'settings'], SUP);
+    const f = path.join(choreWt(F), SETTINGS_REL);
+    // an unrelated key and gates in an order of their own, as written by hand
+    F.edit((j) => { j.tick_minutes = 7; j.gates = { zeta: { cmd: 'true' }, alpha: { cmd: 'true' } }; j.max_active_per_component = 2; }, choreWt(F));
+    const before = fs.readFileSync(f, 'utf8');
+    ok(old, ['settings', 'set', 'max_active_per_component', 'none'], SUP);
+    const after = fs.readFileSync(f, 'utf8');
+    const j = blockOf(f);
+    assert.equal(j.max_active_per_component, null);
+    assert.equal(j.tick_minutes, 7);
+    assert.deepEqual(Object.keys(j.gates), ['zeta', 'alpha']);
+    // only the one line differs
+    const a = before.split('\n'), b = after.split('\n');
+    assert.equal(b.length, a.length, 'replaced in place');
+    assert.equal(b.filter((l, i) => l !== a[i]).length, 1);
+  } finally { F.done(); }
+});
+
+test('settings set without the chore worktree', () => {
+  const F = monoFixture('settings-set-nowt');
+  try {
+    F.lines(F.STD);
+    const r = F.run(F.old, ['settings', 'set', 'max_active_tickets', '4'], SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(r.err, /no worktree \.worktrees\/chore-settings; devteam\.mjs chore start settings/);
+    assert.equal(editActs(F).length, 0);
+  } finally { F.done(); }
+});
+
+test("settings set refuses a settings block it can't edit safely", () => {
+  const F = monoFixture('settings-set-unsafe');
+  const { old, ok, run } = F;
+  try {
+    F.lines(F.STD);
+    ok(old, ['chore', 'start', 'settings'], SUP);
+    const f = path.join(choreWt(F), SETTINGS_REL);
+    const text = fs.readFileSync(f, 'utf8');
+    const block = text.match(/```json devteam\s*\n([\s\S]*?)\n```/)[1];
+    const dup = text.replace(block, () => block.replace(/^\{/, '{\n  "max_active_tickets": 3,\n  "max_active_tickets": 4,'));
+    fs.writeFileSync(f, dup);
+    const r = run(old, ['settings', 'set', 'max_active_tickets', '6'], SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(r.err, /repeats/);
+    assert.equal(fs.readFileSync(f, 'utf8'), dup, 'the file is unchanged');
+    fs.writeFileSync(f, text.replace(block, () => '{}'));
+    ok(old, ['settings', 'set', 'max_active_tickets', '4'], SUP);
+    assert.deepEqual(blockOf(f), { max_active_tickets: 4 });
+    assert.equal(editActs(F).length, 1);
+  } finally { F.done(); }
+});

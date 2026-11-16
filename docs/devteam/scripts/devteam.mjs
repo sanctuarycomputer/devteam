@@ -19829,7 +19829,67 @@ function cmdWhoami() {
   const s = loadSettings();
   out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} home=${mainRoot} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
+// One top-level key of a settings.md's json devteam block set to value, as a text edit: the rest of
+// the block (gate order, every other key) stays byte for byte. Refused, writing nothing, when the
+// block isn't JSON, repeats a key, or the edit would read back as anything else.
+function setSettingsKey(file, key, value) {
+  const text = readText(file) ?? die(`${file}: no settings.md here`);
+  const m = text.match(/```json devteam\s*\n([\s\S]*?)\n```/) ?? die(`${file}: no json devteam block`);
+  const block = m[1];
+  const dups = jsonDuplicateKeys(block);
+  if (dups === undefined) die(`${file}: the json devteam block is not valid JSON`);
+  if (dups.length) die(`${file}: the json devteam block repeats ${dups.map((d) => d.join('.')).join(', ')}; fix that by hand first`);
+  const old = JSON.parse(block);
+  if (!isObj(old)) die(`${file}: the json devteam block is not an object`);
+  const v = JSON.stringify(value);
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let next;
+  if (Object.hasOwn(old, key)) {
+    const re = new RegExp(`("${esc}"\\s*:\\s*)(null|-?\\d+(?:\\.\\d+)?)`, 'g');
+    const hits = [...block.matchAll(re)];
+    if (hits.length !== 1) die(`${file}: ${key} isn't written as one plain number or null; set it by hand`);
+    next = block.replace(re, (_, pre) => `${pre}${v}`);
+  } else if (/^\s*\{\s*\}\s*$/.test(block)) next = `{\n  "${key}": ${v}\n}`;
+  else next = block.replace(/^(\s*\{)/, `$1\n  "${key}": ${v},`);
+  let parsed = null;
+  try { parsed = JSON.parse(next); } catch {}
+  const same = isObj(parsed) && jsonDuplicateKeys(next)?.length === 0 && canonical(parsed[key]) === canonical(value)
+    && Object.keys(parsed).length === Object.keys(old).length + (Object.hasOwn(old, key) ? 0 : 1)
+    && Object.keys(old).every((k) => k === key || canonical(parsed[k]) === canonical(old[k]));
+  if (!same) die(`${file}: setting ${key} would change more than that key; set it by hand`);
+  fs.writeFileSync(file, text.replace(block, () => next));
+}
+// settings set <key> <1..20|none> [--for <act-id>]: the supervisor changes one of its askable
+// settings in its settings chore (never a working-tree edit: the file it writes is the chore
+// worktree's), with --for naming the owner's request it lands. It lands on main through chore pr
+// and merge --chore, which is when it applies.
+function settingsSet() {
+  const [, key, arg] = positional;
+  if (!key || arg === undefined || positional.length !== 3) die('usage: settings set <key> <1..20|none> [--for <act-id>]');
+  supervisorOnly('settings set');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`settings set: ${why}`);
+  const wt = path.join(mainRoot, '.worktrees', 'chore-settings');
+  if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-settings; devteam.mjs chore start settings');
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-settings is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start settings');
+  const words = (x) => (x === null ? 'no limit' : String(x));
+  const forId = flagStr('for');
+  if (flags.for !== undefined && !forId) die('settings set: --for names the owner\'s owner-setting act');
+  if (forId) {
+    const a = logGet(forId);
+    if (!a || a.type !== 'act' || a.class !== 'owner-setting' || a.created_by !== 'owner' || a.key !== key) die(`settings set: --for names the owner's owner-setting act for ${key}`);
+    const latest = latestOwnerSetting(key);
+    if (latest && latest.id !== a.id) die(`settings set: a newer request ${latest.id} asks for ${words(latest.value)}`);
+    if (a.value !== value) die(`settings set: the owner asked for ${words(a.value)}; --for applies exactly that`);
+  }
+  const file = path.join(wt, projectRel, 'settings.md');
+  setSettingsKey(file, key, value);
+  appendLog({ type: 'act', class: 'settings-edit', key, value, ...(forId ? { for: forId, refs: [forId] } : { refs: [] }), what: `set ${key} to ${words(value)} in the settings chore`, reversible: true }, 'supervisor');
+  out(`${path.relative(mainRoot, file)}: ${key} is ${words(value)}\nnext: devteam.mjs chore pr settings --title "settings: ${key} ${words(value)}", then devteam.mjs merge --chore settings`);
+}
 function cmdSettings() {
+  if (positional[0] === 'set') return settingsSet();
   const s = loadSettings();
   const key = flagStr('get');
   // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
@@ -20759,6 +20819,7 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
@@ -20818,7 +20879,7 @@ Dashboard and releases
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
 const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
-const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
