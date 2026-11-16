@@ -20,7 +20,7 @@
 
 ## Global constraints
 
-- Touch only `docs/devteam/dashboard/hub.html`, `test/hub-overview.test.mjs`, `test/hub-measure.test.mjs` and this ticket folder.
+- Touch only `docs/devteam/dashboard/hub.html`, `test/hub-overview.test.mjs`, `test/hub-measure.test.mjs`, `test/dashboard-shell.test.mjs` (its "no .shell yet" loop only; ruling m-20261116-024531651) and this ticket folder.
 - `devteam-layout` and `devteam-shell-js` stay byte-identical to index.html's (`test/dashboard-shell.test.mjs` checks this; run it after each task that touches hub.html).
 - Keep these strings or hooks: `.ov-card`; `[data-pin="name"]` in a card; `#ov-body [data-pin="headline"]`; `paintOverview`; `#overview` scroll box with `#tl-pins` in it; the Overview tab's text exactly `Overview`; a project tab's text starting with its name. Gateway strings: `const urlOf = …`, `if (box || !NOTIFY_OK`, `typeof b.previews === 'string' && secure(b.previews)`, `a.textContent = 'Previews'`, the drop guard with exactly two `e.preventDefault()` directly before `// The hub on a laptop has no box.json`, the terminal frame's sandbox line, `Drop onto the Terminal tab`.
 - Text from a hello goes in as text (`textContent`, attributes through the DOM), or through `escHtml` in the shared builders.
@@ -78,6 +78,7 @@ Markup and CSS decisions:
   - (string, replacing `'the Overview draws the box line from box.json and the latest list'` for now) `'the Overview draws no box line'`: `paintOverview`'s body doesn't mention `boxLine`, `findBox` keeps `image: b.image`, and `draw` keeps its two `hubSeen` lines. T4 adds the Settings half.
 - [ ] **Step 2: Run, see them fail** (Node 24, the file filtered by `--test-name-pattern`).
 - [ ] **Step 3: Implement** as decided above.
+- [ ] **Step 3b: In `test/dashboard-shell.test.mjs`, change only the loop `for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]])` that asserts "has no .shell yet" to run over `[['index.html', INDEX]]`, with a comment that the hub adopted the shell in kit-94; the keyframes check in that loop keeps running for both pages (split it into its own loop over both).**
 - [ ] **Step 4: Run these tests, the T1 tests, `test/dashboard-shell.test.mjs`, and `test/operator-threads.hub.test.mjs`.** On the box, if that last one fails on the hard-coded `/opt/devteam` paths (lesson k-20261114-204646621), note it and rely on CI.
 - [ ] **Step 5: Commit** `kit-94: T2 the shell, tabs and cards`.
 
@@ -151,10 +152,10 @@ Verify (verification.md, a row per done-when, CI run id at the head via `gate ci
 ## Notes
 
 - A project named `settings`, `overview` or `terminal` now gets a `-<hex>` address (T1). The gateway's push links follow the old rule, so a notification for such a project would open the view instead. That's rare, and the gateway is outside the touches: an observation for a follow-up (plan review 1, P13).
-- Open: `m-20261116-024443642-kit-94-hub-overview` asks to add `test/dashboard-shell.test.mjs` to the touches, to change only its "no .shell yet" loop to index.html alone (plan review 1, P1). T2 waits on the ruling for that one line.
 
 ## Rulings
 
 - `m-20261116-022459643-supervisor`: the partly-held pill is drawn from `fleet.goals`' counts. Its hover lists `fleet.goals.held = [{ title, mode, why }]` when present, else the counts. Both are tested (T1, T2).
 - `m-20261116-023526852-supervisor`: approve-spec at 25d12f1.
+- `m-20261116-024531651-supervisor` (on `m-20261116-024443642`, plan review 1 P1): `test/dashboard-shell.test.mjs` is in the touches, for its "no .shell yet" loop only (T2 makes it check index.html alone; nothing else in the file changes). Order: kit-94 follows kit-87, and kit-100 follows kit-94. Keep building; merge `origin/main` once kit-87 has merged, then open the PR.
 - Spec review 2's S2-1 and S2-2 are carried here: Escape and focus on both confirms (T3), the 0-running mixed pill and Run confirming on a pill card not in run (T1, T3), and the reserved-key suffix (T1, T4).
