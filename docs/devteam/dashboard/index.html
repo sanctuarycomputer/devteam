@@ -250,20 +250,44 @@ try {
   .nav a:hover { background: var(--hover); color: var(--fg); }
   .nav .count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .nav .count.hot { color: var(--red-fg); }
-  .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
-  main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+  :where(.no-shell) .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+  :where(.no-shell) main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+  /* the frame (kit-87): the grouped nav, the settings area at the sidebar's foot, one page shown at a time */
+  .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 14px 8px 4px; }
+  .brand + .eyebrow { padding-top: 4px; }
+  .nav a[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 4px 2px; display: flex; flex-direction: column; gap: 8px; }
+  .settings a.set { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-radius: 6px; color: var(--fg-2); }
+  .settings a.set:hover { background: var(--hover); color: var(--fg); }
+  .settings a.set[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings a.set i { font-size: 15px; width: 16px; text-align: center; color: var(--muted); }
+  .settings .foot { font-size: 11px; color: var(--muted); line-height: 1.6; padding: 0 4px; }
+  #side-fleet:empty, #side-state:empty { display: none; }
+  .main { min-width: 0; }
+  .pagebar .tt { margin-top: 0; }
+  .pagebar .tt .n.q { color: var(--red-fg); }
+  main.page > section[data-page]:not(.on) { display: none; }
+  main.page > section[data-page] { margin-top: 0; }
   @media (max-width: 900px) {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
     /* the second row takes the spare height: with no content yet, the nav would get half of it */
-    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
-    .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+    .main { display: contents; }
+    .pagebar { order: 0; }
+    main.page { order: 2; }
+    .side { order: 1; top: var(--bar-h); height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .side .eyebrow { display: none; }
+    .settings { flex-direction: row; align-items: center; margin: 0 0 0 auto; border-top: 0; padding: 0 0 0 8px; flex: none; }
+    .settings .foot { display: none; }
+    .settings a.set { white-space: nowrap; padding: 5px 8px; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
-    .side .foot { display: none; }
+    :where(.no-shell) .side .foot { display: none; }
     .stale-note { top: 60px; left: 16px; }
     .nav a { white-space: nowrap; }
     /* a long URL or id wraps; it doesn't widen the page */
-    main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
+    :where(.no-shell) main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
+    main.page { overflow-wrap: anywhere; }
   }
 
   /* sections */
@@ -276,8 +300,8 @@ try {
   .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow); }
   .stat span { display: block; font-size: 12px; color: var(--fg-2); }
   .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
-  .card.small { padding: 10px 12px; }
+  :where(.no-shell) .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
+  :where(.no-shell) .card.small { padding: 10px 12px; }
   .card[data-open] { cursor: pointer; }
   .card[data-open]:hover { background: var(--hover); }
   .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
@@ -459,7 +483,7 @@ try {
   .goal-let-go, .goal-met { opacity: .75; }
   fieldset.next { border: 0; padding: 0; margin: 10px 0 0; }
   fieldset.next legend { font-size: 12px; color: var(--fg-2); padding: 0; margin-bottom: 4px; }
-  .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
+  :where(.no-shell) .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
   .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
   .rulebox input { margin-top: 3px; }
 
@@ -468,8 +492,8 @@ try {
   .nav .nl { display: inline-flex; align-items: center; gap: 8px; }
   .nav .nl i { font-size: 15px; color: var(--muted); width: 16px; text-align: center; }
   .nav a:hover .nl i { color: var(--fg-2); }
-  .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
-  .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
+  :where(.no-shell) .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  :where(.no-shell) .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
   .card-head i { font-size: 14px; }
   .card-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-head .badge { margin-right: 0; }
@@ -757,51 +781,49 @@ try {
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 </style>
 </head>
-<body>
+<body class="shell">
 <div class="app">
-<aside class="side">
+<aside class="side" aria-label="Navigation">
   <div class="brand"><span class="dot"></span><b id="title">devteam</b><span class="badge kit" id="kit" hidden></span></div>
-  <nav class="nav">
-    <a href="#overview"><span class="nl"><i class="icon-layout-dashboard" aria-hidden="true"></i>Overview</span></a>
-    <a href="#goals"><span class="nl"><i class="icon-target" aria-hidden="true"></i>Goals</span> <span class="count" id="n-goals"></span></a>
-    <a href="#inbox"><span class="nl"><i class="icon-inbox" aria-hidden="true"></i>Inbox</span> <span class="count" id="n-questions"></span></a>
-    <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
-    <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
-    <a href="#library"><span class="nl"><i class="icon-library" aria-hidden="true"></i>Library</span> <span class="count" id="n-library"></span></a>
-    <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
-    <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
-    <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
-    <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
-    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-sensors"></span></a>
-  </nav>
-  <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+  <div class="eyebrow">Project</div>
+  <nav class="nav" data-group="project"></nav>
+  <div class="eyebrow">Autonomy</div>
+  <nav class="nav" data-group="autonomy"></nav>
+  <div class="settings" aria-label="Fleet settings">
+    <div id="side-fleet"></div>
+    <div id="side-state"></div>
+    <a class="set" href="#settings"><i class="icon-settings" aria-hidden="true"></i>Settings</a>
+    <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+  </div>
 </aside>
-<main class="waiting">
+<div class="main">
+<header class="pagebar"><h1 id="page-title">Overview</h1><span class="extra"></span><button class="ghost tt" id="inbox-btn" type="button" title="Open questions"><i class="icon-inbox" aria-hidden="true"></i>Inbox <span class="n q" id="inbox-btn-n"></span></button></header>
+<main class="page waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
   <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
-  <section id="overview">
+  <section id="overview" class="no-shell" data-page="overview">
     <div id="fleet-strip" class="fleet-strip"></div>
     <div id="down-banner" class="down-banner" role="alert" hidden></div>
     <div class="grid" id="stats"></div>
   </section>
 
-  <section id="goals">
+  <section id="goals" class="no-shell" data-page="goals">
     <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
   </section>
 
-  <section id="inbox">
+  <section id="inbox" class="no-shell" data-page="inbox">
     <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
     <div id="ask-inbox"></div>
     <div id="questions"></div>
     <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
 
-  <section id="progress">
+  <section id="progress" class="no-shell" data-page="progress">
     <h2>Progress</h2>
     <div class="filters">
       <label>Show <select id="view"></select></label>
@@ -826,13 +848,13 @@ try {
     </div>
   </section>
 
-  <section id="board">
+  <section id="board" class="no-shell" data-page="board">
     <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
     <div id="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
 
-  <section id="library">
+  <section id="library" class="no-shell" data-page="library">
     <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
     <div class="lib-list" id="previews"></div>
     <h3>Artifacts</h3>
@@ -841,7 +863,7 @@ try {
     <div class="lib-list" id="lib-links"></div>
   </section>
 
-  <section id="loop">
+  <section id="loop" class="no-shell" data-page="loop">
     <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
     <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
     <div class="tabs" role="tablist" id="loop-tabs">
@@ -882,7 +904,7 @@ try {
     </div>
   </section>
 
-  <section id="trust">
+  <section id="trust" class="no-shell" data-page="trust">
     <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
     <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
     <div class="scroll"><table id="trust-table"></table></div>
@@ -890,13 +912,13 @@ try {
     <div class="feed" id="trust-history"></div>
   </section>
 
-  <section id="retros">
+  <section id="retros" class="no-shell" data-page="retros">
     <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
     <div id="retro-due"></div>
     <div id="retro-list"></div>
   </section>
 
-  <section id="health">
+  <section id="health" class="no-shell" data-page="health">
     <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
     <div class="two" style="margin-top:14px">
@@ -912,7 +934,7 @@ try {
     <div class="two" style="margin-top:14px" id="test-lists"></div>
   </section>
 
-  <section id="monitoring">
+  <section id="monitoring" class="no-shell" data-page="sensors">
     <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
     <div id="sensors"></div>
     <h3 style="margin-top:14px">Incidents</h3>
@@ -923,7 +945,9 @@ try {
     <div class="feed" id="sensor-feed"></div>
   </section>
 
-  <section id="review-view" hidden>
+  <section id="settings" data-page="settings"></section>
+
+  <section id="review-view" class="no-shell" hidden>
     <div id="rv-head"></div>
     <div id="rv-link" class="banner stale rv-link" role="alert" hidden></div>
     <div id="rv-frame-wrap"></div>
@@ -935,12 +959,13 @@ try {
 
 </main>
 </div>
-<div class="scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
+</div>
+<div class="scrim no-shell" id="scrim" hidden></div>
+<aside class="drawer no-shell" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
   <div class="drawer-bar"><h2 id="drawer-bar-title"></h2><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></div>
   <div id="drawer-body"></div>
 </aside>
-<div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
+<div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
     <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
@@ -962,7 +987,7 @@ try {
   </div>
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
-<div id="tl">
+<div id="tl" class="no-shell">
   <div id="tl-pins" class="tl-pins"></div>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
@@ -1282,6 +1307,38 @@ const SHELL_ROUTES = {
 for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---- pages (kit-87): one shown at a time, the nav drawn once from the registry ----
+// Each page is today's section (its data-page); render() still draws every section on every read,
+// shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
+// element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
+const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+for (const [id, title, group, icon] of [
+  ['overview', 'Overview', 'project', 'layout-dashboard'], ['inbox', 'Inbox', 'project', 'inbox'], ['goals', 'Goals', 'project', 'target'],
+  ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
+]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
+for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
+  nav.innerHTML = shellPages().filter((pg) => pg.group === nav.dataset.group).map((pg) => `<a href="#${pg.id}"><span class="nl"><i class="icon-${pg.icon}" aria-hidden="true"></i>${esc(pg.title)}</span>${PAGE_COUNT_ID[pg.id] ? ` <span class="count" id="${PAGE_COUNT_ID[pg.id]}"></span>` : ''}</a>`).join('');
+}
+let PAGE_NOW = null; // the page shown
+// Show one page: its section alone, its title in the page bar, its nav item current; a change of
+// page starts at the top, unless the route scrolls to a target on it (keepScroll).
+function showPage(id, { keepScroll = false } = {}) {
+  const pg = shellPages().find((x) => x.id === id) ?? shellPages()[0];
+  const changed = PAGE_NOW !== pg.id;
+  PAGE_NOW = pg.id;
+  for (const sec of document.querySelectorAll('main.page > section[data-page]')) sec.classList.toggle('on', sec.dataset.page === pg.id);
+  $('page-title').textContent = pg.title;
+  for (const a of document.querySelectorAll('.side a[href^="#"]')) {
+    if (a.getAttribute('href') === `#${pg.id}`) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+  if (changed && !keepScroll) window.scrollTo(0, 0);
+}
+// The page an element is on: its section's data-page, else Overview.
+const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
+$('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
 // Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
 // (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
 const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
@@ -4003,7 +4060,7 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  if (q?.status === 'open') { closeDrawer(); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
+  if (q?.status === 'open') { closeDrawer(); showPage('inbox', { keepScroll: true }); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -4303,15 +4360,16 @@ document.addEventListener('click', (e) => {
 let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
+  // nothing shown yet (a cold load of a link): the page it opens over
+  if (!PAGE_NOW) { const p0 = parseHead(location.hash, SHELL_ROUTES); if (p0.link !== undefined) showPage(p0.home); }
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
   if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
-  if (closeArtifact() && /^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView();
+  closeArtifact();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
-  // back from a review to a section: the section was hidden when the browser looked for it
-  // (and the Inbox cards redraw, so a card's progress pill is the one the review just reported)
-  if (closeReview()) { if (DATA) render(DATA); if (/^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView(); }
+  // back from a review: the Inbox cards redraw, so a card's progress pill is the one the review just reported
+  if (closeReview() && DATA) render(DATA);
   const h = decodeURIComponent(raw);
   const k = h.startsWith('file?') ? 'file' : h.split('/')[0];
   if (TYPE_META[k] && h.includes('/') || k === 'file') DRAWER = { kind: k, id: null };
@@ -4327,6 +4385,11 @@ function route() {
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
+  // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
+  const p = parseHead(location.hash, SHELL_ROUTES);
+  if (p.link !== undefined) return;
+  if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
+  showPage(p.page);
 }
 function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
@@ -4652,6 +4715,7 @@ function render(d) {
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter(ownerLesson).length, true);
+  $('inbox-btn-n').textContent = $('n-questions').textContent;
   count('n-active', active);
   {
     const rt = DATA.ooda.retro || {};
@@ -5193,11 +5257,13 @@ function tlGoTo(s) {
     if (panel?.hidden) showTab(panel.dataset.panel);
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
+    showPage(sectionPage(el), { keepScroll: true });
     el.scrollIntoView({ block: 'center' });
   } else if (s?.kind === 'page') {
     const [sec, tab] = String(s.view).slice(1).split('/');
     if (sec === 'loop' && tab && document.querySelector(`#loop-tabs [data-tab="${CSS.escape(tab)}"]`)) showTab(tab);
-    document.getElementById(sec)?.scrollIntoView();
+    const at = document.getElementById(sec);
+    if (at) showPage(sectionPage(at));
   }
 }
 // Where a frame subject's pin is now, on the screen and in the frame (fx, fy): at its anchor's
@@ -6006,6 +6072,7 @@ function inboxTitle(d) {
   const c = $('n-questions');
   c.textContent = n || '';
   c.classList.toggle('hot', n > 0);
+  $('inbox-btn-n').textContent = c.textContent;
 }
 
 document.addEventListener('click', (e) => {

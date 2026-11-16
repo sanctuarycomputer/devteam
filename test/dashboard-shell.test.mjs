@@ -110,7 +110,7 @@ test('both blocks are byte-identical in index.html and hub.html', () => {
   }
 });
 
-test("today's pages can't change: every layout rule is scoped to .shell, and neither page has a .shell", () => {
+test("every layout rule is scoped to .shell: index adopts it with its old regions fenced, the hub has none yet", () => {
   // every selector, inside @media or not, is :root or starts with :where(.shell)
   const css = LAYOUT.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@keyframes[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
   const sels = [];
@@ -124,9 +124,18 @@ test("today's pages can't change: every layout rule is scoped to .shell, and nei
   assert.ok(sels.filter((s) => s.includes(B)).length === sels.filter((s) => s !== ':root').length);
   const frames = [...LAYOUT.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]);
   assert.deepEqual(frames, ['shell-ring'], 'its one animation has a name of its own');
+  // index adopts the shell (kit-87): .shell on <body>, every region it doesn't port fenced with .no-shell;
+  // the hub has no .shell until its own ticket (kit-94)
+  const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
+  assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
+  for (const id of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'drawer', 'scrim', 'artifact-view', 'tl']) {
+    const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
+    assert.ok(tag, `index.html has #${id}`);
+    assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
+  }
+  assert.doesNotMatch(without(HUB, 'devteam-layout', 'devteam-shell-js'), /class="[^"]*(?<![\w-])shell(?![\w-])|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*(?<![\w-])shell(?![\w-])/, 'hub.html has no .shell yet');
   for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
     const rest = without(src, 'devteam-layout', 'devteam-shell-js');
-    assert.doesNotMatch(rest, /class="[^"]*\bshell\b|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*\bshell\b/, `${name} has no .shell yet`);
     for (const f of frames) assert.doesNotMatch(rest, new RegExp(`@keyframes\\s+${f}\\b|animation(-name)?:[^;]*\\b${f}\\b`), `${name} has no animation of the block's name ${f}`);
   }
   // index's own --measure (78ch) still comes after the block, so it still wins there
