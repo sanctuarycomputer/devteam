@@ -225,10 +225,10 @@ try {
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
   .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
-  /* fixed, so it never moves what is under the cursor; at the top, as both bottom corners are taken,
+  /* fixed, so it never moves what is under the cursor; at the top under the page bar, as both bottom corners are taken,
      over the content, not the nav (below it on a phone, where staleNote measures the nav), under a
      drawer or review, and never in the way of a click */
-  .stale-note { position: fixed; top: 12px; left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
+  .stale-note { position: fixed; top: calc(var(--bar-h) + 12px); left: calc(232px + 16px); right: 16px; width: fit-content; margin: 0 auto; z-index: 19; pointer-events: none; padding: 4px 12px; text-align: center; border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--amber) 12%, var(--surface)); color: var(--amber-fg); font-size: 12px; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -250,20 +250,70 @@ try {
   .nav a:hover { background: var(--hover); color: var(--fg); }
   .nav .count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .nav .count.hot { color: var(--red-fg); }
-  .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
-  main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+  :where(.no-shell) .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+  :where(.no-shell) main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+  /* the frame (kit-87): the grouped nav, the settings area at the sidebar's foot, one page shown at a time */
+  .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 14px 8px 4px; }
+  .brand + .eyebrow { padding-top: 4px; }
+  .nav a[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings { margin-top: auto; border-top: 1px solid var(--line); padding: 10px 4px 2px; display: flex; flex-direction: column; gap: 8px; }
+  .settings a.set { display: flex; align-items: center; gap: 8px; padding: 5px 4px; border-radius: 6px; color: var(--fg-2); }
+  .settings a.set:hover { background: var(--hover); color: var(--fg); }
+  .settings a.set[aria-current="page"] { background: var(--hover); color: var(--fg); }
+  .settings a.set i { font-size: 15px; width: 16px; text-align: center; color: var(--muted); }
+  .settings .foot { font-size: 11px; color: var(--muted); line-height: 1.6; padding: 0 4px; }
+  #side-fleet:empty, #side-state:empty { display: none; }
+  .settings .fleet-switch { padding: 0 4px; }
+  .settings .fleet-state { font-size: 11.5px; color: var(--muted); padding: 0 4px; line-height: 1.4; }
+  .settings .fleet-state b { font-weight: 500; color: var(--fg-2); }
+  /* The area sits at the sidebar's foot (margin-top: auto), so a line growing below the switch's buttons
+     pushes them up under the owner's pointer. Every line that comes and goes there keeps its room:
+     the switch's busy or error line, the state line's second line (the reason), the foot's error. */
+  @media (min-width: 901px) {
+    .settings .fleet-switch .msg, .settings .fleet-switch .err { flex-basis: 100%; line-height: 16px; }
+    .settings .fleet-switch:not(:has(> .msg, > .err))::after { content: ''; flex-basis: 100%; height: 16px; }
+    .settings .fleet-state { min-height: 2.8em; }
+    .settings .foot #err { display: block; min-height: 1.6em; }
+  }
+  .main { min-width: 0; }
+  .pagebar .tt { margin-top: 0; }
+  .pagebar .tt .n.q { color: var(--red-fg); }
+  main.page > section[data-page]:not(.on) { display: none; }
+  main.page > section[data-page] { margin-top: 0; }
+  /* the Settings page (kit-87 spec §8), as the mock at main draws it */
+  .badge.amber { --c: var(--amber-fg); }
+  button.mini { height: 22px; padding: 0 8px; margin: 0; }
+  .stepper { display: inline-flex; align-items: center; } .seg .stepper { border-left: 1px solid var(--line-2); }
+  .stepper button { height: 28px; width: 28px; padding: 0; margin: 0; border: 0; border-radius: 0; }
+  .limit { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; } .limit .stepper b { min-width: 18px; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .set-key { font: 11px var(--mono); color: var(--muted); margin-left: 6px; } .set-desc { font-size: 12px; margin: -2px 0 8px; max-width: var(--measure); } .set-row .r { text-align: right; max-width: 55%; min-width: 0; white-space: normal; overflow-wrap: anywhere; } .set-row .t { flex: 1 1 auto; min-width: 0; }
+  @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; text-align: left; white-space: normal; overflow-wrap: anywhere; margin-top: 2px; } .limit { justify-content: flex-start; } }
+  .ready-card { margin-bottom: 14px; }
+  .ready-card .rowline .t { white-space: normal; overflow-wrap: anywhere; }
+  .ready-card .rowline .r { color: var(--fg-2); flex: none; max-width: 60%; overflow-wrap: anywhere; }
   @media (max-width: 900px) {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
     /* the second row takes the spare height: with no content yet, the nav would get half of it */
-    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
-    .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto 1fr; }
+    /* .main spans the three rows on a subgrid, with the nav row laid over its second: the page bar and the
+       page stay inside .main's box (display: contents would leave .main no box to hold them) */
+    .main { grid-column: 1; grid-row: 1 / 4; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: subgrid; }
+    .pagebar { grid-row: 1; }
+    main.page { grid-row: 3; width: 100%; min-width: 0; }
+    .side { grid-column: 1; grid-row: 2; top: var(--bar-h); height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .side .eyebrow { display: none; }
+    .settings { flex-direction: row; align-items: center; margin: 0 0 0 auto; border-top: 0; padding: 0 0 0 8px; flex: none; }
+    .settings .foot { display: none; }
+    .settings .fleet-switch, .settings .fleet-state { white-space: nowrap; flex-wrap: nowrap; }
+    .settings a.set { white-space: nowrap; padding: 5px 8px; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
-    .side .foot { display: none; }
-    .stale-note { top: 60px; left: 16px; }
+    :where(.no-shell) .side .foot { display: none; }
+    .stale-note { top: calc(var(--bar-h) + 60px); left: 16px; }
     .nav a { white-space: nowrap; }
     /* a long URL or id wraps; it doesn't widen the page */
-    main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
+    :where(.no-shell) main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
+    main.page { overflow-wrap: anywhere; }
   }
 
   /* sections */
@@ -276,8 +326,8 @@ try {
   .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow); }
   .stat span { display: block; font-size: 12px; color: var(--fg-2); }
   .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
-  .card.small { padding: 10px 12px; }
+  :where(.no-shell) .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
+  :where(.no-shell) .card.small { padding: 10px 12px; }
   .card[data-open] { cursor: pointer; }
   .card[data-open]:hover { background: var(--hover); }
   .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
@@ -459,7 +509,7 @@ try {
   .goal-let-go, .goal-met { opacity: .75; }
   fieldset.next { border: 0; padding: 0; margin: 10px 0 0; }
   fieldset.next legend { font-size: 12px; color: var(--fg-2); padding: 0; margin-bottom: 4px; }
-  .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
+  :where(.no-shell) .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
   .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
   .rulebox input { margin-top: 3px; }
 
@@ -468,8 +518,8 @@ try {
   .nav .nl { display: inline-flex; align-items: center; gap: 8px; }
   .nav .nl i { font-size: 15px; color: var(--muted); width: 16px; text-align: center; }
   .nav a:hover .nl i { color: var(--fg-2); }
-  .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
-  .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
+  :where(.no-shell) .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  :where(.no-shell) .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
   .card-head i { font-size: 14px; }
   .card-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-head .badge { margin-right: 0; }
@@ -572,10 +622,6 @@ try {
   .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
   .holdbar .seg2 button.confirm { color: var(--red); }
   .holdbar button[data-met-id].confirm { color: var(--green-fg); }
-  .fleet-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; background: var(--surface); }
-  .fleet-strip .grow { flex: 1 1 auto; }
-  .fleet-strip details { width: 100%; }
-  .fleet-strip ul { margin: 6px 0 0 18px; padding: 0; }
   .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
   .md { max-width: var(--measure); font-size: 13.5px; line-height: 1.65; }
   .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
@@ -709,6 +755,7 @@ try {
   .tl-cursor circle { fill: #fff; }
   .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
   .tl-hl.spot { border-radius: 50%; }
+  .tl-marked { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
   .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
   .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
@@ -757,51 +804,48 @@ try {
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 </style>
 </head>
-<body>
+<body class="shell">
 <div class="app">
-<aside class="side">
+<aside class="side" aria-label="Navigation">
   <div class="brand"><span class="dot"></span><b id="title">devteam</b><span class="badge kit" id="kit" hidden></span></div>
-  <nav class="nav">
-    <a href="#overview"><span class="nl"><i class="icon-layout-dashboard" aria-hidden="true"></i>Overview</span></a>
-    <a href="#goals"><span class="nl"><i class="icon-target" aria-hidden="true"></i>Goals</span> <span class="count" id="n-goals"></span></a>
-    <a href="#inbox"><span class="nl"><i class="icon-inbox" aria-hidden="true"></i>Inbox</span> <span class="count" id="n-questions"></span></a>
-    <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
-    <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
-    <a href="#library"><span class="nl"><i class="icon-library" aria-hidden="true"></i>Library</span> <span class="count" id="n-library"></span></a>
-    <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
-    <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
-    <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
-    <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
-    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-sensors"></span></a>
-  </nav>
-  <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+  <div class="eyebrow">Project</div>
+  <nav class="nav" data-group="project"></nav>
+  <div class="eyebrow">Autonomy</div>
+  <nav class="nav" data-group="autonomy"></nav>
+  <div class="settings" role="group" aria-label="Fleet settings">
+    <div id="side-fleet" data-fleet-slot="switch"></div>
+    <div id="side-state" class="fleet-state" data-fleet-slot="state"></div>
+    <a class="set" href="#settings"><i class="icon-settings" aria-hidden="true"></i>Settings</a>
+    <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+  </div>
 </aside>
-<main class="waiting">
+<div class="main">
+<header class="pagebar"><h1 id="page-title">Overview</h1><span class="extra"></span><button class="ghost tt" id="inbox-btn" type="button" title="Open questions"><i class="icon-inbox" aria-hidden="true"></i>Inbox <span class="n q" id="inbox-btn-n"></span></button></header>
+<main class="page waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
   <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
-  <section id="overview">
-    <div id="fleet-strip" class="fleet-strip"></div>
+  <section id="overview" class="no-shell" data-page="overview">
     <div id="down-banner" class="down-banner" role="alert" hidden></div>
     <div class="grid" id="stats"></div>
   </section>
 
-  <section id="goals">
+  <section id="goals" class="no-shell" data-page="goals">
     <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
   </section>
 
-  <section id="inbox">
+  <section id="inbox" class="no-shell" data-page="inbox">
     <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
     <div id="ask-inbox"></div>
     <div id="questions"></div>
     <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
 
-  <section id="progress">
+  <section id="progress" class="no-shell" data-page="progress">
     <h2>Progress</h2>
     <div class="filters">
       <label>Show <select id="view"></select></label>
@@ -826,13 +870,13 @@ try {
     </div>
   </section>
 
-  <section id="board">
+  <section id="board" class="no-shell" data-page="board">
     <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
     <div id="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
 
-  <section id="library">
+  <section id="library" class="no-shell" data-page="library">
     <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
     <div class="lib-list" id="previews"></div>
     <h3>Artifacts</h3>
@@ -841,7 +885,7 @@ try {
     <div class="lib-list" id="lib-links"></div>
   </section>
 
-  <section id="loop">
+  <section id="loop" class="no-shell" data-page="loop">
     <h2>Loop <span class="sub">how the supervisor notices, makes sense of, decides and acts</span></h2>
     <div id="learning" class="learning" aria-label="Is the loop making the system smarter?"></div>
     <div class="tabs" role="tablist" id="loop-tabs">
@@ -882,7 +926,7 @@ try {
     </div>
   </section>
 
-  <section id="trust">
+  <section id="trust" class="no-shell" data-page="trust">
     <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
     <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
     <div class="scroll"><table id="trust-table"></table></div>
@@ -890,13 +934,13 @@ try {
     <div class="feed" id="trust-history"></div>
   </section>
 
-  <section id="retros">
+  <section id="retros" class="no-shell" data-page="retros">
     <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
     <div id="retro-due"></div>
     <div id="retro-list"></div>
   </section>
 
-  <section id="health">
+  <section id="health" class="no-shell" data-page="health">
     <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
     <div class="two" style="margin-top:14px">
@@ -912,7 +956,7 @@ try {
     <div class="two" style="margin-top:14px" id="test-lists"></div>
   </section>
 
-  <section id="monitoring">
+  <section id="monitoring" class="no-shell" data-page="sensors">
     <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
     <div id="sensors"></div>
     <h3 style="margin-top:14px">Incidents</h3>
@@ -923,7 +967,9 @@ try {
     <div class="feed" id="sensor-feed"></div>
   </section>
 
-  <section id="review-view" hidden>
+  <section id="settings" data-page="settings"></section>
+
+  <section id="review-view" class="no-shell" hidden>
     <div id="rv-head"></div>
     <div id="rv-link" class="banner stale rv-link" role="alert" hidden></div>
     <div id="rv-frame-wrap"></div>
@@ -935,12 +981,13 @@ try {
 
 </main>
 </div>
-<div class="scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
+</div>
+<div class="scrim no-shell" id="scrim" hidden></div>
+<aside class="drawer no-shell" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
   <div class="drawer-bar"><h2 id="drawer-bar-title"></h2><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></div>
   <div id="drawer-body"></div>
 </aside>
-<div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
+<div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
     <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
@@ -962,7 +1009,7 @@ try {
   </div>
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
-<div id="tl">
+<div id="tl" class="no-shell">
   <div id="tl-pins" class="tl-pins"></div>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
@@ -1255,8 +1302,11 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
+// until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
+// governance file's home below then opens over Overview); kit-93 swaps both
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
-  pages: ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'governance', 'sensors', 'retros', 'loop', 'settings'],
+  pages: SHELL_ROUTES_PAGES,
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
@@ -1265,13 +1315,56 @@ const SHELL_ROUTES = {
     artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
-  redirects: { monitoring: 'sensors', health: 'sensors?st=fleet' },
+  redirects: {
+    monitoring: 'sensors',
+    // permanent: the old Loop tab subjects open the Loop page (and its tab)
+    'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
+    // until kit-100: today's Inbox list anchor, and every page's Threads "Inbox" tab, are the Inbox page
+    questions: 'inbox',
+    ...Object.fromEntries(SHELL_ROUTES_PAGES.map((p) => [`${p}?th=inbox`, 'inbox'])),
+  },
 };
 /* shell-routes end */
 // An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
 for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---- pages (kit-87): one shown at a time, the nav drawn once from the registry ----
+// Each page is today's section (its data-page); render() still draws every section on every read,
+// shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
+// element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
+const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+for (const [id, title, group, icon] of [
+  ['overview', 'Overview', 'project', 'layout-dashboard'], ['inbox', 'Inbox', 'project', 'inbox'], ['goals', 'Goals', 'project', 'target'],
+  ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
+]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
+for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
+  nav.innerHTML = shellPages().filter((pg) => pg.group === nav.dataset.group).map((pg) => `<a href="#${pg.id}"><span class="nl"><i class="icon-${pg.icon}" aria-hidden="true"></i>${esc(pg.title)}</span>${PAGE_COUNT_ID[pg.id] ? ` <span class="count" id="${PAGE_COUNT_ID[pg.id]}"></span>` : ''}</a>`).join('');
+}
+let PAGE_NOW = null; // the page shown
+// Show one page: its section alone, its title in the page bar, its nav item current; a change of
+// page starts at the top, unless the route scrolls to a target on it (keepScroll).
+function showPage(id, { keepScroll = false } = {}) {
+  const pg = shellPages().find((x) => x.id === id) ?? shellPages()[0];
+  const changed = PAGE_NOW !== pg.id;
+  PAGE_NOW = pg.id;
+  for (const sec of document.querySelectorAll('main.page > section[data-page]')) sec.classList.toggle('on', sec.dataset.page === pg.id);
+  $('page-title').textContent = pg.title;
+  for (const a of document.querySelectorAll('.side a[href^="#"]')) {
+    if (a.getAttribute('href') === `#${pg.id}`) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  }
+  if (changed && !keepScroll) window.scrollTo(0, 0);
+  // arriving on Settings: fetch from origin and check again (what Check did), and draw it
+  if (changed && pg.id === 'settings') { drawSettings(); loadFleet(true); }
+  // the pins are drawn only for subjects on the page shown (one on a hidden page has no box)
+  tlPins();
+}
+// The page an element is on: its section's data-page, else Overview.
+const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
+$('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
 // Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
 // (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
 const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
@@ -2642,7 +2735,7 @@ function holdControl(id, h, { letGo = true, status = null, restoring = false } =
   if (restoring) return `<div class="holdbar"><span class="muted small">Restoring: it comes back parked…</span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   if (status === 'abandoned') return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold"><button type="button" data-hold-id="${esc(id)}" data-mode="restore">Restore (parked)</button></span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   const cur = h?.mode || 'run';
-  const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the strip at the top to resume it</span>' : '';
+  const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the fleet switch in the sidebar to resume it</span>' : '';
   const btn = (m, label) => `<button type="button" data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
   return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
 }
@@ -2658,32 +2751,243 @@ function upkeepCard(u) {
 }
 // Can the fleet move? The mode is in the data; readiness comes from fleet status, asked for apart.
 let FLEET = { at: 0, data: null, busy: false };
-function fleetStrip() {
-  const f = DATA?.fleet || {};
-  const mode = f.mode;
-  const st = FLEET.data;
-  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
-  const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
-  const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
-  // parked or drained only once fleet status says the move is ready; until then it is a transition
+// The fleet switch (the settings area; spec §7): what the page keeps across redraws, so the 10-second
+// redraw never drops a pending confirm, a busy line or a refusal.
+const FLEET_UI = { confirming: false, busy: null, error: null };
+// the switch's mode is the fleet's: run unless a fleet op holds it
+const fleetMode = (f) => (f?.mode === 'park' ? 'park' : f?.mode === 'drain' ? 'drain' : 'run');
+// the state line under the switch: parked or drained only once fleet status says the move is ready;
+// until then it is a transition
+function fleetStateLine(f, st) {
+  f = f || {};
   const settled = !!(st && st.ready);
-  const label = mode === 'park' ? `<b>${settled ? 'Fleet parked' : 'Fleet parking…'}</b>` : mode === 'drain' ? `<b>${settled ? 'Fleet drained' : 'Fleet draining…'}</b>` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
-  const btns = mode || f.op
-    ? '<button type="button" data-fleet="resume">Resume</button>'
-    : '<button type="button" class="ghost" data-fleet="drain">Drain all</button><button type="button" class="ghost" data-fleet="park">Park all</button>';
-  return `<i class="icon-truck" aria-hidden="true"></i>${label}${f.reason ? ` <span class="muted">· ${esc(f.reason)}</span>` : ''}<span class="grow"></span>${ready}${parity}<span class="row-inline">${btns}<button type="button" class="ghost" data-fleet="check" title="Fetch from origin and check again">Check</button></span><span class="err" id="e-fleet"></span>${left}`;
+  const words = f.mode === 'park' ? (settled ? 'parked' : 'parking…') : f.mode === 'drain' ? (settled ? 'drained' : 'draining…') : f.op ? 'partly held (a goal was set apart after the fleet op)' : 'running';
+  return `<b>${esc(words)}</b>${f.reason ? ` · ${esc(f.reason)}` : ''}`;
 }
+// Every fleet slot on the page: the sidebar's ([data-fleet-slot="switch"] and "state"), and any other
+// page's copies with the same attribute. A slot is written only when its HTML changed (against the last
+// string written to it: innerHTML comes back re-serialised, as disabled="" or ' for &#39;), so focus,
+// a pending confirm and a click in progress stay; a rewrite keeps focus on the same button (the confirm is Park's), since
+// the binder's Escape needs focus inside the switch.
+const FLEET_DRAWN = new WeakMap();
+function drawFleet() {
+  const f = DATA?.fleet || {};
+  const html = {
+    switch: fleetSwitch({ scope: 'project', mode: fleetMode(f), confirming: FLEET_UI.confirming, busy: FLEET_UI.busy, error: FLEET_UI.error }),
+    state: fleetStateLine(f, FLEET.data),
+  };
+  for (const el of document.querySelectorAll('[data-fleet-slot]')) {
+    const want = html[el.dataset.fleetSlot];
+    if (want === undefined || FLEET_DRAWN.get(el) === want) continue;
+    const ae = document.activeElement;
+    const had = ae && el.contains(ae) ? ae.dataset.fleet : null;
+    el.innerHTML = want;
+    FLEET_DRAWN.set(el, want);
+    if (had) el.querySelector(`[data-fleet="${CSS.escape(had)}"]`)?.focus({ preventScroll: true });
+  }
+}
+// One fleet op through press(): the overlay shows the mode at once, the busy line holds the switch
+// while the request is out, and a refusal shows in the switch with the mode the data's again.
+// the button a press came from (its slot and data-fleet), to give focus back once the press ends:
+// the switch's buttons are disabled while it is out, so focus falls to the page
+let FLEET_PRESSED = null;
+function fleetRefocus() {
+  const at = FLEET_PRESSED;
+  FLEET_PRESSED = null;
+  if (!at || !at.slot?.isConnected) return;
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && !at.slot.contains(ae)) return; // the owner has moved on
+  at.slot.querySelector(`[data-fleet="${CSS.escape(at.fleet)}"]`)?.focus({ preventScroll: true });
+}
+function postFleet(op) {
+  const fleetNow = { drain: { mode: 'drain' }, park: { mode: 'park' }, resume: { mode: null, op: null } }[op];
+  if (!fleetNow) return;
+  const ae = document.activeElement, slot = ae?.closest?.('[data-fleet-slot]');
+  FLEET_PRESSED = slot && ae.dataset.fleet ? { slot, fleet: ae.dataset.fleet } : null;
+  Object.assign(FLEET_UI, { confirming: false, busy: { drain: 'asking the fleet to drain…', park: 'asking the fleet to park…', resume: 'asking the fleet to run…' }[op], error: null });
+  press('fleet', {
+    build: () => ({ action: 'fleet', body: { op } }),
+    overlay: { data: (d) => ({ ...d, fleet: { ...(d.fleet || {}), ...fleetNow, reason: fleetNow.mode ? d.fleet?.reason ?? null : null } }), agrees: (raw) => (raw.fleet?.mode ?? null) === (fleetNow.mode ?? null) },
+    apply: () => { FLEET = { ...FLEET, data: null, at: 0 }; redrawNow(); drawFleet(); },
+    onOk: () => { FLEET_UI.busy = null; drawFleet(); fleetRefocus(); loadFleet(); },
+    // drawn here with the buttons enabled, so focus can go back; press redraws after
+    onError: (error) => { Object.assign(FLEET_UI, { busy: null, error: `Not saved: ${error}` }); drawFleet(); fleetRefocus(); },
+    errId: 'fleet',
+  });
+}
+bindFleetSwitch(document.querySelector('.app'), {
+  // Park asks first, in place; any other press cancels a pending confirm. A press for the mode already
+  // in force posts nothing (Run while running, Drain while draining, Park while parked); Drain on a
+  // parked fleet posts nothing either (the server's drain changes only running goals) and says why.
+  onPress: (m) => {
+    const f = DATA?.fleet || {};
+    FLEET_UI.error = null;
+    if (m === 'park') { FLEET_UI.confirming = f.mode !== 'park'; drawFleet(); return; }
+    FLEET_UI.confirming = false;
+    if (m === 'drain' && f.mode === 'park') FLEET_UI.error = 'Parked: Run first, then Drain';
+    else if (m === 'drain' && f.mode !== 'drain') return postFleet('drain');
+    else if (m === 'run' && (f.mode || f.op)) return postFleet('resume');
+    drawFleet();
+  },
+  onConfirm: () => { if ((DATA?.fleet || {}).mode === 'park') { FLEET_UI.confirming = false; drawFleet(); return; } postFleet('park'); },
+  onCancel: () => { FLEET_UI.confirming = false; drawFleet(); },
+});
+// A fetch (fetchToo: fetch from origin and check again) asked for while a read is out is kept in
+// FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
 async function loadFleet(fetchToo = false) {
-  if (FLEET.busy) return;
+  if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
-  try { const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`); if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now() }; } catch {}
+  drawSettings(); // Check now disabled while the read is out
+  try {
+    const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`);
+    if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now(), error: null };
+    else { const j = await r.json().catch(() => ({})); FLEET.error = String(j.error ?? `HTTP ${r.status}`); }
+  } catch (e) { FLEET.error = String(e?.message ?? e); }
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
   FLEET.prevReady = !!FLEET.data?.ready;
-  if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
+  drawFleet();
+  drawSettings();
   // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
   if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? RAW);
+  if (FLEET.wantFetch) { FLEET.wantFetch = false; loadFleet(true); }
 }
+
+// ---- the Settings page (kit-87 spec §8): Ready to move? at all times, then every setting
+// under its group, as settings_all gives them; the two worker limits are set on their own rows ----
+const LIMITS = ['max_active_tickets', 'max_active_per_component'];
+// each limit's control across redraws: pending (undefined: as asked; null: No limit; else 1..20), busy, error
+const SET_UI = Object.fromEntries(LIMITS.map((k) => [k, { pending: undefined, busy: false, error: null }]));
+// the limits' names (the server's) for a server whose settings_all can't be read
+const LIMIT_NAMES = { max_active_tickets: 'Workers at once, in all', max_active_per_component: 'Workers at once, per component' };
+const SET_SAVED_LABEL = 'saved; applies once the supervisor lands it';
+const settingList = (a) => (a.length ? `${a.length}: ${a.join(', ')}` : 'none');
+// a setting's value in words, by what of it the server shows
+function settingText(e) {
+  if (e.withheld) return 'withheld';
+  if (e.shown === 'hidden') return 'not shown here';
+  if (e.shown === 'names') return settingList(Array.isArray(e.value) ? e.value.map(String) : []);
+  if (e.shown === 'count') return e.value ? String(e.value) : 'none';
+  const v = e.value;
+  if (v === null || v === undefined) return 'not set';
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (Array.isArray(v)) return settingList(v.map(String));
+  if (typeof v === 'object') return settingList(Object.keys(v));
+  return String(v);
+}
+// the value a limit stands at: the one the owner asked for while it waits to land, else the one in force
+function limitAsked(key) {
+  const a = DATA?.asked_settings?.[key];
+  if (!a) return null;
+  return a.act && String(a.label ?? '').toLowerCase() === SET_SAVED_LABEL ? a.asked ?? null : a.value ?? null;
+}
+const limitShown = (key) => (SET_UI[key].pending !== undefined ? SET_UI[key].pending : limitAsked(key));
+// the No limit / number control, then Save while the value differs from the one asked for (the mock's limitControl)
+function limitControl(key) {
+  const u = SET_UI[key], v = limitShown(key), dis = u.busy ? ' disabled' : '';
+  return `<span class="limit" data-limit="${key}"><span class="seg" role="group" aria-label="Limit"><button type="button" aria-pressed="${v === null}" data-limit-none="${key}"${dis}>No limit</button><span class="stepper"><button type="button" class="ghost" data-limit-step="-1" data-k="${key}" aria-label="Fewer"${dis}>−</button><b>${v ?? '–'}</b><button type="button" class="ghost" data-limit-step="1" data-k="${key}" aria-label="More"${dis}>+</button></span></span><button type="button" class="mini" data-limit-save="${key}"${v === limitAsked(key) ? ' hidden' : ''}${dis}>Save</button>${u.busy ? '<span class="msg dim">saving…</span>' : ''}${u.error ? `<span class="err" role="alert">${esc(u.error)}</span>` : ''}</span>`;
+}
+// One setting's row (data-setting: a thread target, marked while its thread's card is open), and its
+// description under it. A limit's description adds the value in force and the server's label for it.
+function settingRowHtml(e) {
+  const limit = LIMITS.includes(e.key);
+  const a = limit ? DATA?.asked_settings?.[e.key] : null;
+  const desc = [e.description ? esc(e.description) : '', a ? `in force: ${esc(a.shown ?? '')}` : '', a?.label ? `<span class="set-label">${esc(a.label)}</span>` : ''].filter(Boolean).join(' · ');
+  return `<div class="rowline set-row${e.key === SET_MARK ? ' tl-marked' : ''}" data-setting="${esc(e.key)}"><span class="t"><span class="set-name">${esc(e.name)}</span> <code class="set-key">${esc(e.key)}</code></span><span class="r">${limit ? limitControl(e.key) : `<span class="set-val">${esc(settingText(e))}</span>`}${e.owner_only ? ` <span class="badge amber" title="${esc(e.owner_only)}">yours to change</span>` : ''}</span></div><div class="set-desc dim" data-setting-desc="${esc(e.key)}">${desc}</div>`;
+}
+// Ready to move? (fleet status), at all times (ruling m-20261116-095757248): ready or not, each blocker,
+// the parity, and Check now (fetch from origin and check again), disabled while a read is out. On a
+// running fleet with nothing checked yet, the words are today's strip's. Until the first answer the
+// card holds a line for what is left and one for the parity, so the rows below don't jump when it comes
+// (the common answer: one blocker or none, and the parity). After a failed check the last good answer
+// stays, marked old: the badge goes neutral and says when that check was.
+function readyCard(d) {
+  const f = d.fleet || {};
+  const held = !!(f.mode || f.op);
+  const st = FLEET.data;
+  const old = !!(st && FLEET.error);
+  const badge = old ? `<span class="badge">last check failed; this is from ${esc(when(FLEET.at))}</span>` : st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge${held ? ' medium' : ''}">not ready to move</span>`) : held || FLEET.busy ? '<span class="dim">checking…</span>' : '';
+  const rows = [`<div class="rowline"><span class="t">${held ? 'Held' : 'Fleet'}</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
+  if (FLEET.error) rows.push(`<div class="rowline"><span class="err" role="alert">Couldn't check: ${esc(FLEET.error)}</span></div>`);
+  if (!st) {
+    rows.push(`<div class="rowline ready-pending"><span class="t dim">${held || FLEET.busy ? 'checking what a move needs…' : 'Park or drain the fleet to move it; Check now says what a move needs'}</span></div>`);
+    rows.push('<div class="rowline ready-pending"><span class="t">Parity</span><span class="r dim">–</span></div>');
+  }
+  if (st) {
+    for (const b of st.blockers || []) rows.push(`<div class="rowline ready-blocker"><span class="dot amber"></span><span class="t">${linkify(b)}</span></div>`);
+    if (!(st.blockers || []).length) rows.push(`<div class="rowline"><span class="dot green"></span><span class="t">Nothing left before a move</span></div>`);
+    if (st.parity) rows.push(`<div class="rowline"><span class="t">Parity</span><span class="r"><code>${esc(st.parity.hash)}</code></span></div>`);
+  }
+  return `<div class="card ready-card"><div class="card-head"><i class="icon-truck" aria-hidden="true"></i>Ready to move?<span class="grow">${badge}</span><button type="button" class="ghost mini" data-checknow title="Fetch from origin and check again"${FLEET.busy ? ' disabled' : ''}>Check now</button></div><div class="rows">${rows.join('')}</div></div>`;
+}
+// The page, drawn from DATA on every render, on arriving and when fleet status comes back. It is
+// written only when its HTML changed, and focus goes back to the same control.
+let SET_DRAWN = null;
+// Check now was pressed and its read is out
+let CHECK_PRESSED = false;
+// the key of the row whose thread's card is open (the thread layer sets it): drawn marked, so a redraw keeps it
+let SET_MARK = null;
+function drawSettings() {
+  const el = $('settings');
+  if (!el || !DATA) return;
+  // a pending value back at the one asked for is no change
+  for (const k of LIMITS) if (SET_UI[k].pending !== undefined && !SET_UI[k].busy && SET_UI[k].pending === limitAsked(k)) SET_UI[k].pending = undefined;
+  const all = Array.isArray(DATA.settings_all) ? DATA.settings_all : null;
+  const groups = new Map();
+  for (const e of all ?? LIMITS.map((key) => ({ key, group: 'Fleet and capacity', name: LIMIT_NAMES[key], description: '', owner_only: null }))) {
+    if (!groups.has(e.group)) groups.set(e.group, []);
+    groups.get(e.group).push(e);
+  }
+  const html = readyCard(DATA)
+    + (all ? '' : `<p class="dim set-unread">The settings list can't be read from this dashboard's server; only the two worker limits show.</p>`)
+    + [...groups].map(([g, rows]) => `<div class="sec"><div class="lbl">${esc(g)}</div><div class="rows">${rows.map(settingRowHtml).join('')}</div></div>`).join('');
+  if (html === SET_DRAWN) return;
+  const ae = document.activeElement;
+  const at = ae && el.contains(ae) ? (['limitNone', 'limitSave'].map((n) => ae.dataset[n] && `[data-${n === 'limitNone' ? 'limit-none' : 'limit-save'}="${CSS.escape(ae.dataset[n])}"]`).find(Boolean) || (ae.dataset.limitStep && `[data-limit-step="${CSS.escape(ae.dataset.limitStep)}"][data-k="${CSS.escape(ae.dataset.k)}"]`)) : null;
+  el.innerHTML = html;
+  SET_DRAWN = html;
+  if (at) el.querySelector(at)?.focus({ preventScroll: true });
+  // Check now is disabled while its read is out, so focus falls to the page: give it back once it ends
+  if (CHECK_PRESSED && !FLEET.busy) {
+    CHECK_PRESSED = false;
+    const now = document.activeElement;
+    // only if the owner hasn't moved on meanwhile (focus still on the page, or on Check now)
+    if (!now || now === document.body || now.matches?.('[data-checknow]')) el.querySelector('[data-checknow]')?.focus({ preventScroll: true });
+  }
+}
+// Save: POST /api/owner-setting { key, value } through press(). The overlay shows the value asked for
+// until the server's data says so; a refusal keeps the owner's value and shows the reason by the control.
+function saveLimit(key, value) {
+  const u = SET_UI[key];
+  const prevAct = DATA?.asked_settings?.[key]?.act ?? null;
+  return press(`owner-setting:${key}`, {
+    build: () => ({ action: 'owner-setting', body: { key, value } }),
+    overlay: {
+      data: (d) => ({ ...d, asked_settings: { ...(d.asked_settings || {}), [key]: { ...(d.asked_settings?.[key] || {}), asked: value, act: 'saving', label: `${SET_SAVED_LABEL.charAt(0).toUpperCase()}${SET_SAVED_LABEL.slice(1)}` } } }),
+      agrees: (raw) => { const a = raw.asked_settings?.[key]; return !!a && !!a.act && a.act !== prevAct && a.asked === value; },
+    },
+    apply: () => { Object.assign(u, { busy: true, error: null, pending: undefined }); redrawNow(); drawSettings(); },
+    onOk: () => { u.busy = false; drawSettings(); },
+    onError: (error) => { Object.assign(u, { busy: false, pending: value, error: `Not saved: ${error}` }); },
+    errId: `set-${key}`,
+  });
+}
+$('settings').addEventListener('click', (e) => {
+  if (e.shiftKey || TL.pin) return; // a thread's point, not a press
+  const c = e.target.closest('[data-checknow]');
+  if (c) { if (!c.disabled && !FLEET.busy) { CHECK_PRESSED = true; loadFleet(true); } return; }
+  const b = e.target.closest('[data-limit-none], [data-limit-step], [data-limit-save]');
+  if (!b || b.disabled) return;
+  const key = b.dataset.limitNone ?? b.dataset.k ?? b.dataset.limitSave;
+  if (!LIMITS.includes(key)) return;
+  const u = SET_UI[key];
+  if (b.dataset.limitSave) { saveLimit(key, limitShown(key)); return; }
+  u.error = null;
+  if (b.dataset.limitNone) u.pending = null;
+  // 1 to 20; + or − from No limit gives 1
+  else u.pending = Math.min(20, Math.max(1, (limitShown(key) ?? 0) + Number(b.dataset.limitStep)));
+  drawSettings();
+});
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
@@ -3077,13 +3381,16 @@ function showDrawer(html) {
   else if (keep) $('drawer-body').querySelector(keep)?.focus();
   for (const f of after) f();
 }
+// Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
+// over every entry this visit pushed down to the page, else in place to the page in its stamp.
 function closeDrawer() {
   DRAWER = { kind: null, id: null };
   LAST_HTML = '';
   $('drawer').hidden = true; $('scrim').hidden = true;
   document.body.style.overflow = '';
-  if (/^#(ticket|q|file|goal|planner)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
   lastFocus?.focus?.();
+  const c = closeTarget(history.state);
+  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
@@ -3993,7 +4300,9 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  if (q?.status === 'open') { closeDrawer(); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
+  // an open question: its entry is replaced by the Inbox (Back returns to the page the link was
+  // clicked on), and its card is brought into view
+  if (q?.status === 'open') { hideDrawer(); goHead('#inbox', { replace: true }); document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }); return; }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -4291,17 +4600,45 @@ document.addEventListener('click', (e) => {
   location.hash = card.dataset.open;
 });
 let ROUTED = false;
+// The router's history (shell.md §7): HERE is the stamp of what is on screen ({ page, depth, openedHere });
+// ROUTE_COLD is true until the visit's first route.
+let HERE = null;
+let ROUTE_COLD = true;
+// Go to a head: a new entry (assigned; hashchange routes it), or this entry replaced by it with a fresh stamp, then routed.
+function goHead(head, { replace = false } = {}) {
+  if (!replace) { location.hash = head; return; }
+  history.replaceState(stampFor({ hash: head, state: null }, HERE, ROUTE_COLD, SHELL_ROUTES), '', head);
+  route();
+}
+// The page shown under everything: its section, and on Self Improvement the tab its lt names (Observe when none).
+const LOOP_TABS = ['observe', 'orient', 'decide', 'act'];
+function showHead(p, opts) {
+  showPage(p.page, opts);
+  if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
+}
+// A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
+// whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
+function stampEntry() {
+  if (!history.state || typeof history.state.page !== 'string') history.replaceState(stampFor({ hash: location.hash, state: history.state }, HERE, ROUTE_COLD, SHELL_ROUTES), '');
+  ROUTE_COLD = false;
+  HERE = history.state;
+}
 function route() {
+  stampEntry();
   const raw = location.hash.slice(1);
+  const p = parseHead(location.hash, SHELL_ROUTES);
+  // leaving a talk/ entry (a route to any other head) closes the card it opened
+  if (TL.route && raw !== `talk/${encodeURIComponent(TL.route)}` && raw !== `talk/${TL.route}`) tlLeave();
+  // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
+  if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
   if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
-  if (closeArtifact() && /^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView();
+  closeArtifact();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
-  // back from a review to a section: the section was hidden when the browser looked for it
-  // (and the Inbox cards redraw, so a card's progress pill is the one the review just reported)
-  if (closeReview()) { if (DATA) render(DATA); if (/^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView(); }
+  // back from a review: the Inbox cards redraw, so a card's progress pill is the one the review just reported
+  if (closeReview() && DATA) render(DATA);
   const h = decodeURIComponent(raw);
   const k = h.startsWith('file?') ? 'file' : h.split('/')[0];
   if (TYPE_META[k] && h.includes('/') || k === 'file') DRAWER = { kind: k, id: null };
@@ -4311,15 +4648,27 @@ function route() {
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
-  if (h.startsWith('talk/')) { hideDrawer(); return void tlOpen(h.slice(5)); }
+  if (h.startsWith('talk/')) { hideDrawer(); return void tlRoute(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   hideDrawer();
+  // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
+  if (p.link !== undefined) return;
+  // th=inbox with other keys: the same <page>?th=inbox entry of the table, by the parsed page
+  const thInbox = `${p.page}?th=inbox`;
+  if (!p.redirected && p.state.th === 'inbox' && Object.hasOwn(SHELL_ROUTES.redirects, thInbox)) return void goHead(`#${String(SHELL_ROUTES.redirects[thInbox]).replace(/^#/, '')}`, { replace: true });
+  if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
+  showHead(p);
 }
-function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; } }
+// The drawer hidden, as when the route moves on (closeDrawer also closes its entry)
+function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
+// A move through history fires popstate at once and queues its hashchange, so a link followed in
+// between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
+// its close would go back past the page. HERE follows each entry here, as it changes.
+window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
 document.addEventListener('keydown', (e) => {
@@ -4334,15 +4683,16 @@ let RV_FROM = null;
 function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#inbox'; }
 
 // ---- loop tabs ----
+// The tab is the route's (the lt state key, Observe when none): a click is a history entry, and
+// showTab only draws the tab the route gives.
 let TAB = 'observe';
-try { TAB = localStorage.getItem('devteam.tab') || 'observe'; } catch {}
 function showTab(tab) {
   TAB = tab;
   document.querySelectorAll('#loop-tabs [data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   document.querySelectorAll('.loop-panel').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
-  try { localStorage.setItem('devteam.tab', tab); } catch {}
 }
-$('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) showTab(b.dataset.tab); });
+const loopTab = (tab) => goHead(tab && tab !== 'observe' ? `#loop?lt=${tab}` : '#loop');
+$('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) loopTab(b.dataset.tab); });
 showTab(TAB);
 
 // ---- presses: the page answers at once, the server catches up ----
@@ -4642,6 +4992,7 @@ function render(d) {
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter(ownerLesson).length, true);
+  $('inbox-btn-n').textContent = $('n-questions').textContent;
   count('n-active', active);
   {
     const rt = DATA.ooda.retro || {};
@@ -4664,7 +5015,7 @@ function render(d) {
   const stats = [
     ['done', `${pct(fcAll.done, fcAll.scope)}%`],
     ['forecast finish', fcAll.finished ? 'done' : fcAll.eta ? fmtDate(fcAll.eta) : '–'],
-    ['workers active', `${active}/${d.caps.max_active_tickets}`],
+    ['workers active', `${active}/${d.caps.max_active_tickets ?? 'no cap'}`],
     ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
     ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
@@ -4708,8 +5059,9 @@ function render(d) {
 
   renderOoda(o);
   renderMonitoring(d);
-  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
-  if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
+  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Settings
+  drawFleet();
+  drawSettings();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
@@ -4801,6 +5153,9 @@ const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { c
 // equal by a test. Only ever used to replace (it is global).
 const T_UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// A Settings row's view (#settings?key=<key>): its key, else null.
+const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
+const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -4813,6 +5168,14 @@ function tSubjectAt(el, x, y, sec) {
     const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
+  }
+  // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
+  // its plain name the quote
+  const row = el?.closest?.('[data-setting]');
+  const key = row?.dataset?.setting ?? '';
+  if (row && parseSettingView(`#settings?key=${key}`)) {
+    const name = tLine(row.querySelector?.('.set-name')?.textContent, 300) || key;
+    return { subject: { kind: 'page', view: `#settings?key=${key}`, quote: tCut(name, 300) }, title: tLine(`Setting · ${name} (${key})`, T_TITLE_MAX), el: row };
   }
   const s = sec(el);
   if (!s) return null;
@@ -4916,6 +5279,8 @@ function tWhere(s) {
   if (!s) return 'no subject';
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
+  // a Settings row: by the name it had when the thread began (the subject's quote), else its key
+  if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
@@ -5022,7 +5387,7 @@ const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'art
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null };
+const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null, route: null };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -5062,8 +5427,9 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
-  tlMark(r, hit.subject.kind !== 'item', hit.title, x, y);
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view);
+  const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
+  tlMark(r, !whole, hit.title, x, y);
 }
 function tlHide() {
   TL.hit = null;
@@ -5124,10 +5490,14 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 }, true);
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
+// A Settings row whose thread is open opens that thread (one per row; spec §8).
 function tlStart(hit) {
+  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) : null;
+  const had = key ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
-  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
   tlDraftPrune();
   tlDraw();
   tlEl('tl-c-text')?.focus();
@@ -5140,10 +5510,17 @@ function tlHome(s) {
   const k = s.ref.split(':')[0];
   return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
 }
+// A Settings row's element, as Settings draws it (null when it isn't drawn).
+const settingRow = (key) => (key ? document.querySelector(`#settings [data-setting="${CSS.escape(key)}"]`) : null);
+// The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
+const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
   if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
+  // a Settings row: its box, as an item's; none when it isn't shown
+  const set = tlSettingOf(s);
+  if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
@@ -5176,19 +5553,81 @@ function tlGoTo(s) {
     if (location.hash !== h) location.hash = h;
     return;
   }
+  // an item or a spot on a page: its page head, a new entry when that page (or Loop tab) isn't shown,
+  // then the item scrolled into view once the page shows (the router's hashchange runs first)
+  if (VIEWER || (s?.kind !== 'item' && s?.kind !== 'page')) return;
+  const head = subjectHead(s);
+  const p = parseHead(head, SHELL_ROUTES);
+  // (only when the hash changes: an assignment of the same hash fires no hashchange, and a listener
+  // left behind would scroll to this subject on some later route)
+  if (location.hash !== head && (p.page !== PAGE_NOW || (p.page === 'loop' && (p.state.lt || 'observe') !== TAB))) {
+    addEventListener('hashchange', () => tlReveal(s), { once: true });
+    location.hash = head;
+    return;
+  }
+  tlReveal(s);
+}
+// A subject's page head (shell.md §6): an item's, the page its home element is on (with its Loop tab),
+// else its kind's home page, else Overview; a page subject's view through the router's redirects
+// (#loop/orient is #loop?lt=orient, #monitoring is #sensors), so views already in the log keep working.
+function subjectHead(s) {
   if (s?.kind === 'item') {
     const el = tlHome(s);
-    if (!el) return;
-    const panel = el.closest('.loop-panel');
-    if (panel?.hidden) showTab(panel.dataset.panel);
+    if (el) {
+      const page = sectionPage(el);
+      const tab = page === 'loop' ? el.closest('.loop-panel')?.dataset.panel : null;
+      return headFor({ page, state: tab && tab !== 'observe' && LOOP_TABS.includes(tab) ? { lt: tab } : {} });
+    }
+    const k = String(s.ref).split(':')[0];
+    return headFor(parseHead(Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview', SHELL_ROUTES));
+  }
+  if (s?.kind === 'page') {
+    const p = parseHead(String(s.view ?? ''), SHELL_ROUTES);
+    if (p.link === undefined) return headFor(p);
+    // a view with a path the table doesn't redirect (#loop/<other>): its page, if it is one
+    return headFor(parseHead(SHELL_ROUTES.pages.includes(p.kind) ? p.kind : p.home, SHELL_ROUTES));
+  }
+  return '#overview';
+}
+// On its page: an item's <details> opened and the item scrolled into view; the card placed again.
+function tlReveal(s) {
+  const el = s?.kind === 'item' ? tlHome(s) : tlSettingOf(s)?.el ?? null;
+  if (el) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
     el.scrollIntoView({ block: 'center' });
-  } else if (s?.kind === 'page') {
-    const [sec, tab] = String(s.view).slice(1).split('/');
-    if (sec === 'loop' && tab && document.querySelector(`#loop-tabs [data-tab="${CSS.escape(tab)}"]`)) showTab(tab);
-    document.getElementById(sec)?.scrollIntoView();
   }
+  tlDraw();
+}
+// A #talk/<id> head (spec §4, §5): the card over its subject's page, the entry's stamp changed to that
+// page in place (no entry added). Cold, the stamp's page (talk's home) shows while the threads are read;
+// a read that lands after the hash moved on is dropped.
+async function tlRoute(id) {
+  const at = location.hash;
+  if (!TL.threads.some((x) => x.id === id)) {
+    await tlRefresh();
+    if (location.hash !== at) return;
+  }
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t) return;
+  // a spot in a framed page (an artifact, a preview): today's, the stage opened on it by its own head
+  if (t.subject?.kind === 'artifact' || t.subject?.kind === 'preview') return void tlOpen(id);
+  const head = subjectHead(t.subject);
+  history.replaceState(withPage(history.state, head), '');
+  HERE = history.state;
+  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlSettingOf(t.subject) });
+  await tlOpen(id, false);
+  TL.route = id;
+  tlReveal(t.subject);
+}
+// The route left the talk/ entry whose card it opened: that card closes (the history is the route's).
+function tlLeave() {
+  const id = TL.route;
+  TL.route = null;
+  if (TL.open !== id) return;
+  TL.open = null;
+  TL.resolving = false;
+  tlDraw();
 }
 // Where a frame subject's pin is now, on the screen and in the frame (fx, fy): at its anchor's
 // point inside the rect the lens last gave (clamped to it), or at its point alone; null when the
@@ -5320,7 +5759,7 @@ function tlCardBody(t) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
+    const note = !t ? '' : (s?.kind === 'item' && !now) || tlSettingOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -5338,6 +5777,7 @@ function tlPlaceCard(t) {
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  else if (tlSettingOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
   card.classList.toggle('sheet', !!p.sheet);
@@ -5386,7 +5826,15 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlCard(); tlDock(); tlPins(); askDraw(); }
+function tlDraw() { tlMarkRow(); tlCard(); tlDock(); tlPins(); askDraw(); }
+// The open thread's Settings row is marked (.tl-marked) while its card is open: Settings draws the mark.
+function tlMarkRow() {
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const key = tlSettingOf(t?.subject)?.key ?? null;
+  if (key === SET_MARK) return;
+  SET_MARK = key;
+  drawSettings();
+}
 // What the supervisor's terminal is asking (a tool that wants a person's yes), as /api/threads has
 // it: at the top of the Inbox, in the dock and on the open thread's card, where the owner was
 // talking. A menu the kit read whole gets a button an option: a click posts the question's digest,
@@ -5480,19 +5928,22 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-// Closed: and a #talk/ link that opened it is let go (back to its subject's section, when it has one),
-// so the same link opens it again.
+// Closed: the card a #talk/ entry opened (the route's own) lets its entry go as a peek does
+// (closeTarget): Back to the page the link was clicked on when this visit pushed it, else replaced by
+// the subject's page head; so the same link opens it again. A card opened from outside a route (a pin,
+// the dock), even over a #talk/ entry, closes in place. A viewer tab, which never routes, drops the hash.
 function tlClose() {
-  const s = TL.open ? TL.threads.find((x) => x.id === TL.open)?.subject : null;
+  const own = TL.route !== null && TL.route === TL.open;
   TL.open = null;
   TL.draft = null;
   TL.resolving = false;
-  if (location.hash.startsWith('#talk/')) {
-    const k = s?.kind === 'item' ? String(s.ref).split(':')[0] : null;
-    const sec = k ? (Object.hasOwn(T_HOME, k) ? T_HOME[k] : null) : s?.kind === 'page' ? String(s.view).slice(1).split('/')[0] : null;
-    history.replaceState(null, '', `${location.pathname}${location.search}${sec && Object.hasOwn(T_SECTIONS, sec) ? `#${sec}` : ''}`);
-  }
+  TL.route = null;
   tlDraw();
+  if (!location.hash.startsWith('#talk/')) return;
+  if (VIEWER) return void history.replaceState(history.state, '', `${location.pathname}${location.search}`);
+  if (!own) return;
+  const c = closeTarget(history.state);
+  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
 }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
@@ -5500,6 +5951,7 @@ async function tlOpen(id, go = true) {
   if (!t) return;
   TL.draft = null;
   TL.open = id;
+  TL.route = null;
   TL.openAt = -1;
   TL.resolving = false;
   if (go) tlGoTo(t.subject);
@@ -5631,7 +6083,8 @@ function tlPins() {
     if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
-    const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
+    const corner = g.subject.kind === 'item' || !!tlSettingOf(g.subject);
+    const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   tlPinsInto(box, pins, tlHeld);
@@ -5664,7 +6117,7 @@ function tlDock() {
   const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
+  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlSettingOf(t.subject)?.el === null;
   const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
   const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
@@ -5996,6 +6449,7 @@ function inboxTitle(d) {
   const c = $('n-questions');
   c.textContent = n || '';
   c.classList.toggle('hot', n > 0);
+  $('inbox-btn-n').textContent = c.textContent;
 }
 
 document.addEventListener('click', (e) => {
@@ -6040,23 +6494,6 @@ document.addEventListener('click', async (ev) => {
       restore: () => { const b = document.querySelector(`[data-met-id="${CSS.escape(id)}"]`); if (b) { b.disabled = false; b.textContent = 'Mark met'; } },
       onOk: () => { redraw(); },
       errId: `met-${id}`,
-    });
-    return;
-  }
-  const fb = ev.target.closest('[data-fleet]');
-  if (fb) {
-    const op = fb.dataset.fleet;
-    if (op === 'check') { fb.disabled = true; await loadFleet(true); return; }
-    if (op === 'park' && !fb.classList.contains('confirm')) { fb.classList.add('confirm'); fb.textContent = 'Confirm: park every session'; setTimeout(() => { fb.classList.remove('confirm'); fb.textContent = 'Park all'; }, 6000); return; }
-    // the strip is redrawn only without a pending confirm on it: this press is that confirm
-    fb.classList.remove('confirm');
-    const fleetNow = { drain: { mode: 'drain' }, park: { mode: 'park' }, resume: { mode: null, op: null }, undrain: { mode: null }, unpark: { mode: null } }[op] ?? {};
-    press('fleet', {
-      build: () => ({ action: 'fleet', body: { op } }),
-      overlay: { data: (d) => ({ ...d, fleet: { ...(d.fleet || {}), ...fleetNow, reason: fleetNow.mode ? d.fleet?.reason ?? null : null } }), agrees: (raw) => (raw.fleet?.mode ?? null) === (fleetNow.mode ?? null) },
-      apply: () => { FLEET = { ...FLEET, data: null, at: 0 }; redrawNow(); },
-      onOk: () => { loadFleet(); },
-      errId: 'fleet',
     });
     return;
   }

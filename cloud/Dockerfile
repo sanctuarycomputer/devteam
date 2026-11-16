@@ -338,7 +338,9 @@ find "$HOME/tmp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now; its mark
 # (supervisor-pane-role) goes with it.
-find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# Only inside each repo's own .git (a worktree's locks live in its repo's .git/worktrees/), never a
+# walk of every worktree and node_modules: that took minutes on a box with many checkouts.
+for g in "$HOME"/code/*/.git "$HOME"/code/*/*/.git; do [ -d "$g" ] && find "$g" -name '*.lock' -type f -delete 2>/dev/null; done
 # so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
 rm -f "$HOME"/.pg/*/postmaster.pid
 rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
@@ -541,7 +543,7 @@ ENV DEVTEAM_IMAGE_HUB=4320
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.57.0
+ARG DEVTEAM_RELEASE=v0.59.1
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
