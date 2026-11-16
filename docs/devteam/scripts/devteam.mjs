@@ -602,6 +602,25 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
+// The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
+// supervisor lands with settings set in its settings chore). Like OWNER_SETTINGS they apply as main
+// has them, so the fleet, the Settings row and the finding all read one value. Never an owner key.
+const OWNER_ASKABLE = ['max_active_tickets', 'max_active_per_component'];
+// An askable value: a whole number from 1 to 20, or null (no limit; "none" in argv).
+const askableValue = (v) => v === null || (Number.isInteger(v) && v >= 1 && v <= 20);
+function askableProblem(key, value) {
+  if (Object.hasOwn(OWNER_SETTINGS, key)) return `${key} is the owner's own setting: it changes through a PR with the owner's answer`;
+  if (key === 'links') return 'links change through link set and link land';
+  if (!OWNER_ASKABLE.includes(key)) return `${key} is not a setting the owner asks for here; only ${OWNER_ASKABLE.join(', ')}`;
+  if (!askableValue(value)) return `${key} is a whole number from 1 to 20, or none (no limit)`;
+  return null;
+}
+// An askable value as argv writes it: "none" is null, 1..20 the number, anything else undefined.
+const parseAskable = (arg) => (arg === 'none' ? null : /^(?:[1-9]|1\d|20)$/.test(arg ?? '') ? Number(arg) : undefined);
+// A cap as arithmetic reads it: null is no limit.
+const capOf = (v) => (v === null ? Infinity : v);
+// A cap in words after a count: "3/5", or "3 (no limit)".
+const capText = (n, v) => (v === null ? `${n} (no limit)` : `${n}/${v}`);
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 // Every setting the kit reads, for the Settings page (dashboardData's settings_all): the defaults'
@@ -877,6 +896,10 @@ function loadSettings() {
       settingsCache.links = pinned.links;
       local.push(...pinned.changed);
       if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
+      // the supervisor's askable settings too: the settings chore is how they change
+      const asked = OWNER_ASKABLE.filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
+      for (const k of asked) settingsCache[k] = onMain[k];
+      if (asked.length && !process.env.DEVTEAM_QUIET_ASKABLE) { process.env.DEVTEAM_QUIET_ASKABLE = '1'; warn(`${asked.join(', ')} here differs from main; it applies as on main, so change it with settings set in the settings chore`); }
     }
   }
   return settingsCache;
@@ -4098,12 +4121,12 @@ function cmdReady() {
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
-  out(`active workers: ${active.length}/${s.max_active_tickets}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
+  out(`active workers: ${capText(active.length, s.max_active_tickets)}${s.max_active_tickets !== null && s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
-  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
+  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= capOf(s.max_active_per_component) ? '  (component at cap)' : ''}`);
 }
 
 function cmdWaves() {
@@ -10892,7 +10915,10 @@ function goalForecast(g, r = null) {
   const avgW = all.length ? all.reduce((a, t) => a + weight(t), 0) / all.length : 1;
   // one roadmap per process: every goal's view asks for its forecast, and the roadmap reads git
   r ??= (roadmapMemo ??= collectRoadmap());
-  const slots = Math.max(1, loadSettings().max_active_tickets ?? 1);
+  // no limit: every open ticket of the goal's features can run at once
+  const cap = loadSettings().max_active_tickets;
+  const goalFeats = new Set([...features().values()].filter((f) => (f.goals ?? []).includes(g.id)).map((f) => f.id));
+  const slots = Math.max(1, cap === null ? all.filter((t) => goalFeats.has(t.feature) && !mergeShaFor(t.id)).length : cap ?? 1);
   const cur = currentMilestone(g);
   const fs_ = features();
   let cumPts = 0;
@@ -12407,10 +12433,10 @@ function collectMetrics(since) {
   }
   // a ready fix ticket may use an incident slot past the cap
   const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
-  if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
-  if (!drained && ready.length && active < settings.max_active_tickets && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${capText(active, settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
+  if (!drained && ready.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${capText(active, settings.max_active_tickets)} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
-  if (memFull && (idlePlanning || (!drained && ((ready.length && active < settings.max_active_tickets) || (readyFix.length && active < settings.max_active_tickets + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${settings.max_active_tickets} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
+  if (memFull && (idlePlanning || (!drained && ((ready.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${capText(active, settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
