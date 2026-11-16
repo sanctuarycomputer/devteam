@@ -5340,6 +5340,8 @@ async function tlRoute(id) {
   }
   const t = TL.threads.find((x) => x.id === id);
   if (!t) return;
+  // a spot in a framed page (an artifact, a preview): today's, the stage opened on it by its own head
+  if (t.subject?.kind === 'artifact' || t.subject?.kind === 'preview') return void tlOpen(id);
   const head = subjectHead(t.subject);
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
