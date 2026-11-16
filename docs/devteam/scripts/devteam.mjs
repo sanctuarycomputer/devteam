@@ -16610,10 +16610,17 @@ function ownerFloor() { return ownerCursor()?.floor ?? noCursorFloor(); }
 // lines (a tick's spend line, an observation) never mark earlier owner lines read.
 function seedOwnerCursor() {
   try {
-    if (fs.existsSync(ownerCursorFile())) return;
-    fs.mkdirSync(runDir, { recursive: true });
-    fs.writeFileSync(ownerCursorFile(), `${JSON.stringify({ floor: noCursorFloor(), acked: [], acked_at: null })}\n`);
+    if (ownerCursor()) return;
+    // missing, or unreadable (a crash mid-write): pin the floor again before anything moves it
+    writeOwnerCursor({ floor: noCursorFloor(), acked: [], acked_at: null });
   } catch {}
+}
+// write the cursor whole or not at all: a temp file renamed over it
+function writeOwnerCursor(c) {
+  fs.mkdirSync(runDir, { recursive: true });
+  const tmp = `${ownerCursorFile()}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(c)}\n`);
+  fs.renameSync(tmp, ownerCursorFile());
 }
 function ownerLinesUnread() {
   const floor = ownerFloor();
@@ -16624,20 +16631,26 @@ const unreadWhat = (l) => {
   const text = [l.answer, l.text, l.verdict, l.note, l.outcome, l.status].find((x) => typeof x === 'string' && x);
   return `${l.type}${l.op && l.op !== 'new' ? ` ${l.op}` : ''}${text ? `: ${String(text).replace(/\s+/g, " ").slice(0, 120)}` : ''}`;
 };
-// unread [--json]: the owner's lines past the cursor, oldest first. unread ack <ref> | --all: the
-// supervisor has dealt with every line up to <id> (or every one listed now).
+// unread [--json]: the owner's lines past the cursor, oldest first, each with its ref. unread ack
+// <ref>: the supervisor has dealt with every listed line up to and including that one.
 function cmdUnread() {
   const sub = positional[0];
   if (sub === 'ack') {
     supervisorOnly('unread ack');
     const list = ownerLinesUnread();
-    if (!flags.all && !positional[1]) die('usage: unread ack <ref> | unread ack --all');
-    // a ref (at|id, as unread lists it) or an id: the last unread line it names
-    const to = flags.all ? list.at(-1) : list.findLast((l) => ownerLineKey(l) === positional[1] || l.id === positional[1]);
-    if (!to && !flags.all) die(`${positional[1]} is not an unread owner line (unread lists them)`);
+    // ack acts only on lines the supervisor was shown: it names the last one it dealt with, by the ref
+    // unread printed. No --all (it would ack a line written between the listing and the ack), and a
+    // bare id only when one unread line has it (a set line shares its object's id)
+    if (flags.all) die('unread ack takes the ref of the last line you dealt with, as unread listed it: --all would also ack a line the owner wrote since');
+    if (!positional[1]) die('usage: unread ack <ref>');
+    const byRef = list.find((l) => ownerLineKey(l) === positional[1]);
+    const byId = list.filter((l) => l.id === positional[1]);
+    if (!byRef && byId.length > 1) die(`${byId.length} unread lines carry ${positional[1]}: ack by the ref unread lists (${byId.map(ownerLineKey).join(', ')})`);
+    const to = byRef ?? byId[0];
+    if (!to) die(`${positional[1]} is not an unread owner line (unread lists them)`);
     fs.mkdirSync(runDir, { recursive: true });
     const c = ownerCursor() ?? { floor: noCursorFloor(), acked: [] };
-    const acked = new Set([...c.acked, ...(to ? list.slice(0, list.indexOf(to) + 1).map(ownerLineKey) : [])]);
+    const acked = new Set([...c.acked, ...list.slice(0, list.indexOf(to) + 1).map(ownerLineKey)]);
     // move the floor up past what is dealt with, but never closer to now than UNREAD_LATE_MS (room for
     // a late line) and never past a line still unread; keys under the floor are dropped, so the list
     // stays the size of a day's lines
@@ -16646,11 +16659,11 @@ function cmdUnread() {
     const cap = stillUnread.length ? (stillUnread[0].at < late ? stillUnread[0].at : late) : late;
     const before = (x) => { const t = Date.parse(x) - 1; return Number.isFinite(t) ? new Date(t).toISOString() : x; };
     const floor = [c.floor, before(cap)].sort().pop();
-    fs.writeFileSync(ownerCursorFile(), `${JSON.stringify({ floor, acked: [...acked].filter((k) => k.split('|')[0] > floor), acked_at: nowIso() })}\n`);
+    writeOwnerCursor({ floor, acked: [...acked].filter((k) => k.split('|')[0] > floor), acked_at: nowIso() });
     const left = ownerLinesUnread().length;
-    return out(`${to ? `read up to ${to.id} (${to.at}); ` : ''}${left ? `${left} still unread` : 'nothing unread'}`);
+    return out(`read up to ${to.id} (${to.at}); ${left ? `${left} still unread` : 'nothing unread'}`);
   }
-  if (sub) die('usage: unread [--json] | unread ack <ref> | unread ack --all');
+  if (sub) die('usage: unread [--json] | unread ack <ref>');
   const list = ownerLinesUnread().map((l) => ({ ref: ownerLineKey(l), id: l.id, type: l.type, op: l.op ?? 'new', at: l.at, what: unreadWhat(l), read: `devteam.mjs log --id ${l.id}` }));
   if (flags.json) return json({ unread: list, cursor: ownerCursor() });
   if (!list.length) return out('nothing unread from the owner');
@@ -21207,7 +21220,7 @@ Decide and act (supervisor.md, constitution.md)
   review result <qid> [--json|--tsv|--commit]   the owner's result, once every hash verifies (exit 1 otherwise); --commit copies it into this worktree, the PR that asked (project/questions/<qid>/result.json, or the ticket's questions/<qid>/ on a ticket branch), and prints the line to stage it
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
-  unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> | --all   (supervisor) dealt with every line up to that one
+  unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref>   (supervisor) dealt with every listed line up to that one
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane

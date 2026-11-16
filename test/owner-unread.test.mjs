@@ -14,9 +14,10 @@ test('an owner answer stays unread, is in the opening prompt and raises owner-un
     const AWAY = { DEVTEAM_SUPERVISOR: 'no-such-session:0' };
     const ask = (q) => F.sup(['ask', '--kind', 'owner-decision', '--goal', F.goal, '--question', q, '--recommendation', 'Yes', '--options', 'Yes', 'No']).trim().split('\n')[0];
     const unread = () => JSON.parse(F.sup(['unread', '--json'])).unread;
+    const ackListed = () => { const u = unread(); return u.length ? F.sup(['unread', 'ack', u.at(-1).ref]) : 'nothing unread'; };
     const finding = () => JSON.parse(F.sup(['metrics', '--json'])).findings.find((f) => f.kind === 'owner-unread');
     // start from a clean slate: whatever the fixture's owner wrote is dealt with
-    F.sup(['unread', 'ack', '--all']);
+    ackListed();
     assert.deepEqual(unread(), []);
     const q1 = ask('Ship the EU launch first?');
     const q2 = ask('Keep the old checkout a week?');
@@ -45,16 +46,16 @@ test('an owner answer stays unread, is in the opening prompt and raises owner-un
     assert.match(all[0].what, /^thread/, 'oldest first: the late line');
     F.sup(['unread', 'ack', all[0].id]);
     assert.deepEqual(unread().map((x) => x.id), [all[1].id]);
-    // a new answer after the ack is unread again; ack --all clears everything listed
+    // a new answer after the ack is unread again; acking the last listed ref clears everything listed
     F.owner(['answer', q2, 'No'], AWAY);
     assert.equal(unread().length, 2);
-    assert.match(F.sup(['unread', 'ack', '--all']), /nothing unread/);
+    assert.match(ackListed(), /nothing unread/);
     assert.deepEqual(unread(), []);
     assert.equal(finding(), undefined);
     assert.doesNotMatch(F.sup(['prompt', 'supervisor']), /you haven't dealt with yet/);
     // only the supervisor moves the cursor: the operator may read the list, never ack it
     assert.match(F.owner(['unread'], { DEVTEAM_ROLE: 'operator' }), /nothing unread/);
-    assert.match(F.fails(['unread', 'ack', '--all'], { DEVTEAM_ROLE: 'operator' }), /operator/);
+    assert.match(F.fails(['unread', 'ack', 'x'], { DEVTEAM_ROLE: 'operator' }), /operator/);
     assert.ok(fs.existsSync(path.join(F.old, 'docs/devteam/run/owner-cursor.json')));
   } finally { F.done(); }
 });
@@ -67,7 +68,8 @@ test('owner-unread: the first supervisor line pins the floor, and lines sharing 
   try {
     const cf = path.join(F.old, 'docs/devteam/run/owner-cursor.json');
     const unread = () => JSON.parse(F.sup(['unread', '--json'])).unread;
-    F.sup(['unread', 'ack', '--all']);
+    const ackListed = () => { const u = unread(); return u.length ? F.sup(['unread', 'ack', u.at(-1).ref]) : 'nothing unread'; };
+    ackListed();
     // an upgrade: no cursor file, and the owner wrote after the supervisor's last line
     fs.rmSync(cf, { force: true });
     const tid = F.hand('owner', { type: 'thread', title: 'A word while you were away' }, 0);
@@ -84,8 +86,25 @@ test('owner-unread: the first supervisor line pins the floor, and lines sharing 
     assert.notEqual(two[0].ref, two[1].ref);
     F.sup(['unread', 'ack', two[0].ref]);
     assert.deepEqual(unread().map((x) => x.ref), [two[1].ref], 'acking the first leaves the second unread');
-    F.sup(['unread', 'ack', '--all']);
+    ackListed();
     assert.deepEqual(unread(), []);
+    // ack acts only on what was listed: a line written between unread and ack stays unread
+    const seen = F.hand('owner', { type: 'thread', title: 'Seen in the listing' }, 0);
+    const shown = unread();
+    assert.equal(shown.length, 1);
+    F.hand('owner', { id: seen, type: 'thread', op: 'set', status: 'closed' }, 0);
+    assert.match(F.fails(['unread', 'ack', '--all']), /ref of the last line you dealt with/);
+    assert.match(F.fails(['unread', 'ack', seen]), /2 unread lines carry/, 'a bare id two lines share is refused');
+    F.sup(['unread', 'ack', shown[0].ref]);
+    assert.equal(unread().length, 1, 'the line written after the listing is still unread');
+    ackListed();
+    // a corrupt cursor is pinned again, not read as no cursor on every call
+    fs.writeFileSync(cf, '{"floor": "2026');
+    const tid2 = F.hand('owner', { type: 'thread', title: 'After the crash' }, 0);
+    F.sup(['observe', '--source', 'supervisor', '--subject', 'tick', '--kind', 'note', '--detail', 'a tick line after a crash']);
+    // (lines acked before the crash may come back too: a lost cursor errs on reading twice, never on missing one)
+    assert.ok(unread().map((x) => x.id).includes(tid2), 'the owner\'s line survives the supervisor\'s next line');
+    ackListed();
     // the acked list stays bounded: keys under the floor are dropped
     const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
     assert.ok(c.acked.every((k) => k.split('|')[0] > c.floor));
