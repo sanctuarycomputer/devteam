@@ -28,6 +28,6 @@ The scratch worktree was removed with `git worktree remove --force`.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F2-1 | Minor | quality.md §3 (the record must be accurate) | docs/devteam-dev/tickets/kit-98-autonomy-score-data/verification.md:3 | It credits the final-1 fixes to "b82fc25: two week-6 and week-8 fixture additions". b82fc25 is the dispositions commit. The fixture additions are 54d3f85, which final-1's dispositions cite correctly. Fix: name 54d3f85. |  |
+| F2-1 | Minor | quality.md §3 (the record must be accurate) | docs/devteam-dev/tickets/kit-98-autonomy-score-data/verification.md:3 | It credits the final-1 fixes to "b82fc25: two week-6 and week-8 fixture additions". b82fc25 is the dispositions commit. The fixture additions are 54d3f85, which final-1's dispositions cite correctly. Fix: name 54d3f85. | wont-fix, with the reviewer's agreement: the fixes are 54d3f85 (b82fc25 holds the dispositions); verification.md:3 should read 54d3f85, and editing it after the final APPROVE would void the verdict, so this disposition is the correction of record |
 
 Verdict: APPROVE 923877b9e78152220c1b48bcbccd9a95892ad88a
