@@ -58,3 +58,36 @@ test('an owner answer stays unread, is in the opening prompt and raises owner-un
     assert.ok(fs.existsSync(path.join(F.old, 'docs/devteam/run/owner-cursor.json')));
   } finally { F.done(); }
 });
+
+// With no cursor yet, the floor is pinned the first time the supervisor writes, so its own later
+// lines never mark an earlier owner line read; and two owner lines on one object (each a `set` line
+// carrying that object's id) are read one at a time.
+test('owner-unread: the first supervisor line pins the floor, and lines sharing an id are acked one by one', () => {
+  const F = threadsFixture('owner-unread-floor');
+  try {
+    const cf = path.join(F.old, 'docs/devteam/run/owner-cursor.json');
+    const unread = () => JSON.parse(F.sup(['unread', '--json'])).unread;
+    F.sup(['unread', 'ack', '--all']);
+    // an upgrade: no cursor file, and the owner wrote after the supervisor's last line
+    fs.rmSync(cf, { force: true });
+    const tid = F.hand('owner', { type: 'thread', title: 'A word while you were away' }, 0);
+    assert.equal(unread().length, 1, 'unread with no cursor');
+    // the supervisor's tick writes a line of its own before it reads unread: the owner's stays unread
+    F.sup(['observe', '--source', 'supervisor', '--subject', 'tick', '--kind', 'note', '--detail', 'a tick line']);
+    assert.ok(fs.existsSync(cf), 'the first supervisor line pins the floor in a cursor');
+    assert.equal(unread().length, 1, 'its own later line does not mark the owner\'s read');
+    // a second owner line on the same thread (closing it): same id, a different line
+    F.hand('owner', { id: tid, type: 'thread', op: 'set', status: 'closed' }, 0);
+    const two = unread();
+    assert.equal(two.length, 2);
+    assert.equal(two[0].id, two[1].id, 'both lines carry the thread\'s id');
+    assert.notEqual(two[0].ref, two[1].ref);
+    F.sup(['unread', 'ack', two[0].ref]);
+    assert.deepEqual(unread().map((x) => x.ref), [two[1].ref], 'acking the first leaves the second unread');
+    F.sup(['unread', 'ack', '--all']);
+    assert.deepEqual(unread(), []);
+    // the acked list stays bounded: keys under the floor are dropped
+    const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
+    assert.ok(c.acked.every((k) => k.split('|')[0] > c.floor));
+  } finally { F.done(); }
+});
