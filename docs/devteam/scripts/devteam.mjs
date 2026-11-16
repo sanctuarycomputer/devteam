@@ -13632,7 +13632,7 @@ function restartPane(name, launch, budget) {
 }
 // A machine that died (a dead battery, a redeploy) took the tmux server with it, and what survives
 // on disk says which sessions to bring back: every worker and planner the kit launched, not held
-// or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
+// (its goal, its ticket's held field, a drain) or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
 // gone, or was created after that session's last launch: a window closed in a session older than
 // its launch was closed on purpose, and stays closed (the findings report it).
 const LAUNCH_ACT = /^(?:made|resumed) (worker|planner) (\S+) in /;
@@ -15193,7 +15193,8 @@ function cmdAccountsTick() {
   let supervisorRefused = null;
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
-  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+  // a ticket's held field holds it too: nothing runs for a held ticket
+  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || isHeld(tickets().get(name) ?? {}) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
   // one relaunch a tick, in what's left of it; the rest still report if they've given up
   let tried = false;
   const budget = () => { const left = RESTART_TICK_MS - (Date.now() - began); return tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left); };

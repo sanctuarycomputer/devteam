@@ -67,7 +67,7 @@ test('the key guard: a window closed in a session older than its launch stays cl
   } finally { F.done(); }
 });
 
-test('held, parked, done, merged and superseded sessions, and a removed worktree, are left alone', { skip: !hasTmux }, async () => {
+test('held (a held ticket too), parked, done, merged and superseded sessions, and a removed worktree, are left alone', { skip: !hasTmux }, async () => {
   const F = fixture('held');
   try {
     F.worker('demo-10-parked');
@@ -81,6 +81,8 @@ test('held, parked, done, merged and superseded sessions, and a removed worktree
     fs.rmSync(path.join(F.root, '.worktrees', 'demo-14-nowt'), { recursive: true });
     F.worker('demo-15-unstarted', { started: false });
     F.worker('demo-16-unlaunched', { launched: false });
+    // a ticket held (its held field set), whatever its phase
+    F.worker('demo-18-held', { extra: { held: 'waiting on PR #9' } });
     F.tick(OFF);
     assert.equal(F.state().relaunched.length, 0);
     assert.deepEqual(F.relaunched(), []);
