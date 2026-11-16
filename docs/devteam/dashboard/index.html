@@ -547,19 +547,23 @@ try {
   .act-head { font-weight: 500; }
   .act-detail { color: var(--fg-2); font-size: 12.5px; margin-top: 2px; }
 
-  /* drawer: a ticket, a question or an artifact */
-  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 20; }
-  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 100vw); background: var(--surface); border-left: 1px solid var(--line); z-index: 21; overflow-y: auto; padding: 20px 24px 60px; box-shadow: -8px 0 32px rgba(0,0,0,.18); }
-  .drawer { padding-top: 0; }
-  .drawer-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; margin: 0 -24px 14px; padding: 14px 20px 12px 24px; background: var(--surface); border-bottom: 1px solid var(--line); }
-  .drawer-bar h2 { flex: 1; margin: 0; font-size: 15px; line-height: 1.4; }
-  @media (max-width: 900px) { .drawer-bar { margin: 0 -16px 12px; padding: 12px 12px 10px 16px; } }
-  .drawer dl { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 12.5px; margin: 10px 0 16px; }
-  .drawer dt { color: var(--muted); }
-  .drawer-bar h2 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  /* the peek (kit-88): the block's frame (.scrim, .drawer, .drawer-head, .drawer-body) styles it; here only
+     what the block leaves to the page. A dl the block's props() didn't draw keeps today's grid. */
+  .drawer dl:not(.props) { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 12.5px; margin: 10px 0 16px; }
+  .drawer dl:not(.props) dt { color: var(--muted); }
   .dtype { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--muted); }
   .dtype .badge { margin: 0; background: var(--well); color: var(--fg); border: 1px solid var(--line); }
-  .dtitle { min-width: 0; }
+  /* the title: one line, its full text in its title */
+  .dtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the scrim behind the artifact viewer, a preview and a review: the block shows it only under peek-open */
+  :where(.shell).overlay-open .scrim { opacity: 1; pointer-events: auto; }
+  /* the top-right button beside an open peek: a mirror of .pagebar .tt on <body>, above the scrim (20) and the
+     drawer (21), level with .tt (centred in the bar under its 1px border), --header-pad left of the peek; it fades */
+  #tt-peek { position: fixed; top: calc((var(--bar-h) - 1px - 28px) / 2); right: calc(min(720px, 100vw) + var(--header-pad)); z-index: 22; margin: 0; display: inline-flex; align-items: center; gap: 6px; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease), visibility 0s linear var(--dur); }
+  .shell.peek-open:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  .shell.peek-open:not(.threads-open) .pagebar .tt { visibility: hidden; }
+  #tt-peek .n.q { color: var(--red-fg); }
+  @media (max-width: 760px) { #tt-peek { display: none; } }
   .attrs { margin: 2px 0 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .attrs dl { margin: 8px 0 10px; }
   .attrs dd .links { margin: 0; }
@@ -604,7 +608,7 @@ try {
   dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 4px 0 8px; }
   dl.kv dt { color: var(--muted); }
   pre.untrusted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; border-left: 3px solid var(--amber); padding: 6px 10px; font-size: 12px; }
-  .drawer dd { margin: 0; }
+  .drawer dl:not(.props) dd { margin: 0; }
   .drawer ul { margin: 4px 0; padding-left: 18px; }
   .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
   .tl li { position: relative; padding: 4px 0 10px 16px; font-size: 12.5px; max-width: var(--measure); }
@@ -640,7 +644,7 @@ try {
   .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
-  @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
 
   /* review questions: three bands, the middle one the agent's (sandboxed) page */
   .qcard.review { border-left-color: var(--blue); }
@@ -982,11 +986,13 @@ try {
 </main>
 </div>
 </div>
-<div class="scrim no-shell" id="scrim" hidden></div>
-<aside class="drawer no-shell" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
-  <div class="drawer-bar"><h2 id="drawer-bar-title"></h2><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></div>
-  <div id="drawer-body"></div>
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
+  <div class="drawer-head"><h2 id="drawer-bar-title"></h2><span class="end"><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></span></div>
+  <div class="drawer-body" id="drawer-body"></div>
 </aside>
+<!-- the page bar's top-right button, mirrored above the scrim beside an open peek (kit-88 spec §2.1) -->
+<button class="ghost tt" id="tt-peek" type="button"></button>
 <div id="artifact-view" class="no-shell" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
@@ -1365,6 +1371,23 @@ function showPage(id, { keepScroll = false } = {}) {
 // The page an element is on: its section's data-page, else Overview.
 const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
 $('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
+// The top-right button beside an open peek (kit-88 spec §2.1): the sticky page bar can't lift .tt above the
+// scrim, so #tt-peek on <body> mirrors it: its content (ids dropped, so none is on the page twice), its
+// label and title, copied whenever .tt changes; its click is .tt's. CSS shows one or the other.
+(() => {
+  const tt = document.querySelector('.pagebar .tt'), mirror = $('tt-peek');
+  if (!tt || !mirror) return;
+  const copy = () => {
+    const t = document.createElement('template');
+    t.innerHTML = tt.innerHTML;
+    for (const el of t.content.querySelectorAll('[id]')) el.removeAttribute('id');
+    if (mirror.innerHTML !== t.innerHTML) mirror.innerHTML = t.innerHTML;
+    for (const a of ['aria-label', 'title']) { const v = tt.getAttribute(a); if (v == null) mirror.removeAttribute(a); else if (mirror.getAttribute(a) !== v) mirror.setAttribute(a, v); }
+  };
+  copy();
+  new MutationObserver(copy).observe(tt, { subtree: true, characterData: true, childList: true, attributes: true });
+  mirror.addEventListener('click', () => document.querySelector('.pagebar .tt').click());
+})();
 // Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
 // (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
 const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
@@ -2330,11 +2353,12 @@ async function openReview(raw) {
   const key = preview ? `preview?${params}` : `q:${qid}`;
   if (RV && RV.key === key) return;
   closeReview();
-  if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
+  if (!$('drawer').hidden) { peekHide({ now: true }); DRAWER = { kind: null, id: null }; }
   const me = RV = { key, qid, preview, info: null, frame: null, proposal: null, progress: null, dropped: 0, saveTimer: null, pending: null, saved: null, seq: 0, readonly: false };
   document.querySelector('main').classList.add('reviewing');
   $('review-view').hidden = false;
   $('scrim').hidden = false;
+  document.body.classList.add('overlay-open');
   document.body.style.overflow = 'hidden';
   $('rv-head').innerHTML = '<p class="loading">Loading the review…</p>';
   $('rv-frame-wrap').innerHTML = '';
@@ -2383,6 +2407,7 @@ function closeReview() {
   document.querySelector('main').classList.remove('reviewing');
   $('review-view').hidden = true;
   $('scrim').hidden = true;
+  if (!AV) document.body.classList.remove('overlay-open');
   document.body.style.overflow = '';
   $('rv-frame-wrap').innerHTML = '';
   $('rv-panel').hidden = true;
@@ -2721,7 +2746,8 @@ function goalProgress(g, R) {
 function goalStepper(g, s, R) {
   if (s.key === 'let-go') return '';
   const p = goalProgress(g, R);
-  return `<ol class="steps" aria-label="Progress">${GOAL_STEPS.map((x, i) => {
+  // no-shell: the page's step bar, fenced from the block's .steps where it is drawn in a ported region (a peek)
+  return `<ol class="steps no-shell" aria-label="Progress">${GOAL_STEPS.map((x, i) => {
     const cls = i < s.step ? 'done' : i === s.step ? 'now' : '';
     const fill = x === 'Built' && p.work && i >= s.step ? p.work.frac : x === 'Met' && p.outcome && i >= s.step ? p.outcome.frac : null;
     const sub = x === 'Built' && p.work ? p.work.text : x === 'Met' && p.outcome ? p.outcome.text : '';
@@ -3364,7 +3390,8 @@ function focusBack(m) {
 function showDrawer(html) {
   const after = AFTER;
   AFTER = [];
-  const opening = $('drawer').hidden;
+  // a drawer sliding out is opening again
+  const opening = !peekIsOpen();
   if (!opening && html === LAST_HTML) return;
   const fresh = opening || LAST_HTML === '';
   const keep = !fresh && $('drawer-body').contains(document.activeElement) ? focusKey(document.activeElement) : null;
@@ -3373,21 +3400,53 @@ function showDrawer(html) {
   $('drawer-body').innerHTML = html;
   const h = $('drawer-body').querySelector('h2#drawer-title');
   const [icon, label] = TYPE_META[DRAWER.kind] || [];
-  $('drawer-bar-title').innerHTML = `${label ? `<span class="dtype"><i class="icon-${icon}" aria-hidden="true"></i><span class="badge">${esc(label)}</span></span>` : ''}<span class="dtitle">${h ? h.innerHTML : ''}</span>`;
+  $('drawer-bar-title').innerHTML = `${label ? `<span class="dtype"><i class="icon-${icon}" aria-hidden="true"></i><span class="badge">${esc(label)}</span></span>` : ''}<span class="dtitle"${h ? ` title="${esc(h.textContent.trim())}"` : ''}>${h ? h.innerHTML : ''}</span>`;
   if (h) h.remove();
-  $('drawer').hidden = false; $('scrim').hidden = false;
-  document.body.style.overflow = 'hidden';
+  peekShow();
   if (fresh) $('drawer-close').focus();
   else if (keep) $('drawer-body').querySelector(keep)?.focus();
   for (const f of after) f();
 }
+// The peek on the shell's frame (shell.md §3, kit-88 spec §2.1): peek-open on the .shell element (<body>)
+// slides the drawer in and fades the scrim. Opening unhides both and forces a style flush first, so the
+// slide starts from the closed place; closing removes peek-open and hides both once the slide ends (its
+// transform transition, or --dur if none runs; at once under reduced motion, --dur 0). A reopen before then
+// cancels the pending hide, so #drawer.hidden still means "closed", only now after the slide.
+let PEEK_HIDE = null;
+const peekIsOpen = () => !$('drawer').hidden && document.body.classList.contains('peek-open');
+function peekShow() {
+  if (PEEK_HIDE) PEEK_HIDE.cancel();
+  const d = $('drawer'), s = $('scrim');
+  if (d.hidden || s.hidden) { d.hidden = false; s.hidden = false; void d.offsetWidth; }
+  document.body.classList.add('peek-open');
+  document.body.style.overflow = 'hidden';
+}
+function peekHide({ now = false } = {}) {
+  const d = $('drawer'), body = document.body;
+  // already sliding out: that slide's hide stands, unless this one is at once
+  if (PEEK_HIDE && !now) return;
+  if (PEEK_HIDE) PEEK_HIDE.cancel();
+  body.classList.remove('peek-open');
+  // the viewer, a preview or a review it was under keeps the scrim (and the page's scroll held)
+  const hide = () => { if (PEEK_HIDE) PEEK_HIDE.cancel(); d.hidden = true; if (!body.classList.contains('overlay-open')) { $('scrim').hidden = true; body.style.overflow = ''; } };
+  const cs = getComputedStyle(document.documentElement).getPropertyValue('--dur').trim();
+  const dur = /ms$/.test(cs) ? parseFloat(cs) : parseFloat(cs) * 1000 || 0;
+  if (now || d.hidden || !(dur > 0)) return hide();
+  const end = (e) => { if (e.target === d && e.propertyName === 'transform') hide(); };
+  // a slide that never starts (nothing to move) ends at --dur; one that runs ends with its transitionend
+  const timer = setTimeout(hide, dur + 100);
+  d.addEventListener('transitionend', end);
+  d.addEventListener('transitioncancel', end);
+  PEEK_HIDE = { cancel: () => { clearTimeout(timer); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
+}
 // Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
 // over every entry this visit pushed down to the page, else in place to the page in its stamp.
 function closeDrawer() {
+  // already sliding out: one close, one history move
+  if (!peekIsOpen()) return;
   DRAWER = { kind: null, id: null };
   LAST_HTML = '';
-  $('drawer').hidden = true; $('scrim').hidden = true;
-  document.body.style.overflow = '';
+  peekHide();
   lastFocus?.focus?.();
   const c = closeTarget(history.state);
   if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
@@ -3594,10 +3653,11 @@ function progressBlock(items) {
   const eta = fc.finished ? 'all merged' : fc.eta ? `ETA ${fmtDate(fc.eta)} at the recent ${fc.perDay.toFixed(1)} points a day` : fc.scope ? 'no forecast yet (nothing merged recently)' : 'no tickets yet';
   const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0);
   if (live.length) AFTER.push(() => { if ($('peek-burnup')) burnup(items, now, { el: $('peek-burnup'), legend: $('peek-legend'), tip: $('peek-tip'), card: $('peek-card'), forecast: null }); });
-  return `${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
+  // no-shell: the page's markup (ticket cards, their pills), fenced from the block's rules in a peek
+  return `<div class="no-shell">${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
     <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${usd ? ` · $${usd.toFixed(2)} spent` : ''}</p>
     ${live.length ? `<div class="card chart peek-chart" id="peek-card"><div class="legend" id="peek-legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div><div id="peek-burnup"></div><div class="tip" id="peek-tip"></div></div>` : ''}
-    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}`;
+    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}</div>`;
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
 const notFound = (kind, id, peek, text, { noRecord = false } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
@@ -4538,6 +4598,7 @@ async function openPreview(raw) {
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
   showPreview(name, info);
   $('scrim').hidden = false;
+  document.body.classList.add('overlay-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -4557,6 +4618,7 @@ function openArtifact(raw) {
   const fp = arts.find((x) => x.slug === slug && x.at === at)?.fp ?? (fresh && at !== 'main' && !String(at).startsWith('tree:') ? mainFp : null);
   showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
+  document.body.classList.add('overlay-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -4570,7 +4632,8 @@ function closeArtifact() {
   $('pv-frame').removeAttribute('src');
   $('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
-  if ($('drawer').hidden && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
+  if (!RV) document.body.classList.remove('overlay-open');
+  if (!peekIsOpen() && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
   return true;
 }
@@ -4648,7 +4711,8 @@ function route() {
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
-  if (h.startsWith('talk/')) { hideDrawer(); return void tlRoute(h.slice(5)); }
+  // (at once: the card replaces the peek, with no slide)
+  if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); return void tlRoute(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
@@ -4662,8 +4726,8 @@ function route() {
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
-// The drawer hidden, as when the route moves on (closeDrawer also closes its entry)
-function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
+// The drawer hidden, as when the route moves on (closeDrawer also closes its entry): it slides out
+function hideDrawer() { if (!$('drawer').hidden) { peekHide(); DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 // A move through history fires popstate at once and queues its hashchange, so a link followed in
 // between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
@@ -4675,7 +4739,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on an attribute's key closes its tooltip, not the drawer
   if (document.activeElement?.classList?.contains('attr-k')) return void document.activeElement.blur();
-  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer();
+  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox

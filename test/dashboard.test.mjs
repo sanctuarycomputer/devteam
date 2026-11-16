@@ -3156,6 +3156,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const click = (sel) => still(async () => { await p.click(sel); await released(); });
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
+  // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
+  const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
@@ -3748,7 +3750,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
     await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(shown('drawer'), 'the drawer');
+    await soon(slid(), 'the drawer');
     const at = await p.at('#drawer-close');
     await p.hold('Shift', true);
     await p.move(at.x, at.y, 8);
