@@ -12530,7 +12530,7 @@ function collectMetrics(since) {
       add('medium', 'review-unlanded', q.id, `answered ${hours(now - Date.parse(q.answered_at))}h ago; the owner's result is not on ${loadSettings().main_branch} yet (it lives only in run/, which no one backs up)`, `in the worktree of the PR that asked (${q.review.ref}): review result ${q.id} --commit, commit it, and land the PR`);
     }
   }
-  { const u = ownerLinesUnread(); const old = u.filter((l) => now - Date.parse(l.at) > UNREAD_GRACE_MS); if (old.length) add('high', 'owner-unread', 'owner', `${old.length} line${old.length === 1 ? '' : 's'} from the owner unread for over ${UNREAD_GRACE_MS / 60000} minutes, the oldest ${old[0].id} (${unreadWhat(old[0])})`, 'run unread, act on each, then unread ack <the last ref you dealt with>'); }
+  { const u = ownerLinesUnread(); const old = u.filter((l) => now - Date.parse(l.at) > UNREAD_GRACE_MS); if (old.length) add('high', 'owner-unread', 'owner', `${old.length} line${old.length === 1 ? '' : 's'} from the owner unread for over ${UNREAD_GRACE_MS / 60000} minutes, the oldest ${old[0].id} (${unreadWhat(old[0])})`, 'run unread, act on each, then unread ack <the refs you dealt with>'); }
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
@@ -16639,7 +16639,7 @@ function supervisorOpeningPrompt(p = PROMPTS.supervisor) {
   const d = drainedPreface();
   let n = 0;
   try { seedOwnerCursor(); n = ownerLinesUnread().length; } catch {}
-  const u = n ? `The owner wrote ${n} line${n === 1 ? '' : 's'} you haven't dealt with yet (answers, thread turns, decisions). First, run node docs/devteam/scripts/devteam.mjs unread, act on each, and ack them (unread ack <ref>).` : null;
+  const u = n ? `The owner wrote ${n} line${n === 1 ? '' : 's'} you haven't dealt with yet (answers, thread turns, decisions). First, run node docs/devteam/scripts/devteam.mjs unread, act on each, and ack each one you dealt with (unread ack <ref> …).` : null;
   return [d, u, p].filter(Boolean).join('\n\n');
 }
 
@@ -16672,8 +16672,11 @@ function ownerFloor() { return ownerCursor()?.floor ?? noCursorFloor(); }
 function seedOwnerCursor() {
   try {
     if (ownerCursor()) return;
-    // missing, or unreadable (a crash mid-write): pin the floor again before anything moves it
-    writeOwnerCursor({ floor: noCursorFloor(), acked: [], acked_at: null });
+    // missing: pin the no-cursor floor (what the owner wrote after the supervisor's last line). A file
+    // there but unreadable (a crash mid-write) lost the acks too: pin a day back instead, so a line
+    // not yet dealt with is read again rather than hidden under the supervisor's later lines
+    const lost = fs.existsSync(ownerCursorFile());
+    writeOwnerCursor({ floor: lost ? new Date(Date.now() - UNREAD_LATE_MS).toISOString() : noCursorFloor(), acked: [], acked_at: null });
   } catch {}
 }
 // write the cursor whole or not at all: a temp file renamed over it
@@ -16693,25 +16696,30 @@ const unreadWhat = (l) => {
   return `${l.type}${l.op && l.op !== 'new' ? ` ${l.op}` : ''}${text ? `: ${String(text).replace(/\s+/g, " ").slice(0, 120)}` : ''}`;
 };
 // unread [--json]: the owner's lines past the cursor, oldest first, each with its ref. unread ack
-// <ref>: the supervisor has dealt with every listed line up to and including that one.
+// <ref> [<ref> …]: the supervisor has dealt with exactly those lines.
 function cmdUnread() {
   const sub = positional[0];
   if (sub === 'ack') {
     supervisorOnly('unread ack');
     const list = ownerLinesUnread();
-    // ack acts only on lines the supervisor was shown: it names the last one it dealt with, by the ref
-    // unread printed. No --all (it would ack a line written between the listing and the ack), and a
-    // bare id only when one unread line has it (a set line shares its object's id)
-    if (flags.all) die('unread ack takes the ref of the last line you dealt with, as unread listed it: --all would also ack a line the owner wrote since');
-    if (!positional[1]) die('usage: unread ack <ref>');
-    const byRef = list.find((l) => ownerLineKey(l) === positional[1]);
-    const byId = list.filter((l) => l.id === positional[1]);
-    if (!byRef && byId.length > 1) die(`${byId.length} unread lines carry ${positional[1]}: ack by the ref unread lists (${byId.map(ownerLineKey).join(', ')})`);
-    const to = byRef ?? byId[0];
-    if (!to) die(`${positional[1]} is not an unread owner line (unread lists them)`);
+    // ack acts only on the lines the supervisor names, each by the ref unread printed: never on a
+    // range, since a line synced in late sorts among them unseen, and never --all. A bare id names
+    // its line only when one unread line has it (a set line shares its object's id).
+    if (flags.all) die('unread ack takes the refs of the lines you dealt with, as unread listed them: --all would also ack a line the owner wrote since');
+    const names = positional.slice(1);
+    if (!names.length) die('usage: unread ack <ref> [<ref> …]');
+    const picked = [];
+    for (const name of names) {
+      const byRef = list.find((l) => ownerLineKey(l) === name);
+      const byId = list.filter((l) => l.id === name);
+      if (!byRef && byId.length > 1) die(`${byId.length} unread lines carry ${name}: ack by the refs unread lists (${byId.map(ownerLineKey).join(', ')})`);
+      const l = byRef ?? byId[0];
+      if (!l) die(`${name} is not an unread owner line (unread lists them)`);
+      picked.push(l);
+    }
     fs.mkdirSync(runDir, { recursive: true });
     const c = ownerCursor() ?? { floor: noCursorFloor(), acked: [] };
-    const acked = new Set([...c.acked, ...list.slice(0, list.indexOf(to) + 1).map(ownerLineKey)]);
+    const acked = new Set([...c.acked, ...picked.map(ownerLineKey)]);
     // move the floor up past what is dealt with, but never closer to now than UNREAD_LATE_MS (room for
     // a late line) and never past a line still unread; keys under the floor are dropped, so the list
     // stays the size of a day's lines
@@ -16722,14 +16730,14 @@ function cmdUnread() {
     const floor = [c.floor, before(cap)].sort().pop();
     writeOwnerCursor({ floor, acked: [...acked].filter((k) => k.split('|')[0] > floor), acked_at: nowIso() });
     const left = ownerLinesUnread().length;
-    return out(`read up to ${to.id} (${to.at}); ${left ? `${left} still unread` : 'nothing unread'}`);
+    return out(`read ${picked.length} line${picked.length === 1 ? '' : 's'}; ${left ? `${left} still unread` : 'nothing unread'}`);
   }
-  if (sub) die('usage: unread [--json] | unread ack <ref>');
+  if (sub) die('usage: unread [--json] | unread ack <ref> [<ref> …]');
   const list = ownerLinesUnread().map((l) => ({ ref: ownerLineKey(l), id: l.id, type: l.type, op: l.op ?? 'new', at: l.at, what: unreadWhat(l), read: `devteam.mjs log --id ${l.id}` }));
   if (flags.json) return json({ unread: list, cursor: ownerCursor() });
   if (!list.length) return out('nothing unread from the owner');
   for (const x of list) out(`${x.ref}  ${x.what}  (${x.read})`);
-  out(`\n${list.length} unread. Act on each (its question, thread or goal), then: devteam.mjs unread ack <the last ref you dealt with>`);
+  out(`\n${list.length} unread. Act on each (its question, thread or goal), then ack the ones you dealt with: devteam.mjs unread ack ${list.map((x) => x.ref).join(' ')}`);
 }
 
 function cmdPrompt() {
@@ -21281,7 +21289,7 @@ Decide and act (supervisor.md, constitution.md)
   review result <qid> [--json|--tsv|--commit]   the owner's result, once every hash verifies (exit 1 otherwise); --commit copies it into this worktree, the PR that asked (project/questions/<qid>/result.json, or the ticket's questions/<qid>/ on a ticket branch), and prints the line to stage it
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
-  unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref>   (supervisor) dealt with every listed line up to that one
+  unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
