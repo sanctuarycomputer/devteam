@@ -166,10 +166,10 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
 
   await t.test('Done goes through once every record is done; never while one is unchanged', async () => {
     // p.click measures where a control is and then presses there, in two steps. An answered card stays
-    // in the Inbox as its "Answered" note until a redraw of data that lists the answer removes it, and
-    // that redraw moves every card below it up the page: if it lands between the two steps the press
-    // misses (the note never focused). So before the next card's clicks, wait for that redraw itself:
-    // the Answered count one up (it counts the server's answered list) and the card gone.
+    // in the Inbox as its "Answered" note until the next redraw removes it, moving every card below it
+    // up the page; the redraw of data that lists the answer can move what sits above them too. If either
+    // lands between the two steps the press misses (the note never focused). So before the next card's
+    // clicks, wait for both: the card gone, and the Answered count one up (the server's answered list).
     const answeredNow = async () => Number(/\((\d+)\)/.exec(await p.ev(`document.getElementById('answered-sum')?.textContent ?? ''`))?.[1] ?? 0);
     const n0 = await answeredNow();
     const settled = (q, n) => soon(`!${card(q)} && document.getElementById('answered-sum')?.textContent === 'Answered (${n})'`, `${q === Q ? 'Q' : 'Q2'} drawn answered by the server, its card gone`);
