@@ -12357,6 +12357,7 @@ function collectMetrics(since) {
       add('medium', 'review-unlanded', q.id, `answered ${hours(now - Date.parse(q.answered_at))}h ago; the owner's result is not on ${loadSettings().main_branch} yet (it lives only in run/, which no one backs up)`, `in the worktree of the PR that asked (${q.review.ref}): review result ${q.id} --commit, commit it, and land the PR`);
     }
   }
+  { const u = ownerLinesUnread(); const old = u.filter((l) => now - Date.parse(l.at) > UNREAD_GRACE_MS); if (old.length) add('high', 'owner-unread', 'owner', `${old.length} line${old.length === 1 ? '' : 's'} from the owner unread for over ${UNREAD_GRACE_MS / 60000} minutes, the oldest ${old[0].id} (${unreadWhat(old[0])})`, 'run unread, act on each, then unread ack <the last id you dealt with>'); }
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
@@ -16260,11 +16261,72 @@ function promptFor(role, id, R = repo('home')) {
   if (role === 'worker' && recordsInHomeId(id)) return `${head}. Only this ticket's code goes in ${R.name}: nothing of the project, records included. Keep its records (spec, plan, verification, reviews) under ${projectRel}/tickets/${id}/ in ${recordsWorktreePath(id)}, a checkout of home on its branch ticket/${id}; commit and push them there, and run dispose there. A final review record names the home commit of the records it reviewed in a line "- Records: <full sha>" beside its verdict on this repo's head.${repo('home').settings.forge === 'git' ? '' : ` Open a PR in home from ticket/${id} with this ticket's PR title too: merge lands it with the code.`}`;
   return `${head}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
-// The supervisor's opening prompt: the drained or parked preface first, when there is one.
+// The supervisor's opening prompt: the drained or parked preface first, when there is one, and
+// what the owner wrote while it was away.
 function supervisorOpeningPrompt(p = PROMPTS.supervisor) {
   const d = drainedPreface();
-  return d ? `${d}\n\n${p}` : p;
+  let n = 0;
+  try { n = ownerLinesUnread().length; } catch {}
+  const u = n ? `The owner wrote ${n} line${n === 1 ? '' : 's'} you haven't dealt with yet (answers, thread turns, decisions). First, run node docs/devteam/scripts/devteam.mjs unread, act on each, and ack them (unread ack <id>).` : null;
+  return [d, u, p].filter(Boolean).join('\n\n');
 }
+
+// What the owner wrote that the supervisor hasn't dealt with yet: a cursor over the owner's log lines
+// (answers, thread turns, goal decisions, corrections, secrets posted, acks), kept in run/. Every
+// owner line is written to the log whether the supervisor is up or not; the cursor moves only when
+// the supervisor says it has dealt with a line (unread ack), never because a nudge was typed or a
+// screen shown. So a nudge lost to a supervisor that was down, at a dialog or restarting costs a
+// few minutes, never the line: `unread` lists it, the prompt at every start says how many, and
+// past UNREAD_GRACE_MS the owner-unread finding (high) wakes wait and shows in status and metrics.
+const UNREAD_GRACE_MS = 10 * 60000;
+const ownerCursorFile = () => runPath('owner-cursor.json');
+// The cursor is a floor and the ids dealt with since: a line that reaches this machine late (synced
+// from another clone, written with an earlier stamp) is still unread, as a time alone would not see.
+function ownerCursor() {
+  try { const c = JSON.parse(readText(ownerCursorFile()) ?? 'null'); if (c && typeof c.floor === 'string' && Array.isArray(c.acked)) return c; } catch {}
+  return null;
+}
+function ownerFloor() {
+  // no cursor yet (a new machine, or a kit from before it): what the owner wrote after the
+  // supervisor's own last line is unread, so an upgrade never hides an answer and never replays years
+  return ownerCursor()?.floor ?? readLog().lines.filter((l) => l.by === 'supervisor' && typeof l.at === 'string').map((l) => l.at).sort().pop() ?? '';
+}
+function ownerLinesUnread() {
+  const floor = ownerFloor();
+  const acked = new Set(ownerCursor()?.acked ?? []);
+  return readLog().lines.filter((l) => l.by === 'owner' && typeof l.at === 'string' && typeof l.id === 'string' && l.at > floor && !acked.has(l.id)).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
+}
+const unreadWhat = (l) => {
+  const text = [l.answer, l.text, l.verdict, l.note, l.outcome, l.status].find((x) => typeof x === 'string' && x);
+  return `${l.type}${l.op && l.op !== 'new' ? ` ${l.op}` : ''}${text ? `: ${String(text).replace(/\s+/g, " ").slice(0, 120)}` : ''}`;
+};
+// unread [--json]: the owner's lines past the cursor, oldest first. unread ack <id> | --all: the
+// supervisor has dealt with every line up to <id> (or every one listed now).
+function cmdUnread() {
+  const sub = positional[0];
+  if (sub === 'ack') {
+    supervisorOnly('unread ack');
+    const list = ownerLinesUnread();
+    const to = flags.all ? list.at(-1) : list.find((l) => l.id === positional[1]);
+    if (!flags.all && !positional[1]) die('usage: unread ack <id> | unread ack --all');
+    if (!to && !flags.all) die(`${positional[1]} is not an unread owner line (unread lists them)`);
+    fs.mkdirSync(runDir, { recursive: true });
+    const upTo = to ? list.slice(0, list.indexOf(to) + 1).map((l) => l.id) : [];
+    const c = ownerCursor() ?? { floor: ownerFloor(), acked: [] };
+    // ids under the floor are done for good; the list stays the size of what is still live
+    const live = new Set(readLog().lines.filter((l) => l.by === 'owner' && l.at > c.floor).map((l) => l.id));
+    fs.writeFileSync(ownerCursorFile(), `${JSON.stringify({ floor: c.floor, acked: [...new Set([...c.acked, ...upTo])].filter((id) => live.has(id)), acked_at: nowIso() })}\n`);
+    const left = ownerLinesUnread().length;
+    return out(`${to ? `read up to ${to.id}; ` : ''}${left ? `${left} still unread` : 'nothing unread'}`);
+  }
+  if (sub) die('usage: unread [--json] | unread ack <id> | unread ack --all');
+  const list = ownerLinesUnread().map((l) => ({ id: l.id, type: l.type, op: l.op ?? 'new', at: l.at, what: unreadWhat(l), read: `devteam.mjs log --id ${l.id}` }));
+  if (flags.json) return json({ unread: list, cursor: ownerCursor() });
+  if (!list.length) return out('nothing unread from the owner');
+  for (const x of list) out(`${x.at}  ${x.id}  ${x.what}  (${x.read})`);
+  out(`\n${list.length} unread. Act on each (its question, thread or goal), then: devteam.mjs unread ack <the last id you dealt with>`);
+}
+
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
@@ -16381,7 +16443,7 @@ function nudgeSupervisor(line) {
 function deliverNudges() { for (const line of queuedNudges.splice(0)) typeNudge(line); }
 function typeNudge(line) {
   const { target, problem } = resolvePane(supervisorTarget());
-  if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
+  if (problem) return void warn(`not delivered to the supervisor: ${problem}; the line stays unread until it acks it (unread)`);
   typeInto(target, line);
 }
 const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'supervisor' : w; };
@@ -20743,14 +20805,14 @@ Dashboard and releases
 // recover, machine and operator-thread write, and are allowed by name below: bringing a supervisor
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
-const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
-const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
+const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'unread', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'unread']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, unread: cmdUnread, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,

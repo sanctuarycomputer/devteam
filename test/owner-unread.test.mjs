@@ -1,0 +1,60 @@
+// Every owner line is in the log whether the supervisor is up or not; a cursor says which ones the
+// supervisor has dealt with. An answer given while the supervisor was down, then a restart: the
+// line is unread, the opening prompt says so, and past ten minutes the owner-unread finding (high)
+// is raised, until the supervisor acks it. Nothing is cleared by a nudge or a screen.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { threadsFixture } from './lib/kit.mjs';
+
+test('an owner answer stays unread, is in the opening prompt and raises owner-unread, until the supervisor acks it', () => {
+  const F = threadsFixture('owner-unread');
+  try {
+    const AWAY = { DEVTEAM_SUPERVISOR: 'no-such-session:0' };
+    const ask = (q) => F.sup(['ask', '--kind', 'owner-decision', '--goal', F.goal, '--question', q, '--recommendation', 'Yes', '--options', 'Yes', 'No']).trim().split('\n')[0];
+    const unread = () => JSON.parse(F.sup(['unread', '--json'])).unread;
+    const finding = () => JSON.parse(F.sup(['metrics', '--json'])).findings.find((f) => f.kind === 'owner-unread');
+    // start from a clean slate: whatever the fixture's owner wrote is dealt with
+    F.sup(['unread', 'ack', '--all']);
+    assert.deepEqual(unread(), []);
+    const q1 = ask('Ship the EU launch first?');
+    const q2 = ask('Keep the old checkout a week?');
+    // the owner answers while the supervisor is down: the nudge reaches no one
+    F.owner(['answer', q1, 'Yes'], AWAY);
+    const u = unread();
+    assert.equal(u.length, 1, JSON.stringify(u));
+    assert.match(u[0].what, /Yes/);
+    assert.match(F.sup(['unread']), /1 unread\. Act on each/);
+    // the restart: the opening prompt leads with it
+    assert.match(F.sup(['prompt', 'supervisor']), /The owner wrote 1 line you haven't dealt with yet/);
+    // within the grace, no finding; past it, high
+    assert.equal(finding(), undefined, 'not yet: a nudge may still be on its way');
+    // a line from twenty minutes ago that reached this machine only now (synced late): unread too,
+    // and old enough to raise the finding. The floor is put back an hour so the line is above it.
+    const cf = path.join(F.old, 'docs/devteam/run/owner-cursor.json');
+    const c = JSON.parse(fs.readFileSync(cf, 'utf8'));
+    fs.writeFileSync(cf, JSON.stringify({ ...c, floor: new Date(Date.now() - 3600000).toISOString() }));
+    F.hand('owner', { type: 'thread', title: 'An old one from while you were away' }, 20 * 60000);
+    const f = finding();
+    assert.ok(f, 'owner-unread once a line is over ten minutes old');
+    assert.equal(f.severity, 'high');
+    // ack up to the first: the later one stays
+    const all = unread();
+    assert.equal(all.length, 2, 'the late line and the answer');
+    assert.match(all[0].what, /^thread/, 'oldest first: the late line');
+    F.sup(['unread', 'ack', all[0].id]);
+    assert.deepEqual(unread().map((x) => x.id), [all[1].id]);
+    // a new answer after the ack is unread again; ack --all clears everything listed
+    F.owner(['answer', q2, 'No'], AWAY);
+    assert.equal(unread().length, 2);
+    assert.match(F.sup(['unread', 'ack', '--all']), /nothing unread/);
+    assert.deepEqual(unread(), []);
+    assert.equal(finding(), undefined);
+    assert.doesNotMatch(F.sup(['prompt', 'supervisor']), /you haven't dealt with yet/);
+    // only the supervisor moves the cursor: the operator may read the list, never ack it
+    assert.match(F.owner(['unread'], { DEVTEAM_ROLE: 'operator' }), /nothing unread/);
+    assert.match(F.fails(['unread', 'ack', '--all'], { DEVTEAM_ROLE: 'operator' }), /operator/);
+    assert.ok(fs.existsSync(path.join(F.old, 'docs/devteam/run/owner-cursor.json')));
+  } finally { F.done(); }
+});
