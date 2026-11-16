@@ -1255,8 +1255,9 @@ function saveFilters(page, state) {
 // The router's table (dashboard-shell@1, shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
-  pages: ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'governance', 'sensors', 'retros', 'loop', 'settings'],
+  pages: SHELL_ROUTES_PAGES,
   links: {
     ticket: 'board', feature: 'board', story: 'board', release: 'board', wave: 'board', milestone: 'board', planner: 'board', thread: 'board',
     goal: 'goals', q: 'overview', talk: 'overview',
@@ -1265,7 +1266,14 @@ const SHELL_ROUTES = {
     artifact: 'library', preview: 'library', review: 'library', 'review-preview': 'library', file: 'library',
   },
   files: [[/(^|\/)docs\/devteam\/(governance|process)\//, 'governance'], [/(^|\/)strategy\.md$/, 'governance']],
-  redirects: { monitoring: 'sensors', health: 'sensors?st=fleet' },
+  redirects: {
+    monitoring: 'sensors',
+    // permanent: the old Loop tab subjects open the Loop page (and its tab)
+    'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
+    // until kit-100: today's Inbox list anchor, and every page's Threads "Inbox" tab, are the Inbox page
+    questions: 'inbox',
+    ...Object.fromEntries(SHELL_ROUTES_PAGES.map((p) => [`${p}?th=inbox`, 'inbox'])),
+  },
 };
 /* shell-routes end */
 // An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.

@@ -378,7 +378,7 @@ test('pages and Threads tabs register once; a throwing tab shows its error', () 
 });
 
 test("the router's table: page ids and link kinds disjoint, and every legacy head goes to its home page", () => {
-  assert.deepEqual([...R.pages].sort(), ['board', 'goals', 'governance', 'inbox', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
+  assert.deepEqual([...R.pages].sort(), ['board', 'goals', 'health', 'inbox', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
   for (const p of R.pages) { assert.doesNotMatch(p, /[/?]/); assert.ok(!Object.hasOwn(R.links, p), `${p} is not a link kind`); }
   // every link kind today's route() reads
   const route = INDEX.slice(INDEX.indexOf('function route()'), INDEX.indexOf('function hideDrawer()'));
@@ -401,13 +401,21 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
   // today's section anchors are page heads, and the two that move redirect
   for (const s of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#monitoring', R))), { page: 'sensors', state: {}, redirected: true });
-  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#health', R))), { page: 'sensors', state: { st: 'fleet' }, redirected: true });
+  // until kit-93: Health is a page of its own, and Governance has none yet (it is over overview)
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#health', R))), { page: 'health', state: {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#governance', R))), { page: 'overview', state: {} });
+  // until kit-100: every page's Threads tab is the Inbox page
+  for (const p of R.pages) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${p}?th=inbox`, R))), { page: 'inbox', state: {}, redirected: true }, `${p}?th=inbox`);
+  // the old Loop tab subjects are permanent redirects
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/orient', R))), { page: 'loop', state: { lt: 'orient' }, redirected: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/observe', R))), { page: 'loop', state: {}, redirected: true });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('', R))), { page: 'overview', state: {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#questions', R))), { page: 'overview', state: {} }, 'an unknown head is overview');
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#questions', R))), { page: 'inbox', state: {}, redirected: true }, "today's Inbox list anchor (until kit-100)");
 });
 
 test('parseHead and headFor round-trip every page head and link head', () => {
-  const heads = ['#overview', '#overview?th=inbox', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#governance', '#retros', '#settings', '#inbox'];
+  const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#inbox'];
+  // ?th=inbox on a page redirects to the Inbox page (until kit-100), so it is not a round-trip head
   for (const p of R.pages) heads.push(`#${p}`, `#${p}?th=open&t=t-20261115-1`);
   for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
   heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');
@@ -435,7 +443,7 @@ test('stampFor, closeTarget and rememberedFilters', () => {
   const cold2 = S.stampFor({ hash: '#goal/g-1', state: null }, cold1, false, R);
   assert.deepEqual(plain(cold2), { page: '#board', depth: 2, openedHere: false });
   assert.deepEqual(plain(S.closeTarget(cold2)), { replace: '#board' });
-  assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', state: null }, null, true, R)), { page: '#governance', depth: 1, openedHere: false }, 'a cold file link by its path');
+  assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', state: null }, null, true, R)), { page: '#overview', depth: 1, openedHere: false }, 'a cold file link by its path (governance is no page until kit-93, so over overview)');
   assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fx.md', state: null }, null, true, R)), { page: '#library', depth: 1, openedHere: false });
   // Threads changing under an open peek: the same entry, its page head updated
   assert.deepEqual(plain(S.withPage(p1, '#progress?goal=g-1&th=open')), { page: '#progress?goal=g-1&th=open', depth: 1, openedHere: true });
