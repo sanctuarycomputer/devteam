@@ -524,8 +524,15 @@ const SETTINGS_DEFAULTS = {
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
   forge: 'github',
-  max_active_tickets: 5,
-  max_active_per_component: 2,
+  // Workers at once; null (the default) is no cap: move as fast as the graph allows. Planning keeps
+  // parallel workers apart (touches, D4), the machine's memory ceiling keeps the box alive
+  // (machine_memory_ceiling), and the owner can set a number when they want to throttle.
+  max_active_tickets: null,
+  // Workers at once in one component; null (the default) is no cap. Parallel work is the point: what
+  // keeps two workers off each other is touches (validate's D4 makes any two tickets that touch the
+  // same files depend on one another, and ready marks a ready ticket whose touches overlap a running
+  // one), not a count per component. A project can still set a number if it wants one.
+  max_active_per_component: null,
   // Planners at once (plan/<feature> branches in flight); null is no cap. Every goal that needs
   // planning gets one unless its design waits on another goal's (goal set --plan-after). They don't
   // count against max_active_tickets.
@@ -4071,6 +4078,16 @@ function notSchedulable(t) {
   if (coverageGap(name, repo(name))) return 'unowned files';
   return null;
 }
+// A cap setting as a number to compare against: null, absent or not a positive number is no cap.
+const capOf = (v) => (typeof v === 'number' && v > 0 ? v : Infinity);
+const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
+// The running tickets whose touches overlap t's in the same repo: t waits for them to merge. D4
+// usually orders such tickets already; touches widened after planning can still collide.
+function overlapsActive(t, activeIds, ts) {
+  const repo = repoOfTicketLink(t);
+  const mine = t.touches ?? [];
+  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => globsOverlap(ga, gb))); });
+}
 function cmdReady() {
   const ts = tickets();
   const rows = [];
@@ -4097,13 +4114,22 @@ function cmdReady() {
   const active = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
+  // what keeps parallel workers apart: a ready ticket whose touches overlap a running one's waits for
+  // it to merge. Only build rows: a plan-ahead ticket specs and plans beside its running dependency.
+  for (const r of rows) {
+    if (r.mode !== 'build') continue;
+    const hits = overlapsActive(ts.get(r.id), active, ts);
+    if (hits.length) r.overlaps_active = hits;
+  }
+  // both caps read the same way: a positive number is a cap, anything else (null, 0) is none
+  const capped = (r) => (perComponent[r.component] ?? 0) >= capOf(s.max_active_per_component);
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
-  out(`active workers: ${active.length}/${s.max_active_tickets}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
+  out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
-  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
+  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
 }
 
 function cmdWaves() {
@@ -10885,6 +10911,7 @@ function currentMilestone(g) {
 // points, or the design's estimate where nothing is planned yet), the waves that takes at the
 // current worker slots, and a date where the fleet has a measured rate (planning.md §1).
 let roadmapMemo = null;
+const FORECAST_WIDTH = 8;
 function goalForecast(g, r = null) {
   const ms = g.milestones ?? [];
   if (!ms.length) return null;
@@ -10892,7 +10919,8 @@ function goalForecast(g, r = null) {
   const avgW = all.length ? all.reduce((a, t) => a + weight(t), 0) / all.length : 1;
   // one roadmap per process: every goal's view asks for its forecast, and the roadmap reads git
   r ??= (roadmapMemo ??= collectRoadmap());
-  const slots = Math.max(1, loadSettings().max_active_tickets ?? 1);
+  // with no cap, an unplanned milestone is forecast at FORECAST_WIDTH tickets at once; planned features use their own waves
+  const slots = Math.max(1, Number.isFinite(capOf(loadSettings().max_active_tickets)) ? loadSettings().max_active_tickets : FORECAST_WIDTH);
   const cur = currentMilestone(g);
   const fs_ = features();
   let cumPts = 0;
@@ -12405,12 +12433,15 @@ function collectMetrics(since) {
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
     if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
+  // what idle capacity offers: ready tickets that don't overlap a running one's touches (ready marks those)
+  const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length);
   // a ready fix ticket may use an incident slot past the cap
-  const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
-  if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
-  if (!drained && ready.length && active < settings.max_active_tickets && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
+  if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
+  if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
-  if (memFull && (idlePlanning || (!drained && ((ready.length && active < settings.max_active_tickets) || (readyFix.length && active < settings.max_active_tickets + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${settings.max_active_tickets} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
+  if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
