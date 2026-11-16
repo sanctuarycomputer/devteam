@@ -470,19 +470,17 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await until(async () => await hash() === '#board' && !(await p.ev("document.body.classList.contains('threads-open')")) && await p.ev("getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, Board at rest');
 
   // pins: the ticket thread's on Board; a pin keeps the page and opens the card; none on Overview
-  // (since kit-89, spec §2.5: opening a thread from a pin is a Threads change, one entry with its t; × takes t away)
   await until(() => pinned(TT), "the ticket thread's pin on Board");
   n = await len();
   await p.click(`#tl-pins [data-tl-pin="${TT}"]`);
   await until(() => cardOn(TT), 'the pin opens the card');
-  assert.equal(await hash(), `#board?t=${TT}`, 'the pin keeps the page');
-  assert.equal(await len(), n + 1, 'and adds one entry');
+  assert.equal(await hash(), '#board', 'the pin keeps the page');
+  assert.equal(await len(), n, 'and adds no entry');
   await p.click('[data-tl-close]');
   await until(() => cardShut(), 'closed');
 
-  // over a #talk/ entry (review T4-1): with #talk/<TT> open over Board, B's pin opens B's card. Since kit-89
-  // (spec §2.5) the pin is a Threads change: under talk/ a change of t replaces the talk/ entry with the page head
-  // and B's t (no entry added), and B's × takes t away, a new entry; Board stays
+  // a card opened from outside a route closes in place, even over a #talk/ entry (review T4-1): with
+  // #talk/<TT> open over Board, B's pin opens B's card; its × moves no history and leaves the hash
   await go(`#talk/${TT}`);
   await cardOver(TT, 'board', 'the ticket thread over Board');
   await until(() => pinned(TB), "the Board thread's pin");
@@ -490,12 +488,10 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   // clicked on the pin itself (the open card may lie over it)
   await p.ev(`document.querySelector('#tl-pins [data-tl-pin="${TB}"]').click()`);
   await until(() => cardOn(TB), "B's card, from its pin");
-  assert.equal(await hash(), `#board?t=${TB}`, 'the talk/ entry replaced');
-  assert.equal(await len(), n, 'history.length unchanged');
   await p.click('[data-tl-close]');
   await until(() => cardShut(), "B's card closed");
-  assert.equal(await hash(), '#board', 't taken away');
-  assert.equal(await len(), n + 1, 'one entry');
+  assert.equal(await hash(), `#talk/${TT}`, 'the hash unchanged');
+  assert.equal(await len(), n, 'history.length unchanged');
   assert.deepEqual(await shown(), ['board'], 'still on Board');
 
   await go('#overview');

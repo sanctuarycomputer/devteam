@@ -618,6 +618,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   await nav('goals');
   await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'Goals, still closed');
   // with the panel open on the list, a nav click carries th=open
+  await soon(STEADY('.pagebar .tt'), 'the button at rest');
   await p.click('.pagebar .tt');
   await soon(`location.hash === '#goals?th=open' && ${AT_REST}`, 'the panel on Goals');
   assert.equal(await p.ev("document.activeElement?.closest('#th-tabs [role=\"tab\"]')?.getAttribute('aria-selected')"), 'true', 'the focus on the selected tab');
@@ -704,15 +705,29 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon(`location.hash === '#goals?th=open' && !!${ROW(A)}`, 'the talk/ entry replaced by the list');
   assert.equal(await p.ev('history.length'), n, 'history.length unchanged');
 
-  // a pin opens its card as an entry (t), and resolving a card the route opened takes t away
+  // a pin opens its card in place (spec §2.4: today's [data-tl-pin]), no entry; its × closes it in place
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
   await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'closed');
+  // a fresh #talk/ link from a page head without keys: the remembered th applied before its route (review T3-2)
+  await p.ev(`localStorage.setItem('devteam.threads.open', JSON.stringify({ th: 'open' })); location.hash = '#talk/${G}'; void 0`);
+  await soon(`location.hash === '#talk/${G}' && ${FLOATING(G)} && ${IS_OPEN} && history.state?.page === '#goals?th=open&t=${G}'`, 'the remembered th under the talk/ card');
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && history.state?.page === '#goals?t=${G}'`, 'the panel closed, the card kept');
+  await p.ev("document.querySelector('#tl-card [data-tl-close]').click(); void 0");
+  await soon(`location.hash === '#goals' && ${CARD}.hidden && !${IS_OPEN}`, 'the card closed: back to Goals');
   await soon(`!!document.querySelector('#tl-pins [data-tl-pin="${G}"]')`, "G's pin");
   n = await p.ev('history.length');
   await p.ev(`document.querySelector('#tl-pins [data-tl-pin="${G}"]').click()`);
-  await soon(`location.hash === '#goals?t=${G}' && ${FLOATING(G)}`, 'the pin: t, the card');
-  assert.equal(await p.ev('history.length'), n + 1, 'a new entry');
+  await soon(FLOATING(G), 'the pin: the card');
+  assert.deepEqual(await p.ev('[location.hash, history.length]'), ['#goals', n], 'in place: the hash kept, no entry');
+  await p.ev("document.querySelector('#tl-card [data-tl-close]').click(); void 0");
+  await soon(`${CARD}.hidden`, 'closed');
+  assert.deepEqual(await p.ev('[location.hash, history.length]'), ['#goals', n], 'closed in place');
+  // resolving a card the route opened (its t) takes t away
+  await go(`#goals?t=${G}`, "G's card by its t");
+  await soon(FLOATING(G), "G's card open");
   await p.click('#tl-c-acts [data-tl-resolve]');
   await soon("!!document.querySelector('#tl-card [data-tl-resolve-go]')", 'the resolve form');
   await p.click('#tl-card [data-tl-resolve-go]');

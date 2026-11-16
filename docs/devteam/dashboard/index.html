@@ -3875,7 +3875,7 @@ function closeDrawer() {
   lastFocus?.focus?.();
   const c = closeTarget(history.state);
   // back to the entry below, which has its own head: the panel's th and t from under the peek go with it (kit-89 §2.5)
-  if (c.go) { TH_CARRY = history.state?.page ?? null; history.go(c.go); } else goHead(c.replace, { replace: true });
+  if (c.go) { TH_CARRY = history.state?.page ?? null; TH_CARRY_FROM = location.hash; history.go(c.go); } else goHead(c.replace, { replace: true });
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
@@ -5121,13 +5121,15 @@ function stampEntry() {
   HERE = history.state;
 }
 // Every route draws the Threads panel from the page head in force after the rest (thRoute), whichever way it went
-// (kit-89 spec §2.5): freshness read before the entry is stamped; a peek closed carries its page's th and t; on a
-// fresh entry the remembered panel applied; then the panel decided, drawn and remembered. A route run inside
-// routeHead (a redirect's stamped replace) has done all of it already.
+// (kit-89 spec §2.5): freshness read before the entry is stamped; once stamped (in routeHead, before any link is
+// opened, so a talk/ route reads the head with them) a peek closed carries its page's th and t, and on a fresh entry
+// the remembered panel is applied; then the panel decided, drawn and remembered. A route run inside routeHead (a
+// redirect's stamped replace) has done all of it already.
 let ROUTE_N = 0;
 // TH_MADE: the head thGo is about to assign (an entry it makes isn't fresh); TH_FRESH: an entry's freshness, read
 // before its stamp ({ hash, fresh }); TH_CARRY: the page head under a peek being closed by going back
-let TH_MADE = null, TH_FRESH = null, TH_CARRY = null;
+// TH_CARRY_FROM: the peek's hash it was taken on (a history move that stays on it carries nothing)
+let TH_MADE = null, TH_FRESH = null, TH_CARRY = null, TH_CARRY_FROM = null;
 function route() {
   thFreshness();
   const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
@@ -5135,14 +5137,14 @@ function route() {
   const carry = TH_CARRY;
   TH_CARRY = null;
   const n = ++ROUTE_N;
-  routeHead();
+  routeHead({ fresh, carry });
   if (n !== ROUTE_N) return;
-  if (carry) thCarry(carry);
-  if (fresh) thRemember();
   thRoute();
 }
-function routeHead() {
+function routeHead({ fresh = false, carry = null } = {}) {
   stampEntry();
+  if (carry) thCarry(carry);
+  if (fresh) thRemember();
   const raw = location.hash.slice(1);
   const p = parseHead(location.hash, SHELL_ROUTES);
   // leaving a talk/ entry (a route to any other head) closes the card it opened
@@ -5183,12 +5185,13 @@ function routeHead() {
 }
 // The drawer hidden, as when the route moves on (closeDrawer also closes its entry): it slides out
 function hideDrawer() { if (!$('drawer').hidden) { peekHide(); DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
-window.addEventListener('hashchange', () => { if (DATA) route(); });
+// (a peek's carry is for the route its close lands on, never a later one: dropped if that route doesn't run)
+window.addEventListener('hashchange', () => { if (DATA) route(); else TH_CARRY = null; });
 // A move through history fires popstate at once and queues its hashchange, so a link followed in
 // between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
 // its close would go back past the page. HERE follows each entry here, as it changes.
 // (the Threads code reads an entry's freshness first, before the stamp hides it: kit-89 spec §2.5)
-window.addEventListener('popstate', () => thFreshness());
+window.addEventListener('popstate', () => { thFreshness(); if (TH_CARRY && location.hash === TH_CARRY_FROM) TH_CARRY = null; });
 window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -6676,7 +6679,7 @@ document.addEventListener('click', (e) => {
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
   const pin = e.target.closest('[data-tl-pin]');
-  if (pin) return void thPin(pin.dataset.tlPin);
+  if (pin) return void tlOpen(pin.dataset.tlPin, false);
   const row = e.target.closest('[data-tl-open]');
   if (row) return void thOpenRow(row.dataset.tlOpen);
   if (e.target.closest('[data-tl-back]')) return void thBack();
@@ -7105,14 +7108,6 @@ function thOpenRow(id) {
   if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); TH_MADE = head; location.hash = head; return; }
   thRoute();
   tlReveal(s);
-}
-// A pin on the page: its thread opened as a Threads change, a new entry with its t (spec §2.5: every change is an
-// entry), the panel's th kept; on a frame (an artifact, a preview) or in the /view/ tab, today's in place.
-function thPin(id) {
-  const t = TL.threads.find((x) => x.id === id);
-  if (!t || VIEWER || (t.subject?.kind !== 'item' && t.subject?.kind !== 'page')) return void tlOpen(id, false);
-  if (tlInPanel(t)) return void tlOpen(id, false);
-  thGo({ th: TH.th, t: id });
 }
 // A + draft sent: once the threads have its id, it is the panel's thread in the URL, a new entry (so Back goes
 // to the list the + was pressed on), the focus left where it is (spec §2.4).
