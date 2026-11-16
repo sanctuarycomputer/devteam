@@ -1,0 +1,34 @@
+# Final review, pass 1
+
+- Reviewer: final-reviewer-1 (fresh subagent, claude-opus-5-5; has not seen the build)
+- Reviewed: 7fa5467fb18d8352132b10ea7d329fa9502203ac (the whole branch against origin/main)
+
+## What was checked
+
+**Scope.** `git diff --name-only origin/main...HEAD`: `test/next-step.strategy.test.mjs` (the ticket's one `touches` entry) and files under `docs/devteam-dev/tickets/kit-246-steady-inbox-order-test/`. Nothing else.
+
+**The cause is the CI failure.** Job 133430167953 (main run 43904665122, attempt 1, `kit (24, chrome 1/2)`, head 5718dfe): `not ok 6`, `timed out waiting for the owner's value`, at `next-step.strategy.test.mjs:272` (the server `until` after Send at that sha), `duration_ms: 251863` (1200 polls of 100 ms plus a CLI spawn each). kit-88 (8bb8f05) is not an ancestor of 5718dfe, so the slide-in can't explain that run, and the peek race does. The mechanism holds against the dashboard at HEAD. `openGoal` draws at once with `peekOf('goal', id)` undefined. `attrs` then draws a `Record … loading…` row and no `Created`, and `historySection` draws `<p class="loading">`. `fetchPeek` → `redraw()` redraws when the peek lands. `redraw()` is gated only by `busyDrawer()` (a focused field or a confirm), never by `holding()`/`PRESSED`. The record's stored rows, `Created` and `Last changed` go in the own-props `<dl>` above the Computed list that holds "Why it matters", so Wrong? moves down. `p.click` (test/lib/chrome.mjs) measures in one `Runtime.evaluate` and presses in later `Input.dispatchMouseEvent` calls. The race repro at both heads (`repro-race.txt`, `repro-race-a7a13a8.txt`) shows the press landing off the button and the same timeout. `repro-fixed*.txt` shows the press landing on Wrong? once the record is drawn.
+
+**Each wait uses the page's own signal, and none passes vacuously.**
+- Record: `props()` draws `<dt title=… tabindex=0>${escHtml(k)}</dt>`, so the tooltip is an attribute and the dt's text is exactly `Created`. `attrRow('Created', …)` is non-empty whenever `r` exists, and only `attrs` makes it. In the goal drawer, `.loading` comes only from `historySection`'s pending state (the `Record` row is `span.muted`, not `.loading`, and `#loading` at l.902 is outside `#drawer-body`). Once `PEEKS` has the goal, a failed refresh fetch doesn't evict it (`if (!PEEKS.has(k)) PEEK_FAIL.set`), so the signal stays true. Healthy page: both halves come from the same draw, so it can't hang.
+- Form open: the `[data-correct]` handler unhides the form and focuses `form.querySelector('input')`. That is the reason field (the select comes before it but is not an `input`). It is the click's own effect, and it holds the drawer (`busyDrawer`) and the page (`holding`, `typingIn`) while `p.ev` sets the values (which doesn't move focus).
+- Sent: `apply` inserts `[data-correct-sent]`, and a refresh after the server has the value draws `Change it`. Before Send the button reads `Wrong?`, asserted at l.275, so neither half can be true early.
+
+**Remaining races.** Between Send's press and release, focus is on the button, so `busyDrawer()` is false. A peek that lands then redraws, but with the record already drawn and nothing writing to the fixture, `openGoal` builds the same HTML and `showDrawer` returns at `html === LAST_HTML`, so the DOM is untouched. The same holds for Wrong?'s press and release. A refresh between setting the values and Send is held by the focused field. The one open path is a write to the goal's record during that window: it changes the HTML and would rebuild the form hidden. Nothing in this fixture writes then, and if it happened the `Correction sent` wait would name it. Not a finding.
+
+**The merged order.** The record wait, then kit-88's at-rest wait, then the text assert and the click. Both conditions stay true once true: a redraw after the drawer is open isn't `opening`, so it doesn't restart the slide. The order is sound, and `repro-race-a7a13a8.txt` shows the record race survives kit-88's wait alone (y=246 → 415), so both waits are needed.
+
+**Done-when 2.** `gh run view`: 43924682759, 43925049072 and 43925420090 succeeded at a7a13a87; 43925700677 and 43926056523 (load=2) succeeded at 1243c14f. All are `workflow_dispatch` on the ticket branch. Each log has node v24.22.2, 5× `# fail 0`, 5× `ok 6 - the Inbox shows`, and no `not ok`, with LOAD 0 on four runs and LOAD 2 on the fifth. `git diff a7a13a8 HEAD -- test/next-step.strategy.test.mjs docs/devteam/dashboard/ test/lib/ docs/devteam/scripts/` is empty. The only diff from either stress head, adding `.github/`, is test-stress.yml gaining a `'18'` Node option, which doesn't affect a node=24 run. So 20 of 20 count for HEAD.
+
+**Done-when 3.** `evidence/mutate.sh` reverses `d.questions.map(…)` in `render()`, and `mutation.txt` shows `not ok 6` at l.252, which at HEAD is the `assert.deepEqual(cards.map((c) => c.id), [gate, detail, unrated, ''], 'the kit's order…')` assert, with subtests 1–5 ok. The script refuses a dirty dashboard and restores it on EXIT/INT/TERM/HUP.
+
+**Run here.** In `review-worktree` at 7fa5467 (removed after): `node --test --test-concurrency=2 test/next-step.strategy.test.mjs` gave pass 6 / fail 0, with subtest 6 at 2.98 s. A second run in that scratch tree added a fetch wrapper that delays every `/api/peek` by 3 s before the drawer opens. The record wait held for 3172 ms, and subtest 6 passed (pass 6 / fail 0). So the wait truly waits for the record and doesn't hang on a slow one. The scratch edit was reverted and the tree removed.
+
+**PR.** #310's body equals pr-body.md, names the cause (§ The cause), links the five stress runs and shows the mutation. Head 7fa5467, OPEN, MERGEABLE.
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| F1 | Minor | spec § Approaches 1, § Acceptance checks 1, § Edge cases; plan Task 1 step 1 | spec.md l.23, l.32, l.42; plan.md l.16 | The spec body and plan still describe the record signal as `.hist-h` present and no `.loading`, and say a failed load draws no `.hist-h`. Only the last Rulings bullet (spec.md l.59) records the move to the `Created` row in `section.attrs` after kit-88 removed `.hist-h`. The code and the PR are right. A reader who goes to § Approaches or the plan gets a signal that no longer exists in the dashboard. Not worth voiding this verdict for. Fold it in if the records are touched again. | |
+| F2 | Minor | plan § Then ("CI green at the head"); verification.md "CI (test.yml)" row | verification.md; PR #310 checks | When reviewed, test.yml run 43927050781 at 7fa5467 was still pending (one job passed, the rest queued). verification.md says only "see the PR". This verdict doesn't attest to CI at the head. The supervisor confirms it is green before merging. Editing verification.md after this verdict would void it. | |
+
+Verdict: APPROVE 7fa5467fb18d8352132b10ea7d329fa9502203ac
