@@ -685,7 +685,7 @@ async function hexOf(root) {
 }
 function keyOf(it) {
   const twins = [...items.values()].filter((o) => o.x.name === it.x.name).length > 1;
-  return twins ? `${it.x.name}-${hex6.get(it.x.root)}` : String(it.x.name);
+  return hubKey(it.x.name, twins, hex6.get(it.x.root));
 }
 // Each dashboard is on its own address: on the machine, its own port on 127.0.0.1. On a cloud box
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
@@ -998,6 +998,46 @@ function boxLine(image, list) {
   return [{ text: `Box ${release}`, amber: false }, hub, ...tools.filter(([n, v]) => tok(n) && tok(v)).map(([n, v]) => ({ text: `${Object.hasOwn(TOOL_WORDS, n) ? TOOL_WORDS[n] : n} ${v}`, amber: false }))];
 }
 /* box-line end */
+/* hub-overview start */
+// The Overview's rules (kit-94), pure: what a project's tab and Inbox stat count, the partly-held
+// pill, the machine switch's mode, and the address keys no view loses. They read only what they are
+// given (and tLine), so test/hub-overview.test.mjs runs them in vm.
+const wholeN = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+// red questions, then the threads in their most pressing state's colour: ready to accept (with the
+// owner's moves) green, else the owner's moves blue, else those waiting on the supervisor grey
+function tabCounts(inbox, threads) {
+  const q = Number.isInteger(inbox) && inbox > 0 ? inbox : 0;
+  const t = threads && typeof threads === 'object' ? threads : {};
+  const you = wholeN(t.you), waiting = wholeN(t.waiting), ready = wholeN(t.ready);
+  const th = ready ? { n: ready + you, tone: 'ok', title: `${ready} ready to accept${you ? `, ${you} your move` : ''}` }
+    : you ? { n: you, tone: 'you', title: `${you} your move` }
+    : waiting ? { n: waiting, tone: 'wait', title: 'all waiting on the supervisor' } : null;
+  return { q, th };
+}
+// a fleet whose goals are mixed (at least two of run, drain, park): "Partly parked · 2 of 11 goals
+// running"; its hover names the held goals when the hello does (fleet.goals.held), else the counts
+function heldPill(fleet) {
+  const g = fleet && typeof fleet === 'object' ? fleet.goals : null;
+  if (!g || typeof g !== 'object') return null;
+  const { run, drain, park } = g;
+  if (![run, drain, park].every((n) => Number.isInteger(n) && n >= 0)) return null;
+  const total = run + drain + park;
+  if (!total || [run, drain, park].filter(Boolean).length < 2) return null;
+  const word = park ? 'Partly parked' : 'Partly draining';
+  const named = Array.isArray(g.held) ? g.held.filter((h) => h && typeof h === 'object' && typeof h.title === 'string').slice(0, 20).map((h) => `${tLine(h.title, 200)}: ${tLine(typeof h.why === 'string' && h.why ? h.why : h.mode, 200)}`) : [];
+  return { word, running: run, total, text: `${word} · ${run} of ${total} goals running`, title: named.length ? named.join('\n') : `${park} parked, ${drain} draining` };
+}
+// the machine switch: the mode every steerable project shares, or mixed; and the three tallies
+function machineMode(modes) {
+  const counts = { running: 0, draining: 0, parked: 0 };
+  for (const m of modes) counts[{ run: 'running', drain: 'draining', park: 'parked' }[m]]++;
+  const mode = !modes.length ? null : modes.every((m) => m === modes[0]) ? modes[0] : 'mixed';
+  return { mode, counts };
+}
+// a project's address: its name, with 6 hex of its root when two share it or the name is a view's
+const HUB_VIEWS = ['overview', 'terminal', 'settings'];
+const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) ? `${name}-${hex}` : String(name));
+/* hub-overview end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
   const all = [...items.values()];

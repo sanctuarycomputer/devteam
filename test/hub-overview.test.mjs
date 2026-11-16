@@ -280,6 +280,64 @@ test('the Overview draws the box line from box.json and the latest list', () => 
   assert.match(html, /\.ov-box \.amber \{ color: var\(--amber-fg\); \}/);
 });
 
+// ----- the Overview's rules: a pure block of hub.html (kit-94), run here in vm -------------------
+// The tab counts, the partly-held pill, the machine switch's mode and the addresses a view keeps.
+// They read T_UNSAFE and tLine, two one-line definitions of the page, which the loader takes too.
+function overviewRules() {
+  const html = hubHtml();
+  const src = html.slice(html.indexOf('/* hub-overview start */'), html.indexOf('/* hub-overview end */'));
+  assert.ok(src.length > 200, 'the hub-overview block is marked in hub.html');
+  const lineOf = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); return html.slice(i, html.indexOf('\n', i)); };
+  const ctx = vm.createContext({});
+  vm.runInContext(`${lineOf('const T_UNSAFE = ')}\n${lineOf('const tLine = ')}\n${src}\n;globalThis.api = { tabCounts, heldPill, machineMode, hubKey };`, ctx);
+  return ctx.api;
+}
+const plain = (x) => JSON.parse(JSON.stringify(x));
+
+test('the Overview\'s rules: tab counts', () => {
+  const { tabCounts } = overviewRules();
+  assert.deepEqual(plain(tabCounts(3, { you: 1, waiting: 1, ready: 1 })), { q: 3, th: { n: 2, tone: 'ok', title: '1 ready to accept, 1 your move' } });
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 2 })), { q: 0, th: { n: 2, tone: 'ok', title: '2 ready to accept' } });
+  assert.deepEqual(plain(tabCounts(0, { you: 2, waiting: 0, ready: 0 }).th), { n: 2, tone: 'you', title: '2 your move' });
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 2, ready: 0 }).th), { n: 2, tone: 'wait', title: 'all waiting on the supervisor' });
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 0 })), { q: 0, th: null });
+  assert.deepEqual(plain(tabCounts(1, null)), { q: 1, th: null }, 'an older kit: questions only');
+  assert.deepEqual(plain(tabCounts('x', { you: -1 })), { q: 0, th: null });
+  assert.deepEqual(plain(tabCounts(2.5, { you: 1.5, waiting: '3', ready: null })), { q: 0, th: null }, 'only whole numbers count');
+});
+
+test('the Overview\'s rules: the partly-held pill', () => {
+  const { heldPill } = overviewRules();
+  let p = plain(heldPill({ mode: 'run', goals: { run: 2, drain: 0, park: 9 } }));
+  assert.deepEqual(p, { word: 'Partly parked', running: 2, total: 11, text: 'Partly parked · 2 of 11 goals running', title: '9 parked, 0 draining' });
+  assert.equal(heldPill({ goals: { run: 0, drain: 3, park: 8 } }).text, 'Partly parked · 0 of 11 goals running', 'every goal held, split between parked and draining');
+  assert.equal(heldPill({ goals: { run: 5, drain: 1, park: 0 } }).word, 'Partly draining');
+  for (const f of [{ goals: { run: 11, drain: 0, park: 0 } }, { goals: { run: 0, drain: 0, park: 4 } }, { goals: { run: 0, drain: 4, park: 0 } }, { goals: { run: 0, drain: 0, park: 0 } }, { goals: { run: -1, drain: 2, park: 2 } }, { goals: { run: '2', drain: 0, park: 9 } }, { goals: { run: 1.5, drain: 0, park: 9 } }, { goals: null }, { mode: 'run' }, null, undefined, 'park']) assert.equal(heldPill(f), null, JSON.stringify(f));
+  // the held goals, named: each its title and why (its mode without a why), as plain lines
+  p = heldPill({ goals: { run: 2, drain: 1, park: 1, held: [{ title: 'Recurring checks', mode: 'park', why: 'waits on your approval' }, { title: 'Sense', mode: 'drain' }, { mode: 'park' }, 'x'] } });
+  assert.equal(p.title, 'Recurring checks: waits on your approval\nSense: drain');
+  const many = Array.from({ length: 25 }, (_, i) => ({ title: `g${i}`, mode: 'park', why: 'later' }));
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 25, held: many } }).title.split('\n').length, 20, 'at most 20');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: [{ title: 'a‮b', mode: 'park', why: 'c\nd' }] } }).title, 'a b: c d', 'what a reader\'s eye acts on goes, as tLine does');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: 'nope' } }).title, '1 parked, 0 draining', 'held not a list: the counts');
+});
+
+test('the Overview\'s rules: the machine switch\'s mode', () => {
+  const { machineMode } = overviewRules();
+  assert.deepEqual(plain(machineMode(['run', 'run'])), { mode: 'run', counts: { running: 2, draining: 0, parked: 0 } });
+  assert.deepEqual(plain(machineMode(['park', 'park'])), { mode: 'park', counts: { running: 0, draining: 0, parked: 2 } });
+  assert.deepEqual(plain(machineMode(['run', 'park', 'drain'])), { mode: 'mixed', counts: { running: 1, draining: 1, parked: 1 } });
+  assert.deepEqual(plain(machineMode([])), { mode: null, counts: { running: 0, draining: 0, parked: 0 } });
+});
+
+test('the Overview\'s rules: addresses a view never loses', () => {
+  const { hubKey } = overviewRules();
+  assert.equal(hubKey('alpha', false, 'abc123'), 'alpha');
+  assert.equal(hubKey('alpha', true, 'abc123'), 'alpha-abc123', 'two of one name');
+  for (const v of ['settings', 'overview', 'terminal']) assert.equal(hubKey(v, false, 'abc123'), `${v}-abc123`, v);
+  assert.match(hubHtml(), /return hubKey\(it\.x\.name, twins, hex6\.get\(it\.x\.root\)\);/, 'keyOf uses it');
+});
+
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
 // that page posts to itself: only for its parent, only when that parent is another origin (the hub,
 // by frame-ancestors), never in the viewer, never opened on its own.
