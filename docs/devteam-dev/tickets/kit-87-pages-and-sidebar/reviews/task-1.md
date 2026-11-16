@@ -7,6 +7,6 @@ Read rules.md, the brief, spec section 4 (interim table and rulings) and the who
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T1-1 | Minor | Constraint: each interim SHELL_ROUTES entry carries a comment naming the ending ticket (kit-93 or kit-100) | docs/devteam/dashboard/index.html:1258 | The pages list is interim (health added, governance removed, both ended by kit-93) but has no comment. Add one, e.g. "until kit-93: health folds into Sensors; governance returns as a page". The redirect groups are correctly commented. | |
+| T1-1 | Minor | Constraint: each interim SHELL_ROUTES entry carries a comment naming the ending ticket (kit-93 or kit-100) | docs/devteam/dashboard/index.html:1258 | The pages list is interim (health added, governance removed, both ended by kit-93) but has no comment. Add one, e.g. "until kit-93: health folds into Sensors; governance returns as a page". The redirect groups are correctly commented. | fixed in e96b03f: a comment names kit-93 on the page list and the governance file home |
 
 Verdict: APPROVE 0618b1f431b071c3df71234bfae53f0855ae1b05
