@@ -1268,9 +1268,9 @@ exit 0
       "name": "Workers at once, in all",
       "description": "the most tickets with a worker running at the same time",
       "shown": "value",
-      "value": 5,
+      "value": null,
       "set": false,
-      "default": 5,
+      "default": null,
       "owner_only": null
     },
     {
@@ -1279,9 +1279,9 @@ exit 0
       "name": "Workers at once, per component",
       "description": "the most workers at the same time within one component",
       "shown": "value",
-      "value": 2,
+      "value": null,
       "set": false,
-      "default": 2,
+      "default": null,
       "owner_only": null
     },
     {
