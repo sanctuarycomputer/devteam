@@ -475,6 +475,7 @@
               "high"
             ]
           },
+          "uncertainty": { "description": "low: well-trodden work, like work done before; high: new ground (an unfamiliar library, API or domain, an unclear cause). With size and risk it says how much care the ticket needs; merges check every rating against what happened (metrics mis-rated).", "enum": ["low", "high"] },
           "serves": {
             "description": "The stories it helps deliver.",
             "type": "array",
