@@ -64,7 +64,10 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
   const text = (sel) => p.ev(`(document.querySelector(${JSON.stringify(sel)})?.textContent ?? '').replace(/\\s+/g, ' ').trim()`);
   // a Where it goes block's text, by its heading
   const block = (h) => p.ev(`([...document.querySelectorAll('#efficiency .eff-obs')].find((b) => b.querySelector('h4')?.textContent.trim() === ${JSON.stringify(h)})?.textContent ?? '').replace(/\\s+/g, ' ').trim()`);
-  const drawn = () => soon("!!document.querySelector('#efficiency .card .sec')", 'the Efficiency card');
+  // the card, and every fit chart drawn at its width (fitCharts' own mark, data-w): the charts draw a
+  // frame after the card, from the ResizeObserver, and push what is below them down, so a click aimed
+  // before then can land where the item was
+  const drawn = () => soon("!!document.querySelector('#efficiency .card .sec') && [...document.querySelectorAll('#efficiency .fit[data-fit]')].every((f) => +f.dataset.w > 0)", 'the Efficiency card and its charts');
   const WHERE = ['Tokens by phase', 'Hours by phase', 'USD by phase', 'USD by model', 'Tokens'];
 
   await t.test('nav: Efficiency right after Trust, counting the score', async () => {
