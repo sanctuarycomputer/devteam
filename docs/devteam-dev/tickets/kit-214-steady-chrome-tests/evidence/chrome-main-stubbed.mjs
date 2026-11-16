@@ -1,0 +1,135 @@
+// Real headless Chrome, driven over the DevTools Protocol: real mouse and key events, for what a
+// synthetic DOM event can't show (where focus goes, what a space bar scrolls). A machine with no
+// Chrome, or a Node with no WebSocket (before 22), skips what needs it.
+import { spawn, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const found = () => {
+  if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+  const mac = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+  if (fs.existsSync(mac)) return mac;
+  for (const c of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) { const r = spawnSync('sh', ['-c', `command -v ${c}`], { encoding: 'utf8' }); if (r.status === 0) return r.stdout.trim(); }
+  return null;
+};
+export const chromePath = found();
+export const canDrive = !!chromePath && typeof WebSocket === 'function';
+
+const KEYS = { Tab: 9, Enter: 13, Escape: 27, ' ': 32, ArrowLeft: 37, ArrowRight: 39 };
+const CODES = { ' ': 'Space' };
+
+export async function openChrome() {
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-chrome-'));
+  // Its own process group, so its helpers go with it: one left holding the stderr pipe open keeps this
+  // test process (and the job) alive after every test has finished.
+  const proc = spawn(chromePath, ['--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'], { stdio: ['ignore', 'ignore', 'pipe'], detached: true });
+  const signal = (sig) => { try { process.kill(-proc.pid, sig); } catch { try { proc.kill(sig); } catch {} } };
+  const atExit = () => signal('SIGKILL');
+  process.once('exit', atExit);
+  const base = await new Promise((resolve, reject) => {
+    let err = '';
+    const failing = setTimeout(() => { signal('SIGKILL'); reject(new Error(`chrome said nothing for 60 s: ${err.slice(0, 400)}`)); }, 60000);
+    proc.stderr.on('data', (b) => { err += b; const m = err.match(/DevTools listening on ws:\/\/([^/]+)\//); if (m) { clearTimeout(failing); resolve(`http://${m[1]}`); } });
+    proc.on('exit', () => { clearTimeout(failing); reject(new Error(`chrome exited: ${err.slice(0, 400)}`)); });
+  });
+  // from here nothing about the browser holds this process open, whatever a test does or doesn't close
+  proc.unref();
+  proc.stderr.unref();
+  let closing = null;
+  const close = () => (closing ??= new Promise((r) => {
+    const hard = setTimeout(() => signal('SIGKILL'), 3000);
+    const done = () => {
+      clearTimeout(hard);
+      signal('SIGKILL'); // whatever helpers outlived it
+      process.off('exit', atExit);
+      proc.stderr.destroy();
+      try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch {}
+      r();
+    };
+    // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
+    if (proc.exitCode !== null || proc.signalCode !== null) return done();
+    proc.once('exit', done);
+    signal('SIGTERM');
+  }));
+  const newPage = async () => {
+    const target = await (await fetch(`${base}/json/new?about:blank`, { method: 'PUT' })).json();
+    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = () => reject(new Error('could not reach the page')); });
+    let seq = 0;
+    const waiting = new Map();
+    // the page's script worlds by origin (Runtime.enable sends them), for evIn: a frame of another origin is out of its parent's reach
+    const worlds = new Map();
+    ws.onmessage = (m) => { const o = JSON.parse(m.data);
+      if (o.method === 'Runtime.executionContextCreated' && o.params.context.auxData?.isDefault) worlds.set(o.params.context.id, o.params.context.origin);
+      else if (o.method === 'Runtime.executionContextDestroyed') worlds.delete(o.params.executionContextId);
+      else if (o.method === 'Runtime.executionContextsCleared') worlds.clear();
+      const w = waiting.get(o.id); if (!w) return; waiting.delete(o.id); if (o.error) w.reject(new Error(`${w.method}: ${o.error.message}`)); else w.resolve(o.result); };
+    // A page that stops answering fails the call: an await nobody will ever settle hangs the run.
+    const send = (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++seq;
+      const timer = setTimeout(() => { waiting.delete(id); reject(new Error(`${method}: no answer from Chrome in 30 s`)); }, 30000);
+      timer.unref();
+      const settled = (f) => (v) => { clearTimeout(timer); f(v); };
+      waiting.set(id, { resolve: settled(resolve), reject: settled(reject), method });
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+    const ev = async (expression) => {
+      const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+      if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+      return r.result.value;
+    };
+    // ev, in the newest page of that origin (a frame under a page of another one)
+    const evIn = async (origin, expression) => {
+      // newest first, and one that is really at that origin: a frame's first, empty document has a world of its own
+      for (const id of [...worlds].filter(([, o]) => o === origin).map(([i]) => i).reverse()) {
+        const at = await send('Runtime.evaluate', { expression: 'location.href', returnByValue: true, contextId: id }).catch(() => null);
+        if (!String(at?.result?.value).startsWith(origin)) continue;
+        const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true, contextId: id });
+        if (r.exceptionDetails) throw new Error(`${expression}: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
+        return r.result.value;
+      }
+      throw new Error(`no page of ${origin} yet`);
+    };
+    const key = async (k, modifiers = 0) => {
+      const printable = k.length === 1;
+      const common = { key: k, code: CODES[k] ?? (printable ? `Key${k.toUpperCase()}` : k), modifiers, windowsVirtualKeyCode: KEYS[k] ?? k.toUpperCase().charCodeAt(0) };
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...common, ...(printable ? { text: k } : {}) });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+    };
+    const type = async (text) => { for (const c of text) await key(c); };
+    // A click in the middle of whatever the selector finds, brought into view first.
+    const click = async (selector) => {
+      const at = await ev(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+      await send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...at });
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', clickCount: 1 });
+    };
+    // A key held down or let go (Shift: modifiers 8), the middle of what a selector finds, and the
+    // mouse there with modifiers: a Shift+click is a press and release with modifiers 8.
+    const hold = (k, down) => send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: k, code: `${k}Left`, windowsVirtualKeyCode: { Shift: 16, Alt: 18, Control: 17 }[k], modifiers: down ? { Shift: 8, Alt: 1, Control: 2 }[k] : 0 });
+    const at = (selector) => ev(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    const move = (x, y, modifiers = 0) => send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+    const clickAt = async (x, y, modifiers = 0) => {
+      await move(x, y, modifiers);
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, modifiers, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, modifiers, button: 'left', buttons: 0, clickCount: 1 });
+    };
+    return { send, ev, evIn, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
+  };
+  return { newPage, close, pid: proc.pid, proc };
+}
+// A test's teardown, run last-registered first, each step on its own: a folder's removal registered
+// first runs after every stop, and one step that throws skips none of the others (node runs t.after
+// hooks in the order they were registered, and stops at the first that throws). The first error is
+// thrown once every step has run. const later = cleanup(t); later(() => dash.stop());
+export function cleanup(t) {
+  const fns = [];
+  t.after(async () => {
+    let first = null;
+    for (const f of fns.reverse()) { try { await f(); } catch (e) { first ??= e; } }
+    if (first) throw first;
+  });
+  return (f) => { fns.push(f); };
+}
+
