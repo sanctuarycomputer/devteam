@@ -124,7 +124,7 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   assert.ok(sels.filter((s) => s.includes(B)).length === sels.filter((s) => s !== ':root').length);
   const frames = [...LAYOUT.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]);
   assert.deepEqual(frames, ['shell-ring'], 'its one animation has a name of its own');
-  // index adopts the shell (kit-87): .shell on <body>, every region it doesn't port fenced with .no-shell;
+  // index adopts the shell (kit-87): .shell on <body>, every region it doesn't port fenced with .no-shell
   // the hub has no .shell until its own ticket (kit-94)
   const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
   assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
@@ -133,7 +133,8 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
   }
-  assert.doesNotMatch(without(HUB, 'devteam-layout', 'devteam-shell-js'), /class="[^"]*(?<![\w-])shell(?![\w-])|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*(?<![\w-])shell(?![\w-])/, 'hub.html has no .shell yet');
+  // the hub adopts it too (kit-94): .shell on <body>, its timeline and frames fenced with .no-shell
+  assert.match(without(HUB, 'devteam-layout', 'devteam-shell-js'), /<body class="shell">/, 'hub.html adopts the shell on <body>');
   for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
     const rest = without(src, 'devteam-layout', 'devteam-shell-js');
     for (const f of frames) assert.doesNotMatch(rest, new RegExp(`@keyframes\\s+${f}\\b|animation(-name)?:[^;]*\\b${f}\\b`), `${name} has no animation of the block's name ${f}`);
