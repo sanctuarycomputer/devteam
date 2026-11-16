@@ -24,3 +24,8 @@
 - Model: strong
 - `cmdValidate`: hoist the plan branch feature (`pf` in the id-block check) to `planFeature`, reuse it there; `head = flags.strict && commonDir && (!landed || fid === planFeature) ? resolveCommit('HEAD') : null`. Update the comment.
 - Run the new test green.
+
+## Amendment during build (inside touches)
+
+- Found in T2: the merge gate, `check-pr` (and `merge`, through `checkPr`), runs `validate --strict` in a **detached** worktree of the plan head, where `onPlanBranch()` is false, so a branch-name-only fix never reaches the gate. `check-pr` now passes `validate --strict --plan <feature>`; `validate` takes `--plan <feature>` as the plan feature, else the branch name. The id-block warning keeps using the branch name only (unchanged).
+- The T1 test also runs `check-pr` on the first plan (stale: fails) and the re-plan (stale: fails; reviewed at head: passes). Without `--plan` in check-pr, the re-plan stale `check-pr` assertion fails (checked by hand).

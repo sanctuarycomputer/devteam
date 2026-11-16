@@ -1234,6 +1234,13 @@ test('validate --strict on a re-plan branch checks its latest design and graph v
     const STALE = [/feature cards: graph review graph-\d\.md is at \w{12}, which does not hold at HEAD/, /feature cards: design review design-\d\.md is at \w{12}, which does not hold at HEAD; review again/];
     const stale = (w, when) => { const r = w.strict(); assert.notEqual(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.match(r.said, re, when); };
     const fresh = (w, when) => { const r = w.strict(); assert.equal(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.doesNotMatch(r.said, re, when); };
+    // check-pr, the merge gate, validates the pushed head detached, off any branch
+    const gate = (wt) => {
+      const sha = F.g(['rev-parse', 'HEAD'], wt);
+      F.g(['push', '-q', '-f', 'origin', 'plan/cards'], wt);
+      const r = F.run(F.old, ['check-pr', '--head-ref', 'plan/cards', '--sha', sha, '--title', 'plan-cards: cards'], F.SUP);
+      return { status: r.status, said: `${r.out}\n${r.err}` };
+    };
 
     // a first plan: reviews at its head pass; a ticket changed after them is stale
     const wt1 = path.join(F.base, 'plan-cards');
@@ -1248,6 +1255,9 @@ test('validate --strict on a re-plan branch checks its latest design and graph v
     w1.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
     w1.commit('after review');
     stale(w1, 'a first plan changed after its reviews');
+    let g = gate(wt1);
+    assert.notEqual(g.status, 0, g.said);
+    for (const re of STALE) assert.match(g.said, re, 'check-pr on a first plan changed after its reviews');
     F.g(['reset', '-q', '--hard', reviewed], wt1);
 
     // it lands
@@ -1264,8 +1274,13 @@ test('validate --strict on a re-plan branch checks its latest design and graph v
     w2.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
     w2.commit('re-plan cards');
     stale(w2, 'a re-plan changed after its reviews');
+    g = gate(wt2);
+    assert.notEqual(g.status, 0, g.said);
+    for (const re of STALE) assert.match(g.said, re, 'check-pr on a re-plan changed after its reviews');
     w2.reviews(2, F.g(['rev-parse', 'HEAD'], wt2));
     w2.commit('re-plan reviews');
     fresh(w2, 'a re-plan reviewed again at its head');
+    g = gate(wt2);
+    assert.equal(g.status, 0, `check-pr on a re-plan reviewed again at its head: ${g.said}`);
   } finally { F.done(); }
 });
