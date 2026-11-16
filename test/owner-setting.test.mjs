@@ -73,7 +73,9 @@ test('null means no limit wherever a cap is read', () => {
   const ENV = { ...SUP, DEVTEAM_CGROUP: none, DEVTEAM_MEMINFO: none };
   const setMain = (patch) => { edit((j) => Object.assign(j, patch)); g(['commit', '-qam', `settings ${JSON.stringify(patch)}`], old); g(['push', '-q', 'origin', 'main'], old); };
   try {
-    F.lines(F.STD, { max_active_tickets: null, max_active_per_component: null, incident_slots: 1 });
+    // two incident slots: with one worker active, null read as 0 would raise the fix-ready line (task-1 T1-2)
+    // no planner slots, so the draft goal waiting for one raises no memory-full of its own (task-1 T1-1)
+    F.lines(F.STD, { max_active_tickets: null, max_active_per_component: null, incident_slots: 2, max_active_planners: 0 });
     // a goal with one feature holding the three open tickets: two ready and the fix
     const G = ok(old, ['goal', 'add', '--title', 'Floor', '--outcome', 'the floor holds', '--measure', 'gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'none', '--preconditions', 'a'], SUP);
     ok(old, ['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Floor', target: 0, preconditions: [1], tickets: 3 }])], SUP);
@@ -102,11 +104,15 @@ test('null means no limit wherever a cap is read', () => {
     assert.match(idle[0].detail, /no limit/);
     assert.doesNotMatch(idle[0].detail, /null/);
 
+    // memory-full with one incident slot, so neither of its branches holds under the old null reading
+    // (with two slots its fix branch would: 1 < null + 2)
+    setMain({ incident_slots: 1 });
     const meminfo = path.join(F.base, 'meminfo');
     fs.writeFileSync(meminfo, 'MemTotal:       16777216 kB\nMemFree:          524288 kB\nMemAvailable:    1677722 kB\n');
     const full = json(ok(old, ['metrics', '--json'], { ...ENV, DEVTEAM_MEMINFO: meminfo })).findings.find((f) => f.kind === 'memory-full');
     assert.ok(full, 'memory-full is raised with no limit');
     assert.match(full.detail, /no limit/);
+    assert.doesNotMatch(full.detail, /waiting for a planner/, 'raised for the ready tickets, not for planning');
     assert.doesNotMatch(full.detail, /null/);
 
     // the forecast: no limit runs the goal's open tickets at once (3), not one at a time
