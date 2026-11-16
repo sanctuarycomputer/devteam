@@ -265,6 +265,8 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     await p.ev(`void (location.hash = '#goal/${G}')`);
     const key = `imp:${D}`;
     await soon(`!!document.querySelector('[data-correct="${key}"]')`, 'the goal drawer');
+    // the peek slides in (kit-88): click once it is at rest, or the click lands where the button was
+    await soon(`(() => { const d = document.getElementById('drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()`, 'the goal drawer at rest');
     assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
     await p.click(`[data-correct="${key}"]`);
     await p.ev(`(() => { document.querySelector('select[data-impact="${key}"]').value = '4'; document.querySelector('input[data-reason="${key}"]').value = 'the launch blocker'; })()`);

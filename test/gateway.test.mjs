@@ -403,8 +403,24 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const pub = crypto.createPublicKey(gw.g.threadPublicKey());
     assert.equal(crypto.verify(null, signedBytes(P + 5), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), true, 'signed for this port and this body');
     assert.equal(crypto.verify(null, signedBytes(P), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), false, 'and for no other instance');
-    assert.equal(seen.filter((x) => x !== ph).every((x) => x['x-devteam-gateway-sig'] === undefined), true, 'nothing else an instance gets is signed');
     assert.equal((await gw.req('POST', '/api/pane-answer', { on: P + 5, body: press, cookie: '' })).status, 401, 'never without the session');
+    // the owner's Save on the Settings page is the other: signed under a name of its own, so a
+    // signature made for one route is never good for the other (kit-85)
+    const save = { key: 'max_active_tickets', value: 7 };
+    const os_ = await gw.req('POST', '/api/owner-setting', { on: P + 5, body: save, headers: { 'x-devteam-gateway-sig': 'forged', 'x-devteam-gateway-nonce': 'forged', 'x-devteam-gateway-ts': '1' } });
+    assert.equal(os_.status, 200);
+    const oh = seen.at(-1);
+    assert.match(oh['x-devteam-gateway-ts'], /^\d{13}$/);
+    assert.notEqual(oh['x-devteam-gateway-sig'], 'forged');
+    assert.notEqual(oh['x-devteam-gateway-nonce'], 'forged');
+    const savedBytes = (domain, port, hd) => Buffer.from(`${domain}\n${port}\n${hd['x-devteam-gateway-ts']}\n${hd['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(JSON.stringify(domain === 'devteam-pane-answer-v1' && hd === ph ? press : save)).digest('hex')}`);
+    const verifies = (bytes, hd) => crypto.verify(null, bytes, pub, Buffer.from(hd['x-devteam-gateway-sig'], 'base64url'));
+    assert.equal(verifies(savedBytes('devteam-owner-setting-v1', P + 5, oh), oh), true, 'signed for this port and this body');
+    assert.equal(verifies(savedBytes('devteam-owner-setting-v1', P, oh), oh), false, 'and for no other instance');
+    assert.equal(verifies(savedBytes('devteam-pane-answer-v1', P + 5, oh), oh), false, 'an owner-setting signature is no pane-answer one');
+    assert.equal(verifies(Buffer.from(`devteam-owner-setting-v1\n${P + 5}\n${ph['x-devteam-gateway-ts']}\n${ph['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(JSON.stringify(press)).digest('hex')}`), ph), false, 'nor the reverse');
+    assert.equal((await gw.req('POST', '/api/owner-setting', { on: P + 5, body: save, cookie: '' })).status, 401, 'never without the session');
+    assert.equal(seen.filter((x) => x !== ph && x !== oh).every((x) => x['x-devteam-gateway-sig'] === undefined), true, 'nothing else an instance gets is signed: only the pane answer and the owner\'s Save');
 
     // another site's page can't use the cookie for a read; a sandboxed review page's loads can
     const xs = (route, dest) => gw.req('GET', route, { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest } });

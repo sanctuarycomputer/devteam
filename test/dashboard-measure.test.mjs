@@ -7,25 +7,58 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort } from './lib/kit.mjs';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, peekFixture } from './lib/kit.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
-// { hash, ready?, opts? }: the page's head, what must be true before it is measured, and measure options
-const PAGES = [];
+// { hash, ready?, opts?, init? }: the page's head, what must be true before it is measured, measure
+// options, and a script run in each load before the page's own (Page.addScriptToEvaluateOnNewDocument),
+// so a page is measured with the data it draws, not its empty state
+const READY = "!document.querySelector('main.waiting')";
+const PAGES = [
+  // kit-87: Settings, on the shell, whole
+  { hash: '#settings', ready: READY },
+  // kit-87: every other page's frame (the sidebar, the page bar). Its old section is .no-shell, which the
+  // other checks ignore; with the default view it would be taken for the page's first content, whose
+  // page-top is its page ticket's, so the view is a selector no element has.
+  ...['overview', 'inbox', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
+  // line exist only with it)
+  { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
+];
+
+// kit-88: one peek of each kind (spec §2.6), on a second project seeded with test/lib/kit.mjs's
+// peekFixture, so the pages above keep their own data. Each opens over its kind's home page: header-pad
+// judges the page bar's title; inbox matches nothing, since the top-right button moves left of the peek
+// on purpose (dashboard-peek.test.mjs owns its place); prose, head-h and head-end judge the peek's own
+// text and card heads; overflow and uneven skip the drawer by design (it scrolls; uneven leaves out
+// .drawer cards).
+const PEEK_READY = "!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none'";
+// view matches nothing: the pages under the peek are unconverted until their own tickets, the same as the page entries above
+const PEEK_OPTS = { view: '#no-such-view', inbox: '#no-such-inbox' };
+const PEEKS_MEASURED = (ids) => {
+  const e = encodeURIComponent;
+  return [
+    ['ticket', ids.ticket], ['goal', ids.goal], ['feature', ids.feature], ['story', ids.story], ['release', ids.release], ['wave', ids.wave], ['milestone', ids.milestone],
+    ['act', ids.act], ['decision', ids.decision], ['lesson', ids.lesson], ['problem', ids.problem], ['signal', ids.signal], ['observation', ids.observation], ['learning', ids.learning],
+    ['retro', ids.retro], ['thread', ids.thread], ['planner', ids.planner], ['q', ids.qAnswered], ['sensor', ids.sensorHttp],
+  ].map(([kind, id]) => ({ hash: `#${kind}/${e(id)}`, ready: PEEK_READY, opts: PEEK_OPTS }))
+    .concat([{ hash: `#file?path=${e(ids.file)}`, ready: PEEK_READY, opts: PEEK_OPTS }]);
+};
 
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'measure');
   const { dash, port } = await dashboardOnFreePort(root, env);
-  t.after(() => dash.stop());
+  later(() => dash.stop());
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
@@ -37,7 +70,61 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
     return;
   }
   for (const pg of PAGES) {
-    const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
-    for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${size}`);
+    if (!pg.init) {
+      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${size}`);
+      continue;
+    }
+    // with an init script: one new document (from about:blank; the dashboard serves only / and
+    // /index.html, so no query is added to force one), measured at the three sizes as a listed page
+    // is. Not a fresh document per size: on a fresh load at 720x800 every shell page fails page-top
+    // (kit-87's nav row sits between the bar and the page below 900px; o-20261116-110914358). In one
+    // document the narrow sizes are reached scrolled down, and measure.mjs skips page-top there, as
+    // it does for Settings. The script is removed after.
+    const { identifier } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: pg.init });
+    try {
+      await p.send('Page.navigate', { url: 'about:blank' });
+      for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      for (const [at, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${at}`);
+    } finally {
+      await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+    }
   }
+});
+
+test('the dashboard measure: one peek of each kind at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 600000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-peeks-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const t0 = Date.now();
+  const { root, ids } = peekFixture(base, 'measure-peeks');
+  t.diagnostic(`peekFixture took ${Date.now() - t0} ms`);
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
+  const peeks = PEEKS_MEASURED(ids);
+  // every peek kind the page draws is measured
+  assert.ok(peeks.every((pk) => !/undefined/.test(pk.hash)), `a fixture id is missing: ${peeks.map((pk) => pk.hash).join(' ')}`);
+  // every peek's failures, gathered, so one run names them all
+  const failed = {};
+  for (const pk of peeks) {
+    // each from a fresh document (about:blank first), so its first size is a cold load over its home
+    // page and the ready test can't be met by the previous peek still open; the other two sizes are
+    // the same hash in the same document. A fresh visit per peek also keeps each well under Chrome's
+    // navigation throttle (200 in 10 s).
+    await p.send('Page.navigate', { url: 'about:blank' });
+    for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+    const res = await measureAt(p, url(pk.hash), { ready: pk.ready, ...pk.opts });
+    for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`${pk.hash} at ${at}`] = fails;
+  }
+  assert.deepEqual(failed, {});
 });
