@@ -815,6 +815,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
+      // its control is on Progress (one page at a time)
+      await p.ev(`location.hash = '#progress'`);
+      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
       await p.click('#left-only');
       const q = 'After the checkbox?';
       ask(q);
@@ -832,6 +835,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
       await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
+      // back to the Inbox, for the card
+      await p.ev(`location.hash = '#inbox'`);
+      await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     });
 
     await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
@@ -3172,6 +3178,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
+    // the field is on the Inbox page (one page at a time)
+    await p.ev(`location.hash = '#inbox'`);
+    await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
@@ -3179,11 +3188,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    await still(async () => { const g = await p.at(`${goalSel} h4`); await p.move(g.x, g.y, 8); });
+    await still(async () => { const g = await p.at('#inbox h2'); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+    await p.ev(`location.hash = '#goals'`);
+    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
