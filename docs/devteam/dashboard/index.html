@@ -690,7 +690,11 @@ try {
   .holdbar .seg2 button.confirm { color: var(--red); }
   .holdbar button[data-met-id].confirm { color: var(--green-fg); }
   .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
-  .md { max-width: var(--measure); font-size: 13.5px; line-height: 1.65; }
+  /* --measure is in ch, so it would grow with .md's larger type: --body-measure is it resolved once, at
+     the body's 13px (a registered length inherits as px), so rendered markdown keeps the body's measure */
+  @property --body-measure { syntax: '<length>'; inherits: true; initial-value: 0px; }
+  body { --body-measure: var(--measure); }
+  .md { max-width: var(--body-measure); font-size: 13.5px; line-height: 1.65; }
   .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
   .md p, .md ul, .md ol { margin: 8px 0; } .md li { margin: 3px 0; }
   .md code { background: var(--well); padding: 1px 4px; border-radius: 4px; }
