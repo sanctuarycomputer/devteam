@@ -1835,6 +1835,38 @@ test('dropped files: the root must be the gateway\'s own; old ones go, and only 
   } finally { await gw.close(); }
 });
 
+// ⌘⌥←/→ (Ctrl+Alt+←/→ off a Mac) in the terminal type Ctrl+Alt+Shift+←/→, which the box's tmux binds to
+// the previous and next window; any other chord passes through untouched.
+test('the terminal\'s page sends ⌘⌥←/→ to tmux as previous and next window', async () => {
+  const gw = await signedIn('keys-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    const keys = [...tp.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((x) => x.includes("addEventListener('keydown'") && x.includes('1;8D'));
+    assert.ok(keys, 'the page carries the key handler');
+    const run = (platform) => {
+      let on = null;
+      const typed = [];
+      const win = { term: { input: (d) => typed.push(d) } };
+      new Function('addEventListener', 'navigator', 'window', keys)((ev, f) => { if (ev === 'keydown') on = f; }, { platform }, win);
+      const press = (key, mods) => { let stopped = false; on({ key, altKey: false, shiftKey: false, metaKey: false, ctrlKey: false, ...mods, preventDefault: () => { stopped = true; }, stopPropagation: () => {} }); return stopped; };
+      return { typed, press };
+    };
+    const mac = run('MacIntel');
+    assert.ok(mac.press('ArrowLeft', { metaKey: true, altKey: true }));
+    assert.ok(mac.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.deepEqual(mac.typed, ['\x1b[1;8D', '\x1b[1;8C'], 'previous, then next window');
+    assert.ok(!mac.press('ArrowLeft', { altKey: true }), '⌥← alone is word movement, left to the shell');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true }), '⌘← alone passes through');
+    assert.ok(!mac.press('ArrowLeft', { metaKey: true, altKey: true, shiftKey: true }), 'with Shift too, not ours');
+    assert.equal(mac.typed.length, 2);
+    const pc = run('Linux x86_64');
+    assert.ok(pc.press('ArrowRight', { ctrlKey: true, altKey: true }));
+    assert.ok(!pc.press('ArrowRight', { metaKey: true, altKey: true }));
+    assert.deepEqual(pc.typed, ['\x1b[1;8C']);
+  } finally { await gw.close(); }
+});
+
 test('the terminal\'s page takes a drop, and pastes what a shell reads back unchanged', async () => {
   const hostile = ['/data/uploads/d/plain-name_1.png', '/a b/c', 'it\'s', '$(id)', '`id`', 'a"b', 'back\\slash', '-x', 'é'];
   for (const s of hostile) assert.equal(execFileSync('sh', ['-c', `printf %s ${G.shellQuote(s)}`], { encoding: 'utf8' }), s);

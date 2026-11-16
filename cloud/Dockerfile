@@ -351,6 +351,8 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devtea
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 # Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
 grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
+# ⌘⌥←/→ in the terminal page (gateway.mjs, TERM_KEYS) arrive as Ctrl+Alt+Shift+←/→: previous and next window
+grep -q 'C-M-S-Left' .tmux.conf || printf 'bind -n C-M-S-Left previous-window\nbind -n C-M-S-Right next-window\n' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
