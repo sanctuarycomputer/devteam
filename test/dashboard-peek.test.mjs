@@ -154,6 +154,24 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.equal(await p.ev("document.getElementById('scrim').hidden"), true);
   });
 
+  await t.test('a closing peek lets clicks through', async () => {
+    await openPeek(`#ticket/${T}`);
+    // close, and in the same task (the slide out just begun, the drawer still shown) ask what is under a point on it
+    const m = await p.ev(`(() => {
+      const d = document.getElementById('drawer'), r = d.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+      const before = !!document.elementFromPoint(x, y)?.closest('#drawer');
+      document.getElementById('drawer-close').click();
+      const e = document.elementFromPoint(x, y);
+      return { before, hidden: d.hidden, open: document.body.classList.contains('peek-open'), inDrawer: !!e?.closest('#drawer'), seen: getComputedStyle(d).visibility };
+    })()`);
+    assert.ok(m.before, 'open: the point is on the drawer');
+    assert.equal(m.hidden, false, 'still shown, sliding out');
+    assert.equal(m.seen, 'visible', 'still visible');
+    assert.equal(m.open, false);
+    assert.equal(m.inDrawer, false, 'a click there reaches the page, not the drawer');
+    await soon(isClosed, 'closed');
+  });
+
   await t.test('reopen during close stays open', async () => {
     await openPeek(`#ticket/${T}`);
     await p.ev(`document.getElementById('drawer-close').click(); setTimeout(() => { location.hash = '#ticket/${T}'; }, 100); void 0`);

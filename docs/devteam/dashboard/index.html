@@ -600,6 +600,8 @@ try {
   .dtitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* the scrim behind the artifact viewer, a preview and a review: the block shows it only under peek-open */
   :where(.shell).overlay-open .scrim { opacity: 1; pointer-events: auto; }
+  /* a closing peek lets clicks through, as the scrim does: the block holds it visible while it slides out */
+  :where(.shell):not(.peek-open) .drawer { pointer-events: none; }
   /* the top-right button beside an open peek: a mirror of .pagebar .tt on <body>, above the scrim (20) and the
      drawer (21), --header-pad left of the peek, its top set from .tt's (ttPeekPlace); it fades. Where there is
      no room for it beside the peek (840px and below), it isn't shown and .tt stays as it is */
