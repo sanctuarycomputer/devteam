@@ -10,16 +10,14 @@ Reproduced at main: `docs/devteam-dev/tickets/kit-244-steady-owner-action-test/e
 
 ## The fix
 
-Test-only, in `test/dashboard-owner-action.test.mjs`. Before the next card's clicks, the subtest waits for two of the page's own signals:
-- the answered card is gone from the Inbox;
-- `#answered-sum` reads one more than it did at the subtest's start. That count comes from the server's answered list, so the redraw of data that lists the answer has happened, and nothing above Q3 moves after it.
+Before the next card's clicks, the subtest waits for the page to draw server data in which the answered question is gone, and for its card to be gone. After that, nothing above Q3 moves. No sleep, retry or longer timeout was added. With the same held reads but this order, the press lands on the note: `evidence/repro-fixed.txt`.
 
-No sleep, retry or longer timeout was added. With the same held reads but this order, the press lands on the note: `evidence/repro-fixed.txt`.
+This branch first made that wait as `settled(q, n)`: the card gone, and `#answered-sum` one up. kit-87 (#297, a1cb222) then landed `redrawnWithout(q)` in the same two places. It waits for `!DATA.questions.some(…) && !card(q)`, where `DATA` is the server data `render()` stores, so it is the same render. Merging main kept kit-87's version, so **this PR now changes no test code** (`git diff main -- test/` is empty). It carries the cause, the repro, the 20-run stress evidence and the mutation, all at the merged head.
 
 ## How to verify
 
-- Stress (done-when 2): test-stress.yml on this branch with `files=test/dashboard-owner-action.test.mjs`, `node=22`, `repeat=5` (the workflow's maximum), run four times, one after another, for 20 repeats. Runs, all successful: [43826419937](https://github.com/sanctuarycomputer/devteam/actions/runs/43826419937), [43826595672](https://github.com/sanctuarycomputer/devteam/actions/runs/43826595672) (at 8636a1f), [43826814063](https://github.com/sanctuarycomputer/devteam/actions/runs/43826814063), [43826989988](https://github.com/sanctuarycomputer/devteam/actions/runs/43826989988) (at 01fd1ef; it differs from 8636a1f only in one comment's wording). 20 of 20 passed on Node v22.23.4 with 0 skipped.
-- Mutation (done-when 3): `sh docs/devteam-dev/tickets/kit-244-steady-owner-action-test/evidence/mutate.sh` lets Done through on Q3 while its record is unchanged. It skips the dashboard's Done gate for that question only and restores the file afterwards. Subtests 1 to 4 pass. Subtest 5 fails at l.190, `timed out: not done yet` (`evidence/mutation.txt`):
+- Stress (done-when 2): test-stress.yml on this branch with `files=test/dashboard-owner-action.test.mjs`, `node=22`, `repeat=5` (the workflow's maximum), run four times, one after another, for 20 repeats. At the merged head 4e6c815, all successful: [43849681951](https://github.com/sanctuarycomputer/devteam/actions/runs/43849681951), [43849902735](https://github.com/sanctuarycomputer/devteam/actions/runs/43849902735), [43850053023](https://github.com/sanctuarycomputer/devteam/actions/runs/43850053023), [43853298644](https://github.com/sanctuarycomputer/devteam/actions/runs/43853298644). 20 of 20 passed on Node v22.23.4 with 0 skipped. Before the merge, this branch's `settled` version also passed 20 of 20 (43826419937, 43826595672, 43826814063, 43826989988).
+- Mutation (done-when 3): `sh docs/devteam-dev/tickets/kit-244-steady-owner-action-test/evidence/mutate.sh` lets Done through on Q3 while its record is unchanged. It skips the dashboard's Done gate for that question only and restores the file afterwards. Subtests 1 to 4 pass. Subtest 5 fails at l.188, `timed out: not done yet` (`evidence/mutation.txt`):
   ```
   -      if (open.length) { NOT_DONE.set(id, open); oaPaint(); return; }
   +      if (open.length && !/look at one rule/.test(qv.question)) { NOT_DONE.set(id, open); oaPaint(); return; }

@@ -49,3 +49,4 @@ F1: the shrink's timing is corrected above. F2: the stronger page signal is in a
 
 - m-20261116-074413911-supervisor: approve-spec and approve-plan at c2a98f5; build now on this branch, merge main in once kit-87 merges, then CI and finals.
 - m-20261116-075633105-supervisor: take the final review now; after kit-87 only a delta pass, and only if its merge changes the test file. Keep #296 draft until then.
+- m-20261116-102952044-supervisor: kit-87 merged (a1cb222) and edited the test file. Merge main, delta review if the merge changes the file, CI, ready, merge-request. Merged at 4e6c815. kit-87's `redrawnWithout(q)` is the same wait as approach 1 (one render of server data without the answered question), so main's version was kept and `settled` dropped. The branch's test diff against main is empty; verification.md has the evidence re-run at the merged head.
