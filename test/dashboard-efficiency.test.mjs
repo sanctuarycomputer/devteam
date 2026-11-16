@@ -92,6 +92,12 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
       assert.match(b, /build/); assert.match(b, /final-review/);
       assert.doesNotMatch(b, /metrics-only-phase/);
     }
+    // largest first, each in its unit
+    const rows = (h) => p.ev(`[...([...document.querySelectorAll('#efficiency .eff-obs')].find((b) => b.querySelector('h4')?.textContent.trim() === ${JSON.stringify(h)})?.querySelectorAll('.bars > div') ?? [])].map((r) => [r.firstElementChild.textContent.trim(), r.lastElementChild.textContent.trim()])`);
+    assert.deepEqual(await rows('USD by phase'), [['build', '$128'], ['planning', '$94'], ['final-review', '$81'], ['spec', '$61']]);
+    assert.deepEqual((await rows('Hours by phase')).map((r) => r[0]), ['build', 'final-review', 'planning', 'spec']);
+    assert.deepEqual((await rows('Tokens by phase')).map((r) => r[0]), ['build', 'planning', 'spec', 'final-review']);
+    assert.deepEqual(await rows('Tokens'), [['cache reads', '9.0M'], ['output', '3.1M'], ['input', '2.4M'], ['cache writes', '1.2M']]);
     assert.match(await block('Tokens by phase'), /build/);
     assert.match(await block('USD by phase'), /build\s*\$128/);
     assert.match(await block('Hours by phase'), /build\s*21\.4h/);
@@ -340,6 +346,19 @@ test('the Efficiency page', { skip: canDrive ? false : 'needs Chrome and a Node 
     await p.ev('tlClose(); void 0');
     await p.click('#efficiency [data-sugg="eff-cache-prompt-cache"]');
     await soon(`TL.draft?.subject?.view === ${JSON.stringify(VIEW('eff-cache-prompt-cache'))}`, 'a resolved thread does not count');
+    assert.deepEqual(await p.ev('window.__writes'), []);
+    await p.ev('tlClose(); void 0');
+  });
+
+  await t.test('a Shift+click on a suggestion is its page subject too', async () => {
+    // the open thread on item 1 (from the load above): pointing at the item opens it, a second thread never starts
+    const at = await p.at('#efficiency [data-sugg="eff-costly-ticket-kit-87"] .sugg-go');
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    await soon('tlShowing()', 'the thread layer pointing');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.open === ${JSON.stringify(TH)}`, 'the open thread opened by Shift+click');
     assert.deepEqual(await p.ev('window.__writes'), []);
     await p.ev('tlClose(); void 0');
   });

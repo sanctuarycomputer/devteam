@@ -1443,13 +1443,6 @@ const setView = (view, left) => {
 // Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
 const empty = (html) => `<p class="empty">${html}</p>`;
 
-function bars(el, obj, fmt, none) {
-  const entries = Object.entries(obj || {}).filter(([, v]) => v > 0);
-  if (!entries.length) { el.innerHTML = empty(none); return; }
-  const max = Math.max(...entries.map(([, v]) => v), 0.0001);
-  el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
-}
-
 // ---- Efficiency (kit-174): the Efficiency Score card, its own page beside Trust ----
 // It formats /api/data efficiency (kit-173) and metrics.cost, and computes no score, best or ratio.
 // Laid out as the mock's: ruled sections (the layout block's .sec: a label, then the body).
@@ -5394,7 +5387,8 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
 // A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
-const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,180})$/;
+// (the prefix is 23 bytes: an encoded id of at most 177 keeps the view within the log's 200)
+const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,177})$/;
 const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
 const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
