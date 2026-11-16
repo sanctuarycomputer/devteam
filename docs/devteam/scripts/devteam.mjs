@@ -12881,7 +12881,9 @@ function recoverOne() {
   // A fleet whose hold can't be read is not started.
   let held;
   try { held = draining() ? 'park' : fleetMode(); } catch { return { say: 'NOT started (could not read whether its fleet is held)' }; }
-  if (held && !force) return { say: `left stopped (its fleet is held: ${held})` };
+  // A pause keeps its supervisor up: it answers threads and questions and keeps the Inbox and log
+  // current while nothing new starts (its prompt says so). Only a fleet held to move is left here.
+  if (held && movingFleet() && !force) return { say: `left stopped (its fleet is held to move: ${held})` };
   if (!force && !flags['was-up']) {
     const no = recoverRefusal(rec);
     if (no) return { say: no };

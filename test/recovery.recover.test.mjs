@@ -106,18 +106,22 @@ test("the tick after an upgrade: a bare pane record whose agent runs as the supe
   } finally { F.done(); }
 });
 
-test('recover: a parked or drained fleet stays stopped; --force starts it', { skip: !hasTmux }, async () => {
+test('recover: a paused fleet\'s supervisor comes back; one held to move stays stopped; --force starts it', { skip: !hasTmux }, async () => {
   const F = fixture('recheld', { resume: CLAUDE_RESUME });
   const server = privateServer();
   try {
     sessionTranscript(F);
     await seenUp(F);
     F.killSession();
-    assert.equal(F.run(['fleet', 'park', '--reason', 'moving']).status, 0);
-    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held: park\)/);
+    // a pause (no --move): its supervisor keeps answering questions and the Inbox, so it comes back
+    assert.equal(F.run(['fleet', 'park', '--reason', 'throttling spend']).status, 0);
+    assert.match(recover(F, ['--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), 'a paused fleet\'s supervisor is brought back');
     assert.equal(F.run(['fleet', 'unpark']).status, 0);
-    assert.equal(F.run(['fleet', 'drain', '--reason', 'moving']).status, 0);
-    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held: drain\)/);
+    assert.equal(F.run(['fleet', 'park', '--move', '--reason', 'moving']).status, 0);
+    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held to move: park\)/);
+    assert.equal(F.run(['fleet', 'unpark']).status, 0);
+    assert.equal(F.run(['fleet', 'drain', '--move', '--reason', 'moving']).status, 0);
+    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held to move: (drain|park)\)/);
     assert.deepEqual(F.claudeCalls(), []);
     assert.match(recover(F, ['--force', '--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), '--force: its supervisor decides');
   } finally { server.done(); F.done(); }
@@ -243,13 +247,13 @@ test('recover --machine: every repo recorded on the machine, with each repo\'s o
     await seenUp(A, { skip: true });
     A.killSession();
     B.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
-    assert.equal(B.run(['fleet', 'park', '--reason', 'x']).status, 0);
+    assert.equal(B.run(['fleet', 'park', '--move', '--reason', 'x']).status, 0);
     const reg = path.join(HOME, '.devteam', `repos-${process.env.DEVTEAM_HUB_PORT}`);
     fs.writeFileSync(path.join(reg, 'junk.json'), '{ not json');
     write(path.join(reg, 'gone.json'), JSON.stringify({ root: path.join(A.base, 'not-a-repo') }));
     const said = A.run(['recover', '--machine', '--dry-run'], { ...asOwner, ...server.env }).stdout;
     assert.match(said, new RegExp(`^recmach-a: would resume session ${SID}`, 'm'));
-    assert.match(said, /^recmach-b: left stopped \(its fleet is held: park\)/m);
+    assert.match(said, /^recmach-b: left stopped \(its fleet is held to move: park\)/m);
     assert.match(said, /^not-a-repo: skipped/m);
     // a repo with the kit but no settings isn't adopted: refused on its own too, nothing started
     const kitOnly = path.join(A.base, 'kit-only');
