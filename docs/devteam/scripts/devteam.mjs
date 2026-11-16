@@ -4172,16 +4172,29 @@ function cmdWaves() {
   out(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}`);
 }
 
+// The sessions with a message to the supervisor still unanswered (a blocked or review request, a
+// question): their wait is the supervisor's, whatever else they also wait on.
+function idsAwaitingReply() {
+  const msgs = logObjects('message');
+  const replied = new Set([...msgs, ...logObjects('question')].map((m) => m.re).filter(Boolean));
+  return new Set(msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).flatMap((m) => [m.created_by, m.ticket]).filter(Boolean));
+}
 function cmdStatus() {
   const rows = deriveStatus();
   if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
+  const asking = idsAwaitingReply();
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     // held on purpose or stopped before it ran: never stale (a held one shows its hold, which wins)
     const held = r.held && r.phase !== 'done' && !r.merge_sha ? r.held : null;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
-    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
+    // a blocked ticket whose dependencies haven't merged, and that asked the supervisor nothing still
+    // unanswered, waits on them, not on the supervisor: say which. awaiting-word is always the
+    // supervisor's word to give (a plan-ahead ticket's approval too); so is an unanswered message.
+    const deps = r.phase === 'blocked' && !asking.has(r.id) ? (r.depends_on ?? []).filter((d) => !mergeShaFor(d)) : [];
+    const waitsOn = deps.length ? ` WAITING ON ${deps.join(', ')} TO MERGE` : ' WAITING ON SUPERVISOR';
+    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? waitsOn : '';
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
@@ -12454,6 +12467,9 @@ function collectMetrics(since) {
     if (p.phase === 'blocked' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `blocked for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
+    // blocked only on dependencies that haven't merged, with nothing asked of the supervisor: it
+    // waits as planned (status says WAITING ON <ids> TO MERGE), and isn't a stuck session
+    else if (p.phase === 'blocked' && (ts.get(id)?.depends_on ?? []).some((d) => !mergeShaFor(d)) && !openMsgs.some((m) => m.created_by === id || m.ticket === id)) {}
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
     // the first hour of the same: blocked with nothing holding it, raised at once
     else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
