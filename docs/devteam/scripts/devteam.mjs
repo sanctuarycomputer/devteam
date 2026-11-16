@@ -19838,13 +19838,14 @@ async function cmdSensor() {
   }
   if (sub === 'discover') {
     const d = discoverProduction();
-    writeDiscoveryCache(d);
     if (flags.record) {
       supervisorOnly('sensor discover --record');
       const today = dateOnly(nowIso());
       appendLog({ type: 'observation', source: 'sensors', subject: 'sensors', kind: 'discovery', detector: 'sensor', detail: `production: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''}`).join(', ') || 'no host found'}; trackers: ${d.trackers.map((t) => t.tracker).join(', ') || 'none'}; ${d.sensors.length} sensor(s), ${d.proposals.length} to start${d.gaps.length ? `; gaps: ${d.gaps.join('; ')}` : ''}`.slice(0, 900), severity: d.gaps.length ? 2 : 0, valence: 0, source_ref: discoveryKey(), source_key: `sensors:discovery:${today}` }, 'supervisor');
       d.asked = askSensorCredentials(d.missing);
     }
+    // after --record's role check, so a refused run leaves nothing
+    writeDiscoveryCache(d);
     if (flags.json) return json(d);
     out(`where it runs: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''} (${h.from})`).join(', ') || 'nothing found'}`);
     for (const n of d.notes) out(`  ${n}`);

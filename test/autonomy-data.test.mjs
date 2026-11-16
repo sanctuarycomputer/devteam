@@ -350,9 +350,32 @@ test('senses with no discovery, or a malformed one', () => {
     const want = { needed: 2, has: 2, working: 1, missing: [], names: { needed: ['tok', 'web'], has: ['tok', 'web'], working: ['tok'] }, discovered_at: null };
     assert.deepEqual(autonomy(F).senses, want);
     fs.mkdirSync(path.dirname(cacheFile(F)), { recursive: true });
-    for (const bad of ['not json', JSON.stringify({ at: '2026-01-01T00:00:00.000Z', proposals: 'sentry', missing: [], outside: [] }), JSON.stringify([1, 2])]) {
+    const good = { at: '2026-01-01T00:00:00.000Z', sensors: [], proposals: ['sentry'], missing: [], outside: [] };
+    const { at, ...noAt } = good;
+    const { sensors, ...noSensors } = good;
+    for (const bad of ['not json', JSON.stringify([1, 2]), JSON.stringify({ ...good, proposals: 'sentry' }), JSON.stringify({ ...good, proposals: ['sentry', 7] }), JSON.stringify(noAt), JSON.stringify(noSensors)]) {
       fs.writeFileSync(cacheFile(F), bad);
       assert.deepEqual(autonomy(F).senses, want, bad);
     }
+    // the well-formed one is read: the check above is of the shape, not of every cache
+    fs.writeFileSync(cacheFile(F), JSON.stringify(good));
+    assert.deepEqual(autonomy(F).senses.names.needed, ['sentry', 'tok', 'web']);
+    // every discover writes it: text, and --record as the supervisor; a refused --record writes nothing
+    const fresh = (when) => { const c = json(fs.readFileSync(cacheFile(F), 'utf8')); assert.ok(c.at > when, `${c.at} after ${when}`); assert.deepEqual([...c.sensors].sort(), ['tok', 'web']); };
+    fs.rmSync(cacheFile(F));
+    let t0 = new Date().toISOString();
+    F.ok(F.old, ['sensor', 'discover']);
+    fresh(t0);
+    fs.rmSync(cacheFile(F));
+    assert.notEqual(F.run(F.old, ['sensor', 'discover', '--record'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'kit-x' }).status, 0);
+    assert.equal(fs.existsSync(cacheFile(F)), false, 'a refused --record writes no cache');
+    t0 = new Date().toISOString();
+    F.ok(F.old, ['sensor', 'discover', '--record'], { DEVTEAM_ROLE: 'supervisor' });
+    fresh(t0);
+    // a cache it can't write never fails discover
+    fs.rmSync(cacheFile(F));
+    fs.mkdirSync(cacheFile(F));
+    F.ok(F.old, ['sensor', 'discover', '--json']);
+    assert.ok(fs.statSync(cacheFile(F)).isDirectory());
   } finally { F.done(); }
 });
