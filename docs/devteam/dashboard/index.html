@@ -4577,12 +4577,15 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
 }
-function route() {
-  // a new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
-  // whether this visit pushed every entry down to that page
+// A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
+// whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
+function stampEntry() {
   if (!history.state || typeof history.state.page !== 'string') history.replaceState(stampFor({ hash: location.hash, state: history.state }, HERE, ROUTE_COLD, SHELL_ROUTES), '');
   ROUTE_COLD = false;
   HERE = history.state;
+}
+function route() {
+  stampEntry();
   const raw = location.hash.slice(1);
   const p = parseHead(location.hash, SHELL_ROUTES);
   // leaving a talk/ entry (a route to any other head) closes the card it opened
@@ -4623,6 +4626,10 @@ function route() {
 // The drawer hidden, as when the route moves on (closeDrawer also closes its entry)
 function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
+// A move through history fires popstate at once and queues its hashchange, so a link followed in
+// between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
+// its close would go back past the page. HERE follows each entry here, as it changes.
+window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
 document.addEventListener('keydown', (e) => {

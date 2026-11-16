@@ -3377,6 +3377,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon('TL.polling === null', 'no poll with no thread open');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');
+    // The link followed again before the Back's hashchange is handled (a loaded runner's pace, or an
+    // owner's quick click): history.go fires popstate at once and queues hashchange, so the new entry
+    // must be stamped from #goals, not from the card's entry Back left; else its × goes back two.
+    await p.ev(`addEventListener('popstate', () => { location.hash = '#talk/${T}'; }, { once: true }); void 0`);
+    await p.ev("document.getElementById('tl-c-text').focus()");
+    await p.key('Escape');
+    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals'`, 'the link followed again at once');
+    assert.equal(await p.ev('history.state.depth'), 1, 'one entry above #goals');
   });
 
   await t.test('a numbered pin on the goal, placed again after the 10 s rebuild, opening the thread without Shift', async () => {
