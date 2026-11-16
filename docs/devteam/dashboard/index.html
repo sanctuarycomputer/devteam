@@ -5290,7 +5290,9 @@ function tlGoTo(s) {
   if (VIEWER || (s?.kind !== 'item' && s?.kind !== 'page')) return;
   const head = subjectHead(s);
   const p = parseHead(head, SHELL_ROUTES);
-  if (p.page !== PAGE_NOW || (p.page === 'loop' && (p.state.lt || 'observe') !== TAB)) {
+  // (only when the hash changes: an assignment of the same hash fires no hashchange, and a listener
+  // left behind would scroll to this subject on some later route)
+  if (location.hash !== head && (p.page !== PAGE_NOW || (p.page === 'loop' && (p.state.lt || 'observe') !== TAB))) {
     addEventListener('hashchange', () => tlReveal(s), { once: true });
     location.hash = head;
     return;
@@ -5649,10 +5651,12 @@ function tlRelay() {
   TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
   TL.threads = tOverlay(TL.raw, TL.pend);
 }
-// Closed: and a #talk/ entry is let go as a peek is (closeTarget): Back to the page the link was
-// clicked on when this visit pushed it, else replaced by the subject's page head; so the same link
-// opens it again. A card opened from outside a route closes in place. A viewer tab only drops the hash.
+// Closed: the card a #talk/ entry opened (the route's own) lets its entry go as a peek does
+// (closeTarget): Back to the page the link was clicked on when this visit pushed it, else replaced by
+// the subject's page head; so the same link opens it again. A card opened from outside a route (a pin,
+// the dock), even over a #talk/ entry, closes in place. A viewer tab, which never routes, drops the hash.
 function tlClose() {
+  const own = TL.route !== null && TL.route === TL.open;
   TL.open = null;
   TL.draft = null;
   TL.resolving = false;
@@ -5660,6 +5664,7 @@ function tlClose() {
   tlDraw();
   if (!location.hash.startsWith('#talk/')) return;
   if (VIEWER) return void history.replaceState(history.state, '', `${location.pathname}${location.search}`);
+  if (!own) return;
   const c = closeTarget(history.state);
   if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
 }

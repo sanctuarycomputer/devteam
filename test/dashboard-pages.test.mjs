@@ -351,6 +351,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   const TO = thread('On Orient', { kind: 'page', view: '#loop/orient', at: { x: 0.5, y: 0.1 } });
   const TM = thread('On the sensors', { kind: 'page', view: '#monitoring', at: { x: 0.5, y: 0.1 } });
   const TG = thread('On a ticket gone', { kind: 'item', ref: 'ticket:no-such-ticket' });
+  const TB = thread('On the Board', { kind: 'page', view: '#board', at: { x: 0.5, y: 0.9 } });
   const state = async () => JSON.parse(await p.ev('JSON.stringify(history.state)'));
   const len = () => p.ev('history.length');
   const go = (hash) => p.ev(`location.hash = ${JSON.stringify(hash)}`);
@@ -358,7 +359,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   const hash = () => p.ev('location.hash');
   const cardOn = (id) => p.ev(`!document.getElementById('tl-card').hidden && document.getElementById('tl-card').dataset.key === ${JSON.stringify(id)}`);
   const cardShut = () => p.ev(`document.getElementById('tl-card').hidden`);
-  const loaded = () => until(() => p.ev(`[${JSON.stringify([TT, TO, TM, TG])}].flat().every((id) => TL.threads.some((x) => x.id === id))`), 'the threads read in');
+  const loaded = () => until(() => p.ev(`[${JSON.stringify([TT, TO, TM, TG, TB])}].flat().every((id) => TL.threads.some((x) => x.id === id))`), 'the threads read in');
   // the card open at #talk/<id>, over this page alone (and routed: the entry stamped with that page)
   const cardOver = (id, page, what) => until(async () => await cardOn(id) && await p.ev(`location.hash === ${JSON.stringify(`#talk/${id}`)} && history.state?.page?.split('?')[0] === ${JSON.stringify(`#${page}`)}`) && JSON.stringify(await shown()) === JSON.stringify([page]), what);
   const shut = (page, what) => until(async () => await cardShut() && await hash() === `#${page}` && JSON.stringify(await shown()) === JSON.stringify([page]), what);
@@ -456,6 +457,22 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await len(), n, 'and adds no entry');
   await p.click('[data-tl-close]');
   await until(() => cardShut(), 'closed');
+
+  // a card opened from outside a route closes in place, even over a #talk/ entry (review T4-1): with
+  // #talk/<TT> open over Board, B's pin opens B's card; its × moves no history and leaves the hash
+  await go(`#talk/${TT}`);
+  await cardOver(TT, 'board', 'the ticket thread over Board');
+  await until(() => pinned(TB), "the Board thread's pin");
+  n = await len();
+  // clicked on the pin itself (the open card may lie over it)
+  await p.ev(`document.querySelector('#tl-pins [data-tl-pin="${TB}"]').click()`);
+  await until(() => cardOn(TB), "B's card, from its pin");
+  await p.click('[data-tl-close]');
+  await until(() => cardShut(), "B's card closed");
+  assert.equal(await hash(), `#talk/${TT}`, 'the hash unchanged');
+  assert.equal(await len(), n, 'history.length unchanged');
+  assert.deepEqual(await shown(), ['board'], 'still on Board');
+
   await go('#overview');
   await onPage('overview');
   assert.equal(await pinned(TT), false, 'no pin for it on Overview, redrawn on the page change');
