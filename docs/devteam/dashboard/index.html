@@ -6643,7 +6643,8 @@ async function loadNow() {
   const stop = new AbortController();
   const late = DATA ? setTimeout(() => stop.abort(), READ_GIVE_UP_MS) : null;
   try {
-    const r = await fetch('/api/data', { signal: stop.signal });
+    // the first read takes the server's last data at once (it starts a run for the next poll)
+    const r = await fetch(DATA ? '/api/data' : '/api/data?first=1', { signal: stop.signal });
     // the body first: a read given up on mid-body leaves none of what its headers say applied
     const body = await r.text();
     const pv = r.headers.get('x-devteam-page');

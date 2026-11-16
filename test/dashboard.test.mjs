@@ -877,6 +877,32 @@ test('a slow data run: a read with data to fall back on has it at once, marked s
   await until(async () => (await read()).asked.includes('Second?'), 'the run landing');
 });
 
+// Opening a tab never waits on dashboard-data: the dashboard starts a run when it starts, and a
+// page's first read (?first=1) has the last data at once, unmarked while it is recent, and starts a
+// run for the page's next poll.
+test('a page\'s first read has the last data at once, and starts the run its next poll reads', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-first-read-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  // a long wait for any other read: only ?first=1 may answer early
+  const env = { ...process.env, DEVTEAM_DATA_WAIT_MS: '60000', DEVTEAM_HUB_PORT: String(PORTS + 44), DEVTEAM_PORT_BASE: String(PORTS + 45), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'first');
+  const ask = (q) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', q], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); };
+  ask('First?');
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const read = async (q = '') => { const r = await fetch(`http://127.0.0.1:${port}/api/data${q}`); return { stale: r.headers.get('x-devteam-stale') === 'true', asked: (await r.json()).questions.map((x) => x.question) }; };
+  // the run the dashboard started at its start is the one this read joins
+  assert.deepEqual(await read('?first=1'), { stale: false, asked: ['First?'] }, 'with no data yet, the first read waits for the run');
+  ask('Second?');
+  const t0 = Date.now();
+  assert.deepEqual(await read('?first=1'), { stale: false, asked: ['First?'] }, 'a tab opened now has the last data, recent, so unmarked');
+  assert.ok(Date.now() - t0 < 5000, `at once, not after a run (${Date.now() - t0} ms)`);
+  // the run it started lands for the next poll
+  await until(async () => (await read('?first=1')).asked.includes('Second?'), 'the run the first read started landing');
+});
+
 test('a stale read is said on the page: a note at the top with the time of what is shown, on a phone too', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 120000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-stale-note-'));
   const later = cleanup(t);

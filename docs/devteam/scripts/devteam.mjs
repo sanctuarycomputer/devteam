@@ -13389,6 +13389,8 @@ const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
 // How long a dashboard read waits on a dashboard-data run before it has the last good data instead
 // (0 is no wait at all; anything that isn't a number is the default).
+// A first read's last data younger than this is served as current: the page's next poll replaces it.
+const DATA_EARLY_FRESH_MS = 10 * 60000;
 const DATA_WAIT_MS = ((n) => (process.env.DEVTEAM_DATA_WAIT_MS?.trim() && Number.isFinite(n) && n >= 0 ? n : 20000))(Number(process.env.DEVTEAM_DATA_WAIT_MS));
 // makeSession --if-gone found the window there after all (it never types into one): not a failure.
 const IF_GONE_LEFT = 3;
@@ -16058,9 +16060,10 @@ async function cmdDashboard() {
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
   let lastData = null;
+  let lastDataAt = 0;
   const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
     dataRun = null;
-    if (!err && stdout) lastData = stdout;
+    if (!err && stdout) { lastData = stdout; lastDataAt = Date.now(); }
     resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
   })));
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
@@ -16205,19 +16208,25 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      // A page's first read (?first=1: a tab just opened, or the hub's frame made) is answered at once
+      // with the last data there is, and a run starts for its next poll (ten seconds on): opening a
+      // tab never waits on dashboard-data. Data older than DATA_EARLY_FRESH_MS comes marked stale, so
+      // the page says what time it shows until the fresh read lands.
+      const first = /[?&]first=1(?:&|$)/.test(req.url);
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
-      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), DATA_WAIT_MS); });
+      const slow = new Promise((resolve) => { waited = setTimeout(() => resolve({ ok: false, stderr: '' }), first ? 0 : DATA_WAIT_MS); });
       const r = await (lastData ? Promise.race([dashboardData(), slow]) : dashboardData());
       clearTimeout(waited);
+      const early = first && !r.ok && lastData && Date.now() - lastDataAt < DATA_EARLY_FRESH_MS;
       if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
       // The page in use says which version of itself it is: an open tab keeps the code it loaded,
       // so after a kit update it compares this with the first one it saw and offers a reload.
       let version = '';
       try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
       // a run that failed or timed out serves the last good data, marked stale
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok || early ? {} : { 'x-devteam-stale': 'true' }) });
       return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
@@ -16600,7 +16609,9 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  // warm at start: the first data run begins now, so the first tab opened after a restart (or a
+  // kit update) finds it done or under way rather than starting it
+  server.once('listening', () => { dashboardData(); log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
