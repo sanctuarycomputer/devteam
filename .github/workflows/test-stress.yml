@@ -1,0 +1,174 @@
+name: test-stress
+# A stress run of the kit's tests, for the failures that come only sometimes or only under load.
+# Daily on main it runs the chrome and rest groups three times; dispatched (gh workflow run
+# test-stress.yml --ref <branch> -f files=... -f repeat=... -f load=... -f node=...) it runs chosen
+# files, with CPU burners beside them if asked, on the Node major chosen (24 by default, and on a
+# schedule). The job summary names every file that failed on any repeat.
+# Never a pull_request check and never required: test.yml is the gate.
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      files:
+        description: 'Space-separated test files (e.g. test/search.test.mjs); empty runs the chrome and rest groups'
+        type: string
+        required: false
+        default: ''
+      repeat:
+        description: 'Times to run each file, 1 to 5'
+        type: string
+        required: false
+        default: '3'
+      load:
+        description: 'CPU burners (node -e "for(;;){}") beside the tests, 0 to 8'
+        type: string
+        required: false
+        default: '0'
+      node:
+        description: 'Node major to run on'
+        type: choice
+        options: ['20', '22', '24']
+        required: false
+        default: '24'
+permissions:
+  contents: read
+concurrency:
+  group: test-stress-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    # a full scheduled run is about 30 to 40 minutes; run.mjs's own watchdog bounds each file
+    timeout-minutes: 240
+    # the kit won't start a worker while the machine's memory is over its ceiling: the tests read a
+    # machine of their own (or none), never the runner's (as in test.yml)
+    env:
+      DEVTEAM_CGROUP: /nonexistent/devteam-cgroup
+      DEVTEAM_MEMINFO: /nonexistent/devteam-meminfo
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          # a scheduled run has no inputs: 24
+          node-version: ${{ inputs.node || '24' }}
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
+      - name: stress
+        shell: bash
+        # inputs reach the script only here, as environment; on a schedule they are empty
+        env:
+          FILES: ${{ inputs.files }}
+          REPEAT: ${{ inputs.repeat || '3' }}
+          LOAD: ${{ inputs.load || '0' }}
+          NODE: ${{ inputs.node || '24' }}
+        run: |
+          set -euo pipefail
+          # --- inputs ---
+          case "$REPEAT" in [1-5]) ;; *) echo "::error::repeat must be one of 1 to 5"; exit 2 ;; esac
+          case "$LOAD" in [0-8]) ;; *) echo "::error::load must be one of 0 to 8"; exit 2 ;; esac
+          case "$FILES" in *$'\n'* | *$'\t'* | *$'\r'*) echo "::error::files is one line of space-separated paths"; exit 2 ;; esac
+          SEL=()
+          if [ -z "${FILES// /}" ]; then
+            SEL=(--group 'chrome,rest')
+          else
+            set -f
+            read -ra WORDS <<< "$FILES"
+            set +f
+            for w in "${WORDS[@]}"; do
+              # a path, never an option for run.mjs
+              if [[ ! "$w" =~ ^[A-Za-z0-9._/-]+$ || "$w" == -* ]]; then echo "::error::not a test file path: '$w'"; exit 2; fi
+              SEL+=("$w")
+            done
+          fi
+          # --- end inputs ---
+          cat > "$RUNNER_TEMP/summary.mjs" <<'EOF'
+          // node summary.mjs <run.mjs log> <repeat>: a table of every file's result per repeat, from
+          // run.mjs's summary rows, to $GITHUB_STEP_SUMMARY and stdout. Exits 1 unless every cell is ok.
+          import fs from 'node:fs';
+          const [log, repeatArg] = process.argv.slice(2);
+          const repeat = Number(repeatArg);
+          const lines = fs.readFileSync(log, 'utf8').split('\n');
+          const HEADER = /^summary: \d+ files?, concurrency \d+$/;
+          const ROW = /^(\S+)  (\d+(?:\.\d+)?)  (.*?)(?: \(run (\d+)\))?$/;
+          const NEAR = /, near timeout$/;
+          const isOk = (result) => result.replace(NEAR, '') === 'ok';
+          const md = (t) => t.replace(/\|/g, '\\|');
+          const out = [`## ${process.env.STRESS_TITLE || 'test-stress'}`, ''];
+          let bad = false;
+          let at = -1;
+          lines.forEach((l, i) => { if (HEADER.test(l)) at = i; });
+          if (at < 0) {
+            out.push('**No summary**: run.mjs printed no summary line (a usage error or an interrupt). See the log.');
+            bad = true;
+          } else {
+            const files = new Map();
+            let i = at + 1;
+            for (; i < lines.length; i++) {
+              const m = ROW.exec(lines[i]);
+              if (!m) break;
+              const [, file, secs, result, run] = m;
+              if (!files.has(file)) files.set(file, new Map());
+              files.get(file).set(Number(run ?? 1), { result, secs });
+            }
+            const failed = [];
+            for (const [file, runs] of files) {
+              for (let r = 1; r <= repeat; r++) {
+                const c = runs.get(r);
+                if (!c) failed.push(`- \`${file}\` run ${r}: not run`);
+                else if (!isOk(c.result)) failed.push(`- \`${file}\` run ${r}: ${md(c.result)}`);
+              }
+            }
+            const timeouts = lines.slice(i).filter((l) => l.startsWith('timed out: '));
+            if (!files.size) { out.push('**No files** in the summary.', ''); bad = true; }
+            if (failed.length) {
+              bad = true;
+              out.push(`### Failed (${failed.length})`, '', ...failed, '');
+              if (timeouts.length) out.push('```', ...timeouts, '```', '');
+            } else if (files.size) out.push(`All ${files.size} file${files.size === 1 ? '' : 's'} passed on every repeat.`, '');
+            const head = Array.from({ length: repeat }, (_, k) => `Run ${k + 1}`);
+            out.push(`| File | ${head.join(' | ')} |`, `|---|${head.map(() => '---|').join('')}`);
+            for (const [file, runs] of files) {
+              const cells = Array.from({ length: repeat }, (_, k) => {
+                const c = runs.get(k + 1);
+                if (!c) return '**not run**';
+                const res = isOk(c.result) ? `ok ${c.secs} s${NEAR.test(c.result) ? ' (near timeout)' : ''}` : `**${md(c.result)}** ${c.secs} s`;
+                return res;
+              });
+              out.push(`| \`${file}\` | ${cells.join(' | ')} |`);
+            }
+          }
+          const text = out.join('\n') + '\n';
+          if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, text);
+          process.stdout.write(text);
+          process.exit(bad ? 1 : 0);
+          EOF
+          # --- burners ---
+          BURNERS=()
+          # kills only the burners started here, by pid; never fails, so it never sets the step's status
+          stop_burners() {
+            local p
+            for p in "${BURNERS[@]}"; do kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
+            BURNERS=()
+            return 0
+          }
+          trap stop_burners EXIT
+          for _ in $(seq 1 "$LOAD"); do
+            node -e "for(;;){}" &
+            BURNERS+=("$!")
+          done
+          # --- end burners ---
+          # --- run ---
+          export STRESS_TITLE="test-stress: ${SEL[*]}, repeat $REPEAT, load $LOAD, concurrency 4, node $NODE"
+          echo "+ node test/run.mjs ${SEL[*]} --repeat $REPEAT --concurrency 4 (burners: $LOAD)"
+          set +e
+          node test/run.mjs "${SEL[@]}" --repeat "$REPEAT" --concurrency 4 2>&1 | tee "$RUNNER_TEMP/stress.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          n=${#BURNERS[@]}
+          stop_burners
+          echo "stopped $n burners"
+          s=0
+          node "$RUNNER_TEMP/summary.mjs" "$RUNNER_TEMP/stress.log" "$REPEAT" || s=1
+          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+          exit "$s"
+          # --- end run ---

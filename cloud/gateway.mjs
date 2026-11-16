@@ -202,6 +202,12 @@ export function paneSignature(privateKeyPem, port, body, ts = Date.now(), nonce 
   const msg = Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
 }
+// The same for the owner's Save on an instance's Settings page (/api/owner-setting): its own name,
+// so a pane-answer signature is never good for a setting, nor the reverse.
+export function ownerSettingSignature(privateKeyPem, port, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -1147,11 +1153,13 @@ export function createGateway(opts = {}) {
     });
     pipeline(req, up, () => {});
   };
-  // The owner's answer to what an instance's supervisor's terminal asks: the one dashboard request
-  // the gateway signs (paneSignature), after the session check, since on a box every agent can send
-  // that dashboard any header. The body is read whole (it is small) so its hash is what is signed;
-  // whatever signature headers the browser sent are replaced.
-  const panePost = (req, res, port, publicOrigin) => {
+  // The owner's answer to what an instance's supervisor's terminal asks (paneSignature), and the
+  // owner's Save on its Settings page (ownerSettingSignature): the two dashboard requests the gateway
+  // signs, after the session check, since on a box every agent can send that dashboard any header.
+  // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
+  // the browser sent are replaced.
+  const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
+  const signedPost = (req, res, port, publicOrigin, route, signer) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
@@ -1159,7 +1167,7 @@ export function createGateway(opts = {}) {
     req.on('end', () => {
       if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/pane-answer', headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...paneSignature(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
@@ -2027,7 +2035,7 @@ export function createGateway(opts = {}) {
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && rawPath === '/api/pane-answer') return panePost(req, res, port, own);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
         return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
