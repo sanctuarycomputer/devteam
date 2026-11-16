@@ -435,11 +435,12 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal((await state()).page, '#sensors');
   await p.click('[data-tl-close]');
   await shut('overview', '× back to Overview');
-  // a subject not drawn: over its kind's home page
+  // a subject not drawn: since kit-89 (spec §2.4, §2.5) an in-panel thread, so the link opens the Threads panel
+  // on it over the page it was clicked on, the recorded page head given th and t
   await linkOn('overview', `#talk/${TG}`);
-  await cardOver(TG, 'board', 'a thread on a ticket not drawn, over Board');
-  await p.click('[data-tl-close]');
-  await shut('overview', '× back to Overview');
+  await until(async () => await cardOn(TG) && await p.ev(`location.hash === ${JSON.stringify(`#talk/${TG}`)} && history.state?.page === ${JSON.stringify(`#overview?th=open&t=${TG}`)} && !!document.querySelector('#th-card-slot > #tl-card.in-panel')`) && JSON.stringify(await shown()) === '["overview"]', 'a thread on a ticket not drawn, in the panel over Overview');
+  await go('#overview');
+  await until(async () => await cardShut() && await hash() === '#overview' && !(await p.ev("document.body.classList.contains('threads-open')")), 'the panel and the card closed, on Overview');
 
   // the dock's list on Overview: one entry, Board shown; × closes the card in place
   // (Overview made the newest entry, none ahead of it, so the one entry shows in history.length)
@@ -451,14 +452,18 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the Threads panel, at rest, lists it');
   n = await len();
   await p.click(`#tl-list [data-tl-open="${TT}"]`);
-  await until(async () => await cardOn(TT) && await hash() === '#board' && JSON.stringify(await shown()) === '["board"]', 'the dock opens it over Board');
+  // since kit-89 (spec §2.4, §2.5) the row's entry is Board's head with the thread (t) and, above 900px, the
+  // panel kept open (th); its × takes t away, a new entry, the panel staying on the list
+  await until(async () => await cardOn(TT) && await hash() === `#board?th=open&t=${TT}` && JSON.stringify(await shown()) === '["board"]', 'the dock opens it over Board');
   assert.equal(await len(), n + 1, 'the dock adds one entry');
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   n = await len();
   await p.click('[data-tl-close]');
   await until(() => cardShut(), 'closed');
-  assert.equal(await hash(), '#board', 'closed in place');
-  assert.equal(await len(), n, 'no history move');
+  assert.equal(await hash(), '#board?th=open', 'closed on Board, t gone');
+  assert.equal(await len(), n + 1, 'one entry: t taken away');
+  await go('#board');
+  await until(async () => await hash() === '#board' && !(await p.ev("document.body.classList.contains('threads-open')")) && await p.ev("getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, Board at rest');
 
   // pins: the ticket thread's on Board; a pin keeps the page and opens the card; none on Overview
   await until(() => pinned(TT), "the ticket thread's pin on Board");

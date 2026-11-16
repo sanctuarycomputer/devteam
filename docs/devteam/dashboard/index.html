@@ -6498,8 +6498,9 @@ async function tlRefresh() {
     askSet(j.supervisor?.question);
     const first = !TL.have;
     TL.have = n;
-    // the first read: the Threads part of the route runs again, now that a t can be decided (spec §2.5)
-    if (first) thRoute();
+    // the first read, or one that brings in a t the route named before the threads had it: the Threads part of
+    // the route runs again, now that the t can be decided (spec §2.5)
+    if (first || (TH.t && TH.opened !== TH.t && TL.threads.some((x) => x.id === TH.t))) thRoute();
   } catch { return; }
   tlDraw();
   thAdopt();

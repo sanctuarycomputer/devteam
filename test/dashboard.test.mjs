@@ -3790,6 +3790,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`location.hash = '#talk/${R}'`);
     // its own card: the card already open has a Resolve too, until the read of the new thread lands
     await soon(`document.getElementById('tl-card').dataset.key === '${R}' && !!document.querySelector('[data-tl-resolve]')`, 'its card');
+    // no subject: its card is in the Threads panel, which the link opened; pressed once it has slid in
+    await soon(`!!document.querySelector('#th-card-slot #tl-card.in-panel') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
     await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form');
     await p.ev(`document.getElementById('tl-outcome').focus()`);
