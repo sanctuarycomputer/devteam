@@ -719,6 +719,8 @@ const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); 
 
 // Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
 function showOnly(key) {
+  // a card's ⋯ menu belongs to the Overview
+  closeMenu();
   // under Settings no tab is selected, but the Overview tab stays in the tab order: the keyboard's way back
   if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW || key === SETTINGS ? 0 : -1; }
   ovEl.hidden = key !== OVERVIEW;
@@ -1180,6 +1182,9 @@ const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) 
 /* hub-overview end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
+  // the redraw closes an open ⋯ menu; the keyboard, if it was in the menu, goes back to its ⋯ below
+  const fromMenu = menuPop?.contains(document.activeElement) ? menuPop.dataset.root : null;
+  closeMenu();
   const all = [...items.values()];
   const newest = all.map((it) => relNums(it.x.kit)).filter(Boolean).sort(relCmp).pop() ?? null;
   // what needs the owner first: stalled and gone, then waiting, then the rest by name
@@ -1208,6 +1213,7 @@ function paintOverview() {
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
   ovBody.replaceChildren(head, ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
+  else if (fromMenu !== null) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${fromMenu}:menu`)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
   tlDraw();
 }

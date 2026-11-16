@@ -446,11 +446,27 @@ test('the Overview: a header, then two cards a row with the standard head', CHRO
   await p.until('the menu', `!!document.querySelector('.menu-pop')`);
   assert.match(await p.ev(`document.querySelector('.menu-pop').textContent`), new RegExp(`/srv/beta.*${B}`));
   assert.equal(await p.ev(selectedTab), 'Overview');
-  await p.ev('paintOverview()');
-  assert.equal(await p.ev(`!!document.querySelector('.menu-pop')`), true, 'a redraw leaves an open menu open');
   await p.key('Escape');
   await p.until('the menu closed', `!document.querySelector('.menu-pop')`);
   assert.equal(await p.ev(`document.activeElement?.dataset.k ?? null`), '/srv/beta:menu', 'Escape gives the keyboard back to ⋯');
+  // a redraw closes it (the spec); the keyboard, inside it, goes back to its ⋯
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu again', `document.querySelector('.menu-pop')?.contains(document.activeElement) ?? false`);
+  await p.ev('paintOverview()');
+  assert.deepEqual(await p.ev(`[!!document.querySelector('.menu-pop'), document.activeElement?.dataset.k ?? null]`), [false, '/srv/beta:menu'], 'closed by the redraw, focus on its ⋯');
+  // the keyboard elsewhere stays where it is
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu once more', `!!document.querySelector('.menu-pop')`);
+  await p.ev(`${cardOf('gamma')}.querySelector('.ov-name').focus()`);
+  await p.ev('paintOverview()');
+  assert.deepEqual(await p.ev(`[!!document.querySelector('.menu-pop'), document.activeElement?.dataset.k ?? null]`), [false, '/srv/gamma:name']);
+  // another view closes it
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu, last time', `!!document.querySelector('.menu-pop')`);
+  await p.ev(`${tabOf('alpha')}.click()`);
+  await p.until("alpha's dashboard, no menu", `${selectedTab}?.startsWith('alpha') && !document.querySelector('.menu-pop')`);
+  await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview').click()`);
+  await p.until('the Overview', `!document.getElementById('overview').hidden`);
   // the Settings link keeps the keyboard across a redraw
   await p.ev(`document.querySelector('#ov-body > .ov-head a.set').focus()`);
   await p.ev('paintOverview()');
