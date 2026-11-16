@@ -524,8 +524,15 @@ const SETTINGS_DEFAULTS = {
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
   forge: 'github',
-  max_active_tickets: 5,
-  max_active_per_component: 2,
+  // Workers at once; null (the default) is no cap: move as fast as the graph allows. Planning keeps
+  // parallel workers apart (touches, D4), the machine's memory ceiling keeps the box alive
+  // (machine_memory_ceiling), and the owner can set a number when they want to throttle.
+  max_active_tickets: null,
+  // Workers at once in one component; null (the default) is no cap. Parallel work is the point: what
+  // keeps two workers off each other is touches (validate's D4 makes any two tickets that touch the
+  // same files depend on one another, and ready marks a ready ticket whose touches overlap a running
+  // one), not a count per component. A project can still set a number if it wants one.
+  max_active_per_component: null,
   // Planners at once (plan/<feature> branches in flight); null is no cap. Every goal that needs
   // planning gets one unless its design waits on another goal's (goal set --plan-after). They don't
   // count against max_active_tickets.
@@ -602,8 +609,148 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
+// The supervisor's own settings the owner may ask for from the dashboard (an owner-setting act the
+// supervisor lands with settings set in its settings chore). Like OWNER_SETTINGS they apply as main
+// has them, so the fleet, the Settings row and the finding all read one value. Never an owner key.
+const OWNER_ASKABLE = ['max_active_tickets', 'max_active_per_component'];
+// An askable value: a whole number from 1 to 20, or null (no limit; "none" in argv).
+const askableValue = (v) => v === null || (Number.isInteger(v) && v >= 1 && v <= 20);
+function askableProblem(key, value) {
+  if (Object.hasOwn(OWNER_SETTINGS, key)) return `${key} is the owner's own setting: it changes through a PR with the owner's answer`;
+  if (key === 'links') return 'links change through link set and link land';
+  if (!OWNER_ASKABLE.includes(key)) return `${key} is not a setting the owner asks for here; only ${OWNER_ASKABLE.join(', ')}`;
+  if (!askableValue(value)) return `${key} is a whole number from 1 to 20, or none (no limit)`;
+  return null;
+}
+// An askable value as argv writes it: "none" is null, 1..20 the number, anything else undefined.
+const parseAskable = (arg) => (arg === 'none' ? null : /^(?:[1-9]|1\d|20)$/.test(arg ?? '') ? Number(arg) : undefined);
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
+// Every setting the kit reads, for the Settings page (dashboardData's settings_all): the defaults'
+// keys, the owner's, and the few read with neither (sensor_scrub: scrubExtra's patterns, checked by
+// merge). A key added to either map shows up with no other edit.
+const SETTINGS_READ_ONLY_HERE = ['sensor_scrub'];
+const SETTINGS_KEYS = Object.freeze([...new Set([...Object.keys(SETTINGS_DEFAULTS), ...Object.keys(OWNER_SETTINGS), ...SETTINGS_READ_ONLY_HERE])]);
+// Each setting in words: [group, name, description, show], in the page's order. show is what of the
+// value the page gets, never a credential by construction: 'value' (a narrow shape, SETTING_SHAPES,
+// with no string the scrubber would change), 'names' (an object's own keys), 'count' (how many
+// entries) or 'hidden' (nothing: a free-text command or a locator can carry a token anywhere).
+// A key with no words here reads as unnamed and hidden.
+const SETTINGS_WORDS = Object.freeze({
+  max_active_tickets: ['Fleet and capacity', 'Workers at once, in all', 'the most tickets with a worker running at the same time', 'value'],
+  max_active_per_component: ['Fleet and capacity', 'Workers at once, per component', 'the most workers at the same time within one component', 'value'],
+  max_active_planners: ['Fleet and capacity', 'Planners at once', 'the most planners running together; none means no cap', 'value'],
+  machine_memory_ceiling: ['Fleet and capacity', 'Memory ceiling', "share of the machine's memory at or above which a new worker or planner waits", 'value'],
+  tick_minutes: ['Fleet and capacity', 'Supervisor tick', 'how often the supervisor looks over everything when nothing wakes it', 'value'],
+  stale_after_minutes: ['Fleet and capacity', 'Silent session after', 'minutes without a sign of life before a worker counts as stuck', 'value'],
+  tmux_session: ['Fleet and capacity', 'Terminal session name', 'the tmux session the windows live in; none means one named after the project', 'value'],
+  dashboard_port: ['Fleet and capacity', 'Dashboard port', "where this dashboard listens; none means a free port in the hub's range", 'value'],
+  agent_command: ['Agents and sessions', 'Agent command', 'what starts each worker, planner and the supervisor', 'hidden'],
+  resume_command: ['Agents and sessions', 'Resume command', 'what brings a stopped session back on its own conversation', 'hidden'],
+  agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
+  worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
+  worktree_setup: ['Agents and sessions', 'Worktree setup', "a command run in each new worktree after its files are copied", 'hidden'],
+  worktree_files: ['Agents and sessions', 'Files copied into worktrees', 'untracked files each worktree needs, copied from the main checkout', 'value'],
+  usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
+  usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
+  model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
+  gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
+  ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
+  slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
+  main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
+  merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
+  merge_admin: ['Merging and checks', 'Merge past branch protection', "whether merge uses admin rights where the forge requires a review the author can't give", 'value'],
+  forge: ['Merging and checks', 'Forge', 'where PRs live: GitHub, or plain git', 'value'],
+  autonomy_ceilings: ['Merging and checks', 'Autonomy ceilings', "the highest level the supervisor may reach for a kind of decision, below the kit's", 'value'],
+  hold_review_days: ['Merging and checks', 'Parked goal review', 'days a goal stays parked before the owner is asked about it again', 'value'],
+  question_default_after_hours: ['Questions and findings', 'A default applies after', 'hours before a question with a default takes it', 'value'],
+  finding_ack_hours: ['Questions and findings', 'A finding set aside for', 'hours a set-aside finding stays quiet, unless its subject changes', 'value'],
+  upstream_repo: ['Upstream and releases', 'Kit source', 'where new devteam releases come from', 'hidden'],
+  upstream_base: ['Upstream and releases', 'Kit release in use', 'the devteam release this project runs', 'value'],
+  upstream_sync: ['Upstream and releases', 'Kit updates', 'adopt each release on its own, or ask you first', 'value'],
+  upstream_check_hours: ['Upstream and releases', 'Check for kit releases every', 'hours between checks for a new devteam release', 'value'],
+  release: ['Upstream and releases', 'How a release reaches production', 'a tag, a production branch, or every merge to main', 'value'],
+  sensors: ['Production', 'Sensors', 'the production signals the supervisor reads', 'names'],
+  sensor_defaults: ['Production', 'Sensor defaults', 'settings every sensor starts from', 'names'],
+  sensor_scrub: ['Production', 'Sensor scrub patterns', 'extra patterns scrubbed from what sensors bring back', 'count'],
+  remediations: ['Production', 'Remediations', 'the reviewed scripts that may restart, scale or roll back production', 'names'],
+  incident_slots: ['Production', 'Incident fixes past the cap', 'fix tickets that may run beyond the worker cap, so an incident never waits', 'value'],
+  secret_commands: ['Production', 'Commands a secret may be sent to', "command prefixes a secret's sink may run, as you", 'count'],
+  retro_every_days: ['Rhythm', 'Retro every', 'days between retrospectives', 'value'],
+  research_every_days: ['Rhythm', 'Research every', 'days between research spikes on new tools and practice', 'value'],
+  project: ['Project and links', 'Project name', "this project's name on the hub and in its public links", 'value'],
+  components: ['Project and links', 'Components', 'the parts of the work, each with its own lines of files', 'names'],
+  links: ['Project and links', 'Linked repos and resources', 'the repos and resources this project works in or reads', 'names'],
+});
+// The shape each 'value' setting may have to be shown; null wherever its default is null.
+const settingNum = (v) => v === null || Number.isFinite(v);
+const settingName = (v) => v === null || (typeof v === 'string' && /^[A-Za-z0-9._/-]{1,100}$/.test(v));
+const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'string' && s.length <= 100 && !UNSAFE_TEXT.test(s));
+const SETTING_SHAPES = Object.freeze({
+  ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
+  merge_admin: (v) => typeof v === 'boolean',
+  forge: (v) => ['github', 'git'].includes(v),
+  merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
+  upstream_sync: (v) => ['adopt', 'ask'].includes(v),
+  release: (v) => v !== undefined && releaseProblem(v) === null,
+  upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
+  main_branch: settingName, tmux_session: settingName, project: settingName,
+  usage_sources: settingLines, ignored_checks: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
+  autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
+});
+// The hidden settings whose kit default is the kit's own constant, so the page may show it.
+const COMMAND_SETTINGS = ['agent_command', 'resume_command', 'agent_trust_command', 'usage_command', 'worktree_setup'];
+const WITHHELD = Symbol('withheld');
+// a string the page may show as it is: printable, and nothing the scrubber would change
+const plainSettingText = (s) => !UNSAFE_TEXT.test(s) && scrubText(s) === s;
+// every string in a value, an object's keys included
+const settingStrings = (v) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v.flatMap(settingStrings) : isObj(v) ? Object.entries(v).flatMap(([k, x]) => [k, ...settingStrings(x)]) : []);
+// What of a setting's value the page gets, by its show kind; WITHHELD for a value off its shape.
+function shownAs(key, kind, v) {
+  if (kind === 'value') return SETTING_SHAPES[key]?.(v) && settingStrings(v).every(plainSettingText) ? v : WITHHELD;
+  if (kind === 'names') return isObj(v) ? Object.keys(v).map((k) => (plainSettingText(k) ? k : '[withheld]')) : [];
+  if (kind === 'count') return Array.isArray(v) ? v.length : isObj(v) ? Object.keys(v).length : 0;
+  return null;
+}
+// Every setting, in words, as main has it (the working tree's own, in local, where it differs):
+// settingsAt's block from main, else loadSettings() with source 'working tree'. Never throws on a
+// value of the wrong type: it is withheld.
+function settingsAll() {
+  const ref = mainRef();
+  const m = ref ? settingsAt(ref, { orNull: true }) : null;
+  // a settings file's own block, as written (settingsAt's regex): {} with none, null when it doesn't parse
+  const own = (text) => {
+    const b = text?.match(/```json devteam\s*\n([\s\S]*?)\n```/)?.[1];
+    if (b == null) return {};
+    try { const o = JSON.parse(b); return isObj(o) ? o : {}; } catch { return null; }
+  };
+  const working = own(readText(path.join(projectDir, 'settings.md')));
+  const raw = (m ? own(git(['show', `${ref}:${projectRel}/settings.md`])) : working) ?? {};
+  const now = m ?? loadSettings();
+  const local = m && working ? { ...SETTINGS_DEFAULTS, ...working } : null;
+  // shown values compared; two withheld ones are the same only when what is under them is
+  const same = (w, raw) => (w === WITHHELD ? `withheld ${canonical(raw)}` : canonical(w));
+  const words = Object.keys(SETTINGS_WORDS);
+  const at = (k) => (words.includes(k) ? words.indexOf(k) : Infinity);
+  return [...SETTINGS_KEYS].sort((a, b) => at(a) - at(b)).map((key) => {
+    const named = SETTINGS_WORDS[key];
+    const [group, name, description, kind] = named ?? ['Other', `Unnamed setting (${key})`, '', 'hidden'];
+    const e = { key, group, name, description, shown: kind };
+    const v = shownAs(key, kind, now[key]);
+    Object.assign(e, v === WITHHELD ? { value: null, withheld: true } : { value: v });
+    if (local) {
+      const l = shownAs(key, kind, local[key]);
+      if (same(l, local[key]) !== same(v, now[key])) Object.assign(e, l === WITHHELD ? { local: null, local_withheld: true } : { local: l });
+    }
+    e.set = Object.hasOwn(raw, key);
+    if (!named) e.default = null;
+    else if (kind === 'hidden') e.default = COMMAND_SETTINGS.includes(key) ? SETTINGS_DEFAULTS[key] : null;
+    else { const d = shownAs(key, kind, SETTINGS_DEFAULTS[key] ?? (kind === 'value' ? null : {})); e.default = d === WITHHELD ? null : d; }
+    e.owner_only = OWNER_SETTINGS[key] ?? null;
+    if (!m) e.source = 'working tree';
+    return e;
+  });
+}
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -752,6 +899,10 @@ function loadSettings() {
       settingsCache.links = pinned.links;
       local.push(...pinned.changed);
       if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
+      // the supervisor's askable settings too: the settings chore is how they change
+      const asked = OWNER_ASKABLE.filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
+      for (const k of asked) settingsCache[k] = onMain[k];
+      if (asked.length && !process.env.DEVTEAM_QUIET_ASKABLE) { process.env.DEVTEAM_QUIET_ASKABLE = '1'; warn(`${asked.join(', ')} here differs from main; it applies as on main, so change it with settings set in the settings chore`); }
     }
   }
   return settingsCache;
@@ -783,14 +934,18 @@ const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
 const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The only acts the owner writes: records of what the owner did, never calls.
-const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
+const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-setting'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
-const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project'];
+const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
-const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project' };
+// records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
+// "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
+// home's project folder, so nothing of the project lands in the linked repo (recordsInHome).
+const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo' };
+const RECORDS_WHERE = ['repo', 'home'];
 // what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
 const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
 const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
@@ -814,7 +969,7 @@ const locatorForPrompt = (v) => redactUrl(v).replace(/\s/g, encodeURIComponent).
 const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
-  gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string',
+  gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
@@ -891,6 +1046,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       if (ctx.remotes.has(k)) errs.push(`${at}: the same remote as links.${ctx.remotes.get(k)}`);
       else ctx.remotes.set(k, ctx.id);
       if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
+      if (l.records !== undefined && !RECORDS_WHERE.includes(l.records)) errs.push(`${at}: records is "repo" or "home"`);
       return errs;
     },
     // local and cheap: metrics asks it live
@@ -1121,6 +1277,75 @@ function ladder() {
   return (ladderCache = a);
 }
 const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
+// The rungs as the dashboard says them.
+const RUNG_PLAIN = { 1: 'asks you first', 2: 'asks, goes ahead at a deadline', 3: 'decides and tells you' };
+// Every kind of decision in plain words, for display: the constitution's classes, constitutional and
+// owner-only lists, every class the kit writes itself (OWNER_ACTS, the fleet's, the goal's), and
+// kit-85's settings acts. A name never contains a class id (the one-word ones included), so no id
+// ever shows. One entry per line: test/dashboard-data.test.mjs takes one out to check it is missed.
+const CLASS_WORDS = Object.freeze({
+  'new-feature': "Starting a feature you haven't asked for",
+  'priority-change': 'Changing what gets worked on first',
+  'release-scope': 'Moving a story to a later release',
+  'upstream-pr': 'Proposing an improvement to the kit itself',
+  'release-production': 'Shipping a release to production',
+  'production-migration': 'Changing production data',
+  'incident-fix': 'Fixing a production incident',
+  'production-remediation': 'Restarting, scaling or rolling back production',
+  'merge-word': 'Merging a ticket',
+  'approve-feature-plan': "Approving a feature's plan",
+  'merge-chore': 'Merging a chore',
+  'worker-slots': 'Starting and stopping workers',
+  'replan-within-feature': 'Replanning the tickets of a feature',
+  'add-ticket': 'Adding a ticket',
+  'approve-spec': "Approving a ticket's spec",
+  'approve-plan': "Approving a ticket's plan",
+  'approve-design-change': 'Approving a change to a design',
+  'contract-ruling': 'Ruling on a contract between pieces of work',
+  'improvement-trial': 'Trying out a process improvement',
+  'release-staging': 'Shipping a release to staging',
+  'goal-readiness': 'Saying a goal is ready to start',
+  'apply-default': "Going ahead with a question's default",
+  'withdraw-question': 'Taking back a question',
+  recovery: 'Getting stuck work going again',
+  'carry-answer': 'Applying an earlier answer of yours',
+  drain: 'Letting running work finish and starting nothing new',
+  undrain: 'Starting new work again after a wind-down',
+  'goal-hold': 'Holding a goal or letting it go',
+  'fleet-drain': 'Winding down the whole fleet',
+  'fleet-park': 'Parking the whole fleet',
+  'fleet-undrain': 'Starting the whole fleet again after a wind-down',
+  'fleet-unpark': 'Unparking the whole fleet',
+  'registry-edit': 'Changing a registry entry',
+  'goal-impact': 'Judging how much a goal matters',
+  'orient-noise': 'Ruling some signals to be noise',
+  'gate-add': 'Adding a check',
+  'one-way-door': "A change that can't be undone",
+  'check-override': 'Overriding a failing check',
+  'governance-edit': 'Changing the rules',
+  'process-edit': 'Changing how the team works',
+  'gate-change': 'Changing a check',
+  'goal-change': 'Changing a goal',
+  'strategy-change': 'Changing the strategy',
+  'goal-met': 'Saying a goal is met',
+  'registry-attest': 'Confirming the registry is complete',
+  'new-dependency': 'Adding a new dependency',
+  'artifact-publish': 'Publishing a page',
+  'pane-answer': "Answering the supervisor's terminal",
+  'goal-order': 'Putting the goals in order',
+  'goal-approval': 'Approving a goal',
+  'owner-setting': 'Asking for a setting',
+  'settings-edit': 'Changing one of its own settings',
+});
+// A class in plain words; one the supervisor made up (decide --class, ask --class) shows as unnamed,
+// in its own words, so the gap is visible and the bare id never is. No class, no name.
+// A known id in another case (decide --class DRAIN) reads as the known class.
+const className = (c) => {
+  if (c == null) return null;
+  const k = String(c).toLowerCase();
+  return Object.hasOwn(CLASS_WORDS, k) ? CLASS_WORDS[k] : `Unnamed kind (${k.replace(/-/g, ' ')})`;
+};
+const withClassName = (row) => ({ ...row, class_name: className(row.class) });
 
 // ===== 3. the schema and the log =====
 
@@ -1211,11 +1436,14 @@ function integrity(o, file) {
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
-    // (goal order). Nobody else writes those classes: an agent can't make the log say the owner
-    // published, gave a tool their yes, or ordered the goals.
+    // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
+    // writes those classes: an agent can't make the log say the owner published, gave a tool their
+    // yes, ordered the goals or asked for a setting.
     if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
-    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
+    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && ['pane-answer', 'owner-setting'].includes(o.class) && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer or owner-setting act, and nothing else carries one';
+    // its shape, not today's allowlist: narrowing OWNER_ASKABLE later never breaks an old act
+    if (o.type === 'act' && cls === 'owner' && o.class === 'owner-setting' && (typeof o.key !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(o.key) || !askableValue(o.value) || o.artifact !== undefined || o.tree !== undefined)) return 'an owner-setting act names a setting (key) and its value, a whole number from 1 to 20 or null (no limit), and no artifact';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
@@ -2523,6 +2751,23 @@ const repoReadable = (name) => { if (name === 'home') return true; const l = own
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
+// Whether a ticket keeps its records in home (its repo link's records is "home"): spec, plan,
+// verification and reviews on home's ticket/<id>, in home's project folder, while its code is on
+// its repo's ticket/<id>. Read from main's committed settings, like the routing above, so a
+// working tree's edit changes nothing until it lands. A view: never touches a checkout.
+function recordsInHome(t) {
+  const name = t ? repoOfTicketLink(t) : 'home';
+  if (name === 'home') return false;
+  const s = committedComponents();
+  const l = ownEntry(s.links, name);
+  return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.records === 'home';
+}
+const recordsInHomeId = (id) => recordsInHome(tickets().get(id));
+// The repo that holds a ticket's records: home for records in home, else the ticket's own (an act).
+const recordsRepo = (id) => (recordsInHomeId(id) ? repo('home') : repoOfTicketId(id));
+// Home's ticket/<id>, where a records-in-home ticket's records are: the local branch (the worker's
+// committed state), else origin's.
+const homeRecordsRef = (id) => homeTicketBranchRef(id);
 // A ticket's git facts come from its own repo. Views ask by name, through factsRepo,
 // which is null for a repo this machine can't read: its tickets read as unmerged and branchless
 // while link-unreachable says why. Home's methods are today's functions.
@@ -2852,21 +3097,40 @@ function paneWaitingIn(window) {
 
 // A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
 // compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
-// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
-// agent is busy, no prompt is up (the caller checked), nobody is at the pane (a tmux client on it
-// that pressed a key lately) and the text is LOST_ENTER_SECONDS old, press Enter and log it. That
-// Enter can be lost the same way (seen on a loaded machine), so the text still sitting there
-// LOST_ENTER_SECONDS after a press gets another, up to LOST_ENTER_TRIES in all, but only while the
-// bottom lines are exactly as they were at the last press: a lost Enter on an idle pane changes
-// nothing, while a reply, a submission or someone typing does. The text is never retyped. The record
-// is claimed (moved aside) and read again before each key, so however many passes or processes look,
-// and however stale their first read, one press happens per claim, and they stop once the text is gone.
+// window; when the pane's body (its lines above the harness footer, its chrome left out: paneBody)
+// still holds that text's tail, nothing on the pane says the agent is busy, no prompt is up (the
+// caller checked), nobody is at the pane (a tmux client on it that pressed a key lately) and the
+// text is LOST_ENTER_SECONDS old, press Enter and log it. That Enter can be lost the same way (seen
+// on a loaded machine), so the text still sitting there LOST_ENTER_SECONDS after a press gets
+// another, up to LOST_ENTER_TRIES in all, but only while the body is as it was at the last press: a
+// lost Enter on an idle pane changes nothing there (the footer, the agent list and shell counts
+// change on their own, so they're left out), while a reply, a submission or someone typing does.
+// The text is never retyped. The record is claimed (moved aside) and read again before each key, so
+// however many passes or processes look, and however stale their first read, one press happens per
+// claim, and they stop once the text is gone.
 const LOST_ENTER_SECONDS = 30;
 const LOST_ENTER_TRIES = 3;
 const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
 const squash = (t) => t.replace(/[\s─-╿]+/g, '');
+// The harness's own chrome, not the pane's content: a box-drawing rule (the input box's border), a
+// running-shell count, a token counter (an agent's list line or spinner). They change on an idle
+// pane, so the lost-Enter rescue doesn't digest them. The body is the last 8 lines above the last
+// rule that aren't chrome, shell counts taken out; the text is looked for in the raw lines.
+const PANE_RULE = /^[─-╿]{8,}$/;
+const PANE_TOKENS = /[↑↓]\s*[\d.,]+\s*[km]?\s+tokens\b/i;
+const PANE_SHELLS = new RegExp(PANE_SHELL.source, 'gi');
+const paneNorm = (l) => l.replace(PANE_SHELLS, ' ').replace(/[\s·]+/g, ' ').trim();
+function paneBody(lines, tail) {
+  let end = lines.length;
+  for (let i = end - 1; i >= 0; i--) if (PANE_RULE.test(lines[i].replace(/\s+/g, ''))) { end = i + 1; break; }
+  // text below the last rule: no box under the input, so nothing below it is a footer
+  if (end < lines.length && squash(lines.slice(end).join('')).includes(tail)) end = lines.length;
+  const kept = [];
+  for (let i = end - 1; i >= 0 && kept.length < 8; i--) if (!PANE_TOKENS.test(lines[i]) && paneNorm(lines[i])) kept.unshift(i);
+  return { text: squash(lines.slice(kept[0] ?? end, end).join('')), digest: crypto.createHash('sha1').update(kept.map((i) => paneNorm(lines[i])).join('\n')).digest('hex') };
+}
 function recordSent(target, text) {
   const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
   if (!key) return;
@@ -2893,8 +3157,8 @@ function resendLostEnter(key, target, lines) {
   try { rec = readJson(file); } catch { return; }
   const tail = squash(rec.text ?? '').slice(-40);
   if (!tail || !ripe(rec)) return;
-  const bottom = lines.slice(-8);
-  const digest = crypto.createHash('sha1').update(bottom.join('\n')).digest('hex');
+  const body = paneBody(lines, tail);
+  const digest = body.digest;
   const claimed = `${file}.claim-${process.pid}`;
   const drop = () => { try { fs.unlinkSync(claimed); } catch {} };
   // Put the claim back where it was, never over a newer delivery that landed meanwhile (a link
@@ -2910,8 +3174,9 @@ function resendLostEnter(key, target, lines) {
     putBack();
     return null;
   };
-  if (!squash(bottom.join('')).includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
-  if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
+  if (!body.text.includes(tail)) { if (claim()) drop(); return; } // submitted: nothing left to press
+  // every line captured, chrome and all: a footer's or a spinner's busy marker counts
+  if (lines.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l)) || paneAsking(target)) return; // a menu takes that Enter as its answer
   if (clientActiveOn(target)) return; // someone at the pane: their next key or Enter is theirs
   // tests only: the pause a loaded machine can put between the first read and the claim
   const pause = Number(process.env.DEVTEAM_LOST_ENTER_CLAIM_DELAY_MS ?? 0);
@@ -3313,6 +3578,14 @@ const approvalOf = (id, cls) => logObjects('act').filter((a) => a.class === cls 
 // Computed stage of every ticket: git says merged and released; approval acts say spec'd and
 // planned; the branch's committed review records say in review; phase lines say what the worker
 // is doing right now.
+// An active records-in-home ticket whose records are on home's main while it isn't merged in its
+// repo: merge landed the records and then the code didn't land (merge <id> again finishes it).
+function recordsLandedOnly(t) {
+  if (!isActive(t) || !recordsInHome(t) || mergeShaFor(t.id)) return false;
+  const main = mainRef();
+  return !!main && git(['cat-file', '-e', `${main}:${projectRel}/tickets/${t.id}/spec.md`]) !== null;
+}
+const RECORDS_ONLY_FIX = (id) => `records in home, code not merged: run merge ${id} again`;
 function deriveStatus() {
   const ts = tickets();
   return [...ts.values()].map((t) => {
@@ -3339,6 +3612,8 @@ function deriveStatus() {
       waiting: paneWaiting(t.id),
       // a launch stopped before it ran (stoppedLaunch): the key only on its row
       ...(w?.phase === 'starting' && stoppedLaunch(t.id) ? { not_started: true } : {}),
+      // a half-done merge: its records landed in home, its code didn't (merge again lands it)
+      ...(!mergeSha && recordsLandedOnly(t) ? { records_landed: true } : {}),
     };
   });
 }
@@ -3696,7 +3971,8 @@ function parkMessage(s, cause) {
   const reason = cause.reason ? ` (${String(cause.reason).slice(0, 80)})` : '';
   const why = cause.kind === 'fleet' ? `the fleet is parked${reason}` : cause.kind === 'let-go' ? `the owner let go of "${title}"` : `"${title}" is parked${reason}`;
   const tail = ` [${cause.marker}]`;
-  const body = `Park: ${why}. Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
+  const recs = s.role === 'worker' && recordsInHomeId(s.id) ? ` Push records-${s.id} too.` : '';
+  const body = `Park: ${why}.${recs} Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
   // a message line holds 600 characters; the marker that sends it once per cause is kept whole
   return `${body.slice(0, 600 - tail.length)}${tail}`;
 }
@@ -3741,6 +4017,24 @@ const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', '
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
 // A parked session has settled once it stopped (phase parked), its branch is on origin as it is here,
 // its worktree is clean and its handoff is recorded: until then its goal is still parking.
+// A records-in-home worker's records must move with it too: home's ticket/<id> pushed (local =
+// origin) and its records worktree clean. A records branch with nothing of its own (none at all,
+// or a local one that is still in home's main, never pushed) has nothing to lose.
+function recordsParkProblems(s) {
+  if (s.role !== 'worker' || !recordsInHomeId(s.id)) return [];
+  const b = `ticket/${s.id}`;
+  const local = resolveCommit(`refs/heads/${b}`);
+  const remote = resolveCommit(`refs/remotes/origin/${b}`);
+  const main = mainRef();
+  const nothing = !remote && (!local || (!!main && ancestorOf(local, main) === true));
+  const rw = recordsWorktreePath(s.id);
+  const dirty = fs.existsSync(rw) ? workLines(git(['status', '--porcelain'], rw)) : [];
+  return [
+    !nothing && !remote && `records: home's ${b} is not on origin: push it from ${rw}`,
+    !nothing && remote && local && local !== remote && `records: home's ${b} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it from ${rw}`,
+    dirty.length > 0 && `records: ${dirty.length} uncommitted change(s) in ${rw}`,
+  ].filter(Boolean);
+}
 const settledMemo = new Map();
 function sessionSettled(s) {
   if (settledMemo.has(s.name)) return settledMemo.get(s.name);
@@ -3752,7 +4046,7 @@ function sessionSettled(s) {
     const remote = R.resolveCommit(`refs/remotes/origin/${s.branch}`);
     const dirty = fs.existsSync(s.wt) ? workLines(git(['status', '--porcelain'], s.wt)).join('\n') : '';
     const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name, R) || R.git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
-    ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
+    ok = !!remote && (!local || local === remote) && !dirty && !!handoff && !recordsParkProblems(s).length;
   }
   settledMemo.set(s.name, ok);
   return ok;
@@ -3806,6 +4100,16 @@ function notSchedulable(t) {
   if (coverageGap(name, repo(name))) return 'unowned files';
   return null;
 }
+// A cap setting as a number to compare against: null, absent or not a positive number is no cap.
+const capOf = (v) => (typeof v === 'number' && v > 0 ? v : Infinity);
+const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
+// The running tickets whose touches overlap t's in the same repo: t waits for them to merge. D4
+// usually orders such tickets already; touches widened after planning can still collide.
+function overlapsActive(t, activeIds, ts) {
+  const repo = repoOfTicketLink(t);
+  const mine = t.touches ?? [];
+  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => globsOverlap(ga, gb))); });
+}
 function cmdReady() {
   const ts = tickets();
   const rows = [];
@@ -3832,13 +4136,22 @@ function cmdReady() {
   const active = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
+  // what keeps parallel workers apart: a ready ticket whose touches overlap a running one's waits for
+  // it to merge. Only build rows: a plan-ahead ticket specs and plans beside its running dependency.
+  for (const r of rows) {
+    if (r.mode !== 'build') continue;
+    const hits = overlapsActive(ts.get(r.id), active, ts);
+    if (hits.length) r.overlaps_active = hits;
+  }
+  // both caps read the same way: a positive number is a cap, anything else (null, 0) is none
+  const capped = (r) => (perComponent[r.component] ?? 0) >= capOf(s.max_active_per_component);
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
-  out(`active workers: ${active.length}/${s.max_active_tickets}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
+  out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
-  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
+  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
 }
 
 function cmdWaves() {
@@ -3865,7 +4178,7 @@ function cmdStatus() {
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
     const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
-    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}`);
+    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
@@ -3918,31 +4231,54 @@ function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  // A records-in-home ticket's final review names the home commit of the records it reviewed too.
+  // the last such line counts, as the last verdict line does
+  const recordsRaw = [...text.matchAll(/^-[ \t]*Records:[ \t]*(\S+)[ \t]*$/gm)].pop()?.[1] ?? null;
   // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
   const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
+  let ruleIdx = -1;
   let width = 0;
   for (const row of text.split('\n')) {
     if (!row.trim().startsWith('|')) continue;
     const cells = tableCells(row);
     const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); width = cells.length; continue; }
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); width = cells.length; continue; }
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
     reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
+    records: recordsRaw && /^[0-9a-f]{40}$/.test(recordsRaw) ? recordsRaw : null,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
-const ticketReviews = (id, src) => { const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
+// A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
+// branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+// A dashboard request reads every ticket's records several times (deriveStatus and collectMetrics
+// each run more than once, and metrics reads them for reviewStats and reviewPasses): while one runs,
+// each ticket's folder is read once (reviewMemo, set by dashboardData) and reviewReads counts reads.
+let reviewMemo = null;
+let reviewReads = 0;
+const ticketReviews = (id, src) => {
+  if (!reviewMemo) return ticketReviewsRead(id, src);
+  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}`}`;
+  if (!reviewMemo.has(k)) { reviewReads++; reviewMemo.set(k, ticketReviewsRead(id, src)); }
+  return reviewMemo.get(k);
+};
+const ticketReviewsRead = (id, src) => {
+  if (recordsInHomeId(id)) {
+    const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
+    return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
+  }
+  const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
 const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 function latestPerTrack(records, stage) {
   const latest = new Map();
@@ -3954,6 +4290,9 @@ const FINDING_ID = /^[A-Z]{1,4}\d+(?:-\d+)?[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
+// The rule a finding cites, as one key: a Law, value or refusal id (L-LOGIC-3, V2, R1) alone; a
+// document and its section (spec §3, quality.md §6) as written, capped.
+const ruleKey = (rule) => { const t = String(rule).trim().replace(/\s+/g, ' '); const id = t.match(/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\b/); return (id && /\d/.test(id[0]) ? id[0] : t).slice(0, 40); };
 function reviewStats() {
   const byStage = {};
   let findings = 0;
@@ -3964,11 +4303,18 @@ function reviewStats() {
   for (const r of all) {
     for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
     if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0 };
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {} };
     byStage[r.stage].first_passes++;
     if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
+    // what first passes keep blocking on, by the rule each blocking finding cites: what a new
+    // session's prompt, or the stage's template, should have said from the start (supervisor.md §10)
+    for (const f of r.findings) if (blocking(f.severity) && f.rule) { const k = ruleKey(f.rule); byStage[r.stage].rules[k] = (byStage[r.stage].rules[k] ?? 0) + 1; }
   }
-  for (const s of Object.values(byStage)) s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
+  for (const s of Object.values(byStage)) {
+    s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
+    s.top_blocking_rules = Object.entries(s.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
+    delete s.rules;
+  }
   return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
 }
 function reviewPasses() {
@@ -4196,9 +4542,20 @@ function coverageGaps(cov, s) {
 }
 
 const OFF_LINE = 'changes files outside the line of';
+// A records-in-home ticket's home branch holds only its records: every file it changes against
+// home's main, by merge-base as a ticket's footprint is read, is in its own records folder. This
+// keeps a link ticket from changing home's settings, log or strategy through its records branch.
+function recordsBranchFails(id, recSha) {
+  const main = mainRef();
+  const base = main ? git(['merge-base', main, recSha]) : null;
+  if (!base) return [`cannot resolve home's main branch; home's ticket/${id} footprint not checked`];
+  const own = `${projectRel}/tickets/${id}/`;
+  const off = changedFiles(base, recSha).filter((x) => !x.startsWith(own));
+  return off.length ? [`home's ticket/${id} changes files outside its records folder ${own}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`] : [];
+}
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
-function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
+function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg }) {
   const t = tickets().get(id);
   if (!t) return [`no ticket ${id}`];
   const fails = [];
@@ -4207,11 +4564,24 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const R = repoOfTicketId(id);
   let sha = null;
   let src = WORKTREE;
+  // Records in home: the records are home's at recSha (merge pins it; else home's ticket/<id>, the
+  // local branch, else origin's), the code the link's at sha. Never home's working tree.
+  const H = recordsInHome(t);
+  let recSha = null;
   if (R.commonDir) {
     sha = headIn(R, shaArg);
     if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
-    if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
+    if (H) {
+      // records: undefined reads home's ticket/<id>; null is merge's "none pinned" (it says why)
+      const ref = recordsArg === undefined ? homeRecordsRef(id) : recordsArg;
+      recSha = ref ? resolveCommit(ref) : null;
+      if (recordsArg && !recSha) return [`records commit ${recordsArg} not found in home (fetch it first)`];
+      src = { ref: recSha };
+    } else if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
   }
+  if (H && !recSha && recordsArg !== null) fails.push(`no records for ${id} in home: commit them under ${projectRel}/tickets/${id}/ on home's ticket/${id}`);
+  if (H && recSha) fails.push(...recordsBranchFails(id, recSha));
+  if (!H || recSha) {
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
   if (read('spec.md') === null) fails.push('spec.md missing at this head');
   else if (approvals && !approvalOf(id, 'approve-spec')) fails.push('spec not approved (the supervisor logs act --class approve-spec --refs <id>)');
@@ -4233,25 +4603,34 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   }
   // The latest record in every final track must say APPROVE at a commit that holds at this head.
   const reviewsDir = R.projectInRepo ? `${R.projectRel}/tickets/${id}/reviews/` : null;
-  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
+  const codeHolds = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
+  // records in home: the verdict also names the records it reviewed (- Records: <sha>), which must
+  // hold at the records head by the same rule, in home
+  const homeReviewsDir = `${projectRel}/tickets/${id}/reviews/`;
+  const recordsHold = (r) => !H || (!!r.records && verdictHolds(r.records, recSha, homeReviewsDir, repo('home')));
+  const holdsAt = (r) => codeHolds(r.sha) && recordsHold(r);
   const latest = latestPerTrack(reviews, 'final');
   if (!latest.length) fails.push('no final review record (reviews/final-<n>.md)');
   for (const r of latest) {
     if (r.verdict === 'CHANGES') fails.push(`${r.file}: the latest final review in its track says CHANGES`);
     else if (r.verdict !== 'APPROVE') fails.push(`${r.file}: no verdict line (Verdict: APPROVE|CHANGES <sha>)`);
-    else if (!holdsAt(r.sha)) fails.push(`${r.file}: its verdict is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at ${sha?.slice(0, 12)}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+    else if (!codeHolds(r.sha)) fails.push(`${r.file}: its verdict is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at ${sha?.slice(0, 12)}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+    else if (H && !r.records) fails.push(`${r.file}: no "- Records: <full sha>" line; a review of a ticket whose records are in home names the home commit of the records it reviewed`);
+    else if (!recordsHold(r)) fails.push(`${r.file}: its records verdict is at ${r.records.slice(0, 12)}, which does not hold at home's ${recSha.slice(0, 12)}: the records changed since the review in more than newly added review records`);
   }
-  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
+  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
   // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
   for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
+  }
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
     const changed = R.changedFiles(base, sha);
-    const own = R.projectInRepo ? `${R.projectRel}/tickets/${id}/` : null;
+    // records in home: nothing of the project's in the link, its own folder included
+    const own = R.projectInRepo && !H ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}; if the supervisor widened touches with ticket set since the log last landed, land the log first (log-sync, then merge --chore log) and check again`);
@@ -4294,6 +4673,7 @@ function cmdCheckTicket() {
   let title = flagStr('title');
   let body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   let sha = flagStr('sha');
+  const records = flagStr('records');
   const R = repoOfTicketId(id);
   if (flagStr('pr')) {
     const pr = R.gh(['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
@@ -4307,7 +4687,7 @@ function cmdCheckTicket() {
     sha = R.resolveCommit(`ticket/${id}`) ?? R.resolveCommit(`origin/ticket/${id}`) ?? undefined;
     if (sha) out(`checking ticket/${id} at ${sha.slice(0, 12)} (no --sha given, and this checkout isn't on it)`);
   }
-  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
+  report(checkTicket(id, { sha, title, body, records }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
 
 
@@ -4482,12 +4862,15 @@ function artifactRule(sha) {
   }
   return fails;
 }
-function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   // A ticket's PR is in its own repo; plan and chore PRs are always home's.
   if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
   if (branch.startsWith('ticket/') && tickets().has(branch.slice('ticket/'.length))) {
     const own = repoOfTicketLink(tickets().get(branch.slice('ticket/'.length)));
+    // home's ticket/<id> of a records-in-home link ticket is its records branch: only its footprint
+    // is home's to check here (its code, reviews and gates are checked with the link's PR)
+    if (own !== R.name && R.name === 'home' && recordsInHomeId(branch.slice('ticket/'.length))) return recordsBranchFails(branch.slice('ticket/'.length), sha);
     if (own !== R.name) return [`${branch} is a ticket of ${own}, not ${R.name}`];
   }
   const fails = [...logRule(branch, sha, R), ...reviewRule(sha, { forge, repo: R }), ...(R.name === 'home' ? artifactRule(sha) : [])];
@@ -4508,7 +4891,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
   }
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -4668,7 +5051,12 @@ function cmdReviewWorktree() {
     const listed = R ? (R.git(['worktree', 'list', '--porcelain'], R.root) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9))) : [];
     if (!at || path.dirname(at) !== real(root) || !path.basename(at).startsWith('review-') || !listed.includes(at)) die(`${target} is not a review worktree under ${root} (review-worktree removes only what it made)`);
     R.gitOrDie(['worktree', 'remove', '--force', at], R.root);
-    return out(`removed ${at}`);
+    out(`removed ${at}`);
+    // its records checkout (records in home), made beside it
+    const rat = real(`${at}-records`);
+    const made = rat && R.name !== 'home' && worktreeRepo(rat)?.name === 'home' && worktreeRecords(repo('home')).some((w) => w.path === rat && w.detached);
+    if (made) { gitOrDie(['worktree', 'remove', '--force', rat], mainRoot); out(`removed ${rat}`); }
+    return;
   }
   const [id, ref] = positional;
   if (!id || !ref) die('usage: review-worktree <ticket-id> <sha> [--name <suffix>]   |   review-worktree --remove <path>');
@@ -4686,6 +5074,18 @@ function cmdReviewWorktree() {
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   seedWorktree(wt, { repo: R });
   out(wt);
+  // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
+  // reviewer writes in its record's "- Records:" line
+  if (recordsInHomeId(id)) {
+    const ref = homeRecordsRef(id);
+    const rsha = ref ? resolveCommit(ref) : null;
+    if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
+    else {
+      const rwt = `${wt}-records`;
+      gitOrDie(['worktree', 'add', '--quiet', '--detach', rwt, rsha], mainRoot);
+      out(`records: ${rwt} (${rsha})`);
+    }
+  }
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
@@ -4694,7 +5094,14 @@ function cmdCheckPr() {
   const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   fetchMain(R);
-  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
+  // a records-in-home ticket's records are on home's ticket/<id>: as origin has it now
+  const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
+  // judged as origin has them (never a local branch that may not be pushed); none there: none
+  const records = R.name !== 'home' && tid && recordsInHomeId(tid) ? (gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0 ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
+  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) });
+  // none on origin: say so (checkTicket leaves the why to its caller when told none is pinned)
+  if (records === null) fails.push(`no records for ${tid} in home: home's ticket/${tid} is not on origin; push it`);
+  report(fails, `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
 // A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
@@ -4833,6 +5240,75 @@ function strategyState() {
   const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
   return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
 }
+// governance [--json]: the kit's governance and process files, then the project's strategy and
+// exterior, each with its title, its last change on main, and whether it was changed here since the
+// kit was last synced (differs). Read from main, as strategyState is; with no main, or a project
+// outside the repo, from the working tree, with no history. One first-parent walk of main over the
+// listed files and settings.md: a file's first appearance is its newest commit, and the settings.md
+// commits are the sync candidates. A sync commit is one where upstream_base became a different
+// release tag. A file whose newest commit is a sync reads false; one touched after a sync, true; one
+// whose newest commit is older than every sync (the kit was committed before its base was first set)
+// reads null, as with no sync at all: no known release to compare it with. A sync PR that also
+// carried a local edit to a file reads false for that file: the walk can't tell the two apart, and
+// that is accepted (spec §1).
+function governanceView() {
+  const main = projectInRepo ? mainRef() : null;
+  const at = (p) => (main ? git(['show', `${main}:${p}`], projectRoot) : readText(path.join(projectRoot, p)));
+  const kitDirs = ['governance', 'process'];
+  const listed = main
+    ? (git(['ls-tree', '--full-tree', '--name-only', main, '--', ...kitDirs.map((d) => `${kitRel}/${d}/`)], projectRoot) ?? '').split('\n')
+    : kitDirs.flatMap((d) => { try { return fs.readdirSync(path.join(projectRoot, kitRel, d)).map((f) => `${kitRel}/${d}/${f}`); } catch { return []; } });
+  const kit = kitDirs.flatMap((d) => listed.filter((p) => p.startsWith(`${kitRel}/${d}/`) && p.endsWith('.md')).sort().map((p) => ({ group: d, path: p })));
+  const project = [['strategy', 'Strategy'], ['exterior', 'Exterior']].map(([f, fallback]) => ({ group: 'project', path: `${projectRel}/${f}.md`, fallback, template: f === 'strategy' }));
+  const settingsRel = `${projectRel}/settings.md`;
+  const newest = new Map();
+  const syncs = new Set();
+  // the oldest sync's place in the walk (newest first): a file whose newest commit is past it predates every sync
+  let oldestSync = -1;
+  let shallow = new Set();
+  if (main) {
+    const paths = [...kit, ...project].map((r) => r.path);
+    const walk = (merges) => git(['log', '--first-parent', ...merges, '--format=%x00%H %cI', '--name-only', main, '--', ...paths, settingsRel], projectRoot);
+    const commits = (walk(['--diff-merges=first-parent']) ?? walk(['-m']) ?? '').split('\0').slice(1).map((chunk) => {
+      const [head, ...names] = chunk.split('\n').filter(Boolean);
+      const [sha, iso] = head.split(' ');
+      return { sha, iso, names };
+    }).map((c, i) => ({ ...c, i }));
+    for (const c of commits) for (const p of c.names) if (!newest.has(p)) newest.set(p, c);
+    for (const c of commits.filter((x) => x.names.includes(settingsRel))) {
+      const base = settingsAt(c.sha, { orNull: true })?.upstream_base;
+      if (releaseParts(base) && base !== (settingsAt(`${c.sha}^1`, { orNull: true })?.upstream_base ?? null)) { syncs.add(c.sha); oldestSync = Math.max(oldestSync, c.i); }
+    }
+    const sf = git(['rev-parse', '--git-path', 'shallow'], projectRoot);
+    const text = sf && readText(path.resolve(projectRoot, sf));
+    if (text) shallow = new Set(text.split('\n').filter(Boolean));
+  }
+  const files = [...kit, ...project].map(({ group, path: p, fallback, template }) => {
+    const text = at(p);
+    // init's untouched strategy template counts as not written, by its marker line, as strategyState
+    // reads it; exterior.md has no template, so it is written once it exists
+    const written = text !== null && !(template && text.includes(STRATEGY_TEMPLATE_MARK));
+    const c = newest.get(p);
+    const known = c && !shallow.has(c.sha);
+    const differs = group === 'project' || !syncs.size || !known || c.i > oldestSync ? null : !syncs.has(c.sha);
+    return {
+      group,
+      path: p,
+      title: text?.match(/^# (.+)/m)?.[1].trim() ?? (written ? path.basename(p, '.md') : fallback),
+      last_change: known ? c.iso : '—',
+      differs,
+      written,
+      state: !written ? 'not written yet' : differs ? 'changed here' : null,
+    };
+  });
+  return { files };
+}
+function cmdGovernance() {
+  gitReadCache = new Map();
+  const view = governanceView();
+  if (flags.json) return json(view);
+  for (const r of view.files) out(`${r.group.padEnd(10)} ${r.path}  ${r.state ?? ''}`);
+}
 // A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
 // answered strategy-change question. The one change that needs none is init's untouched template
 // arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
@@ -4934,6 +5410,115 @@ function releaseAnswerGap(d, targets) {
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
+// One entry of gh's statusCheckRollup, read the one way both merge's check and covered_by read it:
+// a status (StatusContext, or anything with a state) by its state; a check run by its conclusion
+// once COMPLETED. Uppercased; anything empty or unknown is PENDING, so it is never green.
+function rollupState(c) {
+  const state = c.__typename === 'StatusContext' || c.state ? String(c.state ?? '').toUpperCase() : (c.status === 'COMPLETED' ? String(c.conclusion ?? '').toUpperCase() : 'PENDING');
+  return { name: c.name ?? c.context ?? '?', state: state || 'PENDING' };
+}
+// Whether a gate's covered_by (settings gates.<name>.covered_by, the owner's gate-change) is met by
+// the forge's checks in this rollup, read at the exact head: "ci" needs every check (ignored ones
+// too: ignored_checks never counts as coverage) to be SUCCESS, and at least one check; a list needs
+// each named check present and every entry of that name SUCCESS. SKIPPED or NEUTRAL didn't run the
+// suite, so they aren't coverage. { covered: true, checks } or { covered: false, why, bad? }.
+function forgeCoverage(coveredBy, rollup, ignored = []) {
+  if (coveredBy !== 'ci' && !(Array.isArray(coveredBy) && coveredBy.length && coveredBy.every((n) => typeof n === 'string' && n))) return { covered: false, bad: true, why: 'covered_by is not "ci" or a list of check names' };
+  const entries = (rollup ?? []).map(rollupState);
+  const notGreen = (e) => `${e.name} is ${e.state.toLowerCase()}${ignored.includes(e.name) ? ' (ignored_checks never counts as coverage)' : ''}`;
+  if (coveredBy === 'ci') {
+    if (!entries.length) return { covered: false, why: 'the forge reports no checks' };
+    const bad = entries.find((e) => e.state !== 'SUCCESS');
+    return bad ? { covered: false, why: notGreen(bad) } : { covered: true, checks: [...new Set(entries.map((e) => e.name))] };
+  }
+  for (const n of coveredBy) {
+    const mine = entries.filter((e) => e.name === n);
+    if (!mine.length) return { covered: false, why: `${n} is missing` };
+    const bad = mine.find((e) => e.state !== 'SUCCESS');
+    if (bad) return { covered: false, why: notGreen(bad) };
+  }
+  return { covered: true, checks: [...coveredBy] };
+}
+// The forge's own checks on a PR at its head: pending is not passed and failing fails; the names in
+// ignored are skipped. what names the PR in the message (the records PR in home, say).
+function forgeCheckFails(pr, ignoredChecks, sha, what = "the forge's checks") {
+  const ignored = new Set(ignoredChecks ?? []);
+  const pending = [], failing = [];
+  for (const c of pr.statusCheckRollup ?? []) {
+    const { name, state } = rollupState(c);
+    if (ignored.has(name)) continue;
+    if (['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'].includes(state)) pending.push(name);
+    else if (!['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(state)) failing.push(`${name} (${state.toLowerCase()})`);
+  }
+  return [
+    ...(pending.length ? [`${what} are still running at ${sha.slice(0, 12)}: ${pending.join(', ')}; wait for them, then merge`] : []),
+    ...(failing.length ? [`${what} failed at ${sha.slice(0, 12)}: ${failing.join(', ')}`] : []),
+  ];
+}
+// A records-in-home ticket's records, pinned for merge: the one home commit merge checks and lands.
+// Home's ticket/<id> is fetched as origin has it now; whether it is there is that fetch's answer,
+// never a stale origin ref. Records already landed (a rerun after the code failed to land) are
+// recognized first: forge git, the fetched head is in home's main; otherwise the newest merged home
+// PR from ticket/<id> whose head is the fetched head (the newest of any, when the branch is gone),
+// fetched from refs/pull/<n>/head, since a squash or rebase merge never puts that head in main.
+// Else an open home PR whose head is the fetched one, not a draft, up to date, its checks green.
+// { sha, landed, pr } or { problems }.
+function pinRecords(id) {
+  const HR = repo('home');
+  const HS = HR.settings;
+  const ref = `refs/remotes/origin/ticket/${id}`;
+  const fetched = gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${id}:${ref}`]).status === 0;
+  const tip = fetched ? resolveCommit(ref) : null;
+  const none = [`no records for ${id} in home: commit them under ${projectRel}/tickets/${id}/ on home's ticket/${id} and push it`];
+  if (HS.forge === 'git') {
+    if (!tip) return { problems: none };
+    git(['fetch', '--quiet', 'origin', HS.main_branch]);
+    return { sha: tip, landed: git(['merge-base', '--is-ancestor', tip, `origin/${HS.main_branch}`]) !== null };
+  }
+  let merged = [];
+  try { merged = JSON.parse(HR.gh(['pr', 'list', '--head', `ticket/${id}`, '--state', 'merged', '--json', 'number,headRefOid,mergedAt']) ?? '[]'); } catch {}
+  merged = (Array.isArray(merged) ? merged : []).sort((a, b) => String(b.mergedAt ?? '').localeCompare(String(a.mergedAt ?? '')));
+  const m = tip ? merged.find((p) => p.headRefOid === tip) : merged[0];
+  if (m) {
+    if (!resolveCommit(m.headRefOid)) gitRun(['fetch', '--quiet', 'origin', `refs/pull/${m.number}/head`]);
+    if (!resolveCommit(m.headRefOid)) return { problems: [`home's records PR #${m.number} merged at ${String(m.headRefOid).slice(0, 12)}, which can't be fetched (refs/pull/${m.number}/head)`] };
+    return { sha: m.headRefOid, landed: true, pr: m.number };
+  }
+  if (!tip) return { problems: none };
+  const j = HR.gh(['pr', 'view', `ticket/${id}`, '--json', 'number,headRefOid,isDraft,mergeStateStatus,state,statusCheckRollup']);
+  let p = null;
+  try { p = j ? JSON.parse(j) : null; } catch {}
+  if (!p || (p.state && p.state !== 'OPEN')) return { problems: [`no open home PR from ticket/${id} (its records): open one in home with the ticket's PR title`] };
+  const problems = [];
+  if (p.isDraft) problems.push(`home's records PR #${p.number} is a draft`);
+  if (['BEHIND', 'DIRTY'].includes(p.mergeStateStatus)) problems.push(`home's records PR #${p.number} is ${p.mergeStateStatus.toLowerCase()} relative to home's main; the author merges home's main into ticket/${id} and asks again`);
+  if (p.headRefOid !== tip) problems.push(`home's records PR #${p.number} is at ${String(p.headRefOid).slice(0, 12)}, not home's ticket/${id} as fetched (${tip.slice(0, 12)})`);
+  problems.push(...forgeCheckFails(p, HS.ignored_checks, tip, "home's records PR checks"));
+  return problems.length ? { problems } : { sha: tip, landed: false, pr: p.number };
+}
+// Land a records-in-home ticket's pinned records on home's main, with merge's own message (never
+// run/pr/, which is the link PR's). Home's mergeShaFor is never asked about a link ticket
+// (factsRepo routes it to its link), so the subject needn't avoid what findMergeSha reads; don't
+// add a fallback to home there. null, or why it didn't land.
+function landRecords(id, rec, linkName) {
+  const HR = repo('home');
+  const HS = HR.settings;
+  const subject = `${id}: records`;
+  const body = `Merged home's ticket/${id} at ${rec.sha}: the records of ${id}, whose code lands in ${linkName}`;
+  if (HS.forge === 'git') {
+    git(['fetch', '--quiet', 'origin', HS.main_branch]);
+    const wt = detachedWorktree(`origin/${HS.main_branch}`, `land-records-${slug(id)}`, HR, { seed: false });
+    try {
+      if (git(['merge', '--no-ff', '--quiet', '-m', `${subject}\n\n${body}`, rec.sha], wt) === null) return `home's ticket/${id} at ${rec.sha.slice(0, 12)} does not merge onto home's ${HS.main_branch}`;
+      if (git(['push', '--quiet', 'origin', `HEAD:refs/heads/${HS.main_branch}`], wt) === null) return `push to home's ${HS.main_branch} refused (did main move?)`;
+    } finally {
+      git(['worktree', 'remove', '--force', wt], mainRoot);
+    }
+  } else if (HR.gh(['pr', 'merge', String(rec.pr), `--${HS.merge_method}`, ...(HS.merge_admin === true ? ['--admin'] : []), '--match-head-commit', rec.sha, '--subject', subject, '--body', body]) === null) return `gh pr merge of home's records PR #${rec.pr} refused (did its head move?)`;
+  git(['fetch', '--quiet', 'origin', HS.main_branch]);
+  mainRefCache = undefined; mainLogCache = undefined; mergeShaCache.clear();
+  return null;
+}
 function cmdMerge() {
   supervisorOnly('merge');
   const [id] = positional;
@@ -4972,7 +5557,11 @@ function cmdMerge() {
   const mainBranch0 = S.main_branch;
   R.git(['fetch', '--quiet', 'origin', mainBranch0]);
   if (R.resolveCommit(`origin/${mainBranch0}`) && R.git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
-  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R });
+  // records in home: one pinned home commit, checked here and landed below
+  const inHome = !!id && tickets().has(id) && recordsInHomeId(id);
+  const rec = inHome ? pinRecords(id) : null;
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(inHome ? { records: rec.sha ?? null } : {}) });
+  if (rec?.problems) fails.push(...rec.problems);
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
     const key = `footprint:${id}:${sha}`;
@@ -4995,19 +5584,7 @@ function cmdMerge() {
   // The forge's own checks at this head (CI, a deploy pipeline): pending is not passed and failing
   // fails, whether or not branch protection marks them required. The owner can name checks to
   // skip (settings ignored_checks, gate-change).
-  {
-    const ignored = new Set(S.ignored_checks ?? []);
-    const pending = [], failing = [];
-    for (const c of pr.statusCheckRollup ?? []) {
-      const name = c.name ?? c.context ?? '?';
-      if (ignored.has(name)) continue;
-      const state = c.__typename === 'StatusContext' || c.state ? String(c.state ?? '').toUpperCase() : (c.status === 'COMPLETED' ? String(c.conclusion ?? '').toUpperCase() : 'PENDING');
-      if (['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', ''].includes(state)) pending.push(name);
-      else if (!['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(state)) failing.push(`${name} (${state.toLowerCase()})`);
-    }
-    if (pending.length) fails.push(`the forge's checks are still running at ${sha.slice(0, 12)}: ${pending.join(', ')}; wait for them, then merge`);
-    if (failing.length) fails.push(`the forge's checks failed at ${sha.slice(0, 12)}: ${failing.join(', ')}`);
-  }
+  fails.push(...forgeCheckFails(pr, S.ignored_checks, sha));
   // A chore PR that changes files outside project/ (the agent config, the forge config) carries an
   // owner answer; real kit files need it in a kit class (KIT_CLASSES). project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
@@ -5131,6 +5708,7 @@ function cmdMerge() {
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
   const gates = Object.entries(S.gates ?? {});
+  const coveredNotes = []; // gates the forge's checks covered at this head, for the merge act
   if (!gates.length && !flags['no-gates'] && !chore) fails.push(R.name === 'home' ? 'no gates in settings (gates: {name: command}); pass --no-gates to merge without running any' : `no gates in ${R.name}'s settings (links.${R.name}.gates); pass --no-gates to merge without running any`);
   if (!fails.length && gates.length && !chore && !flags['no-gates']) {
     // A gate with `paths` runs only when the PR changes a file matching one of them (a monorepo's
@@ -5140,9 +5718,44 @@ function cmdMerge() {
     const applies = ([, spec]) => typeof spec === 'string' || !spec.paths || !changed || changed.some((f) => spec.paths.some((g) => pathMatches(g, f)));
     const skipped = gates.filter((g) => !applies(g)).map(([n]) => n);
     if (skipped.length) out(`gates not applicable to this PR: ${skipped.join(', ')}`);
+    // A gate the owner declared covered_by (gate-change) isn't run here when the forge's checks ran
+    // it green at this exact head: the PR is read again, by number, and its head must still be sha.
+    // Everything that can't be read or listed covers nothing. A PR that changes .github/ covers
+    // nothing either: a pull_request workflow runs the PR's own workflow files, so the PR would
+    // define the very CI that excuses the gate.
+    const declared = gates.filter(applies).filter(([, s]) => isObj(s) && s.covered_by !== undefined);
+    let fresh = null;
+    if (declared.length) {
+      const diff = base ? R.git(['diff', '-z', '--name-only', '--no-renames', base, sha]) : null; // the diff itself: changedFiles reads a failed diff as no files
+      const ci = diff === null ? null : diff.split('\0').filter((f) => f.startsWith('.github/'));
+      if (viaGit) fresh = { why: 'forge is git: no checks to read' };
+      else if (!pr.number) fresh = { why: 'no PR to read' };
+      else if (ci === null) fresh = { why: 'cannot tell what the PR changes' };
+      else if (ci.length) fresh = { why: `the PR changes the forge's CI configuration (${ci.slice(0, 3).join(', ')}${ci.length > 3 ? ', …' : ''})` };
+      else {
+        let v = null;
+        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup']) ?? 'null'); } catch { v = null; }
+        if (!isObj(v)) fresh = { why: "could not read the PR's checks again" };
+        else if (v.headRefOid !== sha) fresh = { why: `the head moved to ${String(v.headRefOid ?? '?').slice(0, 12)}` };
+        else fresh = { rollup: v.statusCheckRollup ?? [] };
+      }
+    }
+    const coveredNow = new Map();
+    for (const [name, spec] of declared) {
+      const shape = forgeCoverage(spec.covered_by, []);
+      const c = shape.bad ? shape : fresh.rollup ? forgeCoverage(spec.covered_by, fresh.rollup, S.ignored_checks ?? []) : { covered: false, why: fresh.why };
+      if (c.bad) warn(`gate ${name}: ${c.why}; it runs`);
+      else if (c.covered) {
+        out(`gate ${name} not run here: the forge's checks ran it green at ${sha.slice(0, 12)} (${c.checks.join(', ')})`);
+        coveredNow.set(name, c.checks);
+        coveredNotes.push(`gate ${name} covered by the forge's checks at ${sha} (${c.checks.join(', ')})`);
+        continue;
+      }
+      if (!c.bad) out(`gate ${name} runs here: ${c.why}`);
+    }
     const wt = detachedWorktree(sha, `merge-${slug(branch)}`, R);
     try {
-      for (const [name, spec] of gates.filter(applies)) {
+      for (const [name, spec] of gates.filter(applies).filter(([n]) => !coveredNow.has(n))) {
         const cmd = typeof spec === 'string' ? spec : spec.cmd;
         const started = Date.now();
         let ok = true;
@@ -5190,28 +5803,45 @@ function cmdMerge() {
     }
   }
   if (fails.length) report(fails, '');
-  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}`);
+  const recWords = rec ? `, records at ${rec.sha.slice(0, 12)} in home${rec.landed ? ' (landed already: only the code lands)' : ''}` : '';
+  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}${recWords}`);
   const mainBranch = S.main_branch;
-  if (viaGit) {
-    // Merge the exact verified sha (never the branch name, which may have moved) onto origin's main.
-    R.git(['fetch', '--quiet', 'origin', mainBranch]);
-    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`, R);
-    try {
-      R.gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
-      if (R.git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch}${inR} refused (did main move?); verify from the start`);
-    } finally {
-      R.git(['worktree', 'remove', '--force', wt], R.root);
-    }
-  } else {
-    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
-    if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
+  // Records first: they land on home's main at exactly the pinned sha (once: a rerun finds them
+  // landed), then the code. A code landing that fails after them leaves home with the records and
+  // the link without the code, no act logged; merge again re-checks and lands only the code.
+  if (rec && !rec.landed) {
+    const why = landRecords(id, rec, R.name);
+    if (why) die(`the records of ${id} did not land in home (${why}); nothing landed: verify from the start`);
+    // Its own act, logged as it lands: the merge it made on home's main is named by what merge did,
+    // never inferred from git later (a subject, a tree or a parent is anything anyone can push). No
+    // refs: the ticket isn't merged until its code lands (merged-without-merge reads merge-word refs).
+    const ra = appendLog({ type: 'act', class: 'merge-word', what: `merged home's ticket/${id} at ${rec.sha}: the records of ${id}, ahead of its code in ${R.name}`, refs: [], reversible: false }, 'supervisor');
+    out(`landed the records of ${id} at ${rec.sha.slice(0, 12)} in home (${ra.id})`);
   }
+  const landCode = () => {
+    if (viaGit) {
+      // Merge the exact verified sha (never the branch name, which may have moved) onto origin's main.
+      R.git(['fetch', '--quiet', 'origin', mainBranch]);
+      const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`, R);
+      try {
+        if (R.git(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt) === null) return `${sha.slice(0, 12)} does not merge onto ${mainBranch}${inR}`;
+        if (R.git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) return `push to ${mainBranch}${inR} refused (did main move?)`;
+      } finally {
+        R.git(['worktree', 'remove', '--force', wt], R.root);
+      }
+      return null;
+    }
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
+    return merged === null ? 'gh pr merge refused (did the head move?)' : null;
+  };
+  const codeFail = landCode();
+  if (codeFail) die(rec ? `the records of ${id} landed in home at ${rec.sha.slice(0, 12)}; the code did not land in ${R.name} (${codeFail}): run merge ${id} again` : `${codeFail}; verify from the start`);
   R.git(['fetch', '--quiet', 'origin', mainBranch]);
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
@@ -6240,6 +6870,13 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+// Open threads by whose move: ready (the supervisor's proposal awaits the owner), else you (the
+// owner's move), else waiting (on the supervisor).
+function threadCounts() {
+  const r = { you: 0, waiting: 0, ready: 0 };
+  for (const v of threadViews(readLog().objects)) if (v.status === 'open') r[v.ready ? 'ready' : v.waiting === 'owner' ? 'you' : 'waiting']++;
+  return r;
+}
 // The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
 // second says whether it was typed into the supervisor's pane.
 function cmdThread() {
@@ -8636,6 +9273,20 @@ function rankQuestions(qs, inbox = qs) {
   const ranks = inboxRanks(inbox);
   return qs.map((q) => ({ ...q, rank: ranks.get(q.id) ?? null })).sort((a, b) => (a.rank?.position ?? Infinity) - (b.rank?.position ?? Infinity) || a.asked_at.localeCompare(b.asked_at));
 }
+// What holds each item that needs the owner: a ticket id, or plan-<feature> for a planner, to the
+// open Inbox question holding it (asked for the ticket or naming it in blocks; for a planner, one of
+// its waiting_on_owner). With several, the first in Inbox order: the one the owner answers first.
+function heldByMap() {
+  const qs = rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go'));
+  const H = new Map();
+  const hold = (key, qid) => { if (!H.has(key)) H.set(key, qid); };
+  const ps = planners();
+  for (const q of qs) {
+    for (const id of [q.ticket, ...(q.blocks ?? [])].filter(Boolean)) hold(id, q.id);
+    for (const p of ps) if (p.waiting_on_owner.includes(q.id)) hold(`plan-${p.feature}`, q.id);
+  }
+  return H;
+}
 function cmdQuestions() {
   let qs = questions();
   const inbox = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
@@ -8954,7 +9605,9 @@ function cmdAct() {
       }
     } else if (doors.length && !questions().some((q) => isDoorQuestion(q) && q.ticket === t.id && q.status === 'answered' && doorAgreed(q))) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
-    const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
+    // where the records are: home's ticket/<id> for records in home, else the ticket's repo (an act:
+    // fails fast on a missing or wrong checkout)
+    const R = recordsRepo(t.id);
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
     const plan = ref ? R.git(['show', `${ref}:${R.projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
@@ -10291,6 +10944,7 @@ function currentMilestone(g) {
 // points, or the design's estimate where nothing is planned yet), the waves that takes at the
 // current worker slots, and a date where the fleet has a measured rate (planning.md §1).
 let roadmapMemo = null;
+const FORECAST_WIDTH = 8;
 function goalForecast(g, r = null) {
   const ms = g.milestones ?? [];
   if (!ms.length) return null;
@@ -10298,7 +10952,8 @@ function goalForecast(g, r = null) {
   const avgW = all.length ? all.reduce((a, t) => a + weight(t), 0) / all.length : 1;
   // one roadmap per process: every goal's view asks for its forecast, and the roadmap reads git
   r ??= (roadmapMemo ??= collectRoadmap());
-  const slots = Math.max(1, loadSettings().max_active_tickets ?? 1);
+  // with no cap, an unplanned milestone is forecast at FORECAST_WIDTH tickets at once; planned features use their own waves
+  const slots = Math.max(1, Number.isFinite(capOf(loadSettings().max_active_tickets)) ? loadSettings().max_active_tickets : FORECAST_WIDTH);
   const cur = currentMilestone(g);
   const fs_ = features();
   let cumPts = 0;
@@ -10757,6 +11412,43 @@ const isHarnessRuntime = (f) => RUNTIME_RES.some(([, re]) => re.test(f));
 // git status --porcelain, less the harness's runtime files
 const workLines = (porcelain) => (porcelain ?? '').split('\n').filter(Boolean).filter((l) => !isHarnessRuntime(l.slice(3).replace(/^"|"$/g, '').split(' -> ').pop()));
 const isRecordKeeping = (slug) => ['log', 'fleet-handoff', 'drain-handoff'].includes(slug) || /^secret-/.test(slug ?? '');
+// Upkeep's last 14 UTC days, oldest first: the chores merged, kit syncs, CI fixes (which mark the day
+// failed) and retros, each once a day. Record-keeping chores aren't upkeep; a retro-* chore's retro
+// counts as its observation. A merge act with no chore ref (an older line, a plan) is passed over.
+function upkeepDays(now = Date.now()) {
+  const DAY = 864e5;
+  const n = new Date(now);
+  const day0 = Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate());
+  const days = Array.from({ length: 14 }, (_, i) => ({ starts_at: new Date(day0 - (13 - i) * DAY).toISOString(), items: [], failed: false }));
+  const seen = new Set();
+  const add = (at, kind, ref, words) => {
+    const i = Math.floor((Date.parse(at) - (day0 - 13 * DAY)) / DAY);
+    if (!(i >= 0 && i <= 13)) return;
+    const key = `${i}|${kind}|${ref}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    days[i].items.push({ kind, ref, words, at });
+    if (kind === 'ci-fix') days[i].failed = true;
+  };
+  for (const a of logObjects('act')) {
+    if (a.created_by !== 'supervisor' || !Array.isArray(a.refs)) continue;
+    const ref = a.refs[0];
+    if (a.class === 'merge-chore') {
+      const slug = typeof ref === 'string' ? ref.match(/^chore-(.+)$/)?.[1] : null;
+      if (!slug || isRecordKeeping(slug) || /^retro-/.test(slug)) continue;
+      const sync = slug.match(/^devteam-sync-(.+)$/);
+      if (sync) add(a.created_at, 'kit-sync', ref, `Kit synced to ${sync[1]}`);
+      else if (/^(ci-fix|devteam-workflow)/.test(slug)) add(a.created_at, 'ci-fix', ref, `CI fix ${slug}`);
+      else add(a.created_at, 'chore', ref, `Merged chore ${slug}`);
+    } else if (a.class === 'merge-word') {
+      const t = tickets().get(ref);
+      if (t?.feature === CHORES) add(a.created_at, 'chore', ref, `Merged ${t.title}`);
+    }
+  }
+  for (const o of logObjects('observation')) if (o.kind === 'retro' && o.created_by === 'supervisor') add(o.created_at, 'retro', o.id, 'Retro');
+  for (const d of days) d.items.sort((a, b) => a.at.localeCompare(b.at));
+  return days;
+}
 function cmdChore() {
   const [sub, slugName] = positional;
   if (sub === 'start') {
@@ -11221,6 +11913,200 @@ function threadAnswersUnbound() {
     return why ? { id: l.id, why } : null;
   }).filter(Boolean);
 }
+// ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
+
+const METRICS_INTERNALS = Symbol('metrics internals');
+// kit-98's weeks: the last 12 calendar weeks (Monday 00:00 UTC), oldest first, ending with this one.
+const efficiencyWeeks = (now) => Array.from({ length: 12 }, (_, i) => { const start = mondayOf(now) - (11 - i) * WEEK; return { start, end: start + WEEK }; });
+// A ticket's review record as a pass of its own work, by file name: parseReview reads task-2.md as
+// pass 2 and task-2-2.md as stage task-2-2, but each task-<n>.md is task n's first review (ruling
+// m-20261115-204118085-supervisor). Tracks, contracts, designs and graphs aren't counted.
+function reviewPassOf(file) {
+  const x = /^(spec|plan|final)-(\d+)\.md$/.exec(file);
+  if (x) return { stage: x[1], first: Number(x[2]) === 1 };
+  if (/^task-\d+\.md$/.test(file)) return { stage: 'task', first: true };
+  if (/^task-\d+-\d+\.md$/.test(file)) return { stage: 'task', first: false };
+  return null;
+}
+function firstPassOf(records) {
+  const firsts = records.filter((r) => r.verdict && reviewPassOf(r.file)?.first);
+  return { first_passes: firsts.length, rejected: firsts.filter((r) => r.verdict === 'CHANGES').length };
+}
+// every ticket's records, from where reviewStats reads them (shared through reviewMemo)
+const ticketReviewWalk = () => new Map([...tickets().keys()].map((id) => { const b = ticketBranchRef(id); return [id, ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)]; }));
+const TOKEN_KINDS = ['input', 'output', 'cache_read', 'cache_write'];
+function tokensByPhase(items) {
+  const o = {};
+  for (const r of items) { const t = (o[r.phase] ??= { input: 0, output: 0, cache_read: 0, cache_write: 0 }); for (const k of TOKEN_KINDS) t[k] += r[k]; }
+  return o;
+}
+// The score (the design's Efficiency section): a week with 3 or more tickets is scored against the
+// best (lowest) dollars and hours per point among the 12 weeks' scored weeks. A week with an escaped
+// defect can't score a saving it made by letting the defect through: its spend and time are the
+// lowest raw values of the other scored weeks, 0 with none.
+function scoreWeeks(weeks) {
+  const scored = weeks.filter((w) => w.tickets >= 3);
+  if (!scored.length) return { best: null };
+  const best = { usd_per_point: Math.min(...scored.map((w) => w.usd_per_point)), hours_per_point: Math.min(...scored.map((w) => w.hours_per_point)) };
+  const raw = (w, k) => (w[k] === 0 ? 1 : best[k] / w[k]);
+  for (const w of scored) {
+    const others = scored.filter((o) => o !== w);
+    const part = (k) => (!w.escaped_defects ? Math.min(1, raw(w, k)) : others.length ? Math.min(...others.map((o) => raw(o, k))) : 0);
+    const p = { spend: part('usd_per_point'), time: part('hours_per_point'), rework: w.first_pass };
+    w.score = Math.round((100 * (p.spend + p.time + p.rework)) / 3);
+    w.parts = Object.fromEntries(Object.entries(p).map(([k, v]) => [k, +v.toFixed(2)]));
+  }
+  return { best };
+}
+const SPEND_FINDINGS = ['cost-hotspot', 'costly-ticket', 'low-cache-hit', 'cost-per-point-rising', 'unpriced-model'];
+// Orient: the open spend findings, each with the newest observation that recorded it (null until
+// observe-metrics logs one).
+function efficiencyWaste(m) {
+  const newest = new Map();
+  for (const o of logObjects('observation')) if (o.source_key?.startsWith('metrics:') && (!newest.has(o.source_key) || o.created_at >= newest.get(o.source_key).created_at)) newest.set(o.source_key, o);
+  return m.findings.filter((f) => SPEND_FINDINGS.includes(f.kind)).map((f) => ({ id: newest.get(`metrics:${f.kind}:${f.subject}`)?.id ?? null, kind: f.kind, subject: f.subject, detail: f.detail }));
+}
+// Act: the levers on trial: improvement-trial acts that cite a spend finding or name cost per point,
+// newest first; running until an outcome observation cites one, then kept or dropped by the newest.
+function efficiencyTrials(perPoint) {
+  const spendObs = new Set(logObjects('observation').filter((o) => SPEND_FINDINGS.includes(o.kind)).map((o) => o.id));
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const now = Date.now();
+  return logObjects('act').filter((a) => a.class === 'improvement-trial' && ((a.refs ?? []).some((r) => spendObs.has(r)) || /cost[- ]per[- ](merged )?point/i.test(a.what ?? '')))
+    .sort(byTime).reverse().map((a) => {
+      const since = Date.parse(a.created_at);
+      const last = outcomes.filter((o) => (o.refs ?? []).includes(a.id)).pop();
+      return {
+        id: a.id, what: a.what ?? '', since: a.created_at,
+        usd_per_point_start: perPoint(since - WEEK, since)?.usd_per_point ?? null, usd_per_point_now: perPoint(since, now + 1)?.usd_per_point ?? null,
+        escaped_defects_since: defects.filter((t) => t >= since).length,
+        state: !last ? 'running' : (last.valence ?? 0) >= 0 ? 'kept' : 'dropped',
+      };
+    });
+}
+// Model families from the top, for "a smaller model": the same version one family down, or, when
+// that version isn't priced, that family's newest priced version. Priced means named exactly in
+// MODEL_PRICES or settings.model_prices (priceFor's prefix fallback prices versions nobody listed).
+/* model families start */
+const MODEL_FAMILIES = [['fable', 'mythos'], ['opus'], ['sonnet'], ['haiku']];
+const parseModelKey = (k) => { const x = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(k ?? ''); return x ? { family: x[1], version: x[2] } : null; };
+const versionCmp = (a, b) => { const p = a.split('-').map(Number), q = b.split('-').map(Number); for (let i = 0; i < Math.max(p.length, q.length); i++) { const d = (p[i] ?? 0) - (q[i] ?? 0); if (d) return d; } return 0; };
+function smallerModel(key, priced) {
+  const m = parseModelKey(key);
+  const tier = m ? MODEL_FAMILIES.findIndex((f) => f.includes(m.family)) : -1;
+  if (tier < 0 || tier === MODEL_FAMILIES.length - 1) return null;
+  const down = MODEL_FAMILIES[tier + 1][0];
+  if (priced.includes(`claude-${down}-${m.version}`)) return `claude-${down}-${m.version}`;
+  const newest = priced.map(parseModelKey).filter((x) => x?.family === down).sort((a, b) => versionCmp(b.version, a.version))[0];
+  return newest ? `claude-${down}-${newest.version}` : null;
+}
+// a model as the owner reads it: claude-sonnet-5-5 is Sonnet 5.5
+const modelWords = (key) => { const m = parseModelKey(key); return m ? `${m.family[0].toUpperCase()}${m.family.slice(1)} ${m.version.replace(/-/g, '.')}` : 'that model'; };
+/* model families end */
+// A suggestion's id: stable while its condition holds, never from a rank or a date, and safe as a
+// thread subject (suggestion:<id>).
+const effId = (kind, subject) => `eff-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+const dollars = (x) => `$${Number.isInteger(x) ? x : x.toFixed(2)}`;
+// Decide: up to five suggestions whose condition holds this week, by estimated dollars (the design's
+// five kinds). ids are this week's tickets, ids12 the 12 weeks', [start, end) this week.
+function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS }) {
+  const ts = tickets();
+  const out = [];
+  const add = (kind, subject, usd, per, what, evidence) => out.push({ id: effId(kind, subject), kind, what, evidence, effect: `about ${dollars(+usd.toFixed(2))} ${per === 'once' ? 'once' : 'a week'}`, usd: +usd.toFixed(2), per });
+  const recs = (id) => walk.get(id) ?? [];
+  // a review pass, priced from final-review reviewer spend: the median over the 12 weeks' tickets
+  // with a final record of their reviewer spend over their final records
+  const perTicket = ids12.map((id) => {
+    const finals = recs(id).filter((r) => r.verdict && /^final-\d+[a-z]?\.md$/.test(r.file)).length;
+    const usd = items.filter((x) => x.who === id && x.role === 'reviewer' && (x.phase === 'final-review' || x.phase === 'review')).reduce((a, x) => a + x.usd, 0);
+    return finals ? usd / finals : null;
+  }).filter((x) => x !== null);
+  // with no spend items (spend reported on phase lines only) there is no reviewer spend to price from
+  const perPass = items.length ? median(perTicket) : null;
+  if (perPass !== null) {
+    const small = ids.filter((id) => ts.get(id)?.size === 'S' && ts.get(id)?.risk === 'normal');
+    const passes = small.reduce((a, id) => a + recs(id).filter((r) => r.verdict && ['spec', 'plan'].includes(reviewPassOf(r.file)?.stage)).length, 0);
+    if (passes >= 3) add('review-depth', 's-normal', passes * perPass, 'week', 'Fit review depth to small, normal-risk tickets: fewer spec and plan review rounds, keeping the final review', `${passes} spec and plan reviews this week on ${small.length} small, normal-risk ticket${small.length === 1 ? '' : 's'}, at about ${dollars(+perPass.toFixed(2))} a review`);
+    for (const stage of ['spec', 'plan', 'task', 'final']) {
+      const all = ids.flatMap((id) => recs(id)).filter((r) => r.verdict && reviewPassOf(r.file)?.stage === stage);
+      const firsts = all.filter((r) => reviewPassOf(r.file).first);
+      const rejected = firsts.filter((r) => r.verdict === 'CHANGES').length;
+      if (firsts.length >= 4 && rejected / firsts.length > 0.5) add('tighter-specs', stage, (all.length - firsts.length) * perPass, 'week', `Tighten ${stage} work before it is reviewed: most first ${stage} reviews asked for changes`, `${rejected} of ${firsts.length} first ${stage} reviews asked for changes this week, and ${all.length - firsts.length} more rounds followed`);
+    }
+  }
+  // a smaller model: one model over 90% of this week's spend above $50
+  const week = items.filter((x) => x.at >= start && x.at < end);
+  const total = week.reduce((a, x) => a + x.usd, 0);
+  const byModel = {};
+  for (const x of week) for (const [mdl, v] of Object.entries(x.by_model)) byModel[modelKey(mdl)] = (byModel[modelKey(mdl)] ?? 0) + v.usd;
+  const [dom, domUsd] = Object.entries(byModel).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (total > 50 && domUsd > 0.9 * total) {
+    const priced = [...Object.keys(MODEL_PRICES), ...Object.keys(loadSettings().model_prices ?? {})].map(modelKey);
+    const target = smallerModel(dom, priced);
+    const from = priceFor(dom), to = target && priceFor(target);
+    if (from && to && to.output < from.output) {
+      const NOT = ['final-review', 'review', 'spec', 'plan', 'planning'];
+      const work = week.filter((x) => !NOT.includes(x.phase)).reduce((a, x) => a + Object.entries(x.by_model).filter(([mdl]) => modelKey(mdl) === dom).reduce((b, [, v]) => b + v.usd, 0), 0);
+      add('smaller-model', dom, work * (1 - to.output / from.output), 'week', `Try ${modelWords(target)} for building, outside reviews, specs and planning`, `${modelWords(dom)} was ${Math.round((100 * domUsd) / total)}% of this week's ${dollars(+total.toFixed(2))}, ${dollars(+work.toFixed(2))} of it outside reviews, specs and planning`);
+    }
+  }
+  // keep the prompt cache: low-cache-hit's window, priced at its highest-spend priced model
+  if (m.findings.some((f) => f.kind === 'low-cache-hit')) {
+    const recent = items.filter((x) => x.at >= Date.now() - 7 * DAY);
+    const inSide = recent.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    const reads = recent.reduce((a, x) => a + x.cache_read, 0);
+    const spendBy = {};
+    for (const x of recent) for (const [mdl, v] of Object.entries(x.by_model)) spendBy[modelKey(mdl)] = (spendBy[modelKey(mdl)] ?? 0) + v.usd;
+    const model = Object.entries(spendBy).sort((a, b) => b[1] - a[1]).map(([k]) => k).find((k) => priceFor(k));
+    if (model) { const p = priceFor(model); add('cache', 'prompt-cache', (Math.max(0, 0.6 * inSide - reads) * (p.input - p.read)) / 1e6, 'week', 'Keep the prompt cache: resume sessions instead of relaunching them, and keep prompts stable at the start', `${inSide ? Math.round((100 * reads) / inSide) : 0}% of input tokens were cache reads in the last 7 days, short of 60%`); }
+  }
+  // a costly ticket: its spend above the median per point (as the finding counts it), once
+  const pp = (id) => (m.cost.by_ticket[id] ?? 0) / (POINTS[ts.get(id)?.size] ?? 1);
+  const merged = [...ts.keys()].filter((id) => mergedAt(id) && m.cost.by_ticket[id] !== undefined).map(pp).sort((a, b) => a - b);
+  const med = merged[Math.floor(merged.length / 2)];
+  for (const f of m.findings.filter((x) => x.kind === 'costly-ticket')) {
+    const points = POINTS[ts.get(f.subject)?.size] ?? 1;
+    const spent = m.cost.by_ticket[f.subject] ?? 0;
+    add('costly-ticket', f.subject, spent - med * points, 'once', `Find where ${f.subject}'s spend went, and try a lever on the next tickets like it`, `${dollars(+spent.toFixed(2))} on ${points} point${points === 1 ? '' : 's'}, against a median of ${dollars(+med.toFixed(2))} a point`);
+  }
+  return out.sort((a, b) => b.usd - a.usd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 5);
+}
+function efficiencyData(m) {
+  const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];
+  const weekIds = [];
+  const walk = ticketReviewWalk();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const r2 = (x) => +x.toFixed(2);
+  const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
+    // the week's tickets: merged in it with spend recorded, the set perPoint counts
+    const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
+    weekIds.push(done.map((c) => c.id));
+    const pp = perPoint(start, end);
+    const points = pp?.points ?? 0;
+    const fp = done.map((c) => firstPassOf(walk.get(c.id) ?? [])).reduce((a, f) => ({ n: a.n + f.first_passes, bad: a.bad + f.rejected }), { n: 0, bad: 0 });
+    // the week's spend items: those timed in it, as collectMetrics selects them for its window
+    const its = items.filter((x) => x.at >= start && x.at < end);
+    const usd = {};
+    for (const r of its) usd[r.phase] = (usd[r.phase] ?? 0) + r.usd;
+    const inSide = its.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    return {
+      starts_at: new Date(start).toISOString(), tickets: done.length, points, usd_per_point: pp?.usd_per_point ?? null,
+      hours_per_point: points ? r2(done.reduce((a, c) => a + c.ms, 0) / 3600000 / points) : null,
+      first_pass: fp.n ? r2((fp.n - fp.bad) / fp.n) : 1, first_passes: fp.n,
+      cache_read_share: inSide ? r2(its.reduce((a, x) => a + x.cache_read, 0) / inSide) : null,
+      escaped_defects: defects.filter((t) => t >= start && t < end).length,
+      usd_by_phase: Object.fromEntries(Object.entries(usd).map(([k, v]) => [k, r2(v)])), tokens_by_phase: tokensByPhase(its),
+      score: null, parts: null,
+    };
+  });
+  const { best } = scoreWeeks(weeks);
+  return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
+    observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
+    waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint),
+    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: Date.parse(weeks[11].starts_at), end: Date.parse(weeks[11].starts_at) + WEEK, POINTS }) };
+}
+
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -11323,6 +12209,18 @@ function collectMetrics(since) {
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
     escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
   };
+  // what efficiencyData recomputes per calendar week, by the same code (not in the JSON)
+  Object.defineProperty(m, METRICS_INTERNALS, { value: { cycles, ticketUsd, perPoint, items, POINTS } });
+  // Efficiency (supervisor.md §3, Orient): tokens and clock time together, over ticket work (the
+  // supervisor's own spend and planning are overhead, read from phase_usd). Waiting produces nothing:
+  // a ticket in awaiting-word, blocked, parked or starting. This is over the whole window metrics
+  // reads (--since); the dashboard's top-level efficiency (efficiencyData) is the same cycles and
+  // spend counted per calendar week, with a score against the best of 12 weeks.
+  // mis_rated: merged tickets whose results contradict their rating (supervisor.md §9).
+  m.mis_rated = misRated(cycles, ts, ticketUsd, POINTS);
+  // merged tickets' hours, start to merge, for hours per point (the tickets cost.per_point counts)
+  m.cycle_hours_total = +(cycles.filter((c) => ticketUsd[c.id] !== undefined).reduce((a, c) => a + c.ms, 0) / 3600000).toFixed(2);
+  m.efficiency = efficiencyOf(m);
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
   const threadsNow = threadViews(readLog().objects);
@@ -11428,6 +12326,10 @@ function collectMetrics(since) {
   const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
   const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
   if (phaseNow.size >= 2 && costPhase && totalUsd >= HOTSPOT_MIN_USD && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
+  // what holds each item (heldByMap); a ticket that can still move: active, unmerged, and not on a
+  // parked or let-go goal (that one waits by choice)
+  const H = heldByMap();
+  const live = (id) => { const t = ts.get(id); return !!t && isActive(t) && !mergeShaFor(id) && !['park', 'let-go'].includes(ticketMode(t)); };
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
     // Blocked on an open owner question (asked for it, or naming it in blocks): the next move is the
@@ -11437,9 +12339,20 @@ function collectMetrics(since) {
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
+    // the first hour of the same: blocked with nothing holding it, raised at once
+    else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
     // awaiting the word while an open owner question blocks it: the word waits on the owner
     if (p.phase === 'awaiting-word' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `waiting for the word for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     else if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
+  }
+  // a planner can't log phase blocked: it says so in a blocked message, shown while unanswered. It is
+  // held through waiting_on_owner (a question on its goal, or linking its branch), never --blocks; one
+  // parked, or whose goals are all parked or let go, waits by choice.
+  for (const p of planners()) {
+    const key = `plan-${p.feature}`;
+    if (p.parked || ['park', 'let-go'].includes(modeOf(p.goals.map((g) => logGet(g)).filter((g) => g?.type === 'goal')))) continue;
+    const ask = p.goals.length ? `ask --goal ${p.goals[0]} …` : `ask … --links '[{"title":"The plan","ref":"plan/${p.feature}","path":"${projectRel}/log/${key}.jsonl"}]'`;
+    if (p.waiting_on_supervisor.some((m) => m.kind === 'blocked') && !H.get(key)) add('medium', 'blocked-without-question', key, 'blocked with no open owner question naming it', `if it waits on the owner, ask on its goal (${ask}); otherwise answer its blocked message so it can move`);
   }
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;
@@ -11563,12 +12476,24 @@ function collectMetrics(since) {
     if (!drained && waiting.length && (cap == null || ps.length < cap)) idlePlanning = waiting.length;
     if (idlePlanning && !memFull) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
+  // what idle capacity offers: ready tickets that don't overlap a running one's touches (ready marks those)
+  const activeIds = [...ts.values()].filter(countsAsWorker).map((t) => t.id);
+  const startable = ready.filter((t) => !overlapsActive(t, activeIds, ts).length);
   // a ready fix ticket may use an incident slot past the cap
-  const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
-  if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
-  if (!drained && ready.length && active < settings.max_active_tickets && !memFull) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  const readyFix = startable.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
+  if (!drained && readyFix.length && active >= capOf(settings.max_active_tickets) && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0) && !memFull) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${capWords(settings.max_active_tickets)} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
+  if (!drained && startable.length && active < capOf(settings.max_active_tickets) && !memFull) add('medium', 'idle-capacity', `${startable.length} ready`, `${active}/${capWords(settings.max_active_tickets)} workers active${startable.length < ready.length ? `; ${ready.length - startable.length} more wait on a running ticket whose touches they overlap` : ''}`, `make workers for: ${startable.slice(0, 5).map((t) => t.id).join(', ')}`);
   // the slots and planning above that the machine's memory leaves no room for: say that instead
-  if (memFull && (idlePlanning || (!drained && ((ready.length && active < settings.max_active_tickets) || (readyFix.length && active < settings.max_active_tickets + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${settings.max_active_tickets} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, lower max_active_tickets, your own setting');
+  if (memFull && (idlePlanning || (!drained && ((startable.length && active < capOf(settings.max_active_tickets)) || (readyFix.length && active < capOf(settings.max_active_tickets) + (settings.incident_slots ?? 0)))))) add('medium', 'memory-full', 'machine', `${memFull.words}, with ${ready.length} ticket${ready.length === 1 ? '' : 's'} ready, ${active}/${capWords(settings.max_active_tickets)} workers active${idlePlanning ? `, and ${idlePlanning} waiting for a planner` : ''}`, 'start nothing new until some finish (a resume is fine); if this keeps happening, set max_active_tickets (or lower it), your own setting');
+  // the owner asked for one of the supervisor's settings and main doesn't have it yet
+  {
+    const um = goalMode(upkeepOrVirtual());
+    for (const [key, v] of Object.entries(askedSettingsView()).filter(([, x]) => x.label === ASKED_SAVED)) {
+      const words = (x) => (x === null ? 'no limit' : String(x));
+      const arg = v.asked === null ? 'none' : String(v.asked);
+      add('medium', 'owner-setting-unlanded', key, `the owner asked for ${key} ${words(v.asked)} (${v.act}); main has ${words(v.value)}`, `${um !== 'run' ? `Upkeep is ${holdWords(um)}: ` : ''}devteam.mjs chore start settings; devteam.mjs settings set ${key} ${arg} --for ${v.act}; devteam.mjs chore pr settings --title "settings: ${key} ${words(v.asked)}"; devteam.mjs merge --chore settings. While Upkeep is drained or parked, chore start and merge --chore refuse, so the value waits until Upkeep runs (or --force, logged)`);
+    }
+  }
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
@@ -11614,6 +12539,16 @@ function collectMetrics(since) {
     const tw = m.cost.per_point_this_week, lw = m.cost.per_point_last_week;
     if (tw && lw && tw.tickets >= 3 && lw.tickets >= 3 && tw.usd_per_point > 1.5 * lw.usd_per_point) add('medium', 'cost-per-point-rising', 'spend', `$${tw.usd_per_point} per merged point this week, $${lw.usd_per_point} last week`, 'find what changed (model, ticket mix, review rounds) and trial a fix (supervisor.md §9)');
   }
+  // Time efficiency, from phase hours and review records, so a fleet whose spend is only reported
+  // (or not known) gets them too: tickets spending most of their clock waiting, stages whose first
+  // passes are mostly rejected, and tickets rated small that weren't.
+  const eff = m.efficiency;
+  if (eff?.wait_hours_pct !== null && eff?.wait_hours_pct > 50 && m.tickets_merged >= EFF_MIN_MERGED()) add('medium', 'waiting-heavy', 'tickets', `${eff.wait_hours_pct}% of ticket hours were spent waiting (awaiting-word, blocked, parked, starting)`, 'answer review and merge requests the tick they arrive, give owner questions a default where one is allowed, and look at whether small tickets need every review stage (a trial, kept only while quality holds)');
+  for (const x of m.mis_rated ?? []) add('low', 'mis-rated', x.id, `rated ${x.rated}, but: ${x.why.join('; ')}`, 'at the retro, fold what it teaches into how planners rate (a lesson), which tasks go to a fast model, or the review depth');
+  for (const stage of ['spec', 'plan']) {
+    const st = m.reviews?.by_stage?.[stage];
+    if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt`);
+  }
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -11639,6 +12574,8 @@ function collectMetrics(since) {
     const name = repoOfTicketLink(t);
     if (early.length) add('high', 'merged-out-of-order', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main before ${early.join(', ')}, which it depends on`, `check that ${t.id} works without ${early.length > 1 ? 'them' : 'it'}, and merge ${early.join(', ')} next; a revert is a ticket of its own`, { sev: 3 });
   }
+  // A half-done merge (records in home landed, code not): the finding that names the fix.
+  for (const t of ts.values()) if (recordsLandedOnly(t)) add('high', 'records-without-code', t.id, `${t.id}: ${RECORDS_ONLY_FIX(t.id)}`, `merge ${t.id} again: it re-checks at the same records and lands only the code`, { sev: 3 });
   // A merge on any repo's main that merge never made (a worker's push to its repo's main, a merge
   // on the forge's button): no gates, reviews or checks ran on it. A ticket that reads merged with
   // no merge-word act, and a merge commit whose branch head no merge act names. Only merges after
@@ -11647,7 +12584,8 @@ function collectMetrics(since) {
     const since = upgradeAt('merged-without-merge');
     if (since !== null) {
       const acts = logObjects('act').filter((a) => ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(a.class));
-      const heads = new Set(acts.map((a) => /\bat ([0-9a-f]{40})\b/.exec(a.what ?? '')?.[1]).filter(Boolean));
+      // every sha a merge act names: a records-in-home ticket's act names its records merge's head too
+      const heads = new Set(acts.flatMap((a) => [...String(a.what ?? '').matchAll(/\bat ([0-9a-f]{40})\b/g)].map((x) => x[1])));
       const worded = new Set(acts.filter((a) => a.class === 'merge-word').flatMap((a) => a.refs ?? []));
       const seen = new Set();
       for (const t of ts.values()) {
@@ -11729,6 +12667,62 @@ function cmdAck() {
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
+// Merged tickets (the last 30 days) rated light (S, normal risk, not high uncertainty) whose results
+// say otherwise: over three times the median merged cost per point, three or more final-review passes,
+// or an escaped defect that names them. What the loop reads to calibrate ratings (supervisor.md §9).
+function misRated(cycles, ts, ticketUsd, POINTS) {
+  const now = Date.now();
+  const recent = cycles.filter((c) => now - (mergedAt(c.id) ?? 0) < 30 * 86400000);
+  const per = (c) => (ticketUsd[c.id] === undefined ? null : ticketUsd[c.id] / (POINTS[ts.get(c.id)?.size] ?? 1));
+  const costs = cycles.map(per).filter((x) => x !== null);
+  const med = median(costs);
+  const passes = reviewPasses();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect');
+  const out = [];
+  for (const c of recent) {
+    const t = ts.get(c.id);
+    if (!t || t.size !== 'S' || t.risk === 'high' || t.uncertainty === 'high') continue;
+    const why = [];
+    const p = per(c);
+    if (med && p !== null && costs.length >= 5 && p > 3 * med) why.push(`cost ${(p / med).toFixed(1)}x the median per point`);
+    if ((passes[c.id] ?? 0) >= 3) why.push(`${passes[c.id]} final-review passes`);
+    if (defects.some((o) => (o.refs ?? []).includes(c.id) || String(o.subject ?? '') === c.id)) why.push('an escaped defect traced to it');
+    if (why.length) out.push({ id: c.id, rated: `S, ${t.risk ?? 'normal'}, ${t.uncertainty ?? 'low'} uncertainty`, why });
+  }
+  return out;
+}
+const EFFICIENCY_WAIT = ['awaiting-word', 'blocked', 'parked', 'starting'];
+// How much evidence a finding needs before it speaks: 5 merged tickets for waiting-heavy, 10 first
+// passes at a stage for review-churn. The environment can lower them, for tests and a tiny project
+// (DEVTEAM_EFFICIENCY_MIN_MERGED, DEVTEAM_CHURN_MIN_PASSES; named in supervisor.md §3, Orient).
+// review-churn is the all-time, evidence-floored sibling of the dashboard's weekly tighter-specs
+// suggestion (efficiencySuggestions): the same rejections, a longer window and a higher bar.
+const envInt = (k, d) => { const n = Number(process.env[k]); return Number.isInteger(n) && n > 0 ? n : d; };
+const EFF_MIN_MERGED = () => envInt('DEVTEAM_EFFICIENCY_MIN_MERGED', 5);
+const EFF_MIN_PASSES = () => envInt('DEVTEAM_CHURN_MIN_PASSES', 10);
+const EFFICIENCY_OVERHEAD = ['supervisor', 'planning', 'review'];
+function efficiencyOf(m) {
+  const split = (o) => {
+    const rows = Object.entries(o ?? {}).filter(([k]) => !EFFICIENCY_OVERHEAD.includes(k));
+    const total = rows.reduce((a, [, v]) => a + v, 0);
+    const waiting = rows.filter(([k]) => EFFICIENCY_WAIT.includes(k)).reduce((a, [, v]) => a + v, 0);
+    return { total, waiting, share: total ? waiting / total : null };
+  };
+  const h = split(m.phase_hours);
+  const u = split(m.phase_usd);
+  const points = m.cost?.per_point?.points ?? null;
+  const rej = (stage) => m.reviews?.by_stage?.[stage]?.rejection_rate ?? null;
+  const pct = (x) => (x === null ? null : Math.round(100 * x));
+  return {
+    wait_hours_pct: pct(h.share),
+    wait_usd_pct: pct(u.share),
+    hours_per_point: points && m.cycle_hours_total !== undefined ? +(m.cycle_hours_total / points).toFixed(1) : null,
+    usd_per_point: m.cost?.per_point?.usd_per_point ?? null,
+    first_pass_rejection: { spec: rej('spec'), plan: rej('plan'), final: rej('final') },
+    mis_rated: m.mis_rated ?? [],
+  };
+}
+
 function cmdMetrics() {
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
@@ -11739,6 +12733,7 @@ function cmdMetrics() {
     `since: ${m.since ?? 'the beginning'}`,
     `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
     `time by phase (h): ${kv(m.phase_hours)}`,
+    `efficiency: waiting ${m.efficiency.wait_hours_pct ?? '-'}% of ticket hours, ${m.efficiency.wait_usd_pct ?? '-'}% of ticket dollars; ${m.efficiency.hours_per_point ?? '-'}h and $${m.efficiency.usd_per_point ?? '-'} per point; mis-rated ${m.efficiency.mis_rated.length}`,
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
     `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
@@ -11807,41 +12802,87 @@ function collectOoda() {
     // supervisor's to accept (the owner sees those too, read-only); only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
-    acts: recent(acts, 60),
-    decisions: decisionRecords().slice(0, 200),
-    trust,
-    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    acts: recent(acts, 60).map(withClassName),
+    decisions: decisionRecords().slice(0, 200).map(withClassName),
+    trust: trust.map(withClassName),
+    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k), class_name: className(k) }])),
     impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
-    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
+    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80).map(withClassName),
     // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
     // under three records the Loop shows these since the log began instead of lines; retros and rung
     // changes mark the chart, so cause sits next to effect
     learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
-    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
+    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${className(t.class)} to ${RUNG_PLAIN[e.rung]}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
     learning: learningRecords().map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
+// The Settings page's word on each askable setting: main's value (the one in force) and who set it,
+// told from the owner's latest owner-setting act and the supervisor's settings-edit acts. Never
+// says a value is the owner's that the owner didn't choose (strategy R1).
+const ASKED_SAVED = 'Saved; applies once the supervisor lands it';
+const askedShown = (v) => (v === null ? 'No limit' : String(v));
+// The newest supervisor settings-edit without --for for key, newer than sinceIso, of the value main
+// holds, with a settings-chore merge newer than it: the supervisor deliberately set or kept its own
+// value after the owner asked (a no-op edit counts). Only main is read: an edit never merged, or
+// merged before it was made, lands nothing.
+function landedOverride(key, sinceIso, mainValue) {
+  const merges = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && (a.refs ?? []).includes('chore-settings'));
+  return logObjects('act').filter((a) => a.class === 'settings-edit' && a.created_by === 'supervisor' && a.key === key && a.for === undefined && a.created_at > sinceIso && canonical(a.value) === canonical(mainValue) && merges.some((m) => m.created_at > a.created_at)).sort(byTime).at(-1) ?? null;
+}
+// Once per run: metrics and dashboard-data both read it.
+let askedMemo = null;
+function askedSettingsView() {
+  if (askedMemo) return askedMemo;
+  // main's block through mainRef(), the one way of finding main; the working tree before main has one
+  const ref = mainRef();
+  const s = (ref && settingsAt(ref, { orNull: true })) || loadSettings();
+  let all = null;
+  return (askedMemo = Object.fromEntries(OWNER_ASKABLE.map((key) => {
+    const value = s[key] ?? null;
+    const act = latestOwnerSetting(key);
+    const label = !act ? ((all ??= settingsAll()).find((e) => e.key === key)?.set ? 'Set by the supervisor' : "The kit's default")
+      : canonical(act.value) === canonical(value) ? 'Set by you'
+      : landedOverride(key, act.created_at, value) ? `Set by the supervisor (you asked for ${act.value === null ? 'no limit' : act.value})`
+      : ASKED_SAVED;
+    return [key, { value, shown: askedShown(value), label, asked: act ? act.value : null, act: act?.id ?? null }];
+  })));
+}
 function dashboardData() {
+  reviewMemo = new Map();
+  try { return dashboardDataRead(); } finally { reviewMemo = null; }
+}
+function dashboardDataRead() {
   const settings = loadSettings();
+  const metrics = collectMetrics(0);
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
+  const H = heldByMap();
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
+    asked_settings: askedSettingsView(),
     gates_configured: Object.keys(settings.gates ?? {}),
-    tickets: deriveStatus(),
+    // held_by: the open question holding it, or null
+    tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
+    // every kind of decision in plain words; each row with a class carries its class_name
+    class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
-    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')),
+    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
-    metrics: collectMetrics(0),
+    metrics,
+    efficiency: efficiencyData(metrics),
     progress: collectProgress(),
-    planners: planners(),
+    planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
+    threads: threadCounts(),
+    upkeep_days: upkeepDays(),
+    // every kit setting, in words; never a credential (settingsAll)
+    settings_all: settingsAll(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
     sensors: sensorStatus(),
@@ -11873,7 +12914,11 @@ function dashboardKit() {
   if (!dashboardKitCache || Date.now() - dashboardKitCache.at > 60000) dashboardKitCache = { at: Date.now(), kit: kitVersion() };
   return dashboardKitCache.kit;
 }
-const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
+const cmdDashboardData = () => {
+  gitReadCache = new Map();
+  out(JSON.stringify(dashboardData()));
+  if (process.env.DEVTEAM_TEST_REVIEW_READS) process.stderr.write(`review reads: ${reviewReads}\n`);
+};
 
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
@@ -11891,7 +12936,10 @@ function timelineView(id) {
   const R = factsRepo(id);
   const branch = ticketBranchRef(id);
   const ref = branch && !mergeShaFor(id) ? branch : R?.mainRef() ?? null;
-  const files = !R ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${R.projectRel}/tickets/${id}/${f}`).filter((f) => ref && R.git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref, ...(R.name === 'home' ? {} : { repo: R.name }) }));
+  // records in home: home's ticket/<id> until merged, then home's main
+  const RR = recordsInHomeId(id) ? repo('home') : R;
+  const rref = RR === R ? ref : (mergeShaFor(id) ? mainRef() : homeRecordsRef(id));
+  const files = !RR ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${RR.projectRel}/tickets/${id}/${f}`).filter((f) => rref && RR.git(['cat-file', '-e', `${rref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref: rref, ...(RR.name === 'home' ? {} : { repo: RR.name }) }));
   const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
   return { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))), st, all };
 }
@@ -14567,7 +15615,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -14899,10 +15947,11 @@ async function cmdDashboard() {
   const paneToken = (digest) => crypto.createHmac('sha256', paneSecret).update(String(digest)).digest('hex');
   const paneTokenOk = (digest, token) => { const want = Buffer.from(paneToken(digest)); const got = Buffer.from(String(token ?? '')); return got.length === want.length && crypto.timingSafeEqual(got, want); };
   const paneNonces = new Map();
+  const ownerSettingNonces = new Map();
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
-  async function paneAnswer({ digest, option, proof }) {
+  async function paneAnswer({ digest, option, escape = false, proof }) {
     const no = (error, status = 400) => ({ status, body: { error } });
     const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
     let st = null;
@@ -14911,18 +15960,40 @@ async function cmdDashboard() {
     if (!st.ask) return no(`nothing was answered: the supervisor's terminal is not asking anything now (the question is gone)${st.problem ? `; ${st.problem}` : ''}`);
     if (st.ask.kind !== 'menu' || typeof st.target !== 'string') return no(`nothing was answered: what the supervisor's terminal shows now is answered in the terminal, not here${st.problem ? ` (${st.problem})` : ''}`);
     if (st.ask.digest !== digest) return no("nothing was answered: the question in the supervisor's terminal has changed since the page showed it; read the one showing now and answer that");
-    const opt = st.ask.options.find((o) => o.n === option);
-    if (!opt) return no(`nothing was answered: that question has no option ${option}`);
+    const opt = escape ? null : st.ask.options.find((o) => o.n === option);
+    if (!escape && !opt) return no(`nothing was answered: that question has no option ${option}`);
+    // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
+    const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
+    if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
     const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
     // once more, right before the key
-    if (!menuIn(await look())) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    const last = menuIn(await look());
+    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
     // tests only: the moment between that look and the key, in which a question can go
     const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
     if (pause > 0) await new Promise((w) => setTimeout(w, pause));
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
+    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    const finish = async (rec, keys, why, after) => {
+      if (hello) hello.supervisor_question = null;
+      refreshHello();
+      const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
+      if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
+      if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
+      return { status: 200, body: { ok: true, out: said } };
+    };
+    if (escape) {
+      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
+      const lines = await settle(st.ask.selected);
+      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
+    }
+    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     let lines = await settle(st.ask.selected);
     let keys = String(option);
     let still = menuIn(lines);
@@ -14942,13 +16013,7 @@ async function cmdDashboard() {
     // what the pane shows after: the menu took the key unless the digit is sitting in the input box
     const draft = lines ? paneDraftIn(lines) : null;
     const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    const rec = await runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, option, label: opt.label, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, keys, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
-    if (hello) hello.supervisor_question = null;
-    refreshHello();
-    const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
-    if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
-    if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal, and clear its input box if the digit is there.`, 409);
-    return { status: 200, body: { ok: true, out: said } };
+    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
@@ -15089,6 +16154,10 @@ async function cmdDashboard() {
       const r = await run(['timeline', id, '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
+    if (req.method === 'GET' && u.pathname === '/api/governance') {
+      const r = await run(['governance', '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
     // An artifact a question or ticket links to, read from git (committed content only, never a
     // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
     if (req.method === 'GET' && u.pathname === '/api/file') {
@@ -15217,17 +16286,18 @@ async function cmdDashboard() {
     const isSecret = name === 'secret';
     const isReview = name === 'review-draft' || name === 'review-answer';
     const isPane = name === 'pane-answer';
+    const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
-    if (!action && !isSecret && !isReview && !isPane) return send(res, 404, 'text/plain', 'not found');
+    if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
     // present. A sandboxed frame's request says Origin: null and is refused here too.
-    const strict = isSecret || isReview || isPane;
+    const strict = isSecret || isReview || isPane || isOwnerSetting;
     const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
     // A review's result or draft is up to 4 MB, plus its envelope.
-    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : 20000;
+    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : isOwnerSetting ? 512 : 20000;
     // Bytes first, decoded once: a multibyte character split across chunks stays whole.
     const chunks = [];
     let size = 0;
@@ -15238,8 +16308,8 @@ async function cmdDashboard() {
       if (size <= cap) return void chunks.push(c);
       over = true;
       chunks.length = 0;
-      // a review body over the cap is drained and refused with a reason; one far over it is cut off
-      if (!isReview || size > 4 * cap) req.destroy();
+      // a review or setting body over the cap is drained and refused with a reason; one far over it is cut off
+      if (!(isReview || isOwnerSetting) || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
     // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
@@ -15254,7 +16324,8 @@ async function cmdDashboard() {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        if (!isObj(parsed) || typeof parsed.digest !== 'string' || !/^[0-9a-f]{40}$/.test(parsed.digest) || !Number.isInteger(parsed.option) || parsed.option < 1 || parsed.option > 9 || typeof parsed.token !== 'string') return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token }' }));
+        // exactly an option's press or an Esc's, as the page sends them (paneAnswerShape): nothing else reaches the terminal
+        if (!paneAnswerShape(parsed)) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token } or { digest, escape: true, token }' }));
         if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
         let proof = null;
         if (threadsNeedGateway()) {
@@ -15269,7 +16340,33 @@ async function cmdDashboard() {
         }
         if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
         paneAnswering = true;
-        paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+        paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+      }));
+    }
+    // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
+    // gateway's signature for it (each nonce once here, and in the log for the command it runs).
+    if (isOwnerSetting) {
+      const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+      return req.on('end', () => guarded(() => {
+        const bad = () => send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { key, value }' }));
+        if (over) return bad();
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        if (!isObj(parsed) || Object.keys(parsed).sort().join(',') !== 'key,value' || typeof parsed.key !== 'string' || !(parsed.value === null || Number.isInteger(parsed.value))) return bad();
+        const why = askableProblem(parsed.key, parsed.value);
+        if (why) return send(res, 400, 'application/json', JSON.stringify({ error: why }));
+        let proof = null;
+        if (threadsNeedGateway()) {
+          const boxOnly = "not saved: on a box the owner saves settings only through the box's gateway";
+          if (!(gw('ts') && gw('nonce') && gw('sig'))) return send(res, 403, 'application/json', JSON.stringify({ error: boxOnly }));
+          proof = { port, ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: Buffer.from(body, 'utf8').toString('base64') };
+          const w = ownerSettingProofProblem(proof) ?? (ownerSettingNonces.has(proof.nonce) ? 'its signature was used already' : null);
+          if (w) { log(`refused /api/owner-setting: ${w}`); return send(res, 403, 'application/json', JSON.stringify({ error: `${boxOnly} (${w})` })); }
+          const now = Date.now();
+          for (const [n, at] of ownerSettingNonces) if (now - at > 2 * OPERATOR_PROOF_MS) ownerSettingNonces.delete(n);
+          ownerSettingNonces.set(proof.nonce, now);
+        }
+        ownerChild(['owner-setting', parsed.key, parsed.value === null ? 'none' : String(parsed.value)], proof ? JSON.stringify({ proof }) : null);
       }));
     }
     if (isSecret) {
@@ -15337,7 +16434,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -15354,7 +16451,10 @@ function promptFor(role, id, R = repo('home')) {
   const base = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${fixCare}`;
   if (R.name === 'home') return base;
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
-  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
+  const head = `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}`;
+  // records in home: the code goes here, the records in home's ticket/<id>
+  if (role === 'worker' && recordsInHomeId(id)) return `${head}. Only this ticket's code goes in ${R.name}: nothing of the project, records included. Keep its records (spec, plan, verification, reviews) under ${projectRel}/tickets/${id}/ in ${recordsWorktreePath(id)}, a checkout of home on its branch ticket/${id}; commit and push them there, and run dispose there. A final review record names the home commit of the records it reviewed in a line "- Records: <full sha>" beside its verdict on this repo's head.${repo('home').settings.forge === 'git' ? '' : ` Open a PR in home from ticket/${id} with this ticket's PR title too: merge lands it with the code.`}`;
+  return `${head}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
 // The supervisor's opening prompt: the drained or parked preface first, when there is one.
 function supervisorOpeningPrompt(p = PROMPTS.supervisor) {
@@ -15488,8 +16588,24 @@ const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'su
 // page that asked. pane answered is what it runs after: the owner's act for the log, and the lines
 // held for the pane while it asked. On a box it takes that only with the gateway's signature for
 // the press, each taken once, as a thread with the operator does.
+// A press the dashboard's card sends: exactly { digest, option, token } (option 1 to 9) or exactly
+// { digest, escape: true, token }. The route takes nothing else, and on a box pane answered holds the
+// gateway's signed body to the same shape.
+function paneAnswerShape(b) {
+  if (!isObj(b) || typeof b.digest !== 'string' || !/^[0-9a-f]{40}$/.test(b.digest) || typeof b.token !== 'string') return false;
+  const keys = Object.keys(b).sort().join(',');
+  if (keys === 'digest,option,token') return Number.isInteger(b.option) && b.option >= 1 && b.option <= 9;
+  return keys === 'digest,escape,token' && b.escape === true;
+}
+// Whether a numbered menu's hint says Esc cancels it, and nowhere that Esc exits or quits.
+const paneEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
 const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
-function paneProofProblem(proof, now = Date.now()) {
+// The owner's Save on the Settings page (gateway.mjs, ownerSettingSignature): the same, under its own name.
+const ownerSettingSigned = (port, ts, nonce, body) => Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
+const paneProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, paneSigned, now);
+const ownerSettingProofProblem = (proof, now = Date.now()) => dashboardProofProblem(proof, ownerSettingSigned, now);
+// Why a dashboard press's proof isn't the gateway's for the bytes `signed` names (null when it is).
+function dashboardProofProblem(proof, signed, now = Date.now()) {
   if (!isObj(proof)) return 'it carries no signature from the gateway';
   const { port, ts, nonce, sig, body } = proof;
   if (!Number.isInteger(port) || typeof ts !== 'string' || !/^\d{13}$/.test(ts) || typeof nonce !== 'string' || !/^[A-Za-z0-9_-]{22,64}$/.test(nonce) || typeof sig !== 'string' || !/^[A-Za-z0-9_-]{80,100}$/.test(sig) || typeof body !== 'string') return 'its signature is malformed';
@@ -15497,11 +16613,53 @@ function paneProofProblem(proof, now = Date.now()) {
   const key = gatewayThreadKey();
   if (!key) return `this box has no gateway key (${BOX_THREAD_KEY})`;
   let ok = false;
-  try { ok = crypto.verify(null, paneSigned(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
+  try { ok = crypto.verify(null, signed(port, ts, nonce, Buffer.from(body, 'base64')), key, Buffer.from(sig, 'base64url')); } catch {}
   return ok ? null : 'its signature is not the gateway\'s';
 }
 // Another account's artifact is named by its id, never its link: the log is mirrored to git.
 const noArtifactLinks = (t) => String(t ?? '').replace(/(?:https?:\/\/)?claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})\S*/g, 'artifact $1');
+// This checkout's dashboard port, as a number: the last one the running dashboard logged
+// (run/dashboard.log; a pinned --port writes no run/dashboard-port), else run/dashboard-port.
+function ownDashboardPort() {
+  const logged = [...(readText(path.join(runDir, 'dashboard.log')) ?? '').matchAll(/started on http:\/\/127\.0\.0\.1:(\d+)/g)].pop()?.[1];
+  const n = logged ? Number(logged) : readNum(path.join(runDir, 'dashboard-port'));
+  return Number.isInteger(n) ? n : null;
+}
+// The owner's requests for the supervisor's askable settings, oldest first, and the latest one.
+const ownerSettingActs = (key) => logObjects('act').filter((a) => a.class === 'owner-setting' && a.created_by === 'owner' && a.key === key).sort(byTime);
+const latestOwnerSetting = (key) => ownerSettingActs(key).at(-1) ?? null;
+// owner-setting <key> <1..20|none>: the owner asks for one of the supervisor's own settings (the
+// dashboard's Settings page runs it on Save). It writes one owner act and nothing else: the
+// supervisor lands it with settings set in its settings chore, and owner-setting-unlanded stays
+// raised until main has it. Only the dashboard's channel or the owner's own terminal runs it.
+function cmdOwnerSetting() {
+  const [key, arg] = positional;
+  if (!key || arg === undefined || positional.length !== 2) die('usage: owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor\'s settings; the dashboard\'s Settings page runs it)');
+  const { by } = ownerWriter('the owner asks for a setting on the dashboard\'s Settings page; you change your own with settings set in the settings chore');
+  if (process.env.DEVTEAM_CHANNEL !== 'dashboard' && !process.stdin.isTTY) die('owner-setting: the owner asks for a setting on the dashboard\'s Settings page or in their own terminal; you change your own with settings set in the settings chore');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`owner-setting: ${why}`);
+  // On a box every agent can reach the dashboard and run this: only the gateway's signature for the
+  // owner's Save, for this dashboard and exactly this key and value, each taken once (the log keeps
+  // the nonces past a dashboard restart).
+  let proof = null;
+  if (threadsNeedGateway()) {
+    const no = (w) => die(`owner-setting: on a box the owner saves settings only on the dashboard through the box's gateway, which signs the press, and ${w}`);
+    let b = null;
+    try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
+    const p = isObj(b) ? b.proof : null;
+    const w = ownerSettingProofProblem(p);
+    if (w) no(w);
+    let signed = null;
+    try { signed = JSON.parse(Buffer.from(p.body, 'base64').toString('utf8')); } catch {}
+    if (!isObj(signed) || Object.keys(signed).sort().join(',') !== 'key,value' || signed.key !== key || signed.value !== value) no('the gateway signed another save than this one');
+    if (p.port !== ownDashboardPort()) no('that signature is for another dashboard');
+    if (logObjects('act').some((a) => a.class === 'owner-setting' && a.proof?.nonce === p.nonce)) no('that save was taken already');
+    proof = { port: p.port, ts: p.ts, nonce: p.nonce, sig: p.sig, body: p.body };
+  }
+  out(appendLog({ type: 'act', class: 'owner-setting', key, value, what: `asked for ${key} ${value === null ? 'no limit' : value}`, refs: [], reversible: true, ...(proof ? { proof } : {}) }, by).id);
+}
 function cmdPane() {
   const sub = positional[0];
   if (sub === 'question') {
@@ -15518,7 +16676,10 @@ function cmdPane() {
   let b = null;
   try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
   const line1 = (x, max) => typeof x === 'string' && x.length <= max;
-  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !Number.isInteger(b.option) || b.option < 1 || b.option > 9 || !line1(b.label, 4000) || !line1(b.first, 4000) || !/^\d(, Enter)?$/.test(b.keys ?? '') || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
+  // an option (its number, its label, the keys that took it) or Esc (the Escape key, no option, no label)
+  const asOption = isObj(b) && b.escape === undefined && Number.isInteger(b.option) && b.option >= 1 && b.option <= 9 && line1(b.label, 4000) && /^\d(, Enter)?$/.test(b.keys ?? '');
+  const asEsc = isObj(b) && b.escape === true && b.option === undefined && b.label === undefined && b.keys === 'Escape';
+  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !(asOption || asEsc) || !line1(b.first, 4000) || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
   let proof = null;
   if (threadsNeedGateway()) {
     const no = (why) => die(`pane answered: on a box the owner answers only on the dashboard through the box's gateway, which signs the press, and ${why}`);
@@ -15526,14 +16687,14 @@ function cmdPane() {
     if (why) no(why);
     let signed = null;
     try { signed = JSON.parse(Buffer.from(b.proof.body, 'base64').toString('utf8')); } catch {}
-    if (!isObj(signed) || signed.digest !== b.digest || signed.option !== b.option) no('the gateway signed another press than this one');
+    if (!paneAnswerShape(signed) || signed.digest !== b.digest || signed.option !== b.option || signed.escape !== b.escape) no('the gateway signed another press than this one');
     if (logObjects('act').some((a) => a.class === 'pane-answer' && a.proof?.nonce === b.proof.nonce)) no('that press was taken already');
     proof = { port: b.proof.port, ts: b.proof.ts, nonce: b.proof.nonce, sig: b.proof.sig, body: b.proof.body };
   }
   const flat = (t, max) => { const x = noArtifactLinks(t).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return x.length > max ? `${x.slice(0, max - 1)}…` : x; };
   const about = `"${flat(b.first, 120) || '(no words above the options)'}"${typeof b.artifact === 'string' && /^[A-Za-z0-9-]{6,64}$/.test(b.artifact) ? ` (artifact ${b.artifact})` : ''}`;
-  const chose = `${b.option}. ${flat(b.label, 120)}`;
-  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}, option ${chose}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
+  const chose = asEsc ? 'Esc' : `${b.option}. ${flat(b.label, 120)}`;
+  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}${asEsc ? '' : `, option ${chose}`}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
   out(b.taken ? `answered: ${chose}` : `sent, and it may not have landed: ${chose}`);
   // the dashboard has its answer; then what was held for the pane while it asked, if it took the key
   replyNow();
@@ -15746,6 +16907,21 @@ const plannerPrompt = (feature) => {
 // one removed by hand leaves no stale entry holding ticket/<id> checked out. Refused until the
 // ticket is merged and its worker has logged phase done (its final spend); --force removes it
 // anyway. The branch stays, so a reopened ticket's worker starts again from it.
+// A records-in-home worker's checkout of home on ticket/<id>: the local branch, else origin's
+// (a moved fleet), else new from home's main. Not seeded: it holds only records.
+const recordsWorktreePath = (id) => path.join(mainRoot, '.worktrees', `records-${id}`);
+function ensureRecordsWorktree(id) {
+  const rw = recordsWorktreePath(id);
+  if (fs.existsSync(rw)) return rw;
+  const branch = `ticket/${id}`;
+  const mb = loadSettings().main_branch;
+  git(['fetch', '--quiet', 'origin', mb]);
+  git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+  if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', rw, branch], mainRoot);
+  else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, rw, `origin/${branch}`], mainRoot);
+  else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, rw, resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb], mainRoot);
+  return rw;
+}
 function removeWorkerWorktree(id) {
   const wt = path.join(mainRoot, '.worktrees', id);
   const T = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
@@ -15755,6 +16931,13 @@ function removeWorkerWorktree(id) {
   }
   stopPreviewsOf(id, { keepRecords: false });
   const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
+  // records in home: its records worktree goes too, through home, and first, so one git refuses
+  // (uncommitted records) before anything is removed
+  if (recordsInHomeId(id)) {
+    const rw = recordsWorktreePath(id);
+    if (fs.existsSync(rw)) { gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), rw], mainRoot); out(`removed ${rw} (a worktree of home)`); }
+    gitOrDie(['worktree', 'prune'], mainRoot);
+  }
   if (fs.existsSync(wt)) {
     R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
     out(`removed ${wt} (a worktree of ${R.name})`);
@@ -15819,6 +17002,11 @@ function tidyFinished(name, rec, R, gitdir) {
   if (tickets().has(name)) {
     if (rec.detached || rec.branch !== `refs/heads/ticket/${name}` || factsRepo(name)?.name !== R.name) return null;
     return mergeShaFor(name) && lastPhaseOf(name)?.to === 'done' ? `ticket ${name} is merged and its worker logged phase done` : null;
+  }
+  if (name.startsWith('records-') && tickets().has(name.slice('records-'.length))) {
+    const tid = name.slice('records-'.length);
+    if (R.name !== 'home' || rec.detached || rec.branch !== `refs/heads/ticket/${tid}` || !recordsInHomeId(tid)) return null;
+    return mergeShaFor(tid) && lastPhaseOf(tid)?.to === 'done' ? `ticket ${tid} is merged and its worker logged phase done` : null;
   }
   if (name.startsWith('chore-')) {
     if (R.name !== 'home' || rec.detached || rec.branch !== `refs/heads/${name}`) return null;
@@ -16001,6 +17189,9 @@ function makeSession(role) {
     resume = false;
   }
   seedWorktree(wt, { repo: R });
+  // records in home: home's ticket/<id> in its own worktree, made on its own (a resume whose
+  // records worktree was removed gets it back)
+  if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
   // the agent's trust in its folder, before it starts (agent_trust_command); a dialog left up is a finding
   if (s.agent_trust_command && typeof s.agent_trust_command !== 'string') warn('agent_trust_command is not a string (a shell command), so it was not run');
   else if (s.agent_trust_command?.trim()) {
@@ -16403,6 +17594,7 @@ function fleetStatus() {
       !remote ? `${x.branch} is not on origin: push it` : !r.pushed && `${x.branch} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it`,
       !r.clean && `${dirty.length} uncommitted change(s) in its worktree`,
       r.parked && !r.handoff && (handoffAt ? 'its handoff on origin is older than the park that stopped it' : `no handoff commit on origin/${x.branch} (devteam.mjs handoff in its worktree)`),
+      ...recordsParkProblems(x),
     ].filter(Boolean);
     for (const p of r.problems) blockers.push(`${x.name}: ${p}`);
     return r;
@@ -18787,7 +19979,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -18821,7 +20013,75 @@ function cmdWhoami() {
   const s = loadSettings();
   out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} home=${mainRoot} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
+// One top-level key of a settings.md's json devteam block set to value, as a text edit: the rest of
+// the block (gate order, every other key) stays byte for byte. Refused, writing nothing, when the
+// block isn't JSON, repeats a key, or the edit would read back as anything else.
+function setSettingsKey(file, key, value) {
+  const text = readText(file) ?? die(`${file}: no settings.md here`);
+  const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text) ?? die(`${file}: no json devteam block`);
+  const block = m[1];
+  // where the block is in the file: the edit goes there, never to an earlier copy of the same text
+  const at = m.index + m[0].indexOf(block);
+  const nl = block.includes('\r\n') ? '\r\n' : '\n';
+  const dups = jsonDuplicateKeys(block);
+  if (dups === undefined) die(`${file}: the json devteam block is not valid JSON`);
+  if (dups.length) die(`${file}: the json devteam block repeats ${dups.map((d) => d.join('.')).join(', ')}; fix that by hand first`);
+  const old = JSON.parse(block);
+  if (!isObj(old)) die(`${file}: the json devteam block is not an object`);
+  const v = JSON.stringify(value);
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let next;
+  if (Object.hasOwn(old, key)) {
+    const re = new RegExp(`("${esc}"\\s*:\\s*)(null|-?\\d+(?:\\.\\d+)?)(?![\\d.eE])`, 'g');
+    const hits = [...block.matchAll(re)];
+    if (hits.length !== 1) die(`${file}: ${key} isn't written as one plain number or null; set it by hand`);
+    next = block.replace(re, (_, pre) => `${pre}${v}`);
+  } else if (/^\s*\{\s*\}\s*$/.test(block)) next = `{${nl}  "${key}": ${v}${nl}}`;
+  else next = block.replace(/^(\s*\{)/, `$1${nl}  "${key}": ${v},`);
+  let parsed = null;
+  try { parsed = JSON.parse(next); } catch {}
+  const same = isObj(parsed) && jsonDuplicateKeys(next)?.length === 0 && canonical(parsed[key]) === canonical(value)
+    && Object.keys(parsed).length === Object.keys(old).length + (Object.hasOwn(old, key) ? 0 : 1)
+    && Object.keys(old).every((k) => k === key || canonical(parsed[k]) === canonical(old[k]));
+  if (!same) die(`${file}: setting ${key} would change more than that key; set it by hand`);
+  const written = text.slice(0, at) + next + text.slice(at + block.length);
+  // what is written reads back as the edit: its block, the first in the file, is the edited one
+  if (/```json devteam\s*\n([\s\S]*?)\n```/.exec(written)?.[1] !== next) die(`${file}: setting ${key} didn't land in the json devteam block; set it by hand`);
+  fs.writeFileSync(file, written);
+}
+// settings set <key> <1..20|none> [--for <act-id>]: the supervisor changes one of its askable
+// settings in its settings chore (never a working-tree edit: the file it writes is the chore
+// worktree's), with --for naming the owner's request it lands. It lands on main through chore pr
+// and merge --chore, which is when it applies.
+function settingsSet() {
+  const [, key, arg] = positional;
+  if (!key || arg === undefined || positional.length !== 3) die('usage: settings set <key> <1..20|none> [--for <act-id>]');
+  supervisorOnly('settings set');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`settings set: ${why}`);
+  const wt = path.join(mainRoot, '.worktrees', 'chore-settings');
+  if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-settings; devteam.mjs chore start settings');
+  if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-settings is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start settings');
+  // never the main checkout under another name (a link to it), and only the settings chore's branch
+  if (realPath(wt) === realPath(mainRoot) || git(['rev-parse', '--abbrev-ref', 'HEAD'], wt) !== 'chore-settings') die('.worktrees/chore-settings is not the settings chore (its branch is not chore-settings): move what you wrote aside, then devteam.mjs chore start settings');
+  const words = (x) => (x === null ? 'no limit' : String(x));
+  const forId = flagStr('for');
+  if (flags.for !== undefined && !forId) die('settings set: --for names the owner\'s owner-setting act');
+  if (forId) {
+    const a = logGet(forId);
+    if (!a || a.type !== 'act' || a.class !== 'owner-setting' || a.created_by !== 'owner' || a.key !== key) die(`settings set: --for names the owner's owner-setting act for ${key}`);
+    const latest = latestOwnerSetting(key);
+    if (latest && latest.id !== a.id) die(`settings set: a newer request ${latest.id} asks for ${words(latest.value)}`);
+    if (a.value !== value) die(`settings set: the owner asked for ${words(a.value)}; --for applies exactly that`);
+  }
+  const file = path.join(wt, projectRel, 'settings.md');
+  setSettingsKey(file, key, value);
+  appendLog({ type: 'act', class: 'settings-edit', key, value, ...(forId ? { for: forId, refs: [forId] } : { refs: [] }), what: `set ${key} to ${words(value)} in the settings chore`, reversible: true }, 'supervisor');
+  out(`${path.relative(mainRoot, file)}: ${key} is ${words(value)}\nnext: devteam.mjs chore pr settings --title "settings: ${key} ${words(value)}", then devteam.mjs merge --chore settings`);
+}
 function cmdSettings() {
+  if (positional[0] === 'set') return settingsSet();
   const s = loadSettings();
   const key = flagStr('get');
   // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
@@ -19515,7 +20775,7 @@ function cmdLinks() {
   const origin = git(['config', '--get', 'remote.origin.url']);
   // each readable repo's own main (a view: a link whose checkout is wrong or missing just has none)
   const mains = (R) => ({ main_ref: R.mainRef(), main_sha: R.mainRef() ? R.resolveCommit(R.mainRef()) : null });
-  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
+  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : k === 'records' ? 'home' : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
     if (!K) return { id, ...redactLink(l) };
@@ -19751,6 +21011,8 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
+  owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
@@ -19773,6 +21035,7 @@ Observe and orient
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too, and each ended week's learning record)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
+  governance [--json]   the kit's governance and process files and the project's strategy and exterior: title, last change, changed here
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing) [--for-owner --plain "<words>"] (a lesson that would change something the owner set waits for them, its plain line first; any other the supervisor keeps itself)
   search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
@@ -19808,14 +21071,14 @@ Dashboard and releases
 // back, the machine's digest, word to a supervisor and alert, and its own replies to the owner are
 // what the operator's for (operator-thread holds each of its verbs to the owner or the operator).
 const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'fleet host', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
-const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor', 'settings']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
+  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
