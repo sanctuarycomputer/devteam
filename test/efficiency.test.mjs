@@ -53,6 +53,20 @@ test('efficiency findings fire over their thresholds and stay quiet under them, 
     assert.ok(mr && mr.why.includes('3 final-review passes'), JSON.stringify(m.mis_rated));
     assert.ok(!m.mis_rated.some((x) => x.id === 'e-02-calm'));
     assert.ok(has('mis-rated', 'e-01-churn'));
+    // an escaped defect traced to the calm ticket makes it mis-rated too
+    F.hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'e-02-calm', kind: 'escaped-defect', detail: 'found after merge', severity: 3, valence: -1 }, 60000);
+    const md = JSON.parse(F.sup(['metrics', '--json'], FLOORS));
+    assert.ok(md.mis_rated.find((x) => x.id === 'e-02-calm')?.why.includes('an escaped defect traced to it'), JSON.stringify(md.mis_rated));
+    // three more tickets that built for ten hours with no wait: the waiting share falls under half, and waiting-heavy goes quiet
+    for (const id of ['e-03-busy', 'e-04-busy', 'e-05-busy']) {
+      F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'eff', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['EF-S1'], depends_on: [], touches: [`src/${id}/**`], done_when: ['its test passes in CI'] })]);
+      phaseLine(id, null, 'build', 10 * H);
+      F.g(['commit', '-qm', `${id}: done`, '--allow-empty'], F.old);
+    }
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    const mq = JSON.parse(F.sup(['metrics', '--json'], FLOORS));
+    assert.ok(mq.efficiency.wait_hours_pct < 50, `waiting share ${mq.efficiency.wait_hours_pct}`);
+    assert.ok(!mq.findings.some((f) => f.kind === 'waiting-heavy'), 'under half waiting, waiting-heavy is quiet');
     // under the default floors (5 merged tickets, 10 first passes) the two rate findings stay quiet
     const q = JSON.parse(F.sup(['metrics', '--json']));
     assert.ok(!q.findings.some((f) => ['waiting-heavy', 'review-churn'].includes(f.kind)), 'too little evidence to speak');
