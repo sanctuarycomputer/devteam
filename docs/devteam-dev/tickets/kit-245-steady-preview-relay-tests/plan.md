@@ -40,3 +40,10 @@
 ### T4: evidence
 
 - Push the branch. Run `gh workflow run test-stress.yml --ref ticket/kit-245-steady-preview-relay-tests -f files=test/gateway.test.mjs -f repeat=5 -f node=18` four times, one after another (the workflow's concurrency group queues them). Confirm each conclusion and link all four. Run the CI gate through `devteam.mjs gate ci -- <the real command>`.
+
+## Amendments during build (inside touches)
+
+- `previewReady` is one probe, never retried. It does not wait on `/dev/` with `until`. Waiting would refresh the map and retry past a first-request 503, which could hide a gateway defect (the supervisor's ask for the final review, m-20261116-165525382). The probe is one GET through the relay after `pollPush`, and it must get the app's own body with no second hub read, which proves the map is the poll's. On failure it names the ports and the `/dev/` rows (`previewState`). The dev server's own ready signal is its `listening` event on port 0 (`devServer`).
+- In the ws test, `wsClient`'s `next()` gives up after 5 s with an error, and the first socket `c` is closed in `finally`. Without both, mutation (b) hung the file rather than failing it.
+- Mutation (b) is now "the dev server's frames are not relayed back" (`pipeline(up, socket)` removed). With both pipelines removed, the gateway's upgraded socket stays half-open after the client goes, `server.close()` never returns, and the file hangs rather than reporting red.
+- T1 to T3 were built inline in this session (on the strong model), not by subagents: the whole change is about 50 lines.
