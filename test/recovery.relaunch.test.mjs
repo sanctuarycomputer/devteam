@@ -212,3 +212,53 @@ test('what a crash leaves behind: a stale lock and a mangled record neither stop
     fs.rmSync(noTmux, { recursive: true, force: true });
   } finally { F.done(); }
 });
+
+// The machine's memory as a test sets it: at or over the 80% ceiling (one relaunch a tick), or under it.
+const memory = (F, availGb) => { const f = path.join(F.base, `meminfo-${availGb}`); write(f, `MemTotal:       8388608 kB\nMemFree:         262144 kB\nMemAvailable:   ${Math.round(availGb * 1048576)} kB\n`); return { ...OFF, DEVTEAM_MEMINFO: f, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup') }; };
+const FULL = (F) => memory(F, 0.5);
+const UNDER = (F) => memory(F, 6);
+// What a worker, the supervisor and the owner say, through the kit itself (lines the log accepts).
+const dtRun = (F, args, env) => { const r = spawnSync(process.execPath, [path.join(F.root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: F.root, encoding: 'utf8', env }); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+const asWorker = (F, id, args) => { const e = F.env({ DEVTEAM_ROLE: 'worker' }); e.DEVTEAM_TICKET = id; return dtRun(F, args, e); };
+const asOwner = (F, args) => { const e = F.env(); delete e.DEVTEAM_ROLE; return dtRun(F, args, e); };
+const phase = (F, id, to) => F.logLine(id, { type: 'phase', from: 'starting', to });
+// One tick at a time, memory full: the one it brings back is the next in the order.
+const order = (F, n) => Array.from({ length: n }, () => /relaunched (\S+): its window was gone/.exec(F.tick(FULL(F)))?.[1] ?? null);
+
+test('the order: work in progress first, sessions idle on a dependency last; ties keep the launch order', { skip: !hasTmux }, async () => {
+  const F = fixture('order');
+  try {
+    F.worker('demo-60-idle'); phase(F, 'demo-60-idle', 'awaiting-word');
+    F.worker('demo-61-blocked'); phase(F, 'demo-61-blocked', 'spec');
+    asWorker(F, 'demo-61-blocked', ['send', 'supervisor', 'waiting on demo-60', '--kind', 'blocked']);
+    F.worker('demo-62-plain'); phase(F, 'demo-62-plain', 'spec');
+    F.worker('demo-63-build'); phase(F, 'demo-63-build', 'build');
+    F.worker('demo-64-dirty'); phase(F, 'demo-64-dirty', 'awaiting-word');
+    const wt = path.join(F.root, '.worktrees', 'demo-64-dirty');
+    execFileSync('git', ['init', '-q'], { cwd: wt });
+    write(path.join(wt, 'half-done.txt'), 'not committed\n');
+    F.planner('p6');
+    dtRun(F, ['ask', '--question', 'Which layout for p6?', '--recommendation', 'the grid', '--links', JSON.stringify([{ title: 'the p6 design', path: 'docs/p6.md', ref: 'plan/p6' }])], F.env());
+    F.planner('p7');
+    asOwner(F, ['thread', 'new', 'The header is too tall', '--subject', JSON.stringify({ kind: 'artifact', slug: 'mock', at: 'plan-p7' })]);
+    F.planner('p8');
+    asOwner(F, ['thread', 'new', 'Split this feature', '--subject', JSON.stringify({ kind: 'item', ref: 'planner:p8' })]);
+    F.worker('demo-65-plain2'); phase(F, 'demo-65-plain2', 'plan');
+    assert.deepEqual(order(F, 9), ['demo-63-build', 'demo-64-dirty', 'plan-p6', 'plan-p7', 'plan-p8', 'demo-62-plain', 'demo-65-plain2', 'demo-60-idle', 'demo-61-blocked']);
+    await until(() => F.relaunched().length === 9, 'all nine resumed');
+  } finally { F.done(); }
+});
+
+test('the order: a planner whose question is withdrawn and whose thread is resolved waits like any other', { skip: !hasTmux }, async () => {
+  const F = fixture('order2');
+  try {
+    F.planner('q1');
+    const q = dtRun(F, ['ask', '--question', 'Which layout for q1?', '--recommendation', 'the grid', '--links', JSON.stringify([{ title: 'the q1 design', path: 'docs/q1.md', ref: 'plan/q1' }])], F.env()).split('\n')[0];
+    dtRun(F, ['withdraw', q], F.env());
+    F.planner('q2');
+    const t = asOwner(F, ['thread', 'new', 'Split this feature', '--subject', JSON.stringify({ kind: 'item', ref: 'planner:q2' })]).split('\n')[0];
+    asOwner(F, ['thread', 'resolve', t]);
+    F.worker('demo-70-build'); phase(F, 'demo-70-build', 'build');
+    assert.deepEqual(order(F, 3), ['demo-70-build', 'plan-q1', 'plan-q2']);
+  } finally { F.done(); }
+});

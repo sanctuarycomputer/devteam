@@ -13632,9 +13632,10 @@ function restartPane(name, launch, budget) {
 }
 // A machine that died (a dead battery, a redeploy) took the tmux server with it, and what survives
 // on disk says which sessions to bring back: every worker and planner the kit launched, not held
-// (its goal, its ticket's held field, a drain) or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
-// gone, or was created after that session's last launch: a window closed in a session older than
-// its launch was closed on purpose, and stays closed (the findings report it).
+// (its goal or the fleet parked, let go or drained, or its ticket's held field) or finished, whose
+// worktree still exists and whose window doesn't. Only when the tmux session is gone, or was
+// created after that session's last launch: a window closed in a session older than its launch was
+// closed on purpose, and stays closed (the findings report it). Work in progress comes back first.
 const LAUNCH_ACT = /^(?:made|resumed) (worker|planner) (\S+) in /;
 const SETTLED_MS = 2 * 60000;
 function lastLaunches() {
@@ -13669,7 +13670,33 @@ function sessionsToRelaunch(launchOf, held) {
     if (role === 'worker' ? !lastPhaseOf(name) || tickets().get(name)?.superseded_by : !planners().some((p) => p.feature === launch[1])) continue;
     found.push({ name, launch });
   }
-  return found;
+  // stable: within a tier, the launch order
+  const tier = new Map(found.map((f) => [f.name, relaunchTier(f.name, f.launch)]));
+  return found.sort((a, b) => tier.get(a.name) - tier.get(b.name));
+}
+// Which gone sessions come back first: 0, work in progress (uncommitted changes in its worktree, a
+// planner the owner waits on, a worker in build); 2, a worker idle on a dependency (blocked or
+// awaiting word, or its last message to the supervisor an unanswered blocked); 1, the rest.
+function relaunchTier(name, [role, id]) {
+  const wt = path.join(mainRoot, '.worktrees', name);
+  // a checkout of its own: a plain directory would read the enclosing repo's status
+  if (fs.existsSync(path.join(wt, '.git'))) {
+    const r = spawnSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (r.status === 0 && r.stdout.trim()) return 0;
+  }
+  if (role === 'planner') return plannerAwaitsOwner(name, id) ? 0 : 1;
+  const ph = lastPhaseOf(name)?.to;
+  if (ph === 'build') return 0;
+  if (['blocked', 'awaiting-word'].includes(ph)) return 2;
+  const said = logObjects('message').filter((m) => m.created_by === name).sort(byTime).pop();
+  return said?.kind === 'blocked' && !handledMessages().has(said.id) ? 2 : 1;
+}
+// An open question on the planner's goals or plan branch (its row's waiting_on_owner), or an open
+// thread on it: on its card (planner:<feature>) or on an artifact drawn in its worktree.
+function plannerAwaitsOwner(name, feature) {
+  if (planners().find((p) => p.feature === feature)?.waiting_on_owner?.length) return true;
+  const on = (s) => isObj(s) && ((s.kind === 'item' && [`planner:${feature}`, `planner:${name}`].includes(s.ref)) || (s.kind === 'artifact' && s.at === name));
+  return threadViews(readLog().objects).some((t) => t.status === 'open' && on(t.subject));
 }
 // Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
