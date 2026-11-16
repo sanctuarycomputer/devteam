@@ -562,3 +562,101 @@ export function statusWithHost(port, route, host, method = 'GET', headers = {}) 
 
 // One answer may approve a bundle of repo link changes, but only the bundle its question showed:
 // merge binds each changed owner-kind entry to an act of that answer with the entry that lands.
+
+// kit-174: the Efficiency page's fixture, as kit-173's /api/data efficiency and metrics.cost carry it.
+// Every week is one kit-173 can emit: weeks[3] had no ticket and no spend (score, parts and per-point
+// figures null), this week has an escaped defect (score 31) unless defect is false (score 72), and the
+// phase 'spec' is missing from weeks 0 to 2 and 4 to 5. metrics differs from observe in a key each and
+// in output tokens, so a test can tell which one the page drew from.
+export function efficiencyFixture({ defect = true, efficiency = true, source = 'measured', suggestions, waste, weeks, threads = [] } = {}) {
+  const usdPP = [62, 59, 64, null, 54, 50, 33.2, 51, 46, 43, 45, 41];
+  const hPP = [8.1, 7.9, 8.4, null, 7, 6.6, 5, 6.9, 6.4, 6.2, 7.3, 6.8];
+  const first = [0.44, 0.47, 0.41, 1, 0.49, 0.52, 0.55, 0.51, 0.56, 0.6, 0.58, 0.62];
+  const cache = [0.52, 0.55, 0.5, null, 0.58, 0.61, 0.63, 0.6, 0.62, 0.64, 0.61, 0.58];
+  const points = [6, 7, 5, 0, 7, 9, 6, 8, 9, 10, 7, 8];
+  const score = [55, 58, 52, null, 60, 62, 64, 61, 63, 65, 67, defect ? 31 : 72];
+  const thisParts = defect ? { spend: 0.16, time: 0.15, rework: 0.62 } : { spend: 0.81, time: 0.74, rework: 0.62 };
+  const tok = (n) => ({ input: n * 1e5, output: n * 4e4, cache_read: n * 2e5, cache_write: n * 2e4 });
+  const start = Date.parse('2026-08-24T00:00:00Z');
+  const W = usdPP.map((u, i) => {
+    const empty = i === 3;
+    const phases = empty ? [] : [['build', 130 - i], ['planning', 95 - i], ['final-review', 80 - i], ...(i <= 2 || i === 4 || i === 5 ? [] : [['spec', 60 - i]])];
+    return {
+      starts_at: new Date(start + i * 7 * 864e5).toISOString(), tickets: empty ? 0 : 4, points: points[i], usd_per_point: u, hours_per_point: hPP[i],
+      first_pass: first[i], first_passes: empty ? 0 : 5, cache_read_share: cache[i], escaped_defects: i === 11 && defect ? 1 : 0,
+      usd_by_phase: Object.fromEntries(phases), tokens_by_phase: Object.fromEntries(phases.map(([k, v]) => [k, tok(v / 10)])),
+      score: score[i], parts: empty ? null : i === 11 ? thisParts : { spend: 0.7, time: 0.7, rework: first[i] },
+    };
+  });
+  const observe = {
+    phase_hours: { build: 21.4, 'final-review': 9.1, planning: 4.2, spec: 3.1 },
+    phase_usd: { build: 128, planning: 94, 'final-review': 81, spec: 61 },
+    by_model: { 'claude-opus-5-5': { usd: 447 }, 'claude-sonnet-5-5-with-a-very-long-model-name-for-the-390px-check': { usd: 14 } },
+    tokens: { input: 2.4e6, output: 3.1e6, cache_read: 9e6, cache_write: 1.2e6 },
+    tokens_by_phase: { build: tok(216), planning: tok(162), 'final-review': tok(71), spec: tok(104) },
+  };
+  const eff = {
+    weeks: weeks ?? W, best: { usd_per_point: 33.2, hours_per_point: 5 }, score: { this_week: score[11], last_week: 67 }, parts: thisParts, observe,
+    waste: waste ?? [
+      { id: 'o-20261115-000000001-supervisor', kind: 'costly-ticket', subject: 'kit-87', detail: 'kit-87 cost 3.1× the median merged ticket per point ($254)' },
+      { id: null, kind: 'low-cache-hit', subject: 'prompt-cache', detail: '58% of input tokens were cache reads, under 60%' },
+    ],
+    trials: [],
+    suggestions: suggestions ?? [
+      { id: 'eff-costly-ticket-kit-87', kind: 'costly-ticket', what: 'Look at where kit-87 spent its dollars', evidence: '$254, 3.1× the median merged ticket per point', effect: 'about $172 once', usd: 172, per: 'once' },
+      { id: 'eff-smaller-model-claude-opus-5-5', kind: 'smaller-model', what: 'Run searches and test runs on claude-sonnet-5-5', evidence: 'claude-opus-5-5 took 97% of spend', effect: 'about $75 a week', usd: 75, per: 'week' },
+      { id: 'eff-cache-prompt-cache', kind: 'cache', what: 'Resume sessions instead of starting them again', evidence: '58% of input tokens were cache reads', effect: 'about $25 a week', usd: 25, per: 'week' },
+      { id: 'eff-mystery-x', kind: 'mystery', what: 'Something the page has no words for', evidence: 'seen once', effect: 'about $5 a week', usd: 5, per: 'week' },
+    ],
+  };
+  const metrics = {
+    phase_hours: { ...observe.phase_hours, 'metrics-only-phase': 2 },
+    phase_usd: { ...observe.phase_usd, 'metrics-only-phase': 5 },
+    cost: { source, tokens: { ...observe.tokens, output: 9.9e6 }, by_model: { 'metrics-only-model': { usd: 9 } }, unpriced_models: { 'gpt-x': 3 } },
+    acknowledged: [{ kind: 'slow-gate', subject: 'test', ack: { by: 'supervisor', reason: 'known', until: new Date(Date.now() + 7 * 864e5).toISOString() } }],
+    findings: [{ severity: 'medium', kind: 'stale-worker', subject: 'kit-1', detail: 'no phase line for 3 hours', suggestion: 'look at its pane' }],
+  };
+  return { efficiency: efficiency ? eff : null, metrics, threads };
+}
+// A thread as /api/threads gives one (threadView), on a subject, for efficiencyFixture's threads.
+export function effThread({ id, subject, status = 'open', title = 'A thread', turns = [] }) {
+  const at = new Date(Date.now() - 3600000).toISOString();
+  return { id, title, subject, status, outcome: status === 'resolved' ? 'done' : null, ready: null, turns, questions: [], waiting: 'owner', created_at: at, resolved_at: status === 'resolved' ? at : null, activity_at: at, first_reply_ms: null };
+}
+// A script for Page.addScriptToEvaluateOnNewDocument: the page's fetch wrapped (as dashboard-answers'
+// initScript) so /api/data carries fx's efficiency (none when null) and its metrics merged over the
+// server's, and /api/threads also fx's threads; window.__fx is read on every answer, so a test can
+// change it in the page. Every non-GET request is kept in window.__writes, every error in
+// window.__errors, and the 10 s poll runs every 300 ms.
+export function dataRewriteInit(fx) {
+  return `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  window.__fx = ${JSON.stringify(fx)};
+  window.__writes = [];
+  window.__errors = [];
+  window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error || e)));
+  window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason && e.reason.message || e.reason)));
+  const json = (r, body) => new Response(JSON.stringify(body), { status: r.status, statusText: r.statusText, headers: r.headers });
+  const real = window.fetch;
+  window.fetch = async (u, o) => {
+    const url = String(u && u.url ? u.url : u);
+    const method = String(o?.method || 'GET').toUpperCase();
+    if (method !== 'GET') window.__writes.push({ url, method, body: o?.body ?? null });
+    const r = await real(u, o);
+    const fx = window.__fx;
+    if (method === 'GET' && r.ok && url.startsWith('/api/data')) {
+      const d = await r.json();
+      if (fx.efficiency) d.efficiency = fx.efficiency; else delete d.efficiency;
+      const m = d.metrics || {};
+      d.metrics = { ...m, ...fx.metrics, cost: { ...(m.cost || {}), ...(fx.metrics.cost || {}) } };
+      return json(r, d);
+    }
+    if (method === 'GET' && r.ok && url.startsWith('/api/threads')) {
+      const j = await r.json();
+      return json(r, { ...j, threads: [...(j.threads || []), ...(fx.threads || [])] });
+    }
+    return r;
+  };
+})();`;
+}
