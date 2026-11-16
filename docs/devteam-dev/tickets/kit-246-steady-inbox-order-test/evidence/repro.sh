@@ -13,5 +13,6 @@ DEST="test/zz-repro-kit246.test.mjs"
 OUT="$HERE/repro-$VARIANT.txt"
 cp "$HERE/repro.test.mjs.txt" "$DEST"
 trap 'rm -f "${DEST:?}"' EXIT
+trap 'exit 130' INT TERM HUP
 REPRO_VARIANT="$VARIANT" timeout 900 "$NODE" --test "$DEST" 2>&1 | grep -E "REPRO|error:|^# (pass|fail)" | sed -E 's/port [0-9]+/port N/g; s/127\.0\.0\.1:[0-9]+/127.0.0.1:N/g' > "$OUT" || true
 cat "$OUT"

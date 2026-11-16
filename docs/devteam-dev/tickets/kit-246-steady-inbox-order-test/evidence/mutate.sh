@@ -12,6 +12,7 @@ git diff --quiet -- "$F" || { echo "refusing: $F has uncommitted changes"; exit 
 OLD='d.questions.map((q) => questionCard(q, o, reasonText))'
 [ "$(grep -cF "$OLD" "$F")" = 1 ] || { echo "the Inbox's draw line is not found once"; exit 2; }
 trap 'git checkout -- "$F"' EXIT
+trap 'exit 130' INT TERM HUP
 sed -i 's/d\.questions\.map((q) => questionCard(q, o, reasonText))/[...d.questions].reverse().map((q) => questionCard(q, o, reasonText))/' "$F"
 {
   echo "## mutation (reverted after the run)"
