@@ -239,3 +239,68 @@ test("trust: kinds on its own, and this week's moves", (t) => {
     assert.ok(T.own >= 1, 'X is at 3 now');
   } finally { F.done(); }
 });
+
+// Sensors in place, committed and pushed (main's settings apply), with their state files.
+function sensorsFixture(F, sensors, states) {
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  const text = fs.readFileSync(sf, 'utf8');
+  const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+  const j = JSON.parse(m[1]);
+  j.sensors = sensors;
+  fs.writeFileSync(sf, text.replace(m[1], JSON.stringify(j, null, 2)));
+  for (const [name, state] of Object.entries(states)) {
+    const dir = path.join(F.old, 'docs/devteam/run/sensors', name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ state, fails: 0 }));
+  }
+}
+const cacheFile = (F) => path.join(F.old, 'docs/devteam/run/sensor-discovery.json');
+
+test('senses: needed, has, working and the missing named', () => {
+  const F = fleetFixture('autonomy-senses');
+  try {
+    const hand = handFor(F);
+    sensorsFixture(F, {
+      web: { kind: 'http', url: 'https://app.example.test/up' },
+      tok: { kind: 'probe', probe: 'project/sensors/tok.mjs', credentials: { TOK: 'file:tok' } },
+      fake: { kind: 'probe', probe: 'project/sensors/fake.mjs', credentials: { FAKE: 'file:fake' } },
+      post: { kind: 'probe', probe: 'project/sensors/post.mjs', credentials: { POST: 'file:post' } },
+    }, { web: 'up', tok: 'ok', fake: 'failing', post: 'failing' });
+    fs.writeFileSync(path.join(F.old, 'package.json'), JSON.stringify({ name: 'app', dependencies: { '@sentry/node': '1' } }));
+    F.g(['add', '-A'], F.old);
+    F.g(['commit', '-qm', 'sensors and a sentry dependency'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    // post's credential, posted by the owner through its question
+    const q = hand('supervisor', { type: 'question', kind: 'owner-action', question: 'Post the token post reads?', sensor: 'post', secrets: [{ name: 'POST', sink: 'file:post' }] }, Date.now() - 2 * HOUR);
+    hand('owner', { type: 'question', op: 'set', id: q, secrets_posted: [{ name: 'POST' }] }, Date.now() - HOUR);
+    F.ok(F.old, ['sensor', 'discover', '--json']);
+    const cache = json(fs.readFileSync(cacheFile(F), 'utf8'));
+    assert.ok(cache.missing.includes('sentry') && cache.proposals.includes('sentry'), JSON.stringify(cache));
+    assert.deepEqual(cache.outside, []);
+    assert.deepEqual([...cache.sensors].sort(), ['fake', 'post', 'tok', 'web']);
+    fs.writeFileSync(cacheFile(F), JSON.stringify({ ...cache, outside: ['page-views'] }));
+    const S = autonomy(F).senses;
+    assert.deepEqual(S.names, { needed: ['fake', 'page-views', 'post', 'sentry', 'tok', 'web'], has: ['post', 'tok', 'web'], working: ['tok', 'web'] });
+    assert.deepEqual(S.missing, ['fake', 'page-views', 'sentry']);
+    assert.deepEqual([S.needed, S.has, S.working], [6, 3, 2]);
+    assert.ok(S.needed >= S.has);
+    assert.equal(S.discovered_at, cache.at);
+  } finally { F.done(); }
+});
+
+test('senses with no discovery, or a malformed one', () => {
+  const F = fleetFixture('autonomy-senses-none');
+  try {
+    sensorsFixture(F, { web: { kind: 'http', url: 'https://app.example.test/up' }, tok: { kind: 'probe', probe: 'project/sensors/tok.mjs', credentials: { TOK: 'file:tok' } } }, { web: 'down', tok: 'ok' });
+    F.g(['add', '-A'], F.old);
+    F.g(['commit', '-qm', 'sensors'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    const want = { needed: 2, has: 2, working: 1, missing: [], names: { needed: ['tok', 'web'], has: ['tok', 'web'], working: ['tok'] }, discovered_at: null };
+    assert.deepEqual(autonomy(F).senses, want);
+    fs.mkdirSync(path.dirname(cacheFile(F)), { recursive: true });
+    for (const bad of ['not json', JSON.stringify({ at: '2026-01-01T00:00:00.000Z', proposals: 'sentry', missing: [], outside: [] }), JSON.stringify([1, 2])]) {
+      fs.writeFileSync(cacheFile(F), bad);
+      assert.deepEqual(autonomy(F).senses, want, bad);
+    }
+  } finally { F.done(); }
+});

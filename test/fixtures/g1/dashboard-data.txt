@@ -1498,7 +1498,17 @@ exit 0
       "dropped": 0,
       "changes": []
     },
-    "senses": null
+    "senses": {
+      "needed": 0,
+      "has": 0,
+      "working": 0,
+      "missing": [],
+      "names": {
+        "needed": [],
+        "has": [],
+        "working": []
+      }
+    }
   },
   "threads": {
     "you": 0,

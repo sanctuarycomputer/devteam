@@ -10590,10 +10590,38 @@ function autonomyTrust(now) {
   changes.sort((a, b) => a.at.localeCompare(b.at));
   return { own: classes.filter((c) => rungFor(c) === 3).length, kinds: classes.length, raised: changes.filter((c) => c.to > c.from).length, dropped: changes.filter((c) => c.to < c.from).length, changes };
 }
+// sensor discover runs CLIs with 30 s timeouts, too slow for a request: each run leaves what it
+// found here, and Senses reads that. A cache only: missing or malformed reads as no discovery.
+const DISCOVERY_CACHE = 'sensor-discovery.json';
+function writeDiscoveryCache(d) {
+  const names = (xs) => (Array.isArray(xs) ? xs.map((x) => (isStr(x) ? x : x?.name ?? x?.sensor?.name)).filter(isStr) : []);
+  try {
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(runPath(DISCOVERY_CACHE), `${JSON.stringify({ at: nowIso(), sensors: names(d.sensors), proposals: names(d.proposals), missing: names(d.missing), outside: names(d.outside?.proposals) })}\n`);
+  } catch {}
+}
+function readDiscoveryCache() {
+  const c = jsonOr(runPath(DISCOVERY_CACHE), null);
+  const list = (k) => Array.isArray(c?.[k]) && c[k].every(isStr);
+  return isObj(c) && isStr(c.at) && ['sensors', 'proposals', 'missing', 'outside'].every(list) ? c : null;
+}
+// Senses: what it needs to see (the sensors in place and what discovery proposed, found missing or
+// was told of from outside), what it has (no credential needed, the credential posted, or working:
+// a sensor that reads has its access), and what works (ok, or an http sensor up). has ⊆ in place ⊆
+// needed, so needed >= has.
+function autonomySenses() {
+  const rows = sensorStatus();
+  const c = readDiscoveryCache();
+  const sorted = (xs) => [...new Set(xs)].sort();
+  const working = sorted(rows.filter((r) => ['ok', 'up'].includes(r.state)).map((r) => r.name));
+  const has = sorted(rows.filter((r) => !(r.credentials ?? []).length || working.includes(r.name) || sensorCredentialState(r.name).status === 'posted').map((r) => r.name));
+  const needed = sorted([...rows.map((r) => r.name), ...(c ? [...c.proposals, ...c.missing, ...c.outside] : [])]);
+  return { needed: needed.length, has: has.length, working: working.length, missing: needed.filter((n) => !has.includes(n)), names: { needed, has, working }, discovered_at: c?.at ?? null };
+}
 function autonomyData(now = Date.now()) {
   const x = autonomyContext(now);
   const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
-  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: null };
+  return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: autonomySenses() };
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });
@@ -19809,6 +19837,7 @@ async function cmdSensor() {
   }
   if (sub === 'discover') {
     const d = discoverProduction();
+    writeDiscoveryCache(d);
     if (flags.record) {
       supervisorOnly('sensor discover --record');
       const today = dateOnly(nowIso());
