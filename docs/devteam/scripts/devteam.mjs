@@ -19870,8 +19870,11 @@ function cmdWhoami() {
 // block isn't JSON, repeats a key, or the edit would read back as anything else.
 function setSettingsKey(file, key, value) {
   const text = readText(file) ?? die(`${file}: no settings.md here`);
-  const m = text.match(/```json devteam\s*\n([\s\S]*?)\n```/) ?? die(`${file}: no json devteam block`);
+  const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text) ?? die(`${file}: no json devteam block`);
   const block = m[1];
+  // where the block is in the file: the edit goes there, never to an earlier copy of the same text
+  const at = m.index + m[0].indexOf(block);
+  const nl = block.includes('\r\n') ? '\r\n' : '\n';
   const dups = jsonDuplicateKeys(block);
   if (dups === undefined) die(`${file}: the json devteam block is not valid JSON`);
   if (dups.length) die(`${file}: the json devteam block repeats ${dups.map((d) => d.join('.')).join(', ')}; fix that by hand first`);
@@ -19881,19 +19884,22 @@ function setSettingsKey(file, key, value) {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let next;
   if (Object.hasOwn(old, key)) {
-    const re = new RegExp(`("${esc}"\\s*:\\s*)(null|-?\\d+(?:\\.\\d+)?)`, 'g');
+    const re = new RegExp(`("${esc}"\\s*:\\s*)(null|-?\\d+(?:\\.\\d+)?)(?![\\d.eE])`, 'g');
     const hits = [...block.matchAll(re)];
     if (hits.length !== 1) die(`${file}: ${key} isn't written as one plain number or null; set it by hand`);
     next = block.replace(re, (_, pre) => `${pre}${v}`);
-  } else if (/^\s*\{\s*\}\s*$/.test(block)) next = `{\n  "${key}": ${v}\n}`;
-  else next = block.replace(/^(\s*\{)/, `$1\n  "${key}": ${v},`);
+  } else if (/^\s*\{\s*\}\s*$/.test(block)) next = `{${nl}  "${key}": ${v}${nl}}`;
+  else next = block.replace(/^(\s*\{)/, `$1${nl}  "${key}": ${v},`);
   let parsed = null;
   try { parsed = JSON.parse(next); } catch {}
   const same = isObj(parsed) && jsonDuplicateKeys(next)?.length === 0 && canonical(parsed[key]) === canonical(value)
     && Object.keys(parsed).length === Object.keys(old).length + (Object.hasOwn(old, key) ? 0 : 1)
     && Object.keys(old).every((k) => k === key || canonical(parsed[k]) === canonical(old[k]));
   if (!same) die(`${file}: setting ${key} would change more than that key; set it by hand`);
-  fs.writeFileSync(file, text.replace(block, () => next));
+  const written = text.slice(0, at) + next + text.slice(at + block.length);
+  // what is written reads back as the edit: its block, the first in the file, is the edited one
+  if (/```json devteam\s*\n([\s\S]*?)\n```/.exec(written)?.[1] !== next) die(`${file}: setting ${key} didn't land in the json devteam block; set it by hand`);
+  fs.writeFileSync(file, written);
 }
 // settings set <key> <1..20|none> [--for <act-id>]: the supervisor changes one of its askable
 // settings in its settings chore (never a working-tree edit: the file it writes is the chore
@@ -19909,6 +19915,8 @@ function settingsSet() {
   const wt = path.join(mainRoot, '.worktrees', 'chore-settings');
   if (!fs.existsSync(wt)) die('no worktree .worktrees/chore-settings; devteam.mjs chore start settings');
   if (realPath(git(['rev-parse', '--show-toplevel'], wt) ?? '') !== realPath(wt)) die('.worktrees/chore-settings is not a worktree (was it tidied away?): move what you wrote aside, then devteam.mjs chore start settings');
+  // never the main checkout under another name (a link to it), and only the settings chore's branch
+  if (realPath(wt) === realPath(mainRoot) || git(['rev-parse', '--abbrev-ref', 'HEAD'], wt) !== 'chore-settings') die('.worktrees/chore-settings is not the settings chore (its branch is not chore-settings): move what you wrote aside, then devteam.mjs chore start settings');
   const words = (x) => (x === null ? 'no limit' : String(x));
   const forId = flagStr('for');
   if (flags.for !== undefined && !forId) die('settings set: --for names the owner\'s owner-setting act');

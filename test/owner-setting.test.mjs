@@ -572,3 +572,38 @@ test('owner-setting-unlanded and the Settings label follow main, a landed overri
     assert.equal(run(old, ['log-check']).status, 0);
   } finally { F.done(); }
 });
+
+test('settings set edits the block itself, keeps its line endings, and only in the settings chore', () => {
+  const F = monoFixture('settings-set-where');
+  const { old, ok, run, g } = F;
+  try {
+    F.lines(F.STD);
+    ok(old, ['chore', 'start', 'settings'], SUP);
+    const f = path.join(choreWt(F), SETTINGS_REL);
+    const text = fs.readFileSync(f, 'utf8');
+    const block = text.match(/```json devteam\s*\n([\s\S]*?)\n```/)[1];
+    // an empty block, with {} in the prose above it: the block is edited, not the prose (task-4 T4-1)
+    const withProse = text.replace(block, () => '{}').replace(/^/, 'An empty object reads {} in JSON.\n\n');
+    fs.writeFileSync(f, withProse);
+    ok(old, ['settings', 'set', 'max_active_tickets', '4'], SUP);
+    const after = fs.readFileSync(f, 'utf8');
+    assert.ok(after.startsWith('An empty object reads {} in JSON.\n'), 'the prose is untouched');
+    assert.deepEqual(blockOf(f), { max_active_tickets: 4 });
+    // CRLF: the inserted line keeps them (task-4 T4-3)
+    const crlf = text.replace(block, () => block.replace(/\n/g, '\r\n'));
+    fs.writeFileSync(f, crlf);
+    ok(old, ['settings', 'set', 'max_active_per_component', '3'], SUP);
+    const b = fs.readFileSync(f, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1];
+    assert.equal(JSON.parse(b).max_active_per_component, 3);
+    assert.doesNotMatch(b, /[^\r]\n/, 'no bare LF inside the block');
+    // 1e3 is not a plain number: named as such (task-4 T4-4)
+    fs.writeFileSync(f, text.replace(block, () => '{\n  "max_active_tickets": 1e1\n}'));
+    assert.match(run(old, ['settings', 'set', 'max_active_tickets', '4'], SUP).err, /isn't written as one plain number or null/);
+    // a folder on another branch where the chore should be is refused (task-4 T4-2)
+    fs.writeFileSync(f, text);
+    g(['checkout', '-q', '-b', 'not-settings'], choreWt(F));
+    const before = fs.readFileSync(f, 'utf8');
+    assert.match(run(old, ['settings', 'set', 'max_active_tickets', '4'], SUP).err, /its branch is not chore-settings/);
+    assert.equal(fs.readFileSync(f, 'utf8'), before);
+  } finally { F.done(); }
+});
