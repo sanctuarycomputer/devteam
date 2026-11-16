@@ -669,15 +669,17 @@ test('a machine op: its busy words, the cards disabled while it runs; a confirm 
   await until(() => F.asks.get(A).length && F.asks.get(B).length, 'both asked');
   await p.until('done', `!document.querySelector('#ov-body .fleet-switch .msg')`);
   F.delay.clear();
-  // every project parked: the machine's Park has nothing to do, and its confirm doesn't stay up
+  // every project parked: the machine's Park is the mode it is in, and pressing it does nothing (spec: the current mode)
   F.setList([hello('alpha', A, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }), hello('beta', B, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } })]);
   await p.send('Page.reload');
   await p.until('parked', `${kBtn('machine:park')}?.getAttribute('aria-pressed') === 'true'`);
   await p.ev(`${kBtn('machine:park')}.click()`);
-  await p.until('the confirm', `${textK('machine:park')} === 'Park 0 projects?'`);
-  await p.ev(`${kBtn('machine:park')}.click()`);
-  await new Promise((r) => setTimeout(r, 1000));
-  assert.equal(await p.ev(textK('machine:park')), 'Park', 'cleared at once, not 5 s later');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirm for the mode it is in');
+  await p.ev(`${kBtn('/srv/alpha:park')}.click()`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(textK('/srv/alpha:park')), 'Park', 'nor on a parked card');
+  assert.deepEqual([F.asks.get(A).length, F.asks.get(B).length], [1, 1], 'nothing asked');
   // an error, then a new press: the error goes
   F.setList([hello('alpha', A), hello('beta', B)]);
   await p.send('Page.reload');
