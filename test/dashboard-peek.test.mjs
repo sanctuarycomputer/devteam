@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { PORTS, bareProject, dashboardOnFreePort, until } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, peekFixture, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
@@ -15,9 +15,9 @@ const RATE = ['--stake', '1', '--urgency', '1'];
 
 // A project, its dashboard and a Chrome tab on it. seed({ root, dt, commit, ids }) makes the records
 // (dt: the kit CLI, role null is the owner; commit: everything written so far, on main) before the
-// dashboard starts. Gives the tab (p), the ids and helpers: soon (a page expression, waited for),
-// load (a fresh visit), size, url.
-async function peekPage(t, { seed, name = 'peek' } = {}) {
+// dashboard starts; or fixture(base) makes the whole project ({ root, ids }, test/lib/kit.mjs). Gives
+// the tab (p), the ids and helpers: soon (a page expression, waited for), load (a fresh visit), size, url.
+async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-dash-${name}-`));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -25,8 +25,9 @@ async function peekPage(t, { seed, name = 'peek' } = {}) {
   // DEVTEAM_BOX stays (lib/kit.mjs sets it off): the kit under test sees no box, as on a CI runner
   for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
   for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
-  const root = bareProject(base, name);
-  const ids = {};
+  const made = fixture ? fixture(base) : null;
+  const root = made ? made.root : bareProject(base, name);
+  const ids = made ? made.ids : {};
   const dt = (args, role = 'supervisor') => {
     const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });
     assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
@@ -423,5 +424,166 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon('window.__ttc === 1', ".tt's click ran");
     await soon(isClosed, 'the Inbox, the peek closed');
     await soon(`(() => { ${SEEN} return !seen(document.getElementById('tt-peek')) && seen(document.querySelector('.pagebar .tt')); })()`, 'no peek: .tt again');
+  });
+});
+
+// Every peek on test/lib/kit.mjs's peekFixture: the hash that opens each of its records, and the
+// peek kind it draws (an open question and an artifact open no peek, so they are not here).
+const peekHashes = (ids) => {
+  const e = encodeURIComponent;
+  return {
+    ticket: ['ticket', `#ticket/${e(ids.ticket)}`], goal: ['goal', `#goal/${e(ids.goal)}`], feature: ['feature', `#feature/${e(ids.feature)}`], story: ['story', `#story/${e(ids.story)}`],
+    release: ['release', `#release/${e(ids.release)}`], wave: ['wave', `#wave/${e(ids.wave)}`], milestone: ['milestone', `#milestone/${e(ids.milestone)}`],
+    act: ['act', `#act/${e(ids.act)}`], actUnderDecision: ['act', `#act/${e(ids.actUnderDecision)}`], actCorrected: ['act', `#act/${e(ids.actCorrected)}`],
+    decision: ['decision', `#decision/${e(ids.decision)}`], decisionNotMine: ['decision', `#decision/${e(ids.decisionNotMine)}`],
+    lesson: ['lesson', `#lesson/${e(ids.lesson)}`], problem: ['problem', `#problem/${e(ids.problem)}`], incident: ['problem', `#problem/${e(ids.incident)}`],
+    signal: ['signal', `#signal/${e(ids.signal)}`], observation: ['observation', `#observation/${e(ids.observation)}`], learning: ['learning', `#learning/${e(ids.learning)}`],
+    retro: ['retro', `#retro/${e(ids.retro)}`], thread: ['thread', `#thread/${e(ids.thread)}`], planner: ['planner', `#planner/${e(ids.planner)}`],
+    qAnswered: ['q', `#q/${e(ids.qAnswered)}`], qDefaulted: ['q', `#q/${e(ids.qDefaulted)}`], qWithdrawn: ['q', `#q/${e(ids.qWithdrawn)}`], qLong: ['q', `#q/${e(ids.qLong)}`],
+    file: ['file', `#file?path=${e(ids.file)}`], governanceFile: ['file', `#file?path=${e(ids.governanceFile)}`],
+    sensorHttp: ['sensor', `#sensor/${e(ids.sensorHttp)}`], sensorReader: ['sensor', `#sensor/${e(ids.sensorReader)}`],
+  };
+};
+// What "How it changes" says for each fixture record (spec §2.2): a selector its value holds, or words in it
+const SHIFT = 'Shift+click it where it shows on its page';
+const howCases = (ids) => {
+  const e = encodeURIComponent;
+  const thread = (subject) => ({ sel: `button[type="button"][data-thread-on="${subject}"]` });
+  return {
+    act: { sel: 'a[href="#loop?lt=act"]', text: 'Correct, on its row in Self Improvement' },
+    actUnderDecision: { sel: `a[href="#decision/${e(ids.decision)}"]`, text: 'Correct its decision' },
+    actCorrected: { text: 'Corrected by' },
+    decision: { sel: 'a[href="#loop?lt=decide"]', text: 'Correct, on its row in Self Improvement' },
+    decisionNotMine: thread(`decision:${ids.decisionNotMine}`),
+    qDefaulted: { sel: `a[href="#inbox"][data-answered-go="${ids.qDefaulted}"]`, text: 'Overrule it from its card in the Inbox' },
+    qAnswered: { ...thread(`question:${ids.qAnswered}`), text: 'Settled; to raise it again' },
+    qWithdrawn: { ...thread(`question:${ids.qWithdrawn}`), text: 'Settled; to raise it again' },
+    qLong: thread(`question:${ids.qLong}`),
+    thread: { text: 'Reply in its thread' },
+    governanceFile: { text: 'lands with your yes' },
+    goal: thread(`goal:${ids.goal}`), ticket: thread(`ticket:${ids.ticket}`), planner: thread(`planner:${ids.planner}`), lesson: thread(`lesson:${ids.lesson}`),
+    problem: thread(`problem:${ids.problem}`), incident: thread(`problem:${ids.incident}`), observation: thread(`observation:${ids.observation}`),
+    ...Object.fromEntries(['feature', 'story', 'release', 'wave', 'milestone', 'signal', 'learning', 'retro', 'sensorHttp', 'sensorReader', 'file'].map((k) => [k, { text: SHIFT, sel: 'a[href^="#"]' }])),
+  };
+};
+// the peek drawn in full: its kind, its properties first, its History card last and loaded
+const peekDrawn = (kind) => `(() => { const b = document.getElementById('drawer-body'), last = b.lastElementChild;
+  return !document.getElementById('drawer').hidden && DRAWER.kind === ${JSON.stringify(kind)} && !!b.querySelector('section.attrs') && !!last && last.matches('.psect') && /^History$/.test(last.querySelector('.card-head')?.textContent.trim() ?? '') && !last.querySelector('.loading'); })()`;
+
+test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const { p, ids, size, soon, load } = await peekPage(t, { fixture: peekFixture, name: 'peeks' });
+  await size(1440, 900);
+  await load('#board');
+  const H = peekHashes(ids);
+  const open = async (key) => {
+    const [kind, hash] = H[key];
+    await p.ev("location.hash = '#board'");
+    await soon("!document.body.classList.contains('peek-open')", 'back on Board');
+    // set until it takes: Chrome drops a same-document navigation now and then when a page makes many
+    // in a row (the hash stays as it was, with no hashchange), which a walk over thirty peeks does
+    await soon(`location.hash === ${JSON.stringify(hash)} || (location.hash = ${JSON.stringify(hash)}, false)`, `${key}: its hash`);
+    return kind;
+  };
+
+  await t.test('the fixture draws every kind', async () => {
+    const kinds = new Set(Object.values(H).map(([k]) => k));
+    assert.deepEqual([...kinds].sort(), (await p.ev('Object.keys(TYPE_META)')).sort(), 'every peek kind has a record');
+    for (const key of Object.keys(H)) {
+      const kind = await open(key);
+      await soon(`!document.getElementById('drawer').hidden && DRAWER.kind === ${JSON.stringify(kind)} && !!document.querySelector('#drawer-body section.attrs')`, `${key}: its peek`);
+      // drawn from its record, not "not found" (whose title is the id); a planner, a file and a sensor are titled by their id
+      if (!['planner', 'file', 'governanceFile', 'sensorHttp', 'sensorReader', 'decisionNotMine'].includes(key)) {
+        await soon(`(() => { const t = document.querySelector('#drawer-bar-title .dtitle')?.textContent.trim(); return !!t && t !== ${JSON.stringify(ids[key])}; })()`, `${key}: drawn from its record, not "not found"`);
+      }
+    }
+  });
+
+  await t.test('properties first', async () => {
+    const how = howCases(ids);
+    const untipped = [];
+    // what a drawn wait that times out reports: the hashes and keys of late
+    await p.ev("window.__hl = []; addEventListener('hashchange', () => window.__hl.push(location.hash)); addEventListener('keydown', (e) => window.__hl.push(`key ${e.key} on ${document.activeElement?.tagName}`), true); void 0");
+    for (const key of Object.keys(H)) {
+      const kind = await open(key);
+      await soon(peekDrawn(kind), `${key}: drawn`).catch(async (e) => {
+        const at = await p.ev("[(window.__hl || []).slice(-24).join(' | '), location.hash, DRAWER.kind, document.getElementById('drawer').hidden, [...document.getElementById('drawer-body').children].map((c) => `${c.tagName}.${c.className}`).join(' '), document.getElementById('drawer-body').lastElementChild?.textContent.slice(0, 200)]");
+        throw new Error(`${e.message}: ${JSON.stringify(at)}`);
+      });
+      const m = await p.ev(`(() => {
+        const b = document.getElementById('drawer-body'), first = b.firstElementChild, a = b.querySelector('section.attrs');
+        const dts = [...b.querySelectorAll('dt')], dt0 = a?.querySelector('dl.props dt'), dd0 = dt0?.nextElementSibling;
+        const probe = document.createElement('span'); probe.style.fontFamily = 'var(--mono)'; document.body.appendChild(probe);
+        const mono = getComputedStyle(probe).fontFamily; probe.remove();
+        const hc = dts.find((x) => x.textContent.trim() === 'How it changes');
+        const last = b.lastElementChild;
+        return { first: first?.matches('section.attrs'), firstDt: a?.querySelector('dl.props dt:first-of-type')?.textContent.trim(),
+          untipped: dts.filter((x) => !(x.getAttribute('title') || '').trim()).map((x) => x.textContent.trim()),
+          fonts: [...new Set(dts.map((x) => getComputedStyle(x).fontFamily))], mono,
+          borders: dt0 && dd0 ? [getComputedStyle(dt0).borderTopWidth, getComputedStyle(dd0).borderTopWidth] : null,
+          how: hc ? { html: hc.nextElementSibling.innerHTML, text: hc.nextElementSibling.textContent } : null,
+          lastHead: last?.matches('.psect') ? last.querySelector('.card-head')?.textContent.trim() : last?.outerHTML.slice(0, 80) };
+      })()`);
+      assert.ok(m.first, `${key}: the body's first element is section.attrs`);
+      assert.equal(m.firstDt, 'ID', `${key}: ID first`);
+      untipped.push(...m.untipped.map((x) => `${key}: ${x}`));
+      assert.deepEqual(m.fonts, [m.mono], `${key}: every key in the mono stack`);
+      assert.deepEqual(m.borders, ['0px', '0px'], `${key}: no rule above the first row`);
+      assert.ok(m.how, `${key}: a How it changes row`);
+      const c = how[key];
+      if (c.text) assert.ok(m.how.text.includes(c.text), `${key}: How it changes says "${c.text}": ${m.how.text}`);
+      if (c.sel) assert.ok(await p.ev(`!![...document.querySelectorAll('#drawer-body dt')].find((x) => x.textContent.trim() === 'How it changes').nextElementSibling.querySelector(${JSON.stringify(c.sel)})`), `${key}: How it changes holds ${c.sel}: ${m.how.html}`);
+      assert.equal(m.lastHead, 'History', `${key}: History last`);
+      // the ID's tip on keyboard focus: Tab from the close × reaches the first key
+      await p.ev("document.getElementById('drawer-close').focus(); void 0");
+      await p.key('Tab');
+      const tip = await p.ev(`(() => { const dt = document.activeElement; return { isId: dt?.matches('#drawer-body section.attrs dl.props dt') && dt.textContent.trim() === 'ID', title: dt?.getAttribute('title'), after: dt ? getComputedStyle(dt, '::after').content : null }; })()`);
+      assert.ok(tip.isId, `${key}: Tab reaches the ID key`);
+      assert.equal(tip.after, `"${tip.title.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`, `${key}: its tip shows on focus`);
+      // Escape on a key blurs it (its tip goes) and leaves the peek open
+      await p.key('Escape');
+      assert.equal(await p.ev("document.activeElement?.matches?.('#drawer-body dt') ?? false"), false, `${key}: Escape blurs the key`);
+      assert.equal(await p.ev("document.body.classList.contains('peek-open')"), true, `${key}: and the peek stays`);
+    }
+    assert.deepEqual(untipped, [], 'every key has a tooltip');
+  });
+
+  await t.test('an answered card is anchored once: in the Inbox, never in a peek', async () => {
+    await p.ev("location.hash = '#inbox'");
+    await soon(`!!document.getElementById('a-${ids.qDefaulted}')`, 'the defaulted card in the Answered list');
+    for (const hash of [`#q/${encodeURIComponent(ids.qDefaulted)}`, `#decision/${encodeURIComponent(ids.decision)}`]) {
+      await p.ev(`location.hash = ${JSON.stringify(hash)}`);
+      await soon(peekDrawn(hash.startsWith('#q/') ? 'q' : 'decision'), `${hash} over the Inbox`);
+      assert.ok(await p.ev(`[...document.querySelectorAll('#drawer-body .card a[href="#q/${encodeURIComponent(ids.qDefaulted)}"]')].length > 0`), `${hash}: the answered card is in the peek`);
+      assert.equal(await p.ev(`document.querySelectorAll('#a-${ids.qDefaulted}').length`), 1, `${hash}: one #a-<qid>`);
+      assert.equal(await p.ev(`!!document.getElementById('a-${ids.qDefaulted}').closest('#drawer')`), false, `${hash}: and not in the peek`);
+      await p.ev("location.hash = '#inbox'");
+      await soon("!document.body.classList.contains('peek-open')", 'the peek closed');
+    }
+  });
+
+  await t.test('notFound and loading keep the frame', async () => {
+    const frame = (what, note) => p.ev(`(() => { const b = document.getElementById('drawer-body'), dts = [...b.querySelectorAll('section.attrs dl.props dt')].map((x) => x.textContent.trim()), last = b.lastElementChild;
+      return { first: b.firstElementChild?.matches('section.attrs'), id: dts[0], how: dts.includes('How it changes'), history: last?.matches('.psect') && last.querySelector('.card-head')?.textContent.trim() === 'History', note: last?.querySelector('.psect-body')?.textContent.trim() }; })()`).then((m) => {
+      assert.ok(m.first, `${what}: properties first`);
+      assert.equal(m.id, 'ID', `${what}: ID`);
+      assert.ok(m.how, `${what}: How it changes`);
+      assert.ok(m.history, `${what}: History last`);
+      assert.match(m.note, note, `${what}: History says so`);
+    });
+    // a record nobody logged: once its peek says so
+    await p.ev("location.hash = '#ticket/kit-nope'");
+    await soon(`!document.getElementById('drawer').hidden && DRAWER.id === 'kit-nope' && !!PEEKS.get(peekKey('ticket', 'kit-nope'))?.missing && /Nothing logged yet/.test(document.getElementById('drawer-body').lastElementChild?.textContent ?? '')`, 'the missing ticket');
+    await frame('a missing record', /Nothing logged yet\./);
+    // a peek fetch held open: the frame while it loads
+    await load('#board');
+    await p.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/peek*', requestStage: 'Request' }] });
+    try {
+      await p.ev(`location.hash = ${JSON.stringify(H.ticket[1])}`);
+      await soon("!document.getElementById('drawer').hidden && DRAWER.kind === 'ticket' && !!document.querySelector('#drawer-body section.attrs')", 'the ticket peek, loading');
+      await frame('a peek loading', /Loading/);
+    } finally {
+      await p.send('Fetch.disable');
+    }
+    await soon(peekDrawn('ticket'), 'the ticket peek, loaded');
   });
 });

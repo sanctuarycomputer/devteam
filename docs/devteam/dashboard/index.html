@@ -610,15 +610,17 @@ try {
   @media (min-width: 841px) { .shell.peek-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
   #tt-peek .n.q { color: var(--red-fg); }
   @media (max-width: 840px) { #tt-peek { display: none; } }
-  .attrs { margin: 2px 0 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
-  .attrs dl { margin: 8px 0 10px; }
+  /* a peek's properties (kit-88): the block's props() lists; under them, each section a psect card */
+  .attrs { margin: 0 0 16px; }
   .attrs dd .links { margin: 0; }
   .attrs-h { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-  .attr-k { position: relative; cursor: help; border-bottom: 1px dotted color-mix(in srgb, var(--muted) 60%, transparent); }
-  .attr-tip { display: none; position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 12px; line-height: 1.45; font-weight: 400; text-transform: none; letter-spacing: 0; white-space: normal; }
-  .attr-k:hover .attr-tip, .attr-k:focus-visible .attr-tip, .attr-k:focus .attr-tip { display: block; }
+  /* a key's tooltip on keyboard focus (the mouse has its title); Escape blurs it */
+  .props dt[title] { position: relative; }
+  .props dt[title]:focus-visible::after { content: attr(title); position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font: 400 12px/1.45 var(--sans); white-space: normal; }
+  .drawer-body .psect { margin: 0 0 12px; }
+  .drawer-body .psect-body > :first-child { margin-top: 0; }
+  .drawer-body .psect-body > :last-child { margin-bottom: 0; }
   .drawer h3 { margin: 18px 0 6px; }
-  .hist-h { padding-top: 12px; border-top: 1px solid var(--line); }
   .mini-chart svg { width: 100%; height: auto; display: block; }
   .learning { margin-bottom: 14px; }
   .learn-cols { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -2375,9 +2377,9 @@ function qblock(text, links) {
 }
 // the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
-function answeredCard(q) {
+function answeredCard(q, { inPeek = false } = {}) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
-  return `<div class="card small"${subj('question', q.id, qplain(q.question, q.links))}>
+  return `<div class="card small"${inPeek ? '' : ` id="a-${esc(q.id)}"`}${subj('question', q.id, qplain(q.question, q.links))}>
     <div>${qlink(q.id, q.question)}</div>
     ${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}
     ${q.said ? `<div class="muted">You said: “${esc(q.said)}”</div>` : ''}
@@ -3431,13 +3433,43 @@ async function loadSchemaDocs() {
   if (DRAWER.kind) redraw();
 }
 const tipFor = (type, k) => SCHEMA_DOCS?.types?.[type]?.fields?.[k] ?? (/[.[]/.test(k) ? '' : SCHEMA_DOCS?.envelope?.[k]) ?? '';
-let TIP_N = 0;
-const attrKey = (label, tip) => {
-  if (!tip) return esc(label);
-  const id = `attr-tip-${++TIP_N}`;
-  return `<span class="attr-k" tabindex="0" aria-describedby="${id}">${esc(label)}<span class="attr-tip" role="tooltip" id="${id}">${esc(tip)}</span></span>`;
+// Every key's tooltip, where the schema has no words for it and the opener gave none: each label an
+// opener draws (kit-88 spec §2.2; the owner's mock's KEY_HELP and today's tips). A key with none of
+// the three says which stored field it is.
+const KEY_TIPS = {
+  ID: 'The record\'s id in the log.', 'How it changes': 'How you change it from here: where its correction is, or how to start a thread about it.', Record: 'Its record in the log.',
+  Created: 'When the record was created, and by whom.', 'Last changed': 'The latest change to any of its fields, and who made it.',
+  Title: 'Its name, one line.', Outcome: 'What is true for you when it is met.', Status: 'Where it stands now.', Priority: 'Your order of work; the lowest number goes first.', Horizon: 'The date it should be met by.',
+  Measure: 'What says it is met.', Milestones: 'The usable slices it is planned in.', Preconditions: 'What must hold for it to be met, numbered.', 'Not in scope': 'What it deliberately leaves out.', 'Plan after': 'Goals that must be planned before this one.',
+  Approved: 'The question you approved it in.', Hold: 'Run, Drain or Park: whether new work starts for it.', 'On hold': 'Why it is held, while it is.', Decision: 'The decision it carried out, or your verdict on it.',
+  State: 'Where it stands, computed from its records.', 'Why it matters': 'Its impact, 1 to 4, with who set it and why.', Design: 'The design file it is built from.', Forecast: 'Each milestone\'s date at the measured rate.',
+  Features: 'The features that carry it.', Planners: 'Planners working on it now.', 'Your verdicts': 'What you said when it was checked.', Questions: 'Questions about it, open ones marked.',
+  Goals: 'The goals it serves.', Stories: 'The stories it holds, with their releases.', Notes: 'Anything else the planner wrote.', Component: 'The part of the system it changes.', Kind: 'What sort of record this is.',
+  Size: 'S is up to about 400 changed lines, M about 1,000.', Risk: 'High risk gets two final reviewers.', Serves: 'The stories it delivers.', 'Waits on': 'Tickets that must merge first.', Contracts: 'Interfaces it provides or consumes.',
+  Touches: 'The files it changes.', Links: 'The repos and links it uses.', 'Done when': 'The checks it must pass, in plain words.', 'Replaced by': 'The ticket that replaced it.', Documents: 'Its spec, plan and verification.',
+  Reviews: 'Every review of it and its verdict.', Blocks: 'Tickets that wait on it.', Wave: 'The tickets that can be built alongside it.', 'Ships in': 'The release it ships in.', Spent: 'What its worker and reviewers have spent.',
+  Branch: 'Its git branch.', Merged: 'The merge commit, once merged.', Feature: 'The feature it belongs to.', Release: 'The release it ships in.', Text: 'The story in one sentence.', Releases: 'Releases its stories and tickets target.',
+  Waves: 'Waves its unfinished tickets are in.', Planner: 'A planner working on it now.', 'Plan reviews': 'Reviews of its plan.', Tagged: 'Whether the release has been tagged.', 'Waiting on': 'What must finish first.',
+  Goal: 'The goal it serves.', By: 'The date it is due.', Target: 'What it checks, and what counts as good.', Tickets: 'How many tickets it holds.',
+  Question: 'What was asked, in full.', Class: 'The kind of decision it settles.', Scope: 'How far it reaches.', Ticket: 'The ticket it is about.', Recommendation: 'What the supervisor recommends.', Options: 'The options it weighed.',
+  Default: 'What happens at the deadline if you don\'t answer.', Deadline: 'When the default applies.', Answer: 'The answer it was given.', 'Why asked': 'Why it came to you, and its rung.', Autonomy: 'The trust it moved, if any.',
+  Stake: 'How much rides on the answer.', Urgency: 'How soon it matters.', Settled: 'When it was answered, defaulted or withdrawn.', Took: 'How long it waited for you.', Matched: 'Whether your answer matched the recommendation.',
+  What: 'What was done or decided, in a sentence.', 'Approved by': 'Your answer, or the standing rule, that approved it.', Rung: 'How it was allowed: asked you, deadline, or its own call.', Ceiling: 'The furthest this kind may go without asking.',
+  About: 'The records it is about.', Given: 'Knowledge it was given at the time.', 'Rests on': 'Knowledge it rests on.', Reversible: 'Whether it can be undone.', Under: 'The authority it was done under.', Authority: 'Whose call it was.',
+  Rationale: 'Why it chose this.', Confidence: 'How sure the supervisor is.', 'Its class now': 'How this kind is decided today, against then.', Corrected: 'Your correction of it, if any.', Repaired: 'How a corrected call was repaired.',
+  'In plain words': 'The lesson as you read it.', Statement: 'The lesson as agents are given it.', Valence: 'Good (+) or bad (−), −2 to 2.', Evidence: 'What it rests on.', 'Goes to': 'The sessions that are given it.',
+  Severity: 'How bad it is, 0 to 4.', Realized: 'Whether it happened (an issue) or may happen (a risk).', Threatens: 'The goals it puts at risk.', 'Assigned to': 'Who is handling it.', Detail: 'What happened, in a sentence.',
+  Fingerprints: 'Distinct errors grouped under it.', Sensor: 'The sensor that saw it.', Stage: 'Where it is now.', Fix: 'The ticket that fixes it.', Verify: 'How the fix is shown to hold.', Regressed: 'Whether it came back after the fix.',
+  Subject: 'What it is about.', 'Noticed by': 'Who noticed it.', From: 'Who sent it, or where it came from.', Detector: 'What raised it.', 'Source key': 'The key it recurs on.', 'Where it sits': 'Its signal and records in the loop.',
+  Seen: 'How often it was seen.', Recurring: 'Whether it keeps coming back.', 'First seen': 'When it was first seen.', Latest: 'When it was last seen.', 'Unexplained for': 'How long it has gone without an explanation.', 'Explained already': 'Whether the supervisor has explained it.',
+  Week: 'The week it covers.', Figures: 'The week\'s counts.', 'What it decided': 'Lessons, acts and decisions that came from it.', 'Write-up': 'The retro\'s file.',
+  To: 'Who it was sent to.', Re: 'The message it answers.', Sha: 'The commit it refers to.', 'For goal': 'The goal it plans for.', 'Tickets so far': 'Tickets in its draft so far.', 'Waiting on you': 'Questions it is waiting on you for.', 'Asked the supervisor': 'Messages it sent the supervisor with no reply yet.',
+  Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
+  Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
 };
-const attrRow = (label, html, tip) => (html === '' || html == null || html === false ? '' : `<dt>${attrKey(label, tip)}</dt><dd>${html}</dd>`);
+const keyTip = (label, tip, field) => tip || KEY_TIPS[label] || (field ? `Stored on the record as ${field}.` : `${label}.`);
+// A property row for props(): [label, value, tip], or null when there is no value to show.
+const attrRow = (label, html, tip, field) => (html === '' || html == null || html === false ? null : [label, html, keyTip(label, tip, field)]);
 const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 const longList = (xs) => xs.length > 4 || xs.some((x) => String(x).length > 48);
 // Any value, plainly: text links the ids in it, lists become lists, objects their own key/value pairs.
@@ -3535,23 +3567,79 @@ function storedRows(type, fields, docType, ctx, prefix = '') {
     const f = spec.fmt?.[k] ?? ATTR_COMMON.fmt[k] ?? fmtAny;
     let html;
     try { html = f(fields[k], ctx); } catch { html = fmtAny(fields[k]); }
-    return attrRow(spec.label?.[k] ?? ATTR_COMMON.label[k] ?? words(k), html, tipFor(docType, `${prefix}${k}`));
-  }).join('');
+    return attrRow(spec.label?.[k] ?? ATTR_COMMON.label[k] ?? words(k), html, tipFor(docType, `${prefix}${k}`), `${prefix}${k}`);
+  });
 }
-// The attributes block. peek: the object's peek (undefined while it loads); pick: the part of the
-// record that is this object (a story inside its feature, with prefix 'stories[].' for its tooltips);
-// computed: [label, html, tip] rows worked out from other records; ctx: what formatters may need.
-function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false }) {
-  TIP_N = 0;
+// The properties (kit-88 spec §2.2), on the block's props(): the ID first, the stored fields, Created
+// and Last changed, then How it changes; under them, what is computed from other records. peek: the
+// object's peek (undefined while it loads); pick: the part of the record that is this object (a story
+// inside its feature, with prefix 'stories[].' for its tooltips); computed: [label, html, tip] rows
+// worked out from other records; ctx: what formatters may need; kind and rec: the peek's kind and the
+// record How it changes reads (howItChanges).
+function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false, kind = DRAWER.kind, rec = null }) {
   const r = peek?.record ?? null;
   const fields = r ? (pick ? pick(r.fields) : r.fields) : null;
   const c = { id, record: r, set_by: r?.set_by ?? {}, ...ctx };
-  const made = r && !pick ? attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`, 'When the record was created, and by whom.') + (r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`, 'The latest change to any of its fields, and who made it.') : '') : '';
+  const made = r && !pick ? [attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`), r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`) : null] : [];
   const stored = fields ? storedRows(type, fields, docType ?? type, c, prefix)
-    : noRecord ? '' : peek === undefined ? '<dt class="muted">…</dt><dd class="muted">loading</dd>' : peek?.transient ? '<dt class="muted">Record</dt><dd class="muted">could not load it just now</dd>' : '<dt class="muted">Record</dt><dd class="muted">not in the log</dd>';
-  const comp = computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).join('');
-  return `<section class="attrs"><dl>${attrRow('ID', `<code>${esc(id)}</code>`, idTip ?? tipFor('_', 'id'))}${stored}${made}</dl>${comp ? `<h4 class="attrs-h">Computed</h4><dl>${comp}</dl>` : ''}</section>`;
+    : noRecord ? [] : [attrRow('Record', `<span class="muted">${peek === undefined ? 'loading…' : peek?.transient ? 'could not load it just now' : 'not in the log'}</span>`)];
+  const idTipped = `${idTip ?? (tipFor('_', 'id') || KEY_TIPS.ID)} Copy ID copies exactly this.`;
+  const own = [attrRow('ID', `<code>${esc(id)}</code>`, idTipped), ...stored, ...made, howItChanges(kind, { id, ...(rec || {}), record: r })].filter(Boolean);
+  const comp = computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).filter(Boolean);
+  return `<section class="attrs">${props(own)}${comp.length ? `<h4 class="attrs-h">Computed</h4>${props(comp)}` : ''}</section>`;
 }
+// A section under the properties: a card with its title in the card's head (kit-88 spec §2.2).
+const psect = (title, html) => `<div class="card psect"><div class="card-head"><span class="grow">${esc(title)}</span></div><div class="psect-body">${html}</div></div>`;
+// How the owner changes the record, from where they are reading (R2; kit-88 spec §2.2). A thread on
+// the record starts from its Start a thread button (the subject kind is the log's: a question is
+// question:<id>); a correction is on its row in Self Improvement; a defaulted answer is overruled on
+// its card in the Inbox; anything else is a thread on the spot of the page where it shows.
+const THREAD_KIND = { goal: 'goal', ticket: 'ticket', planner: 'planner', lesson: 'lesson', problem: 'problem', observation: 'observation', decision: 'decision', act: 'act', q: 'question' };
+const threadOn = (kind, id) => `<button type="button" class="ghost" data-thread-on="${esc(`${THREAD_KIND[kind]}:${id}`)}">Start a thread</button>`;
+const homeLink = (kind, id) => {
+  const page = kind === 'file' ? (SHELL_ROUTES.files.find(([re]) => re.test(id))?.[1] ?? SHELL_ROUTES.links.file) : SHELL_ROUTES.links[kind];
+  const pg = shellPages().find((x) => x.id === page);
+  return pg ? ` <a class="linkish" href="#${esc(pg.id)}">${esc(pg.title)}</a>` : '';
+};
+const GOVERNED = /^docs\/devteam\/(governance|process)\/|(^|\/)strategy\.md$/;
+function howItChanges(kind, rec = {}) {
+  const id = rec.id;
+  const tip = KEY_TIPS['How it changes'];
+  const corrected = (c) => `Corrected by ${esc(who(c.by))}: ${esc(c.reason)}`;
+  const correctRow = (lt) => `Correct, on its row in Self Improvement: <a class="linkish" href="#loop?lt=${lt}">${lt === 'act' ? 'Act' : 'Decide'}</a>`;
+  let html;
+  switch (kind) {
+    case 'act': {
+      const a = (DATA?.ooda?.acts || []).find((x) => x.id === id) ?? rec;
+      const dec = a.decision ?? rec.record?.fields?.decision;
+      html = a.correction ? corrected(a.correction) : dec ? `Correct its decision: ${dlink(dec, decisionTitle(dec))}. <span class="muted">It went as decided, so the call is the decision's; if the act itself went wrong, that is a problem.</span>` : correctRow('act');
+      break;
+    }
+    case 'decision': {
+      // the owner may correct a call that has its row in Self Improvement (the supervisor's, on the dashboard: today's mine)
+      const r = (DATA?.ooda?.decisions || []).find((x) => x.id === id && ['decision', 'act'].includes(x.kind));
+      html = r?.correction ? corrected(r.correction) : r && r.who === 'supervisor' ? correctRow('decide') : `${threadOn('decision', id)}`;
+      break;
+    }
+    case 'q': {
+      const listed = (DATA?.ooda?.answered || []).find((x) => x.id === id);
+      html = listed?.status === 'defaulted' ? `<a class="linkish" href="#inbox" data-answered-go="${esc(id)}">Overrule it from its card in the Inbox</a>` : `Settled; to raise it again, ${threadOn('q', id)}`;
+      break;
+    }
+    case 'thread': {
+      const t = rec.record?.fields?.thread ?? rec.thread;
+      html = t ? `<a class="linkish" href="#talk/${encodeURIComponent(t)}">Reply in its thread</a>` : 'Reply in its thread';
+      break;
+    }
+    case 'file':
+      html = GOVERNED.test(String(id ?? '')) ? 'The supervisor drafts it from your thread; it lands with your yes' : `${SHIFT_SAY}:${homeLink('file', String(id ?? ''))}`;
+      break;
+    default:
+      html = THREAD_KIND[kind] ? threadOn(kind, id) : `${SHIFT_SAY}:${homeLink(kind, id)}`;
+  }
+  return ['How it changes', html, tip];
+}
+const SHIFT_SAY = 'Shift+click it where it shows on its page and say so in a thread';
 
 // ---- peeks: one fetch per object, kept, fetched again on each refresh ----
 /* peeks start */
@@ -3617,7 +3705,8 @@ function redraw() { if (DRAWER.kind && !$('drawer').hidden && !busyDrawer()) OPE
 function focusKey(el) {
   if (!el) return null;
   if (el.id) return `#${CSS.escape(el.id)}`;
-  const named = [...el.attributes].filter((a) => a.value && /^(data-.*|href|name|value|aria-describedby)$/.test(a.name));
+  // a property's key (a dt with its tip) is found again by its tip
+  const named = [...el.attributes].filter((a) => a.value && (/^(data-.*|href|name|value|aria-describedby)$/.test(a.name) || (el.tagName === 'DT' && a.name === 'title')));
   return named.length ? el.tagName.toLowerCase() + named.map((a) => `[${a.name}="${CSS.escape(a.value)}"]`).join('') : null;
 }
 // Note where focus is before a redraw, and put it back after: the same control (the nth, if a link
@@ -3756,16 +3845,18 @@ function lineView(l, self) {
     default: return ['', `${esc(words(l.type))} ${esc(l.op)}`];
   }
 }
+// Always the last card of a peek, a missing or failed one's too (kit-88 spec §2.2).
 function historySection(peek, self) {
-  const head = '<h3 class="hist-h">History</h3>';
-  if (peek === undefined) return `${head}<p class="loading">Loading…</p>`;
-  if (!peek || peek.error) return '';
+  const card = (html) => psect('History', html);
+  if (peek === undefined) return card('<p class="loading">Loading…</p>');
+  if (peek?.transient) return card(empty('Could not load it just now.'));
+  if (!peek || peek.error) return card(empty('Nothing logged yet.'));
   if (DRAWER.kind === 'file') {
     const cs = peek.history || [];
-    return `${head}${cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('Not committed yet.')}`;
+    return card(cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('Not committed yet.'));
   }
   const items = (peek.history || []).map((l) => [l, lineView(l, self)]).filter(([, x]) => x);
-  return `${head}${items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.')}`;
+  return card(items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.'));
 }
 
 // ---- pieces the bodies share ----
@@ -3794,7 +3885,7 @@ function designBlock(d, label = 'Design') {
   if (!d) return '';
   const href = fileHref({ title: label, path: d.path, ...(d.ref ? { ref: d.ref } : {}) });
   const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : '<p class="muted">It has no TL;DR yet.</p>';
-  return `<h3>${esc(label)}: the TL;DR</h3><div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`;
+  return psect(`${label}: the TL;DR`, `<div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`);
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
 /* learning start */
@@ -3910,7 +4001,7 @@ function progressBlock(items) {
     <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}</div>`;
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
-const notFound = (kind, id, peek, text, { noRecord = false } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
+const notFound = (kind, id, peek, text, { noRecord = false, rec = null } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord, rec })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
 // How long each phase took, as one bar: from each phase line to the next (or to the merge, or now).
 function phaseStrip(lines, endAt) {
   const ps = lines.filter((l) => l.type === 'phase' && l.to !== 'supervisor').sort((a, b) => a.at.localeCompare(b.at));
@@ -3927,8 +4018,8 @@ function phaseStrip(lines, endAt) {
   const tone = (p) => (['blocked', 'parked'].includes(p) ? 'stop' : ['spec', 'plan', 'contract'].includes(p) ? 'think' : ['build', 'verify'].includes(p) ? 'make' : ['final-review', 'awaiting-word', 'merging'].includes(p) ? 'wait' : 'other');
   const hrs = (ms) => (ms < 3600e3 ? `${Math.round(ms / 60e3)}m` : `${(ms / 3600e3).toFixed(ms < 36000e3 ? 1 : 0)}h`);
   const segs = [...spans].map(([p, ms]) => ({ p, ms, w: (100 * ms) / total }));
-  return `<h3>Time per phase${endAt ? '' : ' so far'}</h3><div class="phase-strip" role="img" aria-label="${esc(segs.map((s) => `${PHASE_SHORT[s.p] || s.p} ${hrs(s.ms)}`).join(', '))}">${segs.map((s) => `<span class="ph ph-${tone(s.p)}" style="width:${s.w.toFixed(2)}%" title="${esc(`${PHASE_SHORT[s.p] || words(s.p)}: ${hrs(s.ms)}`)}"></span>`).join('')}</div>
-    <div class="legend phase-legend">${segs.map((s) => `<span><i class="ph-${tone(s.p)}"></i>${esc(PHASE_SHORT[s.p] || words(s.p))} ${esc(hrs(s.ms))}</span>`).join('')}</div>`;
+  return psect(`Time per phase${endAt ? '' : ' so far'}`, `<div class="phase-strip" role="img" aria-label="${esc(segs.map((s) => `${PHASE_SHORT[s.p] || s.p} ${hrs(s.ms)}`).join(', '))}">${segs.map((s) => `<span class="ph ph-${tone(s.p)}" style="width:${s.w.toFixed(2)}%" title="${esc(`${PHASE_SHORT[s.p] || words(s.p)}: ${hrs(s.ms)}`)}"></span>`).join('')}</div>
+    <div class="legend phase-legend">${segs.map((s) => `<span><i class="ph-${tone(s.p)}"></i>${esc(PHASE_SHORT[s.p] || words(s.p))} ${esc(hrs(s.ms))}</span>`).join('')}</div>`);
 }
 // Every check at every commit it ran on: passed or failed, flaky where one commit saw both, slow
 // where it took over twice the project's usual time for that check.
@@ -3948,13 +4039,13 @@ function gateTable(lines) {
     const slow = median[name] && last.ms && last.ms / 1000 > 2 * median[name];
     return `<td title="${esc(`${name} at ${sha.slice(0, 12)}: ${last.ok ? 'passed' : 'failed'}${last.ms ? `, ${(last.ms / 1000).toFixed(1)}s` : ''}${runs.length > 1 ? `, ${runs.length} runs` : ''}`)}"><span class="gate-dot ${ok && bad ? 'flaky' : last.ok ? 'ok' : 'fail'}">${ok && bad ? '≈' : last.ok ? '✓' : '✗'}</span>${slow ? ' <span class="badge medium">slow</span>' : ''}${ok && bad ? ' <span class="badge high">flaky</span>' : ''}</td>`;
   };
-  return `<h3>Gate runs</h3><div class="scroll"><table class="gates-table"><tr><th>Commit</th>${names.map((n) => `<th>${esc(n)}</th>`).join('')}</tr>${shas.slice(0, 12).map((s) => `<tr><td><code>${esc(s.slice(0, 12))}</code></td>${names.map((n) => cell(s, n)).join('')}</tr>`).join('')}</table></div>`;
+  return psect('Gate runs', `<div class="scroll"><table class="gates-table"><tr><th>Commit</th>${names.map((n) => `<th>${esc(n)}</th>`).join('')}</tr>${shas.slice(0, 12).map((s) => `<tr><td><code>${esc(s.slice(0, 12))}</code></td>${names.map((n) => cell(s, n)).join('')}</tr>`).join('')}</table></div>`);
 }
 function spendChart(spend) {
   if (!spend?.length) return '';
   const roles = uniq(spend.map((s) => s.role || 'agent'));
   const series = roles.map((r) => { let sum = 0; return { name: `${r} ($${spend.filter((s) => (s.role || 'agent') === r).reduce((a, s) => a + (s.usd || 0), 0).toFixed(2)})`, points: spend.filter((s) => (s.role || 'agent') === r).map((s) => [Date.parse(s.at), +(sum += s.usd || 0).toFixed(2)]) }; });
-  return `<h3>Spend over time</h3>${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`;
+  return psect('Spend over time', `${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`);
 }
 
 // ---- monitoring ----
@@ -4056,9 +4147,8 @@ function openSensor(name) {
       ['Today', `${esc(m.today.events)} event(s), ${esc(m.today.qualified)} new for triage, ${esc(m.today.runs)} run(s), ${esc(m.today.fails)} failed, ${esc(m.today.invalid)} invalid line(s)`, 'How the probe itself is doing: the day\'s rollup observes the same.'],
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
-    ${(p?.ignores || []).length ? `<h3>Ignored</h3><ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>` : ''}
-    <h3>What it read</h3>
-    ${(p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>'}
+    ${(p?.ignores || []).length ? psect('Ignored', `<ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>`) : ''}
+    ${psect('What it read', (p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>')}
     ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
     ${attrs({ id: name, idTip: 'Its name in the settings (sensors).', peek: p, noRecord: true, computed: [
@@ -4070,8 +4160,8 @@ function openSensor(name) {
       ['Last check', m.last_at ? `${esc(when(m.last_at))}: ${m.last?.ok ? 'ok' : esc(m.last?.error || 'failed')}${m.last?.ms != null ? `, ${esc(m.last.ms)}ms` : ''}` : 'never', 'The supervisor checks it while it runs (wait polls it when due).'],
       ['Certificate', m.tls_days != null ? `expires in ${esc(m.tls_days)} days` : '', 'Days until the site\'s TLS certificate expires, checked hourly.'],
     ] })}
-    ${p?.series ? `<h3>Last 24 hours</h3>${sensorChart(p.series['24h'], m)}<h3>Last 7 days</h3>${sensorChart(p.series['7d'], m)}` : '<p class="loading">Loading…</p>'}
-    ${fails.length ? `<h3>Failed checks</h3><ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${p?.series ? `${psect('Last 24 hours', sensorChart(p.series['24h'], m))}${psect('Last 7 days', sensorChart(p.series['7d'], m))}` : '<p class="loading">Loading…</p>'}
+    ${fails.length ? psect('Failed checks', `<ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>`) : ''}
     ${historySection(p, `sensor:${name}`)}`);
 }
 
@@ -4096,11 +4186,11 @@ async function openTicket(id) {
       ['Branch', t.branch ? `<code>${esc(t.branch.replace(/^refs\/(heads|remotes\/origin)\//, ''))}</code>` : '', 'Where its work is.'],
       ['Merged', t.merge_sha ? `<code>${esc(t.merge_sha.slice(0, 12))}</code>` : '', 'The commit it landed as on main.'],
     ] })}
-    ${p.handoff ? `<h3>Handoff</h3><div class="card small handoff"><pre>${esc(p.handoff.text)}</pre><div class="meta">${esc(p.handoff.where)}</div></div>` : ''}
+    ${p.handoff ? psect('Handoff', `<div class="handoff"><pre>${esc(p.handoff.text)}</pre><div class="meta">${esc(p.handoff.where)}</div></div>`) : ''}
     ${phaseStrip(p.history, t.merged_at)}
     ${gateTable(p.history)}
     ${spendChart(p.spend)}
-    ${near.length > 1 ? `<h3>Dependencies</h3>${depGraph(near, { focus: id })}` : ''}
+    ${near.length > 1 ? psect('Dependencies', depGraph(near, { focus: id })) : ''}
     ${historySection(p, id)}`);
 }
 // A goal's impact: the words, why, who said so, and the owner's way to give it another value (a
@@ -4149,11 +4239,11 @@ function openGoal(id) {
     ${goalStepper(g, s, R)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
     ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
-    <h3>Readings</h3>${readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>'}
+    ${psect('Readings', readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')}
     ${designBlock(p?.design)}
-    ${problems.length ? `<h3>Problems that threaten it</h3>${problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join('')}` : ''}
-    ${calls.length ? `<h3>Decisions and acts</h3><ol class="tl">${calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>` : ''}
-    ${feats.length ? `<h3>Progress</h3>${progressBlock(items)}` : ''}
+    ${problems.length ? psect('Problems that threaten it', problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join('')) : ''}
+    ${calls.length ? psect('Decisions and acts', `<ol class="tl">${calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>`) : ''}
+    ${feats.length ? psect('Progress', progressBlock(items)) : ''}
     ${historySection(p, id)}`);
 }
 function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
@@ -4164,7 +4254,7 @@ function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, 
     ${attrs({ id, peek: p, type: kind, ...attr, computed })}
     ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
     ${extra}
-    ${progressBlock(items)}
+    ${psect('Progress', progressBlock(items))}
     ${historySection(p, id)}`);
 }
 function openFeature(f) {
@@ -4182,7 +4272,7 @@ function openFeature(f) {
     ['Waves', uniq(items.filter((t) => !isDone(t)).map((t) => t.wave)).sort((a, b) => a - b).map(wlink).join(', '), 'Waves its unfinished tickets are in.'],
     ['Planner', (DATA.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">planning now</a>` : '', 'A planner working on it now.'],
     ['Plan reviews', p?.plan_reviews ? reviewList(p.plan_reviews) || 'none yet' : '', 'Reviews of its plan PR while it is being planned.'],
-  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? `<h3>Dependencies</h3>${depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })}` : ''}` });
+  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? psect('Dependencies', depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })) : ''}` });
 }
 function openStory(sid) {
   const pr = DATA.progress, st = pr.stories[sid];
@@ -4205,12 +4295,12 @@ function openRelease(r) {
     ['Tagged', tagged ? 'yes' : 'not yet', 'Whether the release has been tagged.'],
     ['Stories', stories.map((x) => `${slink(x)} ${esc(String(pr.stories[x].text ?? '').slice(0, 90))}${storyDone(x) ? ' <span class="badge good">done</span>' : ''}`).join('<br>'), 'Stories that target it.'],
     ['Features', uniq([...items.map((t) => t.feature), ...stories.map((x) => pr.stories[x].feature)]).map(flink).join(', '), 'Features with work in it.'],
-  ], extra: `<h3>Readiness</h3><ul>
+  ], extra: `${psect('Readiness', `<ul>
       <li>${open.length ? `${open.length} of ${stories.length} stor${stories.length === 1 ? 'y' : 'ies'} still open: ${open.map(slink).join(', ')}` : stories.length ? `every story is done${tagged ? '' : ': ready to tag'}` : 'no stories target it'}</li>
       <li>${items.filter((t) => !isDone(t)).length} ticket${items.filter((t) => !isDone(t)).length === 1 ? '' : 's'} not merged</li>
       ${gates.length && !tagged ? `<li>checks at the last merge into it (${p.last_merge?.ticket ? tlink(p.last_merge.ticket) : 'a ticket'}, <code>${esc(String(p.last_merge?.sha ?? '').slice(0, 12))}</code>): ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')}</li>` : ''}
-    </ul>
-    <h3>Changelog</h3>${merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>'}` });
+    </ul>`)}
+    ${psect('Changelog', merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>')}` });
 }
 function openWave(w) {
   const items = DATA.progress.tickets.filter((t) => String(t.wave) === String(w));
@@ -4236,7 +4326,7 @@ function openMilestone(key) {
       ['Forecast', m.eta ? `${esc(fmtDate(Date.parse(m.eta)))}${m.late ? ' <span class="badge high">late</span>' : ''}` : '', 'When it should be reached at the recent rate.'],
       ['Features', [...fs].map(flink).join(', '), 'Features planned toward it.'],
     ],
-    extra: readings.length ? `<h3>Readings</h3>${lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks: [{ value: m.target, label: `this milestone (${m.target}${unit})`, strong: true }], unit })}` : '' });
+    extra: readings.length ? psect('Readings', lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks: [{ value: m.target, label: `this milestone (${m.target}${unit})`, strong: true }], unit })) : '' });
 }
 function openAct(id) {
   drawerFor('act', id);
@@ -4246,35 +4336,34 @@ function openAct(id) {
   const v = actView(a);
   const d = a.decision ? (DATA.ooda.decisions || []).find((x) => x.id === a.decision && x.kind === 'decision') : null;
   showDrawer(`<h2 id="drawer-title">${v.head}</h2>
-    ${attrs({ id, peek: p, type: 'act', computed: [
+    ${attrs({ id, peek: p, type: 'act', rec: a, computed: [
       ['Under', actUnder(a), 'What it carried out: a decision, your answer, a standing rule, or its own call.'],
     ] })}
     ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
     ${lineageBlock(p)}
     ${knowledgeCited(p, 'What its instructions carried')}
-    ${d ? `<h3>The decision it carried out</h3><div class="card small"><div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div></div>` : ''}
+    ${d ? psect('The decision it carried out', `<div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div>`) : ''}
     ${citedBlock(p, a)}
-    ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}
     ${historySection(p, id)}`);
 }
 // What a call rested on, inline: your answer as you gave it, or the standing rule's words.
 function restsOn(approvedBy) {
   if (!approvedBy) return '';
-  if (approvedBy.startsWith('q-')) { const q = allQuestions().find((x) => x.id === approvedBy); return q ? `<h3>The answer it rests on</h3>${answeredCard(q)}` : ''; }
+  if (approvedBy.startsWith('q-')) { const q = allQuestions().find((x) => x.id === approvedBy); return q ? psect('The answer it rests on', answeredCard(q, { inPeek: true })) : ''; }
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === approvedBy);
-  return k ? `<h3>The standing rule it rests on</h3><div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span></div>` : '';
+  return k ? psect('The standing rule it rests on', `<a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span>`) : '';
 }
 // The knowledge a decision rests on (decide --on), or a start's prompt carried, in its own words
 // (from its peek): what the call or the session had to go on.
 function knowledgeCited(p, title) {
   const ks = p?.record?.fields?.knowledge || [];
-  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}${x.type === 'knowledge' && x.status && x.status !== 'accepted' ? `, ${esc(x.status)}` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
+  return ks.length ? psect(title, `<ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}${x.type === 'knowledge' && x.status && x.status !== 'accepted' ? `, ${esc(x.status)}` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>`) : '';
 }
 // Records an object cites, in their own words (from its peek); what it rests on or was given has its own list.
 function citedBlock(p, o) {
   const given = new Set(p?.record?.fields?.knowledge || []);
   const c = Object.entries(p?.cited || {}).filter(([id]) => (!id.startsWith('q-') || !o?.approved_by || id !== o.approved_by) && !given.has(id));
-  return c.length ? `<h3>What it cites</h3><ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>` : '';
+  return c.length ? psect('What it cites', `<ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>`) : '';
 }
 function openDecision(id) {
   drawerFor('decision', id);
@@ -4284,15 +4373,14 @@ function openDecision(id) {
   const now = (DATA.ooda.trust || []).find((x) => x.class === r.class);
   const acts = r.kind === 'decision' ? r.acts.map((a) => (DATA.ooda.acts || []).find((y) => y.id === a) || { id: a }) : [];
   showDrawer(`<h2 id="drawer-title">${linkify(r.what)}</h2>
-    ${attrs({ id, peek: p, type: r.kind, computed: [
+    ${attrs({ id, peek: p, type: r.kind, rec: r, computed: [
       ['Under', authorityWords(r.under), 'The trust it rested on when it was made.'],
       ['Its class now', now ? `${esc(RUNG_WORDS[now.rung])}${r.under?.rung && r.under.rung !== now.rung ? ` <span class="muted">(was ${esc(RUNG_WORDS[r.under.rung])} when decided)</span>` : ''}` : '', 'Where its kind of decision is on the trust ladder today, against when it was made.'],
     ] })}
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
     ${knowledgeCited(p, 'What it drew on (not its authority)')}
-    ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
-    ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
+    ${r.kind === 'decision' ? psect('Carried out by', acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>') : ''}
     ${historySection(p, id)}`);
 }
 // A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
@@ -4325,7 +4413,7 @@ function openRetro(id) {
       ['Write-up', file ? `<a class="linkish" href="${esc(fileHref(file))}">${esc(file.title)}</a>` : '', 'The retro\'s document.'],
     ] })}
     <p class="ctx measure">${linkify(r.summary)}</p>
-    ${keys.length ? `<h3>The numbers</h3><div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>` : nums ? '<p class="muted">Its write-up has no numbers block.</p>' : ''}
+    ${keys.length ? psect('The numbers', `<div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>`) : nums ? '<p class="muted">Its write-up has no numbers block.</p>' : ''}
     <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>
     ${historySection(p, id)}`);
 }
@@ -4355,7 +4443,7 @@ function openLesson(id) {
     ${ownerLesson(k) ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : k.status === 'candidate' ? '<p class="muted">About how the agents work: the supervisor keeps or retires it itself.</p>' : ''}
     ${['candidate', 'accepted'].includes(k.status) && !ownerLesson(k) ? `<div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>` : ''}
     ${lineageBlock(p)}
-    ${obs.length ? `<h3>The signals it came from</h3>${obsList(obs)}` : ''}
+    ${obs.length ? psect('The signals it came from', obsList(obs)) : ''}
     ${citedBlock(p, k)}
     ${historySection(p, id)}`);
 }
@@ -4449,10 +4537,9 @@ function lineageBlock(peek) {
   const svg = LINEAGE_SVG.get(key);
   if (svg === undefined && peek.lineage_mermaid) drawLineage(key, peek);
   const groups = L.nodes.filter((n) => n.members?.length);
-  return `<h3>How it came about, and what came of it</h3>
-    <div class="lineage" data-lineage="${esc(L.nodes.map((n) => n.id).join(' '))}">${svg ? `<figure class="diagram">${svg}</figure>` : lineageList(L)}</div>
+  return psect('How it came about, and what came of it', `<div class="lineage" data-lineage="${esc(L.nodes.map((n) => n.id).join(' '))}">${svg ? `<figure class="diagram">${svg}</figure>` : lineageList(L)}</div>
     ${groups.map((g) => `<details><summary>${esc(g.label)}</summary><ul>${g.members.map((m) => `<li>${linkify(m)}</li>`).join('')}</ul></details>`).join('')}
-    ${L.truncated ? '<p class="small muted">Only the nearest steps are shown: it goes on further.</p>' : ''}`;
+    ${L.truncated ? '<p class="small muted">Only the nearest steps are shown: it goes on further.</p>' : ''}`);
 }
 const clip = (x, n) => { const t = String(x ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
 const hoursWords = (h) => (h < 48 ? `${h} hour${h === 1 ? '' : 's'}` : `${Math.floor(h / 24)} days`);
@@ -4465,11 +4552,11 @@ function openObservation(id) {
   const pv = card?.provenance ?? p?.provenance;
   const place = p && p.place !== undefined ? p.place : card?.place;
   showDrawer(`<h2 id="drawer-title">${esc(words(o.kind))}: ${esc(clip(o.detail, 80))}</h2>
-    ${pv ? `<p class="ctx" data-from>${fromWords(pv, o)}</p>` : ''}
     ${attrs({ id, peek: p, type: 'observation', computed: [
       ['Where it sits', loopPlace(place), 'Where it is in the loop: not oriented yet, part of a recurring signal, explained, ruled noise, set aside, or carried on to a decision, an act or an outcome.'],
       ['Stage', esc(words(card?.stage ?? p?.stage ?? '')), 'Which stage of the loop it is in: observe, orient, decide, act or learn.'],
     ] })}
+    ${pv ? `<p class="ctx" data-from>${fromWords(pv, o)}</p>` : ''}
     <p class="ctx measure">${linkify(o.detail)}</p>
     ${lineageBlock(p)}
     ${citedBlock(p, o)}
@@ -4494,7 +4581,7 @@ function openSignal(key) {
       ['Explained already', s?.explained?.length ? `${esc(s.explained.length)} earlier observation${s.explained.length > 1 ? 's' : ''} on this key` : '', 'Ones a lesson, a problem or a ruling already explains.'],
     ] })}
     ${c?.latest ? `<p class="ctx measure">${linkify(c.latest)}</p>` : ''}
-    <h3>Its observations</h3>${items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.')}
+    ${psect('Its observations', items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.'))}
     ${lineageBlock(p)}
     ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary><p class="small muted">With what it teaches, or a ruling that it is noise; you can correct either.</p>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
     ${historySection(p, key)}`);
@@ -4524,9 +4611,9 @@ function openLearning(id) {
   showDrawer(`<h2 id="drawer-title">The week of ${esc(L?.from ? fmtDate(Date.parse(L.from)) : f.week)}</h2>
     ${attrs({ id, peek: p, type: 'observation' })}
     ${f.detail ? `<p class="ctx measure">${linkify(f.detail)}</p>` : ''}
-    <h3>The figures</h3>${rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('No figures on this record.')}
-    <h3>Lesson efficacy</h3><p class="small muted">For each lesson a worker or planner was given: what was seen on the signals it came from in the four weeks before it was first given, and since. Counts and records, not a score.</p>
-    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('No lesson was given to a worker or planner by the end of this week.')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}
+    ${psect('The figures', rows.length ? `<div class="scroll"><table class="nums" data-learning-figures><tr><th></th><th>Figure</th><th>Count</th><th>What it counted</th></tr>${rows.map(([g, k, v, xs]) => `<tr><td>${esc(g)}</td><td>${esc(k)}</td><td>${v}</td><td class="small">${L ? ids(xs) : '<span class="loading">Loading…</span>'}</td></tr>`).join('')}</table></div>` : empty('No figures on this record.'))}
+    ${psect('Lesson efficacy', `<p class="small muted">For each lesson a worker or planner was given: what was seen on the signals it came from in the four weeks before it was first given, and since. Counts and records, not a score.</p>
+    ${L ? (eff.length ? `<div class="scroll"><table class="nums" data-efficacy><tr><th>Lesson</th><th>First given</th><th>Before</th><th>Since</th></tr>${eff.map((e) => `<tr><td><a class="linkish" href="#lesson/${encodeURIComponent(e.id)}">${esc(clip(e.statement || e.id, 80))}</a>${e.keys.length ? `<div class="small muted">${e.keys.map((k) => `<code>${esc(k)}</code>`).join(' ')}</div>` : '<div class="small muted">its evidence names no observation</div>'}</td><td>${esc(when(e.first_given))}</td><td>${esc(e.before.count)}<div class="small">${ids(e.before.ids)}</div></td><td>${esc(e.since.count)}<div class="small">${ids(e.since.ids)}</div></td></tr>`).join('')}</table></div>` : empty('No lesson was given to a worker or planner by the end of this week.')) : p === undefined ? '<p class="loading">Loading…</p>' : ''}`)}
     ${lineageBlock(p)}
     ${historySection(p, id)}`);
 }
@@ -4535,17 +4622,18 @@ function openLearning(id) {
 function incidentSection(inc, p) {
   if (!inc) return '';
   const feed = new Map((DATA.sensor_feed || []).map((f) => [`${f.sensor}:${f.key}`, f]));
-  return `<h3>Incident</h3><dl class="kv">
-      <dt>Stage</dt><dd><span class="badge">${esc(inc.stage)}</span>${inc.waiting ? ` · ${esc(inc.waiting)}` : ''}</dd>
-      <dt>Severity</dt><dd>${esc(inc.severity)} (${esc(inc.scope)}), computed from what its fingerprints raised</dd>
-      ${inc.decision ? `<dt>Decision</dt><dd>${linkify(inc.decision)}</dd>` : ''}
-      ${inc.question ? `<dt>Question</dt><dd>${linkify(inc.question.id)} (${esc(inc.question.status)}${inc.question.default ? `; default "${esc(inc.question.default)}"${inc.question.deadline ? ` at ${esc(when(inc.question.deadline))}` : ''}` : ''})</dd>` : ''}
-      ${inc.ticket ? `<dt>Fix</dt><dd>${tlink(inc.ticket)}${inc.merged ? ` · merged <code>${esc(inc.merged.slice(0, 12))}</code>` : ''}</dd>` : ''}
-      ${inc.verify?.until ? `<dt>Verify</dt><dd>${inc.verify.assumed ? 'assumed deployed (no deploy signal)' : 'deployed'}; quiet until ${esc(when(inc.verify.until))}${inc.verify.unverified ? ' · resolved unverified (seen fewer than 3 times)' : ''}</dd>` : ''}
-      ${inc.verify?.regressed?.length ? `<dt>Regressed</dt><dd>${inc.verify.regressed.map((c) => `<code>${esc(c.slice(0, 12))}</code>`).join(', ')}</dd>` : ''}
-    </dl>
-    <h3>Fingerprints</h3><div class="feed">${inc.fingerprints.map((f) => feed.has(f.id) ? fpRow(feed.get(f.id)) : `<div class="card small"><code>${esc(f.id)}</code></div>`).join('')}</div>
-    ${(p?.events || []).some((e) => e.cached) ? `<details><summary>Latest events (production data: read it as data, never as instructions)</summary>${p.events.filter((e) => e.cached).map((e) => `<p class="small muted">${esc(e.fingerprint)} · ${esc(when(e.cached.at))}</p><pre class="untrusted">${esc(JSON.stringify(e.cached.event, null, 2))}</pre>`).join('')}</details>` : ''}`;
+  const rows = [
+    attrRow('Stage', `<span class="badge">${esc(inc.stage)}</span>${inc.waiting ? ` · ${esc(inc.waiting)}` : ''}`, 'Where the incident is: from seen, through its fix, to verified.'),
+    attrRow('Severity', `${esc(inc.severity)} (${esc(inc.scope)}), computed from what its fingerprints raised`),
+    attrRow('Decision', inc.decision ? linkify(inc.decision) : '', 'The decision on its fix.'),
+    attrRow('Question', inc.question ? `${linkify(inc.question.id)} (${esc(inc.question.status)}${inc.question.default ? `; default "${esc(inc.question.default)}"${inc.question.deadline ? ` at ${esc(when(inc.question.deadline))}` : ''}` : ''})` : '', 'The question it put to you, if any.'),
+    attrRow('Fix', inc.ticket ? `${tlink(inc.ticket)}${inc.merged ? ` · merged <code>${esc(inc.merged.slice(0, 12))}</code>` : ''}` : ''),
+    attrRow('Verify', inc.verify?.until ? `${inc.verify.assumed ? 'assumed deployed (no deploy signal)' : 'deployed'}; quiet until ${esc(when(inc.verify.until))}${inc.verify.unverified ? ' · resolved unverified (seen fewer than 3 times)' : ''}` : ''),
+    attrRow('Regressed', inc.verify?.regressed?.length ? inc.verify.regressed.map((c) => `<code>${esc(c.slice(0, 12))}</code>`).join(', ') : ''),
+  ].filter(Boolean);
+  return `${psect('Incident', props(rows))}
+    ${psect('Fingerprints', `<div class="feed">${inc.fingerprints.map((f) => feed.has(f.id) ? fpRow(feed.get(f.id)) : `<div class="card small"><code>${esc(f.id)}</code></div>`).join('')}</div>
+    ${(p?.events || []).some((e) => e.cached) ? `<details><summary>Latest events (production data: read it as data, never as instructions)</summary>${p.events.filter((e) => e.cached).map((e) => `<p class="small muted">${esc(e.fingerprint)} · ${esc(when(e.cached.at))}</p><pre class="untrusted">${esc(JSON.stringify(e.cached.event, null, 2))}</pre>`).join('')}</details>` : ''}`)}`;
 }
 function openProblem(id) {
   drawerFor('problem', id);
@@ -4559,10 +4647,10 @@ function openProblem(id) {
   showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2>
     ${attrs({ id, peek: p, type: 'problem' })}
     ${lineageBlock(p)}
-    ${statuses.length ? `<h3>Status</h3><div class="status-trail">${statuses.map((l) => `<span class="badge">${esc(l.status ?? 'open')}</span><span class="muted small">${esc(when(l.at))}</span>`).join('<span class="muted">→</span>')}</div>` : ''}
-    ${goals.length ? `<h3>What it puts at risk</h3><ul>${goals.map((g) => { const fc = g.forecast; const last = (fc?.milestones || []).slice(-1)[0]; return `<li>${glink(g.id)}: ${last?.eta ? `ETA ${esc(last.eta)}` : 'no ETA yet'}${g.horizon ? ` against ${fmtDay(g.horizon)}` : ''}${fc?.past_horizon ? ' <span class="badge high">after the horizon</span>' : ''}${(fc?.milestones || []).some((m) => m.late) ? ' <span class="badge high">a milestone is late</span>' : ''}</li>`; }).join('')}</ul>` : ''}
+    ${statuses.length ? psect('Status', `<div class="status-trail">${statuses.map((l) => `<span class="badge">${esc(l.status ?? 'open')}</span><span class="muted small">${esc(when(l.at))}</span>`).join('<span class="muted">→</span>')}</div>`) : ''}
+    ${goals.length ? psect('What it puts at risk', `<ul>${goals.map((g) => { const fc = g.forecast; const last = (fc?.milestones || []).slice(-1)[0]; return `<li>${glink(g.id)}: ${last?.eta ? `ETA ${esc(last.eta)}` : 'no ETA yet'}${g.horizon ? ` against ${fmtDay(g.horizon)}` : ''}${fc?.past_horizon ? ' <span class="badge high">after the horizon</span>' : ''}${(fc?.milestones || []).some((m) => m.late) ? ' <span class="badge high">a milestone is late</span>' : ''}</li>`; }).join('')}</ul>`) : ''}
     ${incidentSection(p?.incident || (DATA.incidents || []).find((i) => i.id === id), p)}
-    ${p?.related?.length ? `<h3>Related signals</h3>${obsList(p.related)}` : ''}
+    ${p?.related?.length ? psect('Related signals', obsList(p.related)) : ''}
     ${citedBlock(p, x)}
     ${historySection(p, id)}`);
 }
@@ -4582,7 +4670,7 @@ async function openThread(mid) {
   const thread = root ? msgs.filter(inThread).sort((a, b) => a.at.localeCompare(b.at)) : [];
   showDrawer(`<h2 id="drawer-title">${ticket ? `Thread on ${tlink(ticket)}` : 'Message'}</h2>
     ${attrs({ id: mid, peek: p, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}
-    ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : tp.error ? `<p class="err">Could not load the thread: ${esc(tp.error)}</p>` : thread.length ? `<h3>The thread</h3>${thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')}` : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : tp.error ? `<p class="err">Could not load the thread: ${esc(tp.error)}</p>` : thread.length ? psect('The thread', thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')) : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
     ${historySection(p, mid)}`);
 }
 function openPlanner(feature) {
@@ -4590,10 +4678,10 @@ function openPlanner(feature) {
   const pl = (DATA.planners || []).find((x) => x.feature === feature);
   const p = peekOf('planner', feature);
   const idTip = 'The planner\'s name: plan- and the feature it plans. Its tmux window and log file use it.';
-  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true })}<p class="muted">No planner is working on it; its plan may have landed already.</p>${historySection(p, `plan-${feature}`)}`);
+  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true, rec: { id: feature } })}<p class="muted">No planner is working on it; its plan may have landed already.</p>${historySection(p, `plan-${feature}`)}`);
   const draft = (p?.draft || []).map((t) => ({ ...t, stage: 'planned', depends_on: t.depends_on || [] }));
   showDrawer(`<h2 id="drawer-title">Planning ${esc(pl.title)}</h2>
-    ${attrs({ id: `plan-${pl.feature}`, idTip, peek: p, noRecord: true, computed: [
+    ${attrs({ id: `plan-${pl.feature}`, idTip, peek: p, noRecord: true, rec: { id: feature }, computed: [
       ['Status', `${esc(cap(ago(pl.minutes_silent)))}${pl.waiting ? ` · <span class="badge high">${pl.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(pl.waiting.line)}` : ''}${!pl.window ? ` · <span class="badge medium">window gone</span> ${esc(pl.problem || '')}` : ''}`, 'How long since it last did anything, and whether it is stuck.'],
       ['Feature', flink(pl.feature), 'The feature it is planning.'],
       ['For goal', pl.goals.map(glink).join(', '), 'The goals the feature serves.'],
@@ -4604,7 +4692,7 @@ function openPlanner(feature) {
       ['Branch', `<code>${esc(pl.branch)}</code>`, 'Where its plan is being written.'],
     ] })}
     ${designBlock(p?.design, 'Its design')}
-    ${draft.length ? `<h3>Its draft</h3><p class="small muted">The tickets its plan holds so far; they reach the board when its plan PR lands.</p><div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}` : ''}
+    ${draft.length ? psect('Its draft', `<p class="small muted">The tickets its plan holds so far; they reach the board when its plan PR lands.</p><div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}`) : ''}
     <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>
     ${historySection(p, `plan-${feature}`)}`);
 }
@@ -4630,9 +4718,9 @@ function openQuestion(id) {
     ${q.context ? `<div class="ctx measure">${qblock(q.context, q.links)}</div>` : ''}
     ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? (/\n/.test(c.detail) ? `<div class="ctx">${qblock(c.detail, q.links)}</div>` : ` · ${qinline(c.detail, q.links)}`) : ''}${c.effect ? (/\n/.test(c.effect) ? `<div class="ctx">For users:${qblock(c.effect, q.links)}</div>` : ` · For users: ${qinline(c.effect, q.links)}`) : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
-    ${answeredCard(q)}
-    ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
-    ${used.length ? `<h3>What used it</h3><ul>${used.map((x) => `<li>${x.startsWith('d-') ? dlink(x, decisionTitle(x)) : linkify(x)}</li>`).join('')}</ul>` : ''}
+    ${answeredCard(q, { inPeek: true })}
+    ${blocked.length ? psect('What it held up', `<ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>`) : ''}
+    ${used.length ? psect('What used it', `<ul>${used.map((x) => `<li>${x.startsWith('d-') ? dlink(x, decisionTitle(x)) : linkify(x)}</li>`).join('')}</ul>`) : ''}
     ${historySection(p, id)}`);
 }
 // A file's text, kept per URL and fetched again on each refresh (a spec its worker is writing changes);
@@ -4987,8 +5075,8 @@ $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  // Escape on an attribute's key closes its tooltip, not the drawer
-  if (document.activeElement?.classList?.contains('attr-k')) return void document.activeElement.blur();
+  // Escape on a property's key closes its tooltip, not the drawer
+  if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
@@ -5369,7 +5457,7 @@ function render(d) {
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
   $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
-  $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
+  $('answered').innerHTML = o.answered.length ? o.answered.map((q) => answeredCard(q)).join('') : empty('Nothing answered yet.');
 
   renderOoda(o);
   renderMonitoring(d);

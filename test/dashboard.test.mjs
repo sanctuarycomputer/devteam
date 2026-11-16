@@ -4252,8 +4252,9 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // a click anywhere on the card (here its detail, no link in it) opens it
   await click(`${card(O1)} > div`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
-  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
-  // an attribute's value, by its label (the label's tooltip is in its text)
+  // where it came from, under its properties (kit-88: every peek opens with its properties)
+  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body section.attrs + [data-from]')?.textContent ?? '')`, 'where it came from, under the properties');
+  // an attribute's value, by its label (its tooltip is the key's title)
   const attr = (label) => p.ev(`[...document.querySelectorAll('#drawer-body .attrs dt')].find((x) => x.textContent.startsWith(${JSON.stringify(label)}))?.nextElementSibling?.textContent ?? null`);
   assert.equal(await attr('Where it sits'), 'Part of a recurring signal (2 of 3)', 'two slow-test notes on app, of the three a signal takes');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
@@ -4268,7 +4269,7 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
   await click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
-  await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
+  await soon(`document.querySelectorAll('#drawer-body .psect-body > ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
   assert.equal(await attr('Unexplained for'), '30 hours');
   // the lineage: Mermaid blocked, the list stands in, every record in it a link

@@ -661,3 +661,104 @@ export function dataRewriteInit(fx) {
   };
 })();`;
 }
+
+// kit-88: a project with a record for every side peek and every "How it changes" case, for
+// test/dashboard-peek.test.mjs (and the measure's peek entries). The kit's own commands where they
+// exist (goal, feature, ticket, questions, knowledge, a correction), lines as the kit would have
+// written them for the rest (acts, decisions, problems, signals, learning, a retro, a message), and
+// files committed on main. Returns the project and the id of each record; Task 4 adds to it.
+// decision rests on qDefaulted (authority default), so its "The answer it rests on" is a defaulted
+// answered card. decisionNotMine is older than the dashboard's 200 newest calls (200 later ones),
+// so no row on Self Improvement can correct it.
+export const PEEK_LONG = `Should the checkout keep the card form on one page, ${'with every field the processor asks for and every one it may ask for later, '.repeat(3)}or split it?`;
+export function peekFixture(base, name = 'peek') {
+  const root = bareProject(base, name);
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const dt = (args, role = 'supervisor') => {
+    const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const logDir = path.join(root, 'docs/devteam/run/log');
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  const T0 = Date.now();
+  // a line by hand at T0 - ago ms, in its writer's file; each picks a distinct ago, so ids differ
+  const hand = (by, o, ago) => {
+    const d = new Date(T0 - ago);
+    const id = o.id ?? `${{ observation: 'o', problem: 'p', decision: 'd', act: 'a', knowledge: 'k', message: 'm' }[o.type]}-${stamp(d)}-${by}`;
+    const file = ['owner', 'supervisor'].includes(by) ? `${by}-${d.toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`;
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, file), line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: d.toISOString(), by }));
+    return id;
+  };
+  const H = 3600000, DAY = 24 * H;
+  const ids = {};
+  // files: a plain document, a governance file (the kit's own), a probe, an artifact; and two sensors
+  write(path.join(root, 'docs/guide.md'), '# The guide\n\nHow the checkout works.\n');
+  ids.file = 'docs/guide.md';
+  ids.governanceFile = 'docs/devteam/governance/constitution.md';
+  write(path.join(root, 'docs/devteam/project/sensors/reader.mjs'), 'export default async function () { return { events: [] }; }\n');
+  const sf = path.join(root, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"sensors": { "web": { "kind": "http", "url": "https://example.com/health" }, "reader": { "kind": "probe", "probe": "project/sensors/reader.mjs", "every_minutes": 5 } }, "gates": {}'));
+  ids.sensorHttp = 'web';
+  ids.sensorReader = 'reader';
+  const art = path.join(root, 'docs/devteam/project/artifacts/peek-mock');
+  write(path.join(art, 'artifact.json'), JSON.stringify({ v: 1, title: 'Peek mock', summary: 'A page to view', by: 'supervisor', for: [] }));
+  write(path.join(art, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Peek mock</title></head><body><p>the mock</p></body></html>\n');
+  ids.artifact = 'peek-mock';
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A'], { cwd: root });
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'the project'], { cwd: root });
+  // the work: a goal with a milestone, a feature with a story in a release, a ticket in wave 1
+  ids.goal = dt(['goal', 'add', '--title', 'Launch checkout', '--outcome', 'admins pay alone']);
+  dt(['goal', 'set', ids.goal, '--milestones', JSON.stringify([{ title: 'First card taken', target: 1, preconditions: [], tickets: 1 }])]);
+  ids.milestone = `${ids.goal}:1`;
+  dt(['feature', 'add', 'pay', '--json', JSON.stringify({ title: 'Pay', goals: [ids.goal], stories: [{ id: 'PAY-S1', text: 'admin adds a card', release: 'v0.2.0' }] })]);
+  ids.feature = 'pay';
+  ids.story = 'PAY-S1';
+  ids.release = 'v0.2.0';
+  ids.ticket = 'pay-01-card';
+  dt(['ticket', 'add', ids.ticket, '--json', JSON.stringify({ title: 'card capture', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'high', serves: ['PAY-S1'], depends_on: [], touches: ['pay/**'], done_when: ['the card check passes in CI'] })]);
+  ids.wave = '1';
+  ids.planner = 'pay';
+  // a message from the ticket's worker: its thread
+  ids.thread = hand(ids.ticket, { type: 'message', to: 'supervisor', kind: 'info', text: 'the card form is in' }, 2 * H);
+  // questions: open, answered, defaulted (in the Inbox's Answered list), withdrawn, and one too long for a line
+  const RATE = ['--stake', '1', '--urgency', '1'];
+  ids.qOpen = dt(['ask', '--question', 'Which processor?', '--choices', '[{"label":"Stripe"},{"label":"Adyen"}]', ...RATE]);
+  ids.qAnswered = dt(['ask', '--question', 'Keep the receipts?', '--choices', '[{"label":"Yes"},{"label":"No"}]', ...RATE]);
+  dt(['answer', ids.qAnswered, 'Yes'], null);
+  ids.qDefaulted = dt(['ask', '--question', 'Which port?', '--default', '8080']);
+  pastDeadline(root, ids.qDefaulted);
+  dt(['answer', ids.qDefaulted, '--defaulted']);
+  ids.qWithdrawn = dt(['ask', '--question', 'Split the form?', '--choices', '[{"label":"Yes"},{"label":"No"}]', ...RATE]);
+  dt(['withdraw', ids.qWithdrawn, '--reason', 'asked twice']);
+  ids.qLong = dt(['ask', '--question', PEEK_LONG, '--choices', '[{"label":"One page"},{"label":"Split"}]', ...RATE]);
+  dt(['answer', ids.qLong, 'One page'], null);
+  // knowledge, observations, a recurring signal, a problem and an incident
+  ids.observation = dt(['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
+  ids.lesson = dt(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'payments time out under load', '--evidence', ids.observation]).match(/k-\S+/)[0];
+  ids.signal = 'metrics:flaky-gate:web/e2e';
+  for (const h of [30, 28, 2]) hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed, then passed', source_key: ids.signal }, h * H);
+  ids.problem = hand('supervisor', { type: 'problem', title: 'the card form drops input', severity: 2, realized: true, status: 'open', threatens: [ids.goal], refs: [ids.observation] }, 5 * H);
+  ids.incident = hand('supervisor', { type: 'problem', title: 'payment errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [], fingerprints: ['web:log:L1'], sensor: 'web' }, 4 * H);
+  // calls: a decision on the defaulted answer and an act under it; an act of its own, one corrected
+  ids.decision = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'put checkout first', rationale: 'the default said so', authority: 'default', approved_by: ids.qDefaulted, refs: [ids.goal], reversible: true }, 3 * H);
+  ids.actUnderDecision = hand('supervisor', { type: 'act', class: 'priority-change', decision: ids.decision, what: 'moved checkout to the top', refs: [ids.goal], reversible: true }, 3 * H - 1000);
+  ids.act = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved receipts down', refs: [ids.goal], reversible: true }, 3 * H - 2000);
+  ids.actCorrected = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved the docs up', refs: [ids.goal], reversible: true }, 3 * H - 3000);
+  dt(['correct', ids.actCorrected, '--reason', 'the docs can wait'], null);
+  ids.decisionNotMine = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'an old call', authority: 'rung', refs: [], reversible: true }, 40 * DAY);
+  for (let i = 0; i < 200; i++) hand('supervisor', { type: 'decision', class: 'priority-change', what: `a later call ${i + 1}`, authority: 'rung', refs: [], reversible: true }, 20 * DAY - i * 60000);
+  // last week's learning record and a closed retro
+  // last week's ISO week (its Thursday's year and week)
+  const th = new Date(T0 - 7 * DAY);
+  th.setUTCDate(th.getUTCDate() + 3 - ((th.getUTCDay() + 6) % 7));
+  const jan4 = new Date(Date.UTC(th.getUTCFullYear(), 0, 4));
+  const week = `${th.getUTCFullYear()}-W${String(1 + Math.round(((th - jan4) / DAY - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7)).padStart(2, '0')}`;
+  ids.learning = hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week, source_key: `learning:${week}`, detail: 'the week in figures',
+    figures: { informed: { knowledge: 1, signals_explained: 0, signals_formed: 1, starts_given: 0, starts: 0 }, autonomous: { trusted_calls: 1, ladder_calls: 2, questions: 3, merged: 0 }, trusted: { agreed: 1, answered: 2, corrections: 1, calls: 3 } } }, 6 * DAY);
+  ids.retro = hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week of checkout', source_ref: 'project/retros/2026-11-09.md', refs: [ids.lesson] }, 1 * H);
+  return { root, ids };
+}
