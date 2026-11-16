@@ -6860,7 +6860,8 @@ function thButton() {
     if (n.textContent !== String(b.n)) n.textContent = String(b.n);
   }
   // the open questions alone (the red count also holds the lessons sent to the owner): the label says questions
-  const q = (DATA?.questions || []).length;
+  // (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
+  const q = DATA ? (DATA.questions || []).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
   const parts = [...(q ? [`${q} open question${q === 1 ? '' : 's'}`] : []), ...(b.label ? [b.label] : [])];
   const label = parts.length ? `Inbox: ${parts.join(', ')}` : 'Inbox';
   const title = b.title || 'Open questions';
@@ -7840,7 +7841,7 @@ async function viewerBoot() {
   document.title = `${$('av-title').textContent} · devteam`;
   // the instance's name, the Inbox's red count (the button's; #tt-peek copies it), and for a preview whether it
   // answers, as the dashboard's tick last found it
-  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; $('inbox-btn-n').textContent = Number.isInteger(h.inbox) && h.inbox > 0 ? String(h.inbox) : ''; if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; $('inbox-btn-n').textContent = Number.isInteger(h.inbox) && h.inbox > 0 ? String(h.inbox) : ''; if (typeof thButton === 'function') thButton(); if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
   hello();
   setInterval(hello, 30000);
   // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)

@@ -842,6 +842,15 @@ test('with the viewer', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon(VIEWER_UP, 'the viewer up at 720');
   const small = await p.ev(`(() => { ${SEEN_FN} const c = document.getElementById('av-close').getBoundingClientRect(); return { mirror: seen(document.getElementById('tt-peek')), close: !!document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2)?.closest('#av-close') }; })()`);
   assert.deepEqual(small, { mirror: false, close: true }, '#tt-peek hidden, #av-close not covered');
+  // and the panel with the viewer up at 720: it overlays (left 0), no --av-right
+  // (the reload dropped the probe)
+  await p.ev("(() => { const d = document.createElement('div'); d.id = 'av-right-probe'; d.style.cssText = 'position: fixed; left: 0; top: 0; height: 1px; width: var(--av-right, 0px); pointer-events: none'; document.body.append(d); return true; })()");
+  await p.ev("thGo({ th: 'open' }); void 0");
+  await soon(AT_REST, 'the panel open over the viewer at 720');
+  assert.equal(await p.ev("document.getElementById('threads').getBoundingClientRect().left"), 0, 'with the viewer up it overlays: its left edge is 0');
+  assert.equal(await p.ev(probe), 0, 'no --av-right at 900px and below, the viewer up');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN}`, 'closed over the viewer');
   await size(1440, 900);
 });
 
@@ -881,6 +890,9 @@ test('the /view/ tab', { skip: SKIP, timeout: 300000 }, async (t) => {
   }
   await size(1440, 900);
   await soon(`innerWidth === 1440 && ${MIRROR_SHOWN}`, 'back at 1440');
+  // the accessible name carries the red count (hello's inbox) as well as the thread counts
+  await soon("/1 open question/.test(document.getElementById('tt-peek').getAttribute('aria-label') || '')", "#tt-peek's name has the red count");
+  assert.match(await p.ev("document.getElementById('tt-peek').getAttribute('aria-label')"), /^Inbox: 1 open question, .*your move/, "#tt-peek's name: the red count, then the threads");
 
   // pressed: the panel with the list; A's row in the pane, G's (a dashboard item: no page here) in the pane too; × closes
   await p.click('#tt-peek');

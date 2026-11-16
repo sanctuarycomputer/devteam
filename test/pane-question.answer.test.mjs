@@ -275,6 +275,8 @@ test("the dashboard page: the card at the top of the Inbox and in the dock, the 
   await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#ask-threads [data-ask-option]')`, 'the card in the Threads panel, at rest');
   await p.click('#th-close');
   await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
+  // the full-width panel leaves with a transition: hidden before the page's Inbox card is pressed under it
+  await soon(`getComputedStyle(document.getElementById('threads')).visibility === 'hidden'`, 'the panel hidden');
   await p.click('#ask-inbox [data-ask-option="1"]');
   await until(() => pane.typed() === '1', 'the digit in the terminal');
   await soon(`/Sent to the supervisor's terminal: 1\\. Yes/.test(document.getElementById('ask-inbox').innerText) || !!document.querySelector('#ask-inbox [data-ask-kind]')`, 'what was sent');

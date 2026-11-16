@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, peekFixture } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, peekFixture, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
@@ -125,6 +125,53 @@ test('the dashboard measure: one peek of each kind at three sizes', { skip: canD
     for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
     const res = await measureAt(p, url(pk.hash), { ready: pk.ready, ...pk.opts });
     for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`${pk.hash} at ${at}`] = fails;
+  }
+  assert.deepEqual(failed, {});
+});
+
+// kit-89: the Threads panel and a floating card (spec AC8), on a third project with a few threads
+// (threadsFixture, as dashboard-threads-sidebar.test.mjs seeds it), so the pages above keep their own
+// data. The panel and the card are overlays the measure leaves out by design (the panel is fixed to the
+// window and scrolls; the card floats at its pin), and the top-right button hides while the panel is
+// open: inbox matches nothing; view matches nothing, as for the pages above. What is judged is the page
+// under them and the panel's own text, in each of the three sizes. localStorage is cleared by a script
+// every load runs first, so no entry inherits another's open panel.
+const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
+const idOf = (out) => out.split('\n')[0].trim();
+const THREADS_OPTS = { view: '#no-such-view', inbox: '#no-such-inbox' };
+const PANEL_AT_REST = "document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'";
+const THREADS_PAGES = (A, G) => [
+  { hash: '#overview?th=open', ready: `${PANEL_AT_REST} && !!document.querySelector('#tl-list .th-row')` },
+  { hash: `#overview?th=open&t=${A}`, ready: `${PANEL_AT_REST} && !!document.querySelector('#th-card-slot > #tl-card.in-panel') && !document.getElementById('tl-card').hidden` },
+  { hash: `#goals?t=${G}`, ready: `!document.getElementById('tl-card').hidden && document.getElementById('tl-card').parentElement.id === 'tl' && !document.body.classList.contains('threads-open')` },
+].map((pg) => ({ ...pg, opts: THREADS_OPTS }));
+
+test('the dashboard measure: the Threads panel and a card at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 600000 }, async (t) => {
+  const F = threadsFixture('measure-threads');
+  const later = cleanup(t);
+  later(() => F.done());
+  F.sup(goalArgs('Self-serve billing', 2));
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  F.owner(['thread', 'new', 'Is the build green?']);
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: "try { localStorage.removeItem('devteam.threads.open'); } catch {}" });
+  const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
+  const failed = {};
+  for (const pg of THREADS_PAGES(A, G)) {
+    await p.send('Page.navigate', { url: 'about:blank' });
+    for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+    const res = await measureAt(p, url(pg.hash), { ready: pg.ready, ...pg.opts });
+    for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`${pg.hash} at ${at}`] = fails;
   }
   assert.deepEqual(failed, {});
 });
