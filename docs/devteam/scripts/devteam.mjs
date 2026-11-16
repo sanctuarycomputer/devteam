@@ -3673,10 +3673,14 @@ function cmdValidate() {
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
     if (isActive(t) && t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
+  // The feature this checkout's plan/<feature> branch plans, or re-plans; check-pr validates a plan
+  // PR's head detached, so it names the feature with --plan.
+  const branchFeature = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+  const planFeature = typeof flags.plan === 'string' ? flags.plan : branchFeature;
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
   {
-    const pf = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const pf = branchFeature;
     const b = pf ? idBlockFor(pf) : null;
     if (b) for (const t of ts.values()) {
       if (t.created_by !== `plan-${pf}`) continue;
@@ -3723,9 +3727,10 @@ function cmdValidate() {
         if (r.verdict && !r.shaValid) errors.push(`feature ${fid}: review ${r.file} needs the full 40-character SHA`);
       }
       // In strict mode (a plan PR) each verdict must also hold at this head: nothing but review
-      // records added since the commit it names (quality.md §3).
+      // records added since the commit it names (quality.md §3). A feature already landed on main is
+      // history, unless this branch is re-planning it: then its latest reviews are this PR's.
       const landed = mainRef() && git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${projectRel}/log/plan-${fid}.jsonl`]) !== null;
-      const head = flags.strict && commonDir && !landed ? resolveCommit('HEAD') : null;
+      const head = flags.strict && commonDir && (!landed || fid === planFeature) ? resolveCommit('HEAD') : null;
       const holds = (r) => !head || verdictHolds(r.sha, head, `${projectRel}/reviews/`);
       const lg = latestPerTrack(reviews, 'graph');
       if (!lg.length) sink.push(`feature ${fid}: no graph review in project/reviews/${fid}/graph-<n>.md`);
@@ -4913,7 +4918,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     // runner has neither the project's untracked files nor its toolchain).
     const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
-      execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict', '--plan', feature], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       fails.push(`validate --strict fails at ${sha.slice(0, 12)}:\n${(e.stdout ?? '').toString().trim()}`);
     } finally {
@@ -21141,7 +21146,7 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
-  validate [--strict]            graph rules D1-D11, reviews, goals, log health
+  validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
