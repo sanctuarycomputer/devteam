@@ -776,7 +776,7 @@ test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
 // that page posts to itself: only for its parent, only when that parent is another origin (the hub,
 // by frame-ancestors), never in the viewer, never opened on its own.
-test('the Overview in Chrome: Park by keyboard, Park all and Resume all through each dashboard; nothing but the hub above a dashboard is heard', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+test('the Overview in Chrome: Park by keyboard on a card, the machine switch\'s Park and Run through each dashboard; nothing but the hub above a dashboard is heard', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-ov-'));
   defer(t, () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const HUB = PORTS + 60;
@@ -802,14 +802,15 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   await p.send('Page.navigate', { url: `http://127.0.0.1:${HUB}/` });
   const page = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
   const card = (name) => `[...document.querySelectorAll('.ov-card')].find((c) => c.querySelector('.ov-name')?.textContent === '${name}')`;
-  const seg = (name, label) => `[...${card(name)}.querySelectorAll('.seg button')].find((x) => x.textContent === '${label}')`;
-  await page('a card each', `document.querySelectorAll('.ov-card').length === 2 && document.querySelectorAll('.seg').length === 2`);
+  const park = (name) => `${card(name)}.querySelector('.fleet-switch [data-fleet=park]')`;
+  const mbtn = (m) => `document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine] [data-fleet=${m}]')`;
+  await page('a card each', `document.querySelectorAll('.ov-card').length === 2 && document.querySelectorAll('.ov-card .fleet-switch').length === 2`);
   assert.equal(await p.ev(`document.querySelector('[role=tab][aria-selected=true]').textContent`), 'Overview', 'the page opens on the Overview');
   assert.equal(await p.ev(`location.hash`), '#overview');
   assert.equal(await p.ev(`document.querySelectorAll('iframe').length`), 0, 'no dashboard is loaded until one is opened or asked');
 
   // Park, by keyboard: two presses of the space bar on one button, across the redraw between them
-  await p.ev(`${seg('alpha', 'Park')}.focus()`);
+  await p.ev(`${park('alpha')}.focus()`);
   await p.key(' ');
   await page('the press asking to be confirmed', `document.activeElement?.textContent === 'Confirm park'`);
   assert.equal(mode(A), 'run', 'one press parks nothing');
@@ -817,19 +818,20 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   await until(() => mode(A) === 'park', 'alpha parked');
   assert.equal(mode(B), 'run', 'and only alpha');
   // the card says so as soon as alpha's dashboard answers, not a hello later
-  await page('the card showing Park pressed', `${seg('alpha', 'Park')}?.getAttribute('aria-pressed') === 'true' && ${card('alpha')}.querySelector('.pill:last-child').textContent === 'Parked'`);
+  await page('the card showing Park pressed', `${card('alpha')}.querySelector('.fleet-switch [data-fleet=park][aria-pressed=true]') !== null && ${card('alpha')}.querySelector('.card-head .pill:not(.shrink)').textContent === 'Parked'`);
   await page('the frame made to ask, gone again', `document.querySelectorAll('iframe').length === 0`);
   const held = spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'fleet', 'status'], { cwd: A, env, encoding: 'utf8' }).stdout;
   assert.match(held, /parked from the hub's Overview/, 'the reason says where it came from');
 
-  // every project at once, and back
-  await page('Park all offered', `[...document.querySelectorAll('.ov-head .acts button')].some((x) => x.textContent === 'Park all' && !x.disabled)`);
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => x.textContent === 'Park all').click()`);
-  assert.equal(mode(B), 'run', 'Park all asks first');
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => /^Confirm: park 1 project$/.test(x.textContent)).click()`);
+  // every project at once, by the machine switch, and back
+  await page('the machine switch offering Park', `${mbtn('park')}?.disabled === false`);
+  await p.ev(`${mbtn('park')}.click()`);
+  await page('the machine asking first', `${mbtn('park')}.textContent === 'Park 1 project?'`);
+  assert.equal(mode(B), 'run', 'the machine switch asks first');
+  await p.ev(`${mbtn('park')}.click()`);
   await until(() => mode(B) === 'park', 'beta parked');
-  await page('Resume all offered for both', `[...document.querySelectorAll('.ov-head .acts button')].some((x) => x.textContent === 'Resume all (2)' && !x.disabled)`);
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => x.textContent === 'Resume all (2)').click()`);
+  await page('the machine switch offering Run', `${mbtn('run')}?.disabled === false && ${mbtn('park')}.getAttribute('aria-pressed') === 'true'`);
+  await p.ev(`${mbtn('run')}.click()`);
   await until(() => mode(A) === 'run' && mode(B) === 'run', 'both running again');
 
   // a project's tab after all that: its dashboard, shown
