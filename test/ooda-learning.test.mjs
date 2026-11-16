@@ -127,7 +127,7 @@ test("a learning record's peek lists what it counted and what each lesson given 
     assert.equal(D.ooda.learning_totals.corrections, 1);
     assert.ok(D.ooda.learning_totals.calls >= 6, JSON.stringify(D.ooda.learning_totals));
     // the correction moved priority-change's rung: a mark, linking the corrected call
-    assert.ok(D.ooda.learning_marks.some((m) => m.kind === 'rung' && m.label === 'priority-change to rung 1' && m.href === `#decision/${encodeURIComponent(X.d1)}`), JSON.stringify(D.ooda.learning_marks));
+    assert.ok(D.ooda.learning_marks.some((m) => m.kind === 'rung' && m.label === 'Changing what gets worked on first to asks you first' && m.href === `#decision/${encodeURIComponent(X.d1)}`), JSON.stringify(D.ooda.learning_marks));
 
     ok(old, ['observe-metrics'], SUP);
     D = json(ok(old, ['dashboard-data']));
