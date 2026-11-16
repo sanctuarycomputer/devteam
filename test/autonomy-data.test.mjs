@@ -59,6 +59,9 @@ function decisionsFixture(F) {
   const X = {};
   X.d6 = rung('raised the importer', h(6, 1, 9));
   X.goal = hand('supervisor', { type: 'goal', title: 'Faster imports', status: 'draft' }, h(6, 2, 9));
+  // week 6 is 2 alone of 3 decisions: 66.7 reads 67
+  X.d6b = rung('raised the importer again', h(6, 3, 9));
+  X.pref6 = hand('owner', { type: 'knowledge', kind: 'preference', statement: 'Prefer importers that resume', scope: 'project', status: 'accepted' }, h(6, 3, 10));
   X.d7 = rung('raised the exporter', h(7, 1, 9));
   // week 8
   X.d1 = rung('lowered the docs', h(8, 1, 9));
@@ -79,6 +82,10 @@ function decisionsFixture(F) {
   X.pref = hand('owner', { type: 'knowledge', kind: 'preference', statement: 'Prefer small PRs', scope: 'project', status: 'accepted' }, h(8, 2, 2));
   X.rule = hand('owner', { type: 'knowledge', kind: 'lesson', statement: 'Raise the importer first', scope: 'class:priority-change', status: 'accepted' }, h(8, 2, 3));
   X.fact = hand('owner', { type: 'knowledge', kind: 'fact', statement: 'The importer runs nightly', scope: 'project', status: 'accepted' }, h(8, 2, 4));
+  // the supervisor's own goal hold and class rule are no owner decisions
+  X.goal2 = hand('supervisor', { type: 'goal', title: 'Fewer retries', status: 'draft' }, h(8, 2, 4.5));
+  hand('supervisor', { type: 'goal', op: 'set', id: X.goal2, hold: { mode: 'drain', reason: 'its own pause' } }, h(8, 2, 5));
+  hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'Raise the uploader with the importer', scope: 'class:priority-change', status: 'accepted' }, h(8, 2, 6));
   X.d2 = rung('raised the uploader', h(8, 3, 9));
   X.d3 = rung('raised the mailer', h(8, 3, 10));
   hand('owner', { type: 'decision', op: 'set', id: X.d3, corrected: { reason: 'not the mailer' } }, h(8, 3, 11));
@@ -132,7 +139,7 @@ test("each week's decisions from the record and the log", (t) => {
     const { weeks } = A.decisions;
     for (let k = 0; k <= 5; k++) assert.deepEqual({ ...weeks[k], starts_at: undefined }, { ...ZERO, starts_at: undefined }, `week ${k}`);
     const row = (k, want) => { for (const [f, v] of Object.entries(want)) assert.deepEqual(weeks[k][f], v, `week ${k} ${f}`); };
-    row(6, { record: null, alone: 1, asked: 0, corrected: 0, decisions: 1, score: 100, answers: 0, asked_again: 0, hours_waiting: 0 });
+    row(6, { record: null, alone: 2, asked: 1, corrected: 0, decisions: 3, score: 67, answers: 0, asked_again: 0, hours_waiting: 0 });
     row(7, { record: X.rec, alone: 1, asked: 0, corrected: 1, decisions: 2, score: 50, merged: 4, answers: 0, merged_per_answer: 4, with_recommendation: { count: 2, of: 3, share: 0.67 }, lessons: [] });
     row(8, { record: null, alone: 2, asked: 6, corrected: 1, decisions: 9, score: 22, answers: 1, merged: 0, merged_per_answer: 0, with_recommendation: { count: 1, of: 1, share: 1 }, asked_again: 1, hours_waiting: 6, lessons: [] });
     row(9, { record: null, alone: 0, asked: 1, corrected: 1, decisions: 2, score: 0, asked_again: 2, hours_waiting: 2.5 });
