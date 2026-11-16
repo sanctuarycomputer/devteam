@@ -6338,9 +6338,12 @@ function tlPlaceCard(t) {
   else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   // beside its pin in the window left of the open panel (above 900px; below, the panel covers the page and the
-  // card hides): tPlace is given the window narrowed by --threads-w, never under 640 (the sheet is the window's)
+  // card hides), never under the panel: tPlace is given the window narrowed by --threads-w (at least 640, since the
+  // sheet is the whole window's), and the card is then kept inside that narrowed window
   const vw = innerWidth - (TH.th && innerWidth > 900 ? thWidth() : 0);
-  const p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
+  const w = card.offsetWidth || 360;
+  let p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, w, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
+  if (!p.sheet && !p.dock) p = { ...p, left: Math.max(8, Math.min(p.left, vw - w - 8)) };
   card.classList.toggle('sheet', !!p.sheet);
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
   card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
@@ -6881,8 +6884,11 @@ function thApply() {
   if (!TL.have || (!DATA && !VIEWER)) return;
   if (TH.t) {
     if (!TL.threads.some((x) => x.id === TH.t)) return;
+    // a + draft (or the thread it is becoming) shown over the route's thread stays: only a t this route hasn't
+    // opened yet takes its place
+    const over = TH.opened === TH.t && TL.open !== TH.t && !!thCurrent();
     TH.opened = TH.t;
-    if (TL.open !== TH.t) { TL.draft = null; TL.open = TH.t; TL.openAt = -1; TL.resolving = false; }
+    if (TL.open !== TH.t && !over) { TL.draft = null; TL.open = TH.t; TL.openAt = -1; TL.resolving = false; }
   } else {
     if (TH.opened && TL.open === TH.opened) { TL.open = null; TL.resolving = false; }
     TH.opened = null;
@@ -6939,15 +6945,18 @@ function thCurrent() {
   if (t) return tlInPanel(t) ? t : null;
   return !TL.open && TL.draft && !TL.draft.subject ? { id: null, title: 'New thread' } : null;
 }
-// The back arrow (and Escape in the panel): the route's in-panel thread left by a new entry, the focus on its
-// row; a + draft (never an entry) let go in place, the focus on the selected tab.
+// The back arrow (and Escape in the panel), one press to the list: a + draft (never an entry), or the thread it
+// is becoming before the URL has it, let go in place; then the route's in-panel thread, if the + was pressed over
+// one, left by a new entry, the focus on its row; else the focus on the selected tab.
 function thBack() {
+  if (thCurrent() && TL.open !== TH.t) {
+    TL.draft = null;
+    TL.open = null;
+    TL.resolving = false;
+    TH.adopt = null;
+    tlDraw();
+  }
   if (TH.t && thInPanelId(TH.t)) return void thGo({ th: TH.th || 'open', t: null, focus: true });
-  TL.draft = null;
-  if (TL.open && thCurrent()) TL.open = null;
-  TL.resolving = false;
-  TH.adopt = null;
-  tlDraw();
   thDraw({ view: true });
   thFocus('tab');
 }

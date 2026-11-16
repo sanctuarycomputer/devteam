@@ -345,6 +345,35 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.ev('history.back()');
   await soon(`location.hash === '#overview?th=open' && ${card}.hidden && Number(document.querySelector('#th-pane [data-thf="resolved"] .n')?.textContent) === ${resolvedN + 1}`, 'Back: the list, one more resolved');
 
+  // + over a thread open in the panel: one press of the arrow leaves both, to the list, the focus on its row;
+  // and while the draft is up, a route that keeps the thread's t doesn't put the thread back
+  await go(`#overview?th=open&t=${A}`, 'A in the panel');
+  await soon(`${atRest} && ${inPanel(A)}`, 'A shown');
+  await soon(STEADY('#threads [data-tl-new]'), '+ at rest');
+  await p.click('#threads [data-tl-new]');
+  await soon(`document.activeElement?.id === 'tl-c-text' && ${card}.dataset.key === 'new:none' && /New thread/.test(document.getElementById('th-pane').textContent)`, 'a + draft over A');
+  await p.ev('thRoute(); void 0');
+  await p.ev(FRAMES);
+  assert.equal(await p.ev(`${card}.dataset.key`), 'new:none', 'a route keeping t leaves the draft');
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && !!${row(A)} && document.activeElement === ${row(A)} && ${card}.hidden`, "one press: the list, the focus on A's row");
+  assert.equal(await p.ev("!!document.querySelector('#th-pane [data-tl-back]')"), false, 'no draft left');
+
+  // between 901px and 1019px a floating card is still clear of the open panel: a draft on a spot 200px in,
+  // whose card would go to the spot's right
+  await size(960, 800);
+  await go('#goals?th=open', 'Goals at 960');
+  await soon(`innerWidth === 960 && ${atRest}`, 'the panel at 960');
+  await p.ev("tlStart({ subject: { kind: 'page', view: '#goals', at: { x: 0, y: 0 } }, title: 'A spot', x: 200, y: 200 }); void 0");
+  await soon(`${card}.parentElement?.id === 'tl' && !${card}.hidden && !${card}.classList.contains('in-dock') && !${card}.classList.contains('sheet')`, 'a floating draft at 960');
+  await p.ev(FRAMES);
+  const right = await p.ev(`${card}.getBoundingClientRect().right`);
+  assert.ok(right <= 960 - 380, `clear of the panel at 960: its right edge ${right}`);
+  await p.ev('tlClose(); void 0');
+  await soon(`${card}.hidden`, 'closed');
+  await go('#overview?th=open', 'Overview');
+  await size(1440, 900);
+
   // at 720x800 with the panel open, Pin closes the panel first and starts pin mode
   await size(720, 800);
   await soon(`innerWidth === 720 && ${atRest}`, 'the panel at 720');

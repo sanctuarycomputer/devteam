@@ -355,7 +355,7 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
 
 // The thread layer on pages (spec §5, done-when 2f, the Edge cases): a thread's subject has a page
 // head; a #talk/ link opens its card over that page (its entry's stamp changed in place, no entry
-// added), closing follows closeTarget; the dock's list goes to the page; a pin keeps it; pins are
+// added), closing follows closeTarget; the Threads panel's row goes to the page; a pin keeps it; pins are
 // drawn for the page shown.
 test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, ids, dt, size, load, reload, shown, onPage } = await pagesFixture(t, 'threads');
@@ -442,7 +442,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await go('#overview');
   await until(async () => await cardShut() && await hash() === '#overview' && !(await p.ev("document.body.classList.contains('threads-open')")), 'the panel and the card closed, on Overview');
 
-  // the dock's list on Overview: one entry, Board shown; × closes the card in place
+  // the Threads panel's list on Overview: the row is one entry to Board's head with the thread (t) and the panel kept (th)
   // (Overview made the newest entry, none ahead of it, so the one entry shows in history.length)
   await go('#goals');
   await onPage('goals');
@@ -454,8 +454,8 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await p.click(`#tl-list [data-tl-open="${TT}"]`);
   // since kit-89 (spec §2.4, §2.5) the row's entry is Board's head with the thread (t) and, above 900px, the
   // panel kept open (th); its × takes t away, a new entry, the panel staying on the list
-  await until(async () => await cardOn(TT) && await hash() === `#board?th=open&t=${TT}` && JSON.stringify(await shown()) === '["board"]', 'the dock opens it over Board');
-  assert.equal(await len(), n + 1, 'the dock adds one entry');
+  await until(async () => await cardOn(TT) && await hash() === `#board?th=open&t=${TT}` && JSON.stringify(await shown()) === '["board"]', 'the panel row opens it over Board');
+  assert.equal(await len(), n + 1, 'the row adds one entry');
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   n = await len();
   await p.click('[data-tl-close]');
@@ -950,7 +950,7 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   await p.click('[data-tl-close]');
   await until(async () => await cardKey() === null, 'closed');
 
-  // the dock's list names the setting
+  // the Threads panel's row names the setting
   await p.click('#inbox-btn');
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the Threads panel, at rest, lists it');
   assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .th-where').textContent`), `Settings, ${name}`);
