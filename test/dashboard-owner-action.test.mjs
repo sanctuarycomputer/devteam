@@ -86,6 +86,10 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
   const marked = (q, id, c = card) => `!!${row(q, id, c)}?.querySelector('[data-oa-notdone]')`;
   const posts = (url, f = () => true) => p.ev(`window.__posts.filter((x) => x.url === ${JSON.stringify(url)})`).then((xs) => xs.filter(f));
   const answers = (q) => posts('/api/answer', (x) => x.body.id === q);
+  // p.click measures, then presses: a reflow in between moves the card under the press. An answered
+  // card stays as its note until a redraw of data without it removes it, moving every card below up,
+  // and that data makes the next card the next best step: wait for that redraw before the next click.
+  const redrawnWithout = (q) => soon(`!DATA.questions.some((x) => x.id === ${JSON.stringify(q)}) && !${card(q)}`, `the Inbox redrawn without ${q}`);
   await soon(`!!${card(Q)} && !!${card(Q2)} && !!${card(Q3)}`, 'the owner-action cards');
 
   await t.test('answers: Done and Can\'t right now, the recommendation a line of text, a row per record its context names', async () => {
@@ -106,6 +110,8 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
   });
 
   await t.test('Done waits: not done yet beside each unchanged record, on both copies, and nothing posted', async () => {
+    // the web fonts in first: a monospace face asked for once the cards first draw swaps in and reflows them
+    await soon(`document.fonts.status === 'loaded'`, 'the page\'s fonts');
     await p.click(`#questions [data-qcard="${Q}"] input[data-pick][value="Done"]`);
     await p.click(`#questions [data-qcard="${Q}"] [data-answer]`);
     await soon(`${marked(Q, KA)} && ${marked(Q, KO)} && ${marked(Q, G)} && ${marked(Q, GT)}`, 'not done yet on each unchanged record');
@@ -165,25 +171,17 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
   });
 
   await t.test('Done goes through once every record is done; never while one is unchanged', async () => {
-    // p.click measures where a control is and then presses there, in two steps. An answered card stays
-    // in the Inbox as its "Answered" note until the next redraw removes it, moving every card below it
-    // up the page; the redraw of data that lists the answer can move what sits above them too. If either
-    // lands between the two steps the press misses (the note never focused). So before the next card's
-    // clicks, wait for both: the card gone, and the Answered count one up (the server's answered list).
-    const answeredNow = async () => Number(/\((\d+)\)/.exec(await p.ev(`document.getElementById('answered-sum')?.textContent ?? ''`))?.[1] ?? 0);
-    const n0 = await answeredNow();
-    const settled = (q, n) => soon(`!${card(q)} && document.getElementById('answered-sum')?.textContent === 'Answered (${n})'`, `${q === Q ? 'Q' : 'Q2'} drawn answered by the server, its card gone`);
     await soon(`[${[KA, KR, KO, G, GT, GL].map((id) => done(Q, id)).join(', ')}].every(Boolean)`, 'every record of Q done');
     await p.click(`#questions [data-qcard="${Q}"] input[data-pick][value="Done"]`);
     await p.click(`#questions [data-qcard="${Q}"] [data-answer]`);
     await soon(`window.__posts.some((x) => x.url === '/api/answer' && x.body.id === ${JSON.stringify(Q)})`, 'Q answered on the first press');
     assert.equal((await answers(Q))[0].body.answer, 'Done');
-    await settled(Q, n0 + 1);
+    await redrawnWithout(Q);
     // naming no record, Done posts at once
     await p.click(`#questions [data-qcard="${Q2}"] input[data-pick][value="Done"]`);
     await p.click(`#questions [data-qcard="${Q2}"] [data-answer]`);
     await soon(`window.__posts.some((x) => x.url === '/api/answer' && x.body.id === ${JSON.stringify(Q2)})`, 'Q2 answered');
-    await settled(Q2, n0 + 2);
+    await redrawnWithout(Q2);
     // an unchanged record: Done never posts, however often Send is pressed; Can't right now is the way out
     await p.click(`#questions [data-qcard="${Q3}"] input[data-pick][value="Done"]`);
     await p.click(`#questions [data-qcard="${Q3}"] [data-answer]`);

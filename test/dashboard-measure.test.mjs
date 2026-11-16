@@ -12,7 +12,15 @@ import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
 // { hash, ready?, opts? }: the page's head, what must be true before it is measured, and measure options
-const PAGES = [];
+const READY = "!document.querySelector('main.waiting')";
+const PAGES = [
+  // kit-87: Settings, on the shell, whole
+  { hash: '#settings', ready: READY },
+  // kit-87: every other page's frame (the sidebar, the page bar). Its old section is .no-shell, which the
+  // other checks ignore; with the default view it would be taken for the page's first content, whose
+  // page-top is its page ticket's, so the view is a selector no element has.
+  ...['overview', 'inbox', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+];
 
 test('the dashboard measure: every listed page at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));
