@@ -46,3 +46,5 @@ F1: the shrink's timing is corrected above. F2: the stronger page signal is in a
 ## Rulings
 
 - m-20261116-072003301-supervisor: tight spec and plan, one combined review, build after kit-87 merges.
+
+- m-20261116-074413911-supervisor: approve-spec and approve-plan at c2a98f5; build now on this branch, merge main in once kit-87 merges, then CI and finals.
