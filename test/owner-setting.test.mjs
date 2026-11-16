@@ -563,6 +563,15 @@ test('owner-setting-unlanded and the Settings label follow main, a landed overri
     chore(() => { ok(old, ['settings', 'set', 'max_active_tickets', '3'], SUP); F.edit((j) => { j.stale_after_minutes = 50; }, choreWt(F)); });
     assert.equal(view().label, SAVED, 'before its merge the edit clears nothing, though main already holds its value');
     assert.equal(unlanded().length, 1);
+    // another chore's merge is no settings merge: it lands nothing of the edit
+    const tidy = ok(old, ['chore', 'start', 'tidy'], SUP).trim();
+    fs.writeFileSync(path.join(tidy, 'docs/devteam/project/tidy.md'), 'tidied\n');
+    ok(old, ['chore', 'pr', 'tidy', '--title', 'tidy'], SUP);
+    fs.writeFileSync(path.join(old, 'docs/devteam/run/pr/chore-tidy.md'), '# chore-tidy: tidy\n\n## One-way doors\n\nNone.\n');
+    const mt = run(old, ['merge', '--chore', 'tidy'], SUP);
+    assert.equal(mt.status, 0, `${mt.out}\n${mt.err}`);
+    g(['fetch', '-q', 'origin'], old);
+    assert.equal(view().label, SAVED, 'a merge of chore-tidy is not the settings chore landing');
     land('settings: keep 3, stale_after_minutes 50');
     v = view();
     assert.deepEqual([v.label, v.asked, v.act], ['Set by the supervisor (you asked for 5)', 5, a5]);
@@ -576,6 +585,11 @@ test('owner-setting-unlanded and the Settings label follow main, a landed overri
     g(['commit', '-qam', 'four, by hand'], other); g(['push', '-q', 'origin', 'main'], other);
     g(['fetch', '-q', 'origin'], old);
     assert.deepEqual([view().label, view().value], [SAVED, 4]);
+    // and back to 3 by hand, so state 10 runs with main at 3, as the plan has it (task-5 T5-4)
+    F.edit((j) => { j.max_active_tickets = 3; }, other);
+    g(['commit', '-qam', 'three, by hand'], other); g(['push', '-q', 'origin', 'main'], other);
+    g(['fetch', '-q', 'origin'], old);
+    assert.deepEqual([view().label, view().value], ['Set by the supervisor (you asked for 5)', 3], 'the landed keep-3 answers the ask again');
     // 10. an override that never merged clears nothing for a newer ask
     ask('6');
     chore(() => ok(old, ['settings', 'set', 'max_active_tickets', '5'], SUP));

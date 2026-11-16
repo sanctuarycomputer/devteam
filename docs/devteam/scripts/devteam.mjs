@@ -12721,18 +12721,23 @@ function landedOverride(key, sinceIso, mainValue) {
   const merges = logObjects('act').filter((a) => a.class === 'merge-chore' && a.created_by === 'supervisor' && (a.refs ?? []).includes('chore-settings'));
   return logObjects('act').filter((a) => a.class === 'settings-edit' && a.created_by === 'supervisor' && a.key === key && a.for === undefined && a.created_at > sinceIso && canonical(a.value) === canonical(mainValue) && merges.some((m) => m.created_at > a.created_at)).sort(byTime).at(-1) ?? null;
 }
+// Once per run: metrics and dashboard-data both read it.
+let askedMemo = null;
 function askedSettingsView() {
-  const s = loadSettings();
-  const all = settingsAll();
-  return Object.fromEntries(OWNER_ASKABLE.map((key) => {
+  if (askedMemo) return askedMemo;
+  // main's block through mainRef(), the one way of finding main; the working tree before main has one
+  const ref = mainRef();
+  const s = (ref && settingsAt(ref, { orNull: true })) || loadSettings();
+  let all = null;
+  return (askedMemo = Object.fromEntries(OWNER_ASKABLE.map((key) => {
     const value = s[key] ?? null;
     const act = latestOwnerSetting(key);
-    const label = !act ? (all.find((e) => e.key === key)?.set ? 'Set by the supervisor' : "The kit's default")
+    const label = !act ? ((all ??= settingsAll()).find((e) => e.key === key)?.set ? 'Set by the supervisor' : "The kit's default")
       : canonical(act.value) === canonical(value) ? 'Set by you'
       : landedOverride(key, act.created_at, value) ? `Set by the supervisor (you asked for ${act.value === null ? 'no limit' : act.value})`
       : ASKED_SAVED;
     return [key, { value, shown: askedShown(value), label, asked: act ? act.value : null, act: act?.id ?? null }];
-  }));
+  })));
 }
 function dashboardData() {
   reviewMemo = new Map();
