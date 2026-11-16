@@ -3156,6 +3156,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const click = (sel) => still(async () => { await p.click(sel); await released(); });
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
+  // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
+  const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
@@ -3748,7 +3750,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
     await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(shown('drawer'), 'the drawer');
+    await soon(slid(), 'the drawer');
     const at = await p.at('#drawer-close');
     await p.hold('Shift', true);
     await p.move(at.x, at.y, 8);
@@ -4250,13 +4252,16 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // a click anywhere on the card (here its detail, no link in it) opens it
   await click(`${card(O1)} > div`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
-  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
-  // an attribute's value, by its label (the label's tooltip is in its text)
+  // where it came from, under its properties (kit-88: every peek opens with its properties)
+  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body section.attrs + [data-from]')?.textContent ?? '')`, 'where it came from, under the properties');
+  // an attribute's value, by its label (its tooltip is the key's title)
   const attr = (label) => p.ev(`[...document.querySelectorAll('#drawer-body .attrs dt')].find((x) => x.textContent.startsWith(${JSON.stringify(label)}))?.nextElementSibling?.textContent ?? null`);
   assert.equal(await attr('Where it sits'), 'Part of a recurring signal (2 of 3)', 'two slow-test notes on app, of the three a signal takes');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
   // a signal whose key holds a /: its card opens #signal/<key>
   await p.ev(`document.getElementById('drawer-close').click()`);
+  // closed once it has slid out (kit-88): until then it still covers the cards under it
+  await soon(`document.getElementById('drawer').hidden`, 'the peek closed');
   await click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
@@ -4264,7 +4269,7 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
   await click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
-  await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
+  await soon(`document.querySelectorAll('#drawer-body .psect-body > ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
   assert.equal(await attr('Unexplained for'), '30 hours');
   // the lineage: Mermaid blocked, the list stands in, every record in it a link
@@ -4283,6 +4288,8 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
   assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  // the peek at rest (kit-88: it reopened as the last one slid out), so the click lands where the node is
+  await soon(`getComputedStyle(document.getElementById('drawer')).transform === 'none'`, 'the peek at rest');
   await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });

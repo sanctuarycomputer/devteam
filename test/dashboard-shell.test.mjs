@@ -128,7 +128,7 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   // the hub has no .shell until its own ticket (kit-94)
   const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
   assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
-  for (const id of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'drawer', 'scrim', 'artifact-view', 'tl']) {
+  for (const id of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
     const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
