@@ -5351,16 +5351,44 @@ function releaseAnswerGap(d, targets) {
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
+// One entry of gh's statusCheckRollup, read the one way both merge's check and covered_by read it:
+// a status (StatusContext, or anything with a state) by its state; a check run by its conclusion
+// once COMPLETED. Uppercased; anything empty or unknown is PENDING, so it is never green.
+function rollupState(c) {
+  const state = c.__typename === 'StatusContext' || c.state ? String(c.state ?? '').toUpperCase() : (c.status === 'COMPLETED' ? String(c.conclusion ?? '').toUpperCase() : 'PENDING');
+  return { name: c.name ?? c.context ?? '?', state: state || 'PENDING' };
+}
+// Whether a gate's covered_by (settings gates.<name>.covered_by, the owner's gate-change) is met by
+// the forge's checks in this rollup, read at the exact head: "ci" needs every check (ignored ones
+// too: ignored_checks never counts as coverage) to be SUCCESS, and at least one check; a list needs
+// each named check present and every entry of that name SUCCESS. SKIPPED or NEUTRAL didn't run the
+// suite, so they aren't coverage. { covered: true, checks } or { covered: false, why, bad? }.
+function forgeCoverage(coveredBy, rollup, ignored = []) {
+  if (coveredBy !== 'ci' && !(Array.isArray(coveredBy) && coveredBy.length && coveredBy.every((n) => typeof n === 'string' && n))) return { covered: false, bad: true, why: 'covered_by is not "ci" or a list of check names' };
+  const entries = (rollup ?? []).map(rollupState);
+  const notGreen = (e) => `${e.name} is ${e.state.toLowerCase()}${ignored.includes(e.name) ? ' (ignored_checks never counts as coverage)' : ''}`;
+  if (coveredBy === 'ci') {
+    if (!entries.length) return { covered: false, why: 'the forge reports no checks' };
+    const bad = entries.find((e) => e.state !== 'SUCCESS');
+    return bad ? { covered: false, why: notGreen(bad) } : { covered: true, checks: [...new Set(entries.map((e) => e.name))] };
+  }
+  for (const n of coveredBy) {
+    const mine = entries.filter((e) => e.name === n);
+    if (!mine.length) return { covered: false, why: `${n} is missing` };
+    const bad = mine.find((e) => e.state !== 'SUCCESS');
+    if (bad) return { covered: false, why: notGreen(bad) };
+  }
+  return { covered: true, checks: [...coveredBy] };
+}
 // The forge's own checks on a PR at its head: pending is not passed and failing fails; the names in
 // ignored are skipped. what names the PR in the message (the records PR in home, say).
 function forgeCheckFails(pr, ignoredChecks, sha, what = "the forge's checks") {
   const ignored = new Set(ignoredChecks ?? []);
   const pending = [], failing = [];
   for (const c of pr.statusCheckRollup ?? []) {
-    const name = c.name ?? c.context ?? '?';
+    const { name, state } = rollupState(c);
     if (ignored.has(name)) continue;
-    const state = c.__typename === 'StatusContext' || c.state ? String(c.state ?? '').toUpperCase() : (c.status === 'COMPLETED' ? String(c.conclusion ?? '').toUpperCase() : 'PENDING');
-    if (['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', ''].includes(state)) pending.push(name);
+    if (['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'].includes(state)) pending.push(name);
     else if (!['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(state)) failing.push(`${name} (${state.toLowerCase()})`);
   }
   return [
@@ -5621,6 +5649,7 @@ function cmdMerge() {
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
   const gates = Object.entries(S.gates ?? {});
+  const coveredNotes = []; // gates the forge's checks covered at this head, for the merge act
   if (!gates.length && !flags['no-gates'] && !chore) fails.push(R.name === 'home' ? 'no gates in settings (gates: {name: command}); pass --no-gates to merge without running any' : `no gates in ${R.name}'s settings (links.${R.name}.gates); pass --no-gates to merge without running any`);
   if (!fails.length && gates.length && !chore && !flags['no-gates']) {
     // A gate with `paths` runs only when the PR changes a file matching one of them (a monorepo's
@@ -5630,9 +5659,44 @@ function cmdMerge() {
     const applies = ([, spec]) => typeof spec === 'string' || !spec.paths || !changed || changed.some((f) => spec.paths.some((g) => pathMatches(g, f)));
     const skipped = gates.filter((g) => !applies(g)).map(([n]) => n);
     if (skipped.length) out(`gates not applicable to this PR: ${skipped.join(', ')}`);
+    // A gate the owner declared covered_by (gate-change) isn't run here when the forge's checks ran
+    // it green at this exact head: the PR is read again, by number, and its head must still be sha.
+    // Everything that can't be read or listed covers nothing. A PR that changes .github/ covers
+    // nothing either: a pull_request workflow runs the PR's own workflow files, so the PR would
+    // define the very CI that excuses the gate.
+    const declared = gates.filter(applies).filter(([, s]) => isObj(s) && s.covered_by !== undefined);
+    let fresh = null;
+    if (declared.length) {
+      const diff = base ? R.git(['diff', '-z', '--name-only', '--no-renames', base, sha]) : null; // the diff itself: changedFiles reads a failed diff as no files
+      const ci = diff === null ? null : diff.split('\0').filter((f) => f.startsWith('.github/'));
+      if (viaGit) fresh = { why: 'forge is git: no checks to read' };
+      else if (!pr.number) fresh = { why: 'no PR to read' };
+      else if (ci === null) fresh = { why: 'cannot tell what the PR changes' };
+      else if (ci.length) fresh = { why: `the PR changes the forge's CI configuration (${ci.slice(0, 3).join(', ')}${ci.length > 3 ? ', …' : ''})` };
+      else {
+        let v = null;
+        try { v = JSON.parse(R.gh(['pr', 'view', String(pr.number), '--json', 'headRefOid,statusCheckRollup']) ?? 'null'); } catch { v = null; }
+        if (!isObj(v)) fresh = { why: "could not read the PR's checks again" };
+        else if (v.headRefOid !== sha) fresh = { why: `the head moved to ${String(v.headRefOid ?? '?').slice(0, 12)}` };
+        else fresh = { rollup: v.statusCheckRollup ?? [] };
+      }
+    }
+    const coveredNow = new Map();
+    for (const [name, spec] of declared) {
+      const shape = forgeCoverage(spec.covered_by, []);
+      const c = shape.bad ? shape : fresh.rollup ? forgeCoverage(spec.covered_by, fresh.rollup, S.ignored_checks ?? []) : { covered: false, why: fresh.why };
+      if (c.bad) warn(`gate ${name}: ${c.why}; it runs`);
+      else if (c.covered) {
+        out(`gate ${name} not run here: the forge's checks ran it green at ${sha.slice(0, 12)} (${c.checks.join(', ')})`);
+        coveredNow.set(name, c.checks);
+        coveredNotes.push(`gate ${name} covered by the forge's checks at ${sha} (${c.checks.join(', ')})`);
+        continue;
+      }
+      if (!c.bad) out(`gate ${name} runs here: ${c.why}`);
+    }
     const wt = detachedWorktree(sha, `merge-${slug(branch)}`, R);
     try {
-      for (const [name, spec] of gates.filter(applies)) {
+      for (const [name, spec] of gates.filter(applies).filter(([n]) => !coveredNow.has(n))) {
         const cmd = typeof spec === 'string' ? spec : spec.cmd;
         const started = Date.now();
         let ok = true;
@@ -5718,7 +5782,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${rec ? `; records at ${rec.sha} in home` : ''}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}${coveredNotes.map((n) => `; ${n}`).join('')}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   // Adding a gate is the supervisor's own act (constitutional gate-add), recorded apart from the merge
   // so the owner sees each new check in the act feed and can correct it.
   if (gateAdds?.length) {
