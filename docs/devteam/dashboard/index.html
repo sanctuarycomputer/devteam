@@ -379,6 +379,49 @@ try {
   .bars div span:last-child { text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
   .bars span.b { height: 6px; background: var(--series-1); border-radius: 3px; min-width: 2px; }
 
+  /* the Efficiency Score card (kit-174), as the mock's: ruled sections; charts drawn at the width they get */
+  .eff-card > .sec:first-of-type { border-top: 0; }
+  .eff-card > .sec:last-child { border-bottom: 0; padding-bottom: 0; }
+  .eff-card .sec-b { min-width: 0; }
+  .eff-card .props-h { margin: 4px 0 6px; font: 500 11px/16px var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .eff-card .props-h i { font-size: 12px; vertical-align: -1px; }
+  .eff-card .score { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .eff-card .score b { font-size: 32px; font-weight: 600; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .eff-card .score-w { margin: 2px 0 12px; color: var(--fg-2); max-width: var(--measure); }
+  .eff-card .score-mod { margin-top: 22px; }
+  .eff-card .eff-parts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px var(--gap); }
+  .eff-card .score-counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px var(--gap); }
+  @media (max-width: 560px) { .eff-card .eff-parts, .eff-card .score-counts { grid-template-columns: minmax(0, 1fr); } }
+  .eff-card .stat { background: none; border: 0; box-shadow: none; padding: 0; border-radius: 0; min-width: 0; }
+  .eff-card .stat .k { display: block; font-size: 12px; color: var(--fg-2); }
+  .eff-card .stat.mini .k { min-height: 2.6em; }
+  .eff-card .stat .dim { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+  .eff-card .sparkline { display: block; margin-top: 6px; max-width: 160px; }
+  .eff-card .fit { min-width: 0; overflow: hidden; }
+  .eff-card .fit svg { display: block; margin: 4px 0; }
+  .eff-card .lc-t { font: 10.5px var(--mono); fill: var(--muted); } .eff-card .lc-b { fill: var(--fg); }
+  .eff-card .legend i { display: inline-block; width: 18px; height: 0; border-top: 6px solid var(--muted); vertical-align: middle; margin-right: 6px; }
+  .eff-where { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px var(--gap); }
+  @media (max-width: 560px) { .eff-where { grid-template-columns: minmax(0, 1fr); } }
+  .eff-obs { min-width: 0; }
+  .eff-obs .bars { padding: 0; }
+  .eff-obs .bars div { grid-template-columns: minmax(0, 132px) minmax(0, 1fr) 56px; }
+  .eff-obs .bars .k { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .eff-src { margin: 12px 0 0; font-size: 12px; color: var(--fg-2); max-width: var(--measure); }
+  .eff-card .rowline .r { flex: none; font-size: 12px; color: var(--muted); }
+  .eff-card .rowline[data-open] { cursor: pointer; border-radius: 4px; }
+  .eff-card .rowline[data-open]:hover .t, .eff-card .rowline[data-open]:focus-visible .t { text-decoration: underline; }
+  .eff-card .rowline[data-open]:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; }
+  .sugg { list-style: none; margin: 0; padding: 0; }
+  .sugg-i { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 0; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .sugg-i:first-child { padding-top: 0; } .sugg-i:last-child { border-bottom: 0; padding-bottom: 0; }
+  .sugg-i:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 2px; border-radius: 4px; }
+  .sugg-n { font: 600 12px/20px var(--mono); color: var(--muted); }
+  .sugg-b { min-width: 0; max-width: var(--measure); }
+  .sugg-go { font-weight: 600; color: var(--fg); } .sugg-i:hover .sugg-go, .sugg-i:focus-visible .sugg-go { text-decoration: underline; }
+  .sugg-w, .sugg-m { font-size: 12.5px; color: var(--fg-2); margin-top: 2px; overflow-wrap: anywhere; }
+  .sugg-e { font-size: 12px; color: var(--green-fg); margin-top: 2px; }
+
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
   /* a select is as wide as its longest option, unless its label can shrink too */
@@ -934,6 +977,9 @@ try {
     <div class="feed" id="trust-history"></div>
   </section>
 
+  <!-- kit-174: the Efficiency Score card, beside Trust, on the shell (render() draws it: renderEfficiency) -->
+  <section id="efficiency" data-page="efficiency"></section>
+
   <section id="retros" class="no-shell" data-page="retros">
     <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
     <div id="retro-due"></div>
@@ -943,14 +989,6 @@ try {
   <section id="health" class="no-shell" data-page="health">
     <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
-    <div class="two" style="margin-top:14px">
-      <div><h3>Hours by phase</h3><div class="bars card" id="phase-time"></div></div>
-      <div><h3>USD by phase</h3><div class="bars card" id="phase-cost"></div></div>
-    </div>
-    <div class="two" style="margin-top:14px">
-      <div><h3>USD by model</h3><div class="bars card" id="model-cost"></div></div>
-      <div><h3>Tokens</h3><div class="card small" id="token-note"></div></div>
-    </div>
     <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
     <div id="gates"></div>
     <div class="two" style="margin-top:14px" id="test-lists"></div>
@@ -1304,7 +1342,7 @@ function saveFilters(page, state) {
 // shared block, so the tickets that change it never touch the block.
 // until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
 // governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop', 'settings'];
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
@@ -1334,11 +1372,11 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
   ['overview', 'Overview', 'project', 'layout-dashboard'], ['inbox', 'Inbox', 'project', 'inbox'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
-  ['trust', 'Trust', 'autonomy', 'shield-check'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
+  ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
 ]) registerPage({ id, title, group, icon, count: () => null, render: () => {} });
 for (const nav of document.querySelectorAll('.side nav.nav[data-group]')) {
@@ -1405,12 +1443,210 @@ const setView = (view, left) => {
 // Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
 const empty = (html) => `<p class="empty">${html}</p>`;
 
-function bars(el, obj, fmt, none) {
-  const entries = Object.entries(obj || {}).filter(([, v]) => v > 0);
-  if (!entries.length) { el.innerHTML = empty(none); return; }
-  const max = Math.max(...entries.map(([, v]) => v), 0.0001);
-  el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
+// ---- Efficiency (kit-174): the Efficiency Score card, its own page beside Trust ----
+// It formats /api/data efficiency (kit-173) and metrics.cost, and computes no score, best or ratio.
+// Laid out as the mock's: ruled sections (the layout block's .sec: a label, then the body).
+const effSection = (label, body) => `<section class="sec"><div class="lbl">${esc(label)}</div><div class="sec-b">${body}</div></section>`;
+const effNone = (s = 'None') => `<p class="empty">${s}</p>`;
+const effM = (n) => `${((n || 0) / 1e6).toFixed(1)}M`;
+// a bar block, largest first (ties by key), labelled by the kit's own keys; "None" with nothing above 0
+function effBars(obj, fmt) {
+  const rows = Object.entries(obj || {}).filter(([, v]) => Number.isFinite(v) && v > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  if (!rows.length) return effNone();
+  return `<div class="bars">${rows.map(([k, v]) => `<div><span class="k" title="${esc(k)}">${esc(k)}</span><span class="b" style="width:${(100 * v) / rows[0][1]}%"></span><span>${esc(fmt(v))}</span></div>`).join('')}</div>`;
 }
+// Where it goes: Health's four spend cards, and tokens by phase, from efficiency.observe, else (a
+// server without efficiency) from metrics, which keeps by_model and tokens under cost; then where the
+// figures come from
+function effWhere(d) {
+  const m = d.metrics || {}, o = d.efficiency?.observe;
+  const src = o ? { phase_hours: o.phase_hours, phase_usd: o.phase_usd, by_model: o.by_model, tokens: o.tokens, tokens_by_phase: o.tokens_by_phase }
+    : { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost?.by_model, tokens: m.cost?.tokens, tokens_by_phase: null };
+  const tk = src.tokens || {};
+  const all = (t) => (t?.input || 0) + (t?.output || 0) + (t?.cache_read || 0) + (t?.cache_write || 0);
+  const blocks = [
+    ['flame', 'Tokens by phase', src.tokens_by_phase ? effBars(Object.fromEntries(Object.entries(src.tokens_by_phase).map(([k, t]) => [k, all(t)])), effM) : effNone()],
+    ['clock', 'Hours by phase', effBars(src.phase_hours, (v) => `${v}h`)],
+    ['dollar-sign', 'USD by phase', effBars(src.phase_usd, (v) => `$${v}`)],
+    ['cpu', 'USD by model', effBars(Object.fromEntries(Object.entries(src.by_model || {}).map(([k, v]) => [k, v?.usd])), (v) => `$${v}`)],
+    ['coins', 'Tokens', effBars({ input: tk.input, output: tk.output, 'cache reads': tk.cache_read, 'cache writes': tk.cache_write }, effM)],
+  ];
+  const c = m.cost || {}, un = Object.keys(c.unpriced_models || {});
+  const said = `${c.source === 'measured' ? 'Measured from the agents\' own session logs' : 'Nothing measured: spend shows only what agents reported'}${un.length ? ` · <span class="err">Unpriced: ${esc(un.join(', '))}</span>` : ''}`;
+  return `<div class="eff-where">${blocks.map(([ic, h, b]) => `<div class="eff-obs"><h4 class="props-h"><i class="icon-${ic}" aria-hidden="true"></i> ${h}</h4>${b}</div>`).join('')}</div><p class="eff-src">${said}</p>`;
+}
+// The card, drawn into #efficiency only when it changed, so a redraw keeps focus and a pin's element;
+// the nav count is this week's score
+function renderEfficiency(d) {
+  const e = d.efficiency || null;
+  const sc = e?.score?.this_week;
+  const n = $('n-efficiency');
+  if (n) n.textContent = Number.isFinite(sc) ? `${sc}%` : '';
+  const html = `<div class="card eff-card">${cardHead('gauge', 'Efficiency Score', { extra: '<span class="muted">this week</span>' })}${
+    effSection('Score', e ? effScore(e) : effNone())}${
+    effSection('Where it goes', effWhere(d))}${
+    effSection('Waste', e ? effWaste(e.waste || []) : effNone())}${
+    effSection('Suggestions', e ? effSuggestions(e.suggestions || []) : effNone('None this week'))}</div>`;
+  const el = $('efficiency');
+  if (!el || el.__html === html) return;
+  el.__html = html;
+  for (const f of el.querySelectorAll('.fit[data-fit]')) FIT_SEEN?.unobserve(f);
+  el.innerHTML = html;
+  fitCharts();
+}
+// ---- the score charts (ported from the mock, project/artifacts/dashboard-cleanup at main): a null is a
+// gap, never a zero. kit-93 and kit-99 reuse them for Trust: a chart drawn at the width it gets is a
+// .fit[data-fit=<key>] element, drawn by FIT_DRAW[key](el, W) whenever its width changes ----
+const weekName = (i, n) => (i === n - 1 ? 'this week' : i === n - 2 ? 'last week' : `${n - 1 - i} weeks ago`);
+const effNum = (x) => typeof x === 'number' && Number.isFinite(x);
+// a path through the points, broken at every null: one M per run; a run of one point is a dot (a
+// zero-length line, which a round cap shows)
+const gapPath = (v, X, Y) => { let d = ''; v.forEach((x, i) => { if (!effNum(x)) return; const p = `${X(i).toFixed(1)},${Y(x).toFixed(1)}`; d += effNum(v[i - 1]) ? `L${p}` : `M${p}${effNum(v[i + 1]) ? '' : `L${p}`}`; }); return d; };
+// a sparkline over the weeks, scaled to its own non-null values
+function spark(v, label) {
+  const xs = v.filter(effNum), max = xs.length ? Math.max(...xs) : 1, min = xs.length ? Math.min(...xs) : 0;
+  const X = (i) => 1 + (i * 78) / Math.max(1, v.length - 1), Y = (x) => (max === min ? 9 : 17 - (15 * (x - min)) / (max - min));
+  return `<svg class="sparkline" viewBox="0 0 80 18" width="100%" height="24" preserveAspectRatio="none" role="img" aria-label="${esc(label)}, the last 12 weeks"><path fill="none" stroke="var(--series-1)" stroke-width="1.5" stroke-linecap="round" vector-effect="non-scaling-stroke" d="${gapPath(v, X, Y)}"/></svg>`;
+}
+// a score over the weeks, oldest first, on a fixed axis (0 to 100 by default): this week last and
+// marked, last week marked, its value labelled; a null week has no point and breaks the line
+function scoreLine(v, W = 560, { min = 0, max = 100 } = {}) {
+  const H = 120, P = 34, n = v.length, tw = n - 1, lw = n - 2;
+  const X = (i) => P + (i * (W - P - 6)) / Math.max(1, n - 1);
+  const Y = (x) => H - 18 - ((H - 30) * (Math.min(max, Math.max(min, x)) - min)) / (max - min || 1);
+  const ty = (y) => Math.min(H - 14, Math.max(10, y));
+  return `<svg class="score-line" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="The score over the last 12 weeks">
+    ${[min, (min + max) / 2, max].map((g) => `<line x1="${P}" x2="${W}" y1="${Y(g)}" y2="${Y(g)}" stroke="var(--line-2)"/><text x="0" y="${Y(g) + 3}" class="lc-t">${g}%</text>`).join('')}
+    <path class="line" fill="none" stroke="var(--series-1)" stroke-width="2" d="${gapPath(v, X, Y)}"/>
+    ${v.map((x, i) => (!effNum(x) ? '' : `<circle data-i="${i}"${i === tw ? ' class="tw"' : i === lw ? ' class="lw"' : ''} cx="${X(i).toFixed(1)}" cy="${Y(x).toFixed(1)}" r="${i >= lw ? 4 : 2.5}" fill="${i === lw ? 'var(--surface)' : 'var(--series-1)'}" stroke="var(--series-1)" stroke-width="${i === lw ? 2 : 0}"><title>${weekName(i, n)}: ${x}%</title></circle>`)).join('')}
+    ${effNum(v[lw]) ? `<text x="${X(lw) + 4}" y="${ty(Y(v[lw]) + 18)}" text-anchor="end" class="lc-t">last week ${v[lw]}%</text>` : ''}
+    ${effNum(v[tw]) ? `<text x="${X(tw)}" y="${ty(Y(v[tw]) - 9)}" text-anchor="end" class="lc-t lc-b">this week ${v[tw]}%</text>` : ''}
+    <text x="${P}" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>`;
+}
+// The charts drawn at the width they get, by key (a page adds its own); one ResizeObserver redraws a
+// chart whose width changed, a page coming into view or the window resized
+const FIT_DRAW = {};
+const FIT_SEEN = typeof ResizeObserver === 'function' ? new ResizeObserver(() => requestAnimationFrame(fitCharts)) : null;
+function fitCharts() {
+  for (const el of document.querySelectorAll('.fit[data-fit]')) {
+    if (!el.__fitSeen) { el.__fitSeen = true; FIT_SEEN?.observe(el); }
+    const W = Math.floor(el.clientWidth), draw = FIT_DRAW[el.dataset.fit];
+    if (!W || !draw || +el.dataset.w === W) continue;
+    el.dataset.w = W;
+    el.innerHTML = draw(el, W);
+  }
+}
+addEventListener('resize', () => requestAnimationFrame(fitCharts));
+
+// Spend by phase, each week: a stacked bar a week, one segment per phase key (the union of the weeks'
+// keys, the most spent over the 12 weeks at the bottom; ties by key); a week with no spend is an empty slot
+// the page's own colour tokens (it defines only --series-1), never the error colour, cycled past the end
+const EFF_COLORS = ['var(--series-1)', 'var(--amber)', 'var(--green)', 'color-mix(in srgb, var(--series-1) 50%, var(--surface))', 'color-mix(in srgb, var(--amber) 50%, var(--surface))', 'color-mix(in srgb, var(--green) 50%, var(--surface))', 'var(--muted)'];
+const effUsd = (x) => `$${+(+x).toFixed(2)}`;
+function effPhaseKeys(weeks) {
+  const tot = {};
+  for (const w of weeks) for (const [k, v] of Object.entries(w.usd_by_phase || {})) if (effNum(v)) tot[k] = (tot[k] ?? 0) + v;
+  return Object.keys(tot).sort((a, b) => tot[b] - tot[a] || (a < b ? -1 : 1));
+}
+function effPhaseBars(weeks, W = 560) {
+  const keys = effPhaseKeys(weeks), n = weeks.length;
+  const val = (w, k) => (effNum(w.usd_by_phase?.[k]) && w.usd_by_phase[k] > 0 ? w.usd_by_phase[k] : 0);
+  const tot = (w) => keys.reduce((a, k) => a + val(w, k), 0);
+  const max = Math.max(0, ...weeks.map(tot));
+  if (!keys.length || !max) return effNone();
+  const H = 96, slot = W / n, bw = Math.max(1, slot - 6), col = (j) => EFF_COLORS[j % EFF_COLORS.length];
+  return `<svg class="split" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Spend by phase, each week">${weeks.map((w, i) => {
+    let y = H - 14;
+    return keys.map((k, j) => { const v = val(w, k); if (!v) return ''; const h = ((H - 24) * v) / max; y -= h;
+      return `<rect data-i="${i}" x="${(i * slot).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" style="fill:${col(j)}"><title>${esc(`${weekName(i, n)}: ${k} ${effUsd(v)} of ${effUsd(tot(w))}`)}</title></rect>`; }).join('');
+  }).join('')}<text x="0" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W - 6}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>
+    <div class="legend small">${keys.map((k, j) => `<span><i style="border-top-color:${col(j)}"></i>${esc(k)} ${effUsd(val(weeks[n - 1] || {}, k))}</span>`).join('')}</div>`;
+}
+let EFF_WEEKS = [];
+FIT_DRAW['eff-score'] = (el, W) => scoreLine(EFF_WEEKS.map((w) => w.score), W, { min: 0, max: 100 });
+FIT_DRAW['eff-phase'] = (el, W) => effPhaseBars(EFF_WEEKS, W);
+
+// The Score section: this and last week's score, the three parts with their ratios, the 12-week line,
+// a sparkline per measure, and spend by phase. A week with an escaped defect takes another week's
+// spend and time (kit-173), so its ratio would disagree with its part: it says so instead.
+const EFF_FIRST_TIP = 'first passes of each spec, plan, final and task review';
+function effScore(e) {
+  const weeks = Array.isArray(e.weeks) ? e.weeks : [], w = weeks[weeks.length - 1] || {}, best = e.best || {};
+  EFF_WEEKS = weeks;
+  const pc = (x) => (effNum(x) ? `${Math.round(100 * x)}%` : '–');
+  const sc = (x) => (effNum(x) ? `${x}%` : '–');
+  const usd = (x) => (effNum(x) ? `$${Math.round(x)}` : '–'), hr = (x) => (effNum(x) ? x.toFixed(1) : '–');
+  const held = 'held down: an escaped defect this week';
+  const ratio = (b, t, f, unit) => (effNum(b) && effNum(t) ? `best ${f(b)} ÷ this week ${f(t)} ${unit}` : '–');
+  const defect = w.escaped_defects > 0;
+  const parts = [
+    ['spend', pc(e.parts?.spend), defect ? held : ratio(best.usd_per_point, w.usd_per_point, usd, 'per point'), ''],
+    ['time', pc(e.parts?.time), defect ? held : ratio(best.hours_per_point, w.hours_per_point, hr, 'hours per point'), ''],
+    ['rework', pc(e.parts?.rework), 'reviews passed the first time', EFF_FIRST_TIP],
+  ];
+  const pair = (t, b, f) => (effNum(t) || effNum(b) ? `${f(t)} · best ${f(b)}` : '–');
+  const col = (k) => weeks.map((x) => (effNum(x[k]) ? x[k] : null));
+  const counts = [
+    ['$ per merged point', pair(w.usd_per_point, best.usd_per_point, usd), col('usd_per_point'), ''],
+    ['hours per merged point', pair(w.hours_per_point, best.hours_per_point, hr), col('hours_per_point'), ''],
+    ['reviews passed the first time', pc(w.first_pass), col('first_pass'), EFF_FIRST_TIP],
+    ['cache reads of input tokens', pc(w.cache_read_share), col('cache_read_share'), ''],
+    ['escaped defects', effNum(w.escaped_defects) ? `${w.escaped_defects} (target 0)` : '–', col('escaped_defects'), ''],
+    ['merged points', effNum(w.points) ? String(w.points) : '–', col('points'), ''],
+  ];
+  const tip = (t) => (t ? ` title="${esc(t)}"` : '');
+  // the charts' data in their attributes, so new data is a new card (renderEfficiency compares the html)
+  const sig = esc(JSON.stringify(weeks.map((x) => [x.score, x.usd_by_phase])));
+  return `<div class="score"><b>${sc(e.score?.this_week)}</b><span class="dim">last week ${sc(e.score?.last_week)}</span></div>
+    <p class="score-w">spend, time and rework against the best of the last 12 weeks, with quality held</p>
+    <div class="eff-parts">${parts.map(([k, v, s, t]) => `<div class="stat"${tip(t)}><span class="k">${k}</span><b>${v}</b><span class="dim">${esc(s)}</span></div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="eff-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${counts.map(([k, v, s, t]) => `<div class="stat mini"${tip(t)}><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">Spend by phase, each week</h4><div class="fit" data-fit="eff-phase" data-v="${sig}"></div></div>`;
+}
+// Waste: the open spend findings, each in plain words; one with an observation opens its peek (a click
+// or Enter), one whose observation isn't logged yet (id null) is plain text
+const EFF_WASTE_WORDS = { 'cost-hotspot': 'cost hotspot', 'costly-ticket': 'costly ticket', 'low-cache-hit': 'low cache hits', 'cost-per-point-rising': 'cost per point rising', 'unpriced-model': 'unpriced model' };
+function effWaste(ws) {
+  if (!ws.length) return effNone();
+  return `<div class="rows">${ws.map((w) => {
+    const k = Object.hasOwn(EFF_WASTE_WORDS, String(w.kind)) ? EFF_WASTE_WORDS[w.kind] : words(w.kind);
+    const open = typeof w.id === 'string' && w.id ? ` data-open="observation/${esc(w.id)}" tabindex="0" role="link"${subj('observation', w.id, w.detail)}` : '';
+    return `<div class="rowline"${open}><span class="dot amber"></span><span class="t" title="${esc(w.detail)}">${linkify(w.detail)}</span><span class="r">${esc(k)}</span></div>`;
+  }).join('')}</div>`;
+}
+// Suggestions (ported from the mock; kit-99 reuses it for Trust): numbered, no buttons; each item is
+// data-sugg="<id>" and its data-title is the title a thread on it starts with. A click or Enter starts
+// a thread on its page subject, or opens the open one (effSuggGo, below).
+function suggestionsList(xs) {
+  if (!xs.length) return effNone('None this week');
+  return `<ol class="sugg">${xs.map((x, i) => `<li class="sugg-i" data-sugg="${esc(x.id)}" data-title="${esc(tLine(`${x.title} · ${x.what}`, T_TITLE_MAX))}" tabindex="0" role="link" title="Start a thread about this suggestion"><span class="sugg-n">${i + 1}</span><div class="sugg-b"><span class="sugg-go">${esc(x.title)}</span><div class="sugg-w">${esc(x.what)}</div><div class="sugg-m">${esc(x.evidence)}</div><div class="sugg-e">Estimated effect: ${esc(x.effect)}</div></div></li>`).join('')}</ol>`;
+}
+const EFF_SUGG_WORDS = { 'review-depth': 'Fit review depth to the ticket', 'smaller-model': 'Use a smaller model where it fits', cache: 'Keep the prompt cache', 'costly-ticket': 'Find where a costly ticket\'s spend went', 'tighter-specs': 'Write tighter specs' };
+function effSuggestions(xs) {
+  return suggestionsList(xs.map((x) => ({ id: String(x.id), title: Object.hasOwn(EFF_SUGG_WORDS, String(x.kind)) ? EFF_SUGG_WORDS[x.kind] : 'Suggestion', what: x.what ?? '', evidence: x.evidence ?? '', effect: x.effect ?? '' })));
+}
+// A suggestion's thread: on the page subject #efficiency?suggestion=<id> (tlStart opens the open one,
+// as a Settings row's); placed by the item, from the click's point or, by Enter, the item's right edge
+function effSuggGo(it, x, y) {
+  const view = suggView(it.dataset.sugg);
+  const title = tLine(it.dataset.title, T_TITLE_MAX);
+  tlStart({ subject: { kind: 'page', view, quote: tCut(title, 300) }, title, el: it, x, y });
+}
+document.addEventListener('click', (e) => {
+  const it = e.target.closest?.('#efficiency [data-sugg]');
+  if (!it || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  if (String(window.getSelection?.() ?? '')) return;
+  e.preventDefault();
+  effSuggGo(it, e.clientX, e.clientY);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  const t = e.target;
+  // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
+  if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
+  if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
+});
 
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
 // Each is [value, label, group]; the board and the burn-up both follow the one chosen.
@@ -5073,14 +5309,8 @@ function render(d) {
     ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
     <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
 
-  bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
-  bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet: no agent harness logs were found for this project (settings usage_sources, usage_command).');
-  bars($('model-cost'), Object.fromEntries(Object.entries(m.cost.by_model || {}).map(([k, v]) => [k, v.usd])), (v) => `$${v}`, 'No spend recorded yet.');
-  const tk = m.cost.tokens || {};
-  const M = (n) => `${((n || 0) / 1e6).toFixed(1)}M`;
-  $('token-note').innerHTML = m.cost.source === 'measured'
-    ? `Measured from the agents' own session logs. Input ${M(tk.input)} · output ${M(tk.output)} · cache reads ${M(tk.cache_read)} · cache writes ${M(tk.cache_write)}.${Object.keys(m.cost.unpriced_models || {}).length ? ` <span class="err">Unpriced: ${esc(Object.keys(m.cost.unpriced_models).join(', '))}.</span>` : ''}`
-    : 'Nothing measured: spend shows only what agents reported.';
+  // Hours by phase, USD by phase, USD by model and Tokens are Efficiency's now (kit-174): Where it goes
+  renderEfficiency(d);
 
   // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
   // are counted, not listed.
@@ -5140,7 +5370,7 @@ const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a que
 // feed, a question in a Decide row) is pinned in its home section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
-const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
 // T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
 // a control character six), so a line of 4,096 bytes always has room for it.
 const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
@@ -5156,6 +5386,11 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(T_UNSAFE, ' ').repla
 // A Settings row's view (#settings?key=<key>): its key, else null.
 const T_SETTING_VIEW = /^#settings\?key=([a-z][a-z0-9_]{0,63})$/;
 const parseSettingView = (view) => T_SETTING_VIEW.exec(typeof view === 'string' ? view : '')?.[1] ?? null;
+// A suggestion on Efficiency (kit-174): #efficiency?suggestion=<its id, URI-encoded>; its id, else null
+// (the prefix is 23 bytes: an encoded id of at most 177 keeps the view within the log's 200)
+const T_SUGG_VIEW = /^#efficiency\?suggestion=([^&#?]{1,177})$/;
+const suggView = (id) => `#efficiency?suggestion=${encodeURIComponent(String(id))}`;
+const parseSuggView = (view) => { const m = T_SUGG_VIEW.exec(typeof view === 'string' ? view : ''); if (!m) return null; try { return decodeURIComponent(m[1]); } catch { return null; } };
 // What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
 // a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
 // box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
@@ -5168,6 +5403,12 @@ function tSubjectAt(el, x, y, sec) {
     const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
     return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
+  }
+  // a suggestion on Efficiency (kit-174): its page subject, the item its spot, its title the quote
+  const sg = el?.closest?.('#efficiency [data-sugg]');
+  if (sg) {
+    const title = tLine(sg.dataset.title, T_TITLE_MAX);
+    return { subject: { kind: 'page', view: suggView(sg.dataset.sugg), quote: tCut(title, 300) }, title, el: sg };
   }
   // a Settings row (spec §8): a page subject on #settings?key=<key>, the row (not a point) its spot,
   // its plain name the quote
@@ -5280,6 +5521,7 @@ function tWhere(s) {
   // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
   if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
   // a Settings row: by the name it had when the thread began (the subject's quote), else its key
+  if (s.kind === 'page' && parseSuggView(s.view) !== null) return 'Efficiency';
   if (s.kind === 'page' && parseSettingView(s.view)) return `Settings, ${tLine(s.quote, 300) || parseSettingView(s.view)}`;
   if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
@@ -5427,7 +5669,7 @@ function tlShow(x, y) {
   // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
   if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view);
+  const whole = hit.subject.kind === 'item' || !!parseSettingView(hit.subject.view) || parseSuggView(hit.subject.view) !== null;
   const r = whole ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, !whole, hit.title, x, y);
 }
@@ -5492,12 +5734,12 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
 // the owner sends the first words.
 // A Settings row whose thread is open opens that thread (one per row; spec §8).
 function tlStart(hit) {
-  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) : null;
-  const had = key ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
+  const key = hit.subject.kind === 'page' ? parseSettingView(hit.subject.view) ?? parseSuggView(hit.subject.view) : null;
+  const had = key !== null ? TL.threads.find((t) => t.status === 'open' && t.subject?.kind === 'page' && t.subject.view === hit.subject.view) : null;
   if (had) return void tlOpen(had.id);
   TL.open = null;
   TL.resolving = false;
-  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' || key !== null ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
   tlDraftPrune();
   tlDraw();
   tlEl('tl-c-text')?.focus();
@@ -5515,11 +5757,15 @@ const settingRow = (key) => (key ? document.querySelector(`#settings [data-setti
 // The row a page subject is about, when it is a Settings row's: its key, and the row if drawn.
 const tlSettingOf = (s) => { const key = s?.kind === 'page' ? parseSettingView(s.view) : null; return key ? { key, el: settingRow(key) } : null; };
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
+// A suggestion's item on Efficiency, for its page subject (kit-174): its id, and the item if drawn
+const tlSuggOf = (s) => { const id = s?.kind === 'page' ? parseSuggView(s.view) : null; return id === null ? null : { key: id, el: document.querySelector(`#efficiency [data-sugg="${CSS.escape(id)}"]`) }; };
+// The row a page subject is about: a Settings row's, or a suggestion's
+const tlRowOf = (s) => tlSettingOf(s) ?? tlSuggOf(s);
 function tlTargetRect(s) {
   if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
   // a Settings row: its box, as an item's; none when it isn't shown
-  const set = tlSettingOf(s);
+  const set = tlRowOf(s);
   if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
@@ -5591,7 +5837,7 @@ function subjectHead(s) {
 }
 // On its page: an item's <details> opened and the item scrolled into view; the card placed again.
 function tlReveal(s) {
-  const el = s?.kind === 'item' ? tlHome(s) : tlSettingOf(s)?.el ?? null;
+  const el = s?.kind === 'item' ? tlHome(s) : tlRowOf(s)?.el ?? null;
   if (el) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
@@ -5615,7 +5861,7 @@ async function tlRoute(id) {
   const head = subjectHead(t.subject);
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
-  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlSettingOf(t.subject) });
+  showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlRowOf(t.subject) });
   await tlOpen(id, false);
   TL.route = id;
   tlReveal(t.subject);
@@ -5757,9 +6003,9 @@ function tlCardBody(t) {
   const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), !!dataAnswered(q.id), ANSWERED.has(q.id), REFUSED.get(q.id)?.n ?? null, (DATA?.questions || []).find((x) => x.id === q.id)?.links_moved ?? null, oaSig((DATA?.questions || []).find((x) => x.id === q.id))])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
-    const now = t ? tlHome(s) : null;
+    const now = t ? tlHome(s) ?? tlSuggOf(s)?.el ?? null : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : (s?.kind === 'item' && !now) || tlSettingOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
+    const note = !t ? '' : (s?.kind === 'item' && !now) || tlRowOf(s)?.el === null ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -5777,7 +6023,7 @@ function tlPlaceCard(t) {
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
-  else if (tlSettingOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
+  else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
   card.classList.toggle('sheet', !!p.sheet);
@@ -6083,7 +6329,7 @@ function tlPins() {
     if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
-    const corner = g.subject.kind === 'item' || !!tlSettingOf(g.subject);
+    const corner = g.subject.kind === 'item' || !!tlRowOf(g.subject);
     const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
@@ -6117,7 +6363,7 @@ function tlDock() {
   const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlSettingOf(t.subject)?.el === null;
+  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRowOf(t.subject)?.el === null;
   const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
   const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
