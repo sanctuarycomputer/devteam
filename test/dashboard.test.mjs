@@ -539,7 +539,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 
   await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
-    await p.ev(`document.querySelector('[data-tl-new]')?.click() ?? (document.getElementById('tl-pill').click(), document.querySelector('[data-tl-new]').click()); void 0`);
+    await p.ev(`document.querySelector('#threads [data-tl-new]').click(); void 0`);
     await soon(`document.activeElement?.id === 'tl-c-text'`, 'the composer');
     await hold();
     await p.type('first words');
@@ -1917,7 +1917,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
     assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 0 && r.width === innerWidth && r.height === innerHeight; })()`), true, 'the whole tab');
     assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.fp === TS.mainFp, /^[0-9a-f]{64}$/.test(TS.fp)].join()`), 'artifact,viewer-mock,main,true,true');
-    assert.equal(await p.ev(`getComputedStyle(document.getElementById('tl-pill')).display !== 'none'`), true, 'the dock');
+    assert.equal(await p.ev(`!document.getElementById('tl-pill') && !!document.getElementById('threads')`), true, 'no dock; the Threads panel');
   });
 
   await t.test('it polls the threads and hello, and never /api/data', async () => {
@@ -2583,8 +2583,8 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 
   await t.test('in pin mode the wheel scrolls the artifact, and the pin follows', async () => {
     await p.ev('document.activeElement?.blur()');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
-    await p.click('#tl-pinbtn');
+    // the panel's Pin, pressed with the viewer up (until kit-89's T4 floats the Inbox button above the viewer)
+    await p.ev(`document.getElementById('tl-pinbtn').click(); void 0`);
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay in pin mode');
     const at = await frameAt(300, 300);
     await p.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: at.x, y: at.y, deltaX: 0, deltaY: 100 });
@@ -3405,12 +3405,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
   });
 
-  await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
+  await t.test('the panel: the Inbox button counting a reply, where each subject is, New thread with no subject', async () => {
     await click('[data-tl-close]');
     F.sup(['thread', 'reply', T, 'Noted.']);
-    await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
-    await click('#tl-pill');
-    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
+    await soon(`document.querySelector('.pagebar .tt .n.th.you')?.textContent === '1'`, 'the count: one your move');
+    { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals') && !!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you')`, 'where its subject is, and its mark');
     await click('[data-tl-new]');
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
     await p.ev("document.getElementById('tl-c-text').focus()");
@@ -3418,13 +3418,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.key('Enter', 8);
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
-    await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
+    await soon(`/Open 2/.test(document.querySelector('#th-pane [data-thf="open"]').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
     await click('[data-tl-close]');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
     await click('#tl-pinbtn');
     assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
     await still(async () => { const at = await p.at(`${goalSel} h4`); await p.move(at.x, at.y, 0); });
@@ -3433,9 +3433,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
 
-  await t.test("a dock row keeps the keyboard's focus through reads that change the list", async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
+  await t.test("a panel row keeps the keyboard's focus through reads that change the list", async () => {
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    // the owner's word first, so the supervisor's reply below changes the row's mark
+    F.owner(['thread', 'say', T, 'Over to you.']);
+    await p.ev('tlRefresh()');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.wait')`, 'its row, waiting on the supervisor');
     await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
     F.sup(['thread', 'reply', T, 'One more thing.']);
     // a read begun now, and the polls beside it: waited on until one has brought the reply in
@@ -3444,12 +3447,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.ok(await p.ev('document.activeElement === window.__row && window.__row.isConnected'), 'focus still on the same row');
     await p.ev('window.__row.blur()');
     await p.ev('tlRefresh()');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`, 'drawn once focus left, its dot named');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you[role="img"][aria-label]')`, 'drawn once focus left, its mark named');
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
-    await click('#tl-pill');
-    await soon(`document.getElementById('tl-panel').hidden`, 'the panel closed');
+    await click('#th-close');
+    // closed, and the page back at rest (its margin slides over --dur), so the pin stays where it is found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed, the page at rest');
     // still from finding the pin to pressing it; the reads then land under the press
     const at = await still(async () => {
       const xy = await p.at('.tl-pin');
@@ -3671,19 +3675,22 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-accept]');
     await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
     await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await click('#th-pane [data-thf="resolved"]');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'listed under Resolved');
     assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
     assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
   });
 
   await t.test('a resolved thread reopens from its card', async () => {
-    await p.ev(`document.querySelector('.tl-resolved').open = true`);
-    await click(`.tl-resolved [data-tl-open="${T}"]`);
+    await click(`#tl-list [data-tl-open="${T}"]`);
     await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
     await click('[data-tl-reopen]');
     await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
+    // the panel closed (by its ×, pressed in place: the card may sit over it)
+    await p.ev(`document.getElementById('th-close').click(); void 0`);
+    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
   });
 
   await t.test('a press on Resolve across a read still opens the form', async () => {

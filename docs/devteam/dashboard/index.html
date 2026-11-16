@@ -6751,7 +6751,7 @@ function thGo({ th = null, t = null, focus = false } = {}) {
   const kind = !focus ? null : !th ? 'inbox' : TH.th ? 'thf' : 'tab';
   TH.focus = kind;
   // the /view/ tab has no routes: the panel's state is in memory (spec §2.8)
-  if (VIEWER) { const was = TH.th; TH.th = th; TH.t = th ? t : null; return void thShow(was); }
+  if (VIEWER) { TH.th = th; TH.t = th ? t : null; return void thShow(); }
   const head = thHead();
   const p = parseHead(head, SHELL_ROUTES);
   const state = { ...p.state };
@@ -6772,21 +6772,24 @@ function thGo({ th = null, t = null, focus = false } = {}) {
 function thRoute() {
   if (VIEWER) return;
   const p = parseHead(thHead(), SHELL_ROUTES);
-  const was = TH.th;
   TH.th = TH_LISTS.includes(p.state?.th) ? p.state.th : null;
   TH.t = typeof p.state?.t === 'string' ? p.state.t : null;
-  thShow(was);
+  thShow();
 }
-function thShow(was) {
+function thShow() {
+  const moved = document.body.classList.contains('threads-open') !== !!TH.th;
   document.body.classList.toggle('threads-open', !!TH.th);
   thDraw({ view: true });
+  // the page moved over (at once with no motion): its pins and a floating card placed again; again when its slide ends
+  if (moved) { tlPins(); tlCard(); }
   const f = TH.focus;
   TH.focus = null;
   // a focus left inside a panel that closed goes to the Inbox button the owner can see (spec §2.9)
   if (!TH.th && $('threads').contains(document.activeElement)) thFocus('inbox');
   else if (f && (f !== 'inbox' || !TH.th)) thFocus(f);
-  void was;
 }
+// the page's slide beside the panel has ended: what sits on it (pins, a floating card) placed where it now is
+document.querySelector('.main')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right') tlDraw(); });
 const thSeen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && el.getClientRects().length > 0; };
 function thFocus(kind) {
   if (kind === 'tab') return void $('th-tabs').querySelector('[role="tab"][aria-selected="true"]')?.focus();

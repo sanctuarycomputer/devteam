@@ -556,8 +556,9 @@ async function threads({ DASH, pane }) {
   await browser.click(dash, dash, '[data-tl-accept]');
   await until(() => JSON.parse(dt(['thread', 'show', T, '--json'])).status === 'resolved', 'resolved');
   await until(() => browser.evalIn(dash, `!document.querySelector('.tl-pin')`), 'the pin gone');
-  await browser.click(dash, dash, '#tl-pill');
-  await until(() => browser.evalIn(dash, `!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`), 'listed under Resolved');
+  await browser.click(dash, dash, '.pagebar .tt');
+  await browser.click(dash, dash, '#th-pane [data-thf="resolved"]');
+  await until(() => browser.evalIn(dash, `!!document.querySelector('#tl-list [data-tl-open="${T}"]')`), 'listed under Resolved');
   stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
   return G;
 }

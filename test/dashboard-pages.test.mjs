@@ -151,8 +151,10 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
     await p.ev("location.hash = '#overview'");
     await onPage('overview');
+    // the Inbox button opens the Threads panel over the page (kit-89); the Inbox page is the nav's
     await p.click('#inbox-btn');
-    await onPage('inbox');
+    await until(() => p.ev("location.hash === '#overview?th=open' && document.body.classList.contains('threads-open')"), 'the Threads panel over Overview');
+    await onPage('overview');
   }
 });
 
@@ -443,9 +445,9 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('goals');
   await go('#overview');
   await onPage('overview');
+  await p.click('#inbox-btn');
+  await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the Threads panel, at rest, lists it');
   n = await len();
-  await p.click('#tl-pill');
-  await until(() => p.ev(`!!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the dock lists it');
   await p.click(`#tl-list [data-tl-open="${TT}"]`);
   await until(async () => await cardOn(TT) && await hash() === '#board' && JSON.stringify(await shown()) === '["board"]', 'the dock opens it over Board');
   assert.equal(await len(), n + 1, 'the dock adds one entry');
@@ -942,10 +944,11 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   await until(async () => await cardKey() === null, 'closed');
 
   // the dock's list names the setting
-  await p.click('#tl-pill');
-  await until(() => p.ev(`!!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the dock lists it');
-  assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .tl-r .small').textContent`), `Settings, ${name}`);
-  await p.click('#tl-pill');
+  await p.click('#inbox-btn');
+  await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the Threads panel, at rest, lists it');
+  assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .th-where').textContent`), `Settings, ${name}`);
+  await p.click('#th-close');
+  await until(() => p.ev("!document.body.classList.contains('threads-open')"), 'the panel closed');
 
   // a thread on the other limit's row has its own pin, on its own row
   const TB = dt(['thread', 'new', 'Per component too', '--subject', JSON.stringify({ kind: 'page', view: view(K2), quote: name2 })], null).split('\n')[0];
