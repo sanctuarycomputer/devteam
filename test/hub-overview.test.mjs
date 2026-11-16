@@ -576,6 +576,104 @@ test('390px: a long name and three pills stay in the head', CHROME, async (t) =>
   assert.deepEqual(r, { pills: 3, out: [], menuIn: true, scroll: true });
 });
 
+// in the page: the button with that data-k, and the switch around it
+const kBtn = (k) => `[...document.querySelectorAll('#ov-body [data-k]')].find((b) => b.dataset.k === ${JSON.stringify(k)})`;
+const focusK = (p, k) => p.ev(`${kBtn(k)}.focus()`);
+const focusedK = `(document.activeElement?.dataset.k ?? null)`;
+const textK = (k) => `(${kBtn(k)}?.textContent ?? null)`;
+
+test('the machine switch: shared mode, Mixed, Park confirms with the count, Run resumes all, Escape cancels', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the machine switch', `!!document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine]')`);
+  const m = `document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine]')`;
+  assert.equal(await p.ev(`${m}.querySelector('[data-fleet=run]').getAttribute('aria-pressed')`), 'true');
+  assert.equal(await p.ev(`${m}.querySelector('.k').textContent`), 'Every fleet');
+  assert.deepEqual(await p.ev(`(() => { const a = document.querySelector('#ov-body > .ov-head .acts a.set'); return a && [a.getAttribute('href'), a.textContent, a.closest('.acts').contains(${m})]; })()`), ['#settings', 'Settings', true]);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#ov-body button')].some((b) => /^(Park all|Resume all)/.test(b.textContent))`), false, 'no Park all, no Resume all');
+  await focusK(p, 'machine:park');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('machine:park')} === 'Park 2 projects?'`);
+  assert.equal(await p.ev(focusedK), 'machine:park');
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(focusedK), 'machine:park', 'a redraw keeps the keyboard');
+  await p.key('Escape');
+  await p.until('cancelled', `${textK('machine:park')} === 'Park'`);
+  assert.deepEqual([F.asks.get(A), F.asks.get(B)], [[], []], 'nothing asked');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('machine:park')} === 'Park 2 projects?'`);
+  await p.key(' ');
+  await until(() => F.asks.get(A).length && F.asks.get(B).length, 'both asked');
+  assert.deepEqual([F.asks.get(A), F.asks.get(B)], [[{ mode: 'park', all: true }], [{ mode: 'park', all: true }]]);
+  // a new mix: reload, so nothing the hub just set colours it
+  F.setList([hello('alpha', A, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }), hello('beta', B)]);
+  await p.send('Page.reload');
+  await p.until('Mixed', `${m}?.querySelector('.k').textContent === 'Mixed: 1 running, 0 draining, 1 parked'`);
+  assert.equal(await p.ev(`${m}.querySelectorAll('[aria-pressed=true]').length`), 0, 'none pressed');
+  await p.ev(`${kBtn('machine:run')}.click()`);
+  await until(() => F.asks.get(A).length === 2, 'alpha asked to run');
+  assert.deepEqual(F.asks.get(A)[1], { mode: 'run', all: false }, 'Run asks the parked one only');
+  assert.equal(F.asks.get(B).length, 1, 'not the one running');
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  // a dashboard that fails: its name, then its error
+  await p.send('Page.reload');
+  await p.until('running', `${m}?.querySelector('[data-fleet=run]').getAttribute('aria-pressed') === 'true'`);
+  F.fail.set(B, 'no way');
+  await p.ev(`${kBtn('machine:drain')}.click()`);
+  await p.until('the error', `${m}?.querySelector('.err')?.textContent.startsWith('beta: no way') ?? false`);
+});
+
+test("a card's switch: Park confirms, busy, error; pressing the current mode does nothing", CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the switches', `!!${kBtn('/srv/alpha:park')}`);
+  assert.equal(await p.ev(`${cardOf('alpha')}.querySelector('.foot [data-pin=fleet] .fleet-switch[data-scope=row]') !== null`), true, 'the row switch in the foot, pinned');
+  await p.ev(`${kBtn('/srv/alpha:run')}.click()`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.deepEqual(F.asks.get(A), [], 'the pressed mode does nothing');
+  await focusK(p, '/srv/alpha:park');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('/srv/alpha:park')} === 'Confirm park'`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(focusedK), '/srv/alpha:park');
+  F.delay.set(A, 1000);
+  await p.key(' ');
+  await p.until('busy', `${cardOf('alpha')}.querySelector('.fleet-switch .msg')?.textContent === 'Parking…'`);
+  await until(() => F.asks.get(A).length === 1, 'alpha asked');
+  assert.deepEqual(F.asks.get(A), [{ mode: 'park', all: false }]);
+  await p.until('done', `!${cardOf('alpha')}.querySelector('.fleet-switch .msg')`);
+  F.fail.set(B, 'it broke');
+  await p.ev(`${kBtn('/srv/beta:drain')}.click()`);
+  await p.until('the error', `${cardOf('beta')}.querySelector('.fleet-switch .err')?.textContent === 'it broke'`);
+});
+
+test('a partly held card: Run asks "Run every goal?" in place, posts on the second press, Escape cancels', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } } }), hello('beta', B, { fleet: { mode: 'park', workers: 0, goals: { run: 0, drain: 1, park: 3 } }, pulse: { state: 'parked' } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the switches', `!!${kBtn('/srv/alpha:run')} && !!${kBtn('/srv/beta:run')}`);
+  for (const [name, port] of [['alpha', A], ['beta', B]]) {
+    const k = `/srv/${name}:run`;
+    await focusK(p, k);
+    await p.key(' ');
+    await p.until('the confirm', `${textK(k)} === 'Run every goal?' && ${cardOf(name)}.querySelector('.fleet-switch[data-confirming="1"]') !== null`);
+    assert.equal(await p.ev(focusedK), k);
+    assert.deepEqual(F.asks.get(port), [], 'nothing asked yet');
+    await p.key('Escape');
+    await p.until('cancelled', `${textK(k)} === 'Run'`);
+    await p.key(' ');
+    await p.until('the confirm', `${textK(k)} === 'Run every goal?'`);
+    await p.key(' ');
+    await until(() => F.asks.get(port).length === 1, `${name} asked`);
+    assert.deepEqual(F.asks.get(port), [{ mode: 'run', all: false }]);
+  }
+});
+
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
 // that page posts to itself: only for its parent, only when that parent is another origin (the hub,
 // by frame-ancestors), never in the viewer, never opened on its own.

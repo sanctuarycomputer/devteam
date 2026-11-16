@@ -856,10 +856,6 @@ function mosaic(days, commits = false) {
   box.setAttribute('aria-label', `Activity over the last ${Math.round(n / 7)} weeks: ${active} active days`);
   return box;
 }
-// A press that needs a second press to confirm (Park, Park all): remembered across redraws, 5 s.
-const confirming = new Map(); // key -> until
-const confirmed = (key) => { const until = confirming.get(key) ?? 0; if (until > Date.now()) { confirming.delete(key); return true; } confirming.set(key, Date.now() + 5000); setTimeout(paintOverview, 5100); paintOverview(); return false; };
-const isConfirming = (key) => (confirming.get(key) ?? 0) > Date.now();
 const modeOf = (it) => {
   const said = ['park', 'drain'].includes(it.x.fleet?.mode) ? it.x.fleet.mode : 'run';
   const set = fleetSet.get(it.x.root);
@@ -870,30 +866,58 @@ const modeOf = (it) => {
 };
 // what the Overview can steer: a dashboard answering, on a kit that sends a pulse
 const steerable = (it) => !it.goneAt && Boolean(it.x.pulse);
-function fleetControl(it) {
-  const root = it.x.root;
-  const ctl = el('div', 'ov-ctl');
-  const seg = el('div', 'seg');
-  seg.setAttribute('role', 'group');
-  seg.setAttribute('aria-label', `${it.x.name}: run, drain or park`);
-  const busy = fleetBusy.get(root);
-  const now = modeOf(it);
-  const opts = [['run', 'Run', 'Workers start and continue tickets'], ['drain', 'Drain', 'Workers finish what they have; nothing new starts'], ['park', 'Park', 'Every session stops where it is']];
-  for (const [mode, label, why] of opts) {
-    const key = `${root}:${mode}`;
-    const b = el('button', isConfirming(key) ? 'confirm' : '', isConfirming(key) ? 'Confirm park' : label);
-    b.dataset.k = key;
-    b.title = why;
-    b.setAttribute('aria-pressed', String(now === mode));
-    b.disabled = Boolean(busy?.asking) || now === mode;
-    b.onclick = () => { if (mode === 'park' && !confirmed(key)) return; setFleet([root], mode); };
-    seg.append(b);
+// The fleet switches (dashboard-shell@1's fleetSwitch, bound with bindFleetSwitch): one a card,
+// keyed by its root, and the machine's in the header, keyed 'machine'. What each is doing outlives
+// the redraws: a confirm waiting for its second press (5 s), what it is asking, its last error.
+const sw = new Map(); // key -> { confirming: 'park'|'run'|null, until, busy, error }
+function swGet(key) {
+  const s_ = sw.get(key) ?? { confirming: null, until: 0, busy: null, error: null };
+  return s_.confirming && s_.until <= Date.now() ? { ...s_, confirming: null } : s_;
+}
+function swSet(key, patch) {
+  const next = { ...swGet(key), ...patch };
+  if ('confirming' in patch && patch.confirming) { next.until = Date.now() + 5000; setTimeout(paintOverview, 5100); }
+  sw.set(key, next);
+  paintOverview();
+}
+// Run, Drain or Park for a card's project, or for every project the machine's press would change
+async function post(key, m) {
+  const can = [...items.values()].filter(steerable);
+  const roots = key === 'machine' ? can.filter((it) => (m === 'run' ? modeOf(it) !== 'run' : m === 'drain' ? modeOf(it) === 'run' : modeOf(it) !== 'park')).map((it) => it.x.root) : [key];
+  if (!roots.length) return;
+  const verb = { park: 'Parking', drain: 'Draining', run: 'Resuming' }[m];
+  swSet(key, { confirming: null, busy: key === 'machine' ? `${verb} ${plural(roots.length, 'project')}…` : `${verb}…`, error: null });
+  await setFleet(roots, m);
+  const failed = roots.find((r) => fleetBusy.get(r)?.error);
+  const why = failed ? fleetBusy.get(failed).error : null;
+  swSet(key, { busy: null, error: !failed ? null : key === 'machine' ? `${items.get(failed)?.x.name ?? failed}: ${why}` : why });
+}
+// a switch, drawn by the shell's builder; its buttons named for the redraw's focus, Run asking
+// first on a project partly held (it runs every goal)
+function switchEl(key, { scope, mode, counts, runConfirm = false }) {
+  const s_ = swGet(key);
+  const fb = scope === 'row' ? fleetBusy.get(key) : null;
+  const div = el('div', 'sw');
+  div.innerHTML = fleetSwitch({ scope, mode, counts, confirming: s_.confirming === 'park', busy: s_.busy ?? fb?.asking ?? null, error: s_.error ?? fb?.error ?? null });
+  for (const b of div.querySelectorAll('[data-fleet]')) b.dataset.k = `${key}:${b.dataset.fleet}`;
+  if (s_.confirming === 'run' && runConfirm) {
+    const b = div.querySelector('[data-fleet=run]');
+    b.textContent = 'Run every goal?';
+    b.classList.add('confirm');
+    b.dataset.confirm = '1';
+    div.querySelector('.fleet-switch').dataset.confirming = '1';
   }
-  pinOn(ctl, 'fleet', `Fleet: ${now}`);
-  ctl.append(seg);
-  if (busy?.asking) ctl.append(el('span', 'msg', busy.asking));
-  else if (busy?.error) ctl.append(el('span', 'msg err', busy.error));
-  return ctl;
+  bindFleetSwitch(div, {
+    onPress: (m) => {
+      if (m === 'park') return swSet(key, { confirming: 'park' });
+      if (m === 'run' && runConfirm) return swSet(key, { confirming: 'run' });
+      if (m === mode) return;
+      post(key, m);
+    },
+    onConfirm: (m) => { post(key, m); },
+    onCancel: () => swSet(key, { confirming: null }),
+  });
+  return div;
 }
 // a project's counts, as its tab and its Inbox stat show them: red questions, then its threads in
 // their most pressing state's colour (tabCounts); on the stat, 0 when there are none
@@ -1038,7 +1062,7 @@ function overviewCard(it, newest) {
     card.append(ul);
   }
   const foot = el('div', 'foot');
-  if (steerable(it)) foot.append(fleetControl(it));
+  if (steerable(it)) { const m = modeOf(it); foot.append(pinOn(switchEl(x.root, { scope: 'row', mode: m, runConfirm: Boolean(held) }), 'fleet', `Fleet: ${m}`)); }
   card.append(foot);
   return card;
 }
@@ -1117,15 +1141,14 @@ function paintOverview() {
   head.append(pinOn(el('h2', '', 'This machine'), 'headline'));
   const parts = !all.length ? ['No projects running'] : [plural(all.length, 'project'), ...[[count('building', 'moving', 'unknown'), 'moving'], [count('waiting'), 'waiting on you'], [count('blocked', 'stalled', 'gone'), 'blocked'], [count('parked'), 'parked']].filter(([n]) => n).map(([n, w]) => `${n} ${w}`)];
   head.append(pinOn(el('span', 'sum', parts.join(' · ')), 'summary'));
-  // every fleet at once: Park all (confirmed), and Resume all while any is held
+  // every fleet at once: the machine's switch, then the way into the hub's Settings
   const can = all.filter(steerable);
   const acts = el('div', 'acts');
-  const held_ = can.filter((it) => modeOf(it) !== 'run');
-  const running = can.filter((it) => modeOf(it) !== 'park');
-  const anyBusy = can.some((it) => fleetBusy.get(it.x.root)?.asking);
-  if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.dataset.k = 'all:run'; b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
-  if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.dataset.k = 'all:park'; b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
-  if (acts.childElementCount) head.append(acts);
+  if (can.length) { const mm = machineMode(can.map(modeOf)); acts.append(switchEl('machine', { scope: 'machine', mode: mm.mode, counts: mm.counts })); }
+  const set = el('a', 'set', 'Settings');
+  set.href = '#settings';
+  acts.append(set);
+  head.append(acts);
   // a card per project, two to a row
   const grid = el('div', 'g12');
   // one answer in the block that isn't shaped like a hello costs its own card, not the page
@@ -1142,7 +1165,7 @@ function paintOverview() {
 // layer's Shift+click and Pin take their clicks first, in its capture listener)
 ovBody.addEventListener('click', (e) => {
   const c = e.target.closest('.ov-card');
-  if (!c || !ovBody.contains(c) || e.target.closest('a, button, input, select, textarea, label, .fleet-switch, .ov-ctl, .menu-pop')) return;
+  if (!c || !ovBody.contains(c) || e.target.closest('a, button, input, select, textarea, label, .fleet-switch, .menu-pop')) return;
   if (items.has(c.dataset.root)) select(c.dataset.root);
 });
 // ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
