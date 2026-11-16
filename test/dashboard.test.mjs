@@ -3412,15 +3412,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
     await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals') && !!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you')`, 'where its subject is, and its mark');
     await click('[data-tl-new]');
-    await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
+    await soon(`${shown('tl-card')} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'a card in the panel');
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('What about onboarding?');
     await p.key('Enter', 8);
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
-    await soon(`/Open 2/.test(document.querySelector('#th-pane [data-thf="open"]').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
-    await click('[data-tl-close]');
+    await click('[data-tl-back]');
+    await soon(`/Open 2/.test(document.querySelector('#th-pane [data-thf="open"]')?.textContent)`, 'two open');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
@@ -3584,10 +3584,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
     await soon(`!document.getElementById('t-q-${Q}')?.querySelector('textarea, button[data-answer]') && /ship it/.test(document.getElementById('tl-c-turns').textContent)`, 'answered in the thread too');
     const X = F.owner(['thread', 'new', 'hello', '--title', `${H} hello`]).split('\n')[0];
-    await p.ev(`tlOpen('${X}')`);
-    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)}`, 'the title as written');
-    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!window.__xss`), false, 'no element made from the title');
-    await click('[data-tl-close]');
+    // no subject: it opens in the panel, through the route
+    await p.ev(`location.hash = '#goals?th=open&t=${X}'`);
+    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'the title as written');
+    assert.equal(await p.ev(`!!document.querySelector('#tl img, #threads img') || !!window.__xss`), false, 'no element made from the title');
+    await click('[data-tl-back]');
+    await p.ev(`location.hash = '#goals'`);
+    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
     F.owner(['thread', 'resolve', X]);
     await p.ev('tlRefresh()');
     await click(`[data-tl-pin="${T}"]`);

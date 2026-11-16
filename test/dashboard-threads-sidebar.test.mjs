@@ -24,17 +24,22 @@ const soonIn = (p, ms = 30000, server = null) => async (expr, what) => {
   }
 };
 // The page polls every 10 s; here every 300 ms. A test can hold back every /api/threads answer, read
-// now, until it lets each go (__threadsQueue, as dashboard.test.mjs's POLL_FAST has it).
+// now, until it lets each go (__threadsQueue, as dashboard.test.mjs's POLL_FAST has it). Each read of
+// the threads that has come back sets __threadsRead to when it did.
 const POLL_FAST = `(() => {
   const si = window.setInterval;
   window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
   const rf = window.fetch;
   window.fetch = async (u, o) => {
-    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, { ...o, signal: undefined }); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
+    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, { ...o, signal: undefined }); await new Promise((go) => window.__threadsQueue.push(go)); window.__threadsRead = Date.now(); return r; }
+    if (String(u).startsWith('/api/threads')) { const r = await rf(u, o); window.__threadsRead = Date.now(); return r; }
     return rf(u, o);
   };
 })()`;
 // Resolves after two frames: whatever an event handler set has been drawn.
+// True once an element's box reads the same twice running (soon's polls are 50 ms apart): after a resize the
+// page can still be settling, and a click at a box read a moment before lands beside it.
+const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
 const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))';
 const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
 const idOf = (out) => out.split('\n')[0].trim();
@@ -173,6 +178,7 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   // narrow: the panel covers the page, Shift over it shows no pin
   await size(720, 800);
   await soon("innerWidth === 720 && getComputedStyle(document.querySelector('.pagebar .tt')).visibility === 'visible'", 'at 720');
+  await soon(STEADY('.pagebar .tt'), 'the button at rest');
   await p.click('.pagebar .tt');
   await soon(`${isOpen} && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'open at 720');
   const mid = await p.ev("(() => { const r = document.getElementById('threads').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()");
@@ -203,6 +209,193 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   await soon(`!${isOpen}`, 'closed');
 });
 
+test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const F = threadsFixture('threads-open');
+  const G2 = F.sup(goalArgs('Self-serve billing', 2)).split('\n')[0].trim();
+  // A: no subject, with a question asked in it (in the panel)
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  const QA = F.sup(['thread', 'ask', A, '--question', 'Which colour?', '--goal', F.goal, '--stake', '1', '--urgency', '1']).split('\n')[0].trim();
+  // G: on the first goal (floating, beside its pin on Goals)
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  // X: on a ticket the project doesn't have (its subject gone: in the panel)
+  const X = idOf(F.owner(['thread', 'new', 'About a ticket', '--subject', JSON.stringify({ kind: 'item', ref: 'ticket:kit-gone' })]));
+  const { p, soon, size } = await open(t, F, '#overview?th=open');
+  const isOpen = "document.body.classList.contains('threads-open')";
+  const atRest = `${isOpen} && getComputedStyle(document.getElementById('threads')).transform === 'none'`;
+  const row = (id) => `document.querySelector('#tl-list [data-tl-open="${id}"]')`;
+  const card = "document.getElementById('tl-card')";
+  const inPanel = (id) => `(!!document.querySelector('#th-card-slot > #tl-card.in-panel') && !${card}.hidden && ${card}.dataset.key === '${id}')`;
+  const floating = (id) => `(${card}.parentElement?.id === 'tl' && !${card}.hidden && !${card}.classList.contains('in-panel') && ${card}.dataset.key === '${id}')`;
+  const seen = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const c = getComputedStyle(e); return c.display !== 'none' && c.visibility !== 'hidden' && e.getClientRects().length > 0; })()`;
+  const go = async (hash, what) => { await p.ev(`location.hash = ${JSON.stringify(hash)}; void 0`); await soon(`location.hash === ${JSON.stringify(hash)}`, what); };
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // A's row: the thread in the panel, one #tl-card moved into the slot
+  await soon(`${atRest} && !!${row(A)}`, 'the panel on the list');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`location.hash === '#overview?th=open&t=${A}' && ${inPanel(A)}`, 'A in the panel');
+  assert.match(await p.ev("document.getElementById('tl-c-turns').textContent"), /Here, I think\./, "A's turns");
+  assert.deepEqual(await p.ev(`[${seen('#tl-c-text')}, ${seen('#tl-c-title')}, ${seen('#tl-card [data-tl-close]')}, ${seen('#tl-c-acts [data-tl-resolve]')}, ${card}.getAttribute('role'), ${seen('#ask-threads')}, document.querySelectorAll('#tl-card').length]`),
+    [true, false, false, true, null, false, 1], 'the composer and Resolve shown; its title, its × and the terminal ask hidden; no role; one card');
+  await soon("document.activeElement?.matches('#th-pane [data-tl-back]')", 'the focus on the back arrow');
+  assert.equal(await p.ev("document.querySelector('#th-pane [data-tl-back]').getAttribute('aria-label')"), 'Back to the threads');
+  assert.match(await p.ev("document.getElementById('th-pane').textContent"), /Where do we start\?/, "the pane's row carries the title");
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && !!${row(A)} && document.activeElement === ${row(A)} && ${card}.hidden`, "the list, the focus on A's row");
+
+  // Review Focus 1: typing in the in-panel composer across the 10 s render and a threads poll
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`${inPanel(A)} && document.activeElement?.matches('[data-tl-back]')`, 'A again');
+  await p.ev("document.getElementById('tl-c-text').focus()");
+  await p.type('half a thought');
+  await p.ev("document.getElementById('tl-c-text').setSelectionRange(4, 4); window.__threadsRead = 0; void 0");
+  await pause(11000);
+  await soon('window.__threadsRead > 0', 'a read of the threads after the wait');
+  await p.ev(FRAMES);
+  assert.deepEqual(await p.ev("[document.getElementById('tl-c-text').value, document.getElementById('tl-c-text').selectionStart, document.activeElement?.id]"), ['half a thought', 4, 'tl-c-text'], 'words, caret and focus kept');
+  await p.ev("(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()");
+
+  // A's question in the panel: its words are its own, the Inbox page's copy untouched
+  const qBox = `#tl-c-turns textarea[data-q="${QA}"]`;
+  await soon(`!!document.querySelector('${qBox}') && !!document.querySelector('main textarea[data-q="${QA}"]')`, 'both copies of the question');
+  await p.ev(`document.querySelector('${qBox}').focus()`);
+  await p.type('panel words');
+  await p.ev('window.__threadsRead = 0; void 0');
+  await soon('window.__threadsRead > 0', 'a read of the threads');
+  await pause(700);
+  assert.deepEqual(await p.ev(`[document.querySelector('${qBox}').value, document.querySelector('main textarea[data-q="${QA}"]').value]`), ['panel words', ''], "the panel's words kept, the Inbox's copy unchanged");
+  await p.ev(`(() => { const b = document.querySelector('${qBox}'); b.value = ''; b.blur(); })()`);
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && !!${row(X)}`, 'the list');
+
+  // X (its subject gone) opens in the pane
+  await p.click(`#tl-list [data-tl-open="${X}"]`);
+  await soon(`location.hash === '#overview?th=open&t=${X}' && ${inPanel(X)}`, 'X in the panel');
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`location.hash === '#overview?th=open' && ${card}.hidden`, 'the list');
+
+  // on Goals, a Shift+click on the second goal: a floating draft beside it; sent, it is listed with its pin, clear of the panel
+  await go('#goals?th=open', 'Goals with the panel');
+  const g2 = `#goals-list [data-subject="goal:${G2}"] h4`;
+  await soon(`${atRest} && getComputedStyle(document.querySelector('.main')).marginRight === '380px' && !!document.querySelector('${g2}')`, 'Goals at rest beside the panel');
+  const at = await p.at(g2);
+  await p.hold('Shift', true);
+  await p.move(at.x, at.y, 8);
+  await soon("!document.getElementById('tl-cursor').hidden", 'the pin');
+  await p.clickAt(at.x, at.y, 8);
+  await p.hold('Shift', false);
+  await soon(`TL.draft?.subject?.ref === 'goal:${G2}' && ${card}.parentElement?.id === 'tl' && !${card}.hidden && document.activeElement?.id === 'tl-c-text'`, 'a floating draft beside it');
+  await p.type('hello');
+  await p.key('Enter', 8);
+  const N = await soon(`TL.threads.find((x) => x.subject?.ref === 'goal:${G2}' && !String(x.id).startsWith('pending-') && !x.pending)?.id`, 'the new thread read');
+  await soon(`!!${row(N)}?.querySelector('.pinchip') && ${row(N)}.querySelector('.pinchip').textContent === String(tPins(TL.threads).find((g) => g.ids.includes('${N}')).n) && /Goals/.test(${row(N)}.querySelector('.th-where').textContent)`, 'listed with its pin number');
+  await soon(`${floating(N)} && ${card}.getBoundingClientRect().right <= innerWidth - 380`, 'its card clear of the panel');
+  await p.click('#tl-card [data-tl-close]');
+  await soon(`${card}.hidden`, 'closed');
+
+  // from Overview, G's row: one entry to Goals with the panel kept, the goal in view, its card floating
+  await go('#overview?th=open', 'Overview with the panel');
+  await soon(`${atRest} && !!${row(G)}`, "G's row");
+  await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
+  const len = await p.ev('history.length');
+  await p.click(`#tl-list [data-tl-open="${G}"]`);
+  await soon(`location.hash === '#goals?th=open&t=${G}' && ${floating(G)}`, "G's card on Goals");
+  assert.equal(await p.ev('history.length'), len + 1, 'one entry');
+  await soon(`(() => { const r = document.querySelector('#goals-list [data-subject="goal:${F.goal}"]').getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; })()`, 'the goal in view');
+  await soon(`${row(G)}?.getAttribute('aria-current') === 'true' && document.activeElement === ${row(G)}`, "its row marked, the focus on it");
+  await p.ev('history.back()');
+  await soon(`location.hash === '#overview?th=open' && ${card}.hidden && ${isOpen}`, 'Back: Overview, the panel on the list');
+
+  // at 720x800 the row closes the panel and the card shows
+  await size(720, 800);
+  await soon(`innerWidth === 720 && ${atRest} && !!${row(G)}`, 'the panel at 720');
+  await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
+  await p.click(`#tl-list [data-tl-open="${G}"]`);
+  await soon(`location.hash === '#goals?t=${G}' && !${isOpen} && ${floating(G)} && getComputedStyle(${card}).display !== 'none'`, 'the panel closed, the card shown');
+  await go('#overview', 'Overview');
+  await soon(`${card}.hidden`, 'the card closed with its t');
+  await size(1440, 900);
+
+  // + : an in-panel draft, the URL unchanged; Send makes it its thread (a new entry), words typed after kept
+  await go('#overview?th=open', 'the panel');
+  await soon(`innerWidth === 1440 && ${atRest} && !!document.querySelector('#th-pane [data-thf="resolved"]')`, 'the list at 1440');
+  await soon(STEADY('#threads [data-tl-new]'), '+ at rest');
+  const resolvedN = Number(await p.ev("document.querySelector('#th-pane [data-thf=\"resolved\"] .n').textContent"));
+  await p.click('#threads [data-tl-new]');
+  await soon(`document.activeElement?.id === 'tl-c-text' && !!document.querySelector('#th-card-slot > #tl-card.in-panel') && !${card}.hidden`, 'an in-panel draft, focused');
+  assert.equal(await p.ev('location.hash'), '#overview?th=open', 'the URL unchanged');
+  assert.match(await p.ev("document.getElementById('th-pane').textContent"), /New thread/, 'its row says New thread');
+  const len2 = await p.ev('history.length');
+  await p.type('new one');
+  await p.key('Enter', 8);
+  await p.type('second');
+  const N2 = await soon("(/[?&]t=([^&]+)/.exec(location.hash) || [])[1]", 't added');
+  assert.equal(await p.ev('history.length'), len2 + 1, 'a new entry');
+  await p.ev(FRAMES);
+  assert.deepEqual(await p.ev("[document.activeElement?.id, document.getElementById('tl-c-text').value]"), ['tl-c-text', 'second'], 'the focus and the words kept');
+  assert.ok(await p.ev(inPanel(N2)), 'the thread in the panel');
+  await p.ev("(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()");
+  await soon(`TL.threads.some((x) => x.id === '${N2}' && !x.pending)`, 'the thread read');
+  await p.click('#tl-c-acts [data-tl-resolve]');
+  await soon("!!document.querySelector('#tl-card [data-tl-resolve-go]')", 'the resolve form');
+  await p.click('#tl-card [data-tl-resolve-go]');
+  await soon(`${inPanel(N2)} && !!document.querySelector('#tl-c-acts [data-tl-reopen]')`, 'resolved, still shown, with Reopen');
+  await p.ev('history.back()');
+  await soon(`location.hash === '#overview?th=open' && ${card}.hidden && Number(document.querySelector('#th-pane [data-thf="resolved"] .n')?.textContent) === ${resolvedN + 1}`, 'Back: the list, one more resolved');
+
+  // at 720x800 with the panel open, Pin closes the panel first and starts pin mode
+  await size(720, 800);
+  await soon(`innerWidth === 720 && ${atRest}`, 'the panel at 720');
+  await soon(STEADY('#tl-pinbtn'), 'Pin at rest');
+  await p.click('#tl-pinbtn');
+  await soon(`!${isOpen} && location.hash === '#overview' && TL.pin && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'true'`, 'the panel closed, pin mode on');
+  await p.key('Escape');
+  await soon('!TL.pin', 'pin mode off');
+  await size(1440, 900);
+
+  // a #talk/ link to A, on Board: the panel open on A over Board
+  await go('#board', 'Board');
+  await soon(`innerWidth === 1440 && !${isOpen}`, 'Board, the panel closed');
+  await p.ev(`location.hash = '#talk/${A}'; void 0`);
+  await soon(`${isOpen} && ${inPanel(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'the panel on A over Board');
+  await go('#overview', 'Overview');
+  await soon(`!${isOpen} && ${card}.hidden`, 'closed');
+
+  // a floating card with no box on screen: in the corner, beside the open panel; hidden while the panel covers the page
+  await go(`#overview?th=open&t=${G}`, 'G on Overview');
+  await soon(`${atRest} && ${floating(G)} && ${card}.classList.contains('in-dock')`, 'in the corner');
+  await soon(`(() => { const r = ${card}.getBoundingClientRect(); return r.right <= innerWidth - 380 - 16 + 0.5 && Math.abs(innerHeight - 16 - r.bottom) <= 1; })()`, 'beside the panel, 16px up');
+  assert.equal(await p.ev(`getComputedStyle(${card}).bottom`), '16px');
+  await size(720, 800);
+  await soon(`innerWidth === 720 && getComputedStyle(${card}).display === 'none'`, 'hidden at 720 under the open panel');
+  await size(1440, 900);
+  await soon(`innerWidth === 1440 && getComputedStyle(${card}).display !== 'none'`, 'shown again at 1440');
+
+  // Escape: on the panel list, the panel closes and the floating card stays
+  await soon(`${atRest} && !!${row(A)}`, 'the list');
+  await p.ev(`${row(A)}.focus()`);
+  await p.key('Escape');
+  await soon(`location.hash === '#overview?t=${G}' && !${isOpen} && ${floating(G)}`, 'the panel closed, the card kept');
+  // in an in-panel thread, Escape goes back to the list, the focus on its row
+  await go(`#overview?th=open&t=${A}`, 'A in the panel');
+  await soon(`${atRest} && ${inPanel(A)}`, 'A shown');
+  await p.ev("document.getElementById('tl-c-text').focus()");
+  await p.key('Escape');
+  await soon(`location.hash === '#overview?th=open' && document.activeElement === ${row(A)}`, "the list, the focus on A's row");
+  // in pin mode, with the focus in the panel, Escape ends pin mode first
+  await p.click('#tl-pinbtn');
+  await soon('TL.pin', 'pin mode');
+  await p.ev("document.getElementById('tl-pinbtn').focus()");
+  await p.key('Escape');
+  await soon('!TL.pin', 'pin mode off');
+  await p.ev(FRAMES);
+  assert.equal(await p.ev(`${isOpen} && location.hash === '#overview?th=open'`), true, 'the panel still open');
+  await p.click('#th-close');
+  await soon(`!${isOpen}`, 'closed');
+});
+
 test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) => {
   const F = threadsFixture('threads-counts');
   const C2 = idOf(F.owner(['thread', 'new', 'Ready one']));
@@ -225,10 +418,13 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   await p.type('my answer');
   await p.key('Enter', 8);
   await soon(`${n('.ok')} === '2'`, 'green 2 with the reads held');
-  assert.ok(await p.ev('window.__threadsQueue.length >= 0 && TL.pend.length > 0'), 'the send still pending on the page');
+  await soon('window.__threadsQueue.length > 0 && TL.pend.length > 0', 'a read of the threads held, the send still pending on the page');
+  assert.equal(await p.ev(n('.ok')), '2', 'still green 2: the count came before the read');
   await p.ev('const q = window.__threadsQueue; window.__threadsQueue = null; q.forEach((go) => go()); void 0');
   await until(() => JSON.parse(F.owner(['thread', 'show', Y1, '--json'])).turns.some((u) => u.text === 'my answer'), 'the turn on the server');
-  await p.ev('tlClose()');
+  // Y1 has no subject: it opened in the panel; the panel closed takes it away
+  await p.ev("location.hash = '#overview'");
+  await soon("!document.body.classList.contains('threads-open') && document.getElementById('tl-card').hidden", 'the panel and its thread closed');
 
   // the ready one accepted: blue, counting the your-move ones
   F.owner(['thread', 'resolve', C2, '--accept']);

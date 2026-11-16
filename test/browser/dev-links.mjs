@@ -559,7 +559,7 @@ async function threads({ DASH, pane }) {
   await browser.click(dash, dash, '.pagebar .tt');
   await browser.click(dash, dash, '#th-pane [data-thf="resolved"]');
   await until(() => browser.evalIn(dash, `!!document.querySelector('#tl-list [data-tl-open="${T}"]')`), 'listed under Resolved');
-  stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
+  stepOk('accepting the proposal resolved it: the pin went, and the panel lists it under Resolved');
   return G;
 }
 
