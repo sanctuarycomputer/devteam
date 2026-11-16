@@ -264,22 +264,40 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/box-tmux-menu
 #!/bin/sh
 c="$1"
 tab=$(printf '\t')
-set -- display-menu -c "$c" -T "#[align=centre] Box " -x 0 -y S \
+# the pane the menu's scroll items act on: the tapping client's own, never another client's
+pane=$(tmux display-message -p -c "$c" '#{pane_id}')
+# tmux draws no menu taller than the client and says nothing: fit the list to its height
+h=$(tmux display-message -p -c "$c" '#{client_height}')
+case "$h" in ''|*[!0-9]*) h=24 ;; esac
+room=$((h - 2 - 4))
+# the home session's windows first, then each project's agents under its name
+list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
+  awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
+# too many for the screen: the home session and each project's supervisor only
+count=$(printf '%s\n' "$list" | awk -F"$tab" -v OFS="$tab" '$4!="" && $3!="dashboard"{s[$1]=1; n++} END{for (k in s) if (k!="home") n++; print n+0}')
+only_sup=0
+[ "$count" -gt "$room" ] && only_sup=1
+set -- display-menu -c "$c" -t "$pane" -T "#[align=centre] Box " -x 0 -y S \
   "Scroll up a page" u "copy-mode -u" \
   "Scroll down a page" d "send-keys -X page-down" \
   "Stop scrolling" q "send-keys -X cancel" \
   ""
-# the home session's windows first, then each project's agents under its name
-list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
-  awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
+used=0
 last=""
 while IFS="$tab" read -r s _ n id; do
-  [ -n "$id" ] && [ "$n" != dashboard ] || continue
+  [ -n "$id" ] && [ -n "$n" ] && [ "$n" != dashboard ] || continue
+  [ "$only_sup" = 1 ] && [ "$s" != home ] && case "$n" in sup-*) ;; *) continue ;; esac
   case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
-  [ "$s" != "$last" ] && [ -n "$last" ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
+  need=1
+  [ "$s" != "$last" ] && [ -n "$last" ] && need=2
+  [ $((used + need)) -gt "$room" ] && break
+  [ "$need" = 2 ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
   last="$s"
-  # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it literally
-  set -- "$@" "$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34 | sed 's/#/##/g')" "" "switch-client -c '$c' -t '$id'"
+  used=$((used + need))
+  # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it
+  # literally; a leading - would make it a disabled item, so it gets a space first
+  label=$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-34 | sed 's/#/##/g; s/^-/ -/')
+  set -- "$@" "$label" "" "switch-client -c '$c' -t '$id'"
 done <<LIST
 $list
 LIST
@@ -378,14 +396,15 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devtea
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 # Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
 grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
-# a phone's screen: short tabs, and the ☰ menu (box-tmux-menu) to scroll and reach any window
+# a phone's screen (under 80 columns): short tabs and no status-right; every screen gets the ☰ menu
+# (box-tmux-menu) to scroll and reach any window
 grep -q MouseDown1StatusLeft .tmux.conf || cat >> .tmux.conf <<'TMUX'
 set -g status-left '#[reverse] ☰ #[default] '
 set -g status-left-length 5
-set -g status-right ''
 set -g window-status-separator ''
-set -g window-status-format ' #I #{=7:#{s/^sup-//:window_name}} '
-set -g window-status-current-format '#[reverse] #I #{=7:#{s/^sup-//:window_name}} #[default]'
+set -g status-right '#{?#{e|<:#{client_width},80},,"#{=21:pane_title}" %H:%M %d-%b-%y}'
+set -g window-status-format '#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }'
+set -g window-status-current-format '#[reverse]#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }#[default]'
 bind -n MouseDown1StatusLeft run-shell -b "box-tmux-menu '#{client_name}'"
 TMUX
 if [ ! -f .bashrc ]; then

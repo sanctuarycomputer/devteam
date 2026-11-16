@@ -1835,6 +1835,36 @@ test('dropped files: the root must be the gateway\'s own; old ones go, and only 
   } finally { await gw.close(); }
 });
 
+// A phone has no wheel: the terminal's page turns a one-finger swipe into the wheel events xterm
+// passes to tmux, which scrolls; a two-finger touch is left alone.
+test('the terminal\'s page turns a swipe into wheel events on the terminal', async () => {
+  const gw = await signedIn('touch-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    const all = [...tp.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    const touch = all.find((x) => x.includes("addEventListener('touchmove'"));
+    assert.ok(touch, 'the page carries the swipe handler');
+    const on = {};
+    const wheels = [];
+    const screen = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 600, bottom: 600 }), dispatchEvent: (e) => wheels.push(e) };
+    class WheelEvent { constructor(type, o) { Object.assign(this, o, { type }); } }
+    new Function('addEventListener', 'document', 'WheelEvent', touch)((ev, f) => { on[ev] = f; }, { querySelector: (q) => (q === '.xterm-screen' ? screen : null) }, WheelEvent);
+    let prevented = 0;
+    const touches = (...ys) => ({ touches: ys.map((clientY) => ({ clientY })), preventDefault: () => { prevented++; } });
+    on.touchstart(touches(400));
+    on.touchmove(touches(300));
+    assert.ok(wheels.length >= 5, `a 100px swipe up is several wheel steps (${wheels.length})`);
+    assert.ok(wheels.every((w) => w.type === 'wheel' && w.deltaY > 0), 'swiping up scrolls back');
+    assert.ok(prevented > 0, 'the page itself does not scroll');
+    on.touchend();
+    const before = wheels.length;
+    on.touchstart(touches(100, 200));
+    on.touchmove(touches(300, 400));
+    assert.equal(wheels.length, before, 'two fingers are left alone (pinch, select)');
+  } finally { await gw.close(); }
+});
+
 test('the terminal\'s page takes a drop, and pastes what a shell reads back unchanged', async () => {
   const hostile = ['/data/uploads/d/plain-name_1.png', '/a b/c', 'it\'s', '$(id)', '`id`', 'a"b', 'back\\slash', '-x', 'é'];
   for (const s of hostile) assert.equal(execFileSync('sh', ['-c', `printf %s ${G.shellQuote(s)}`], { encoding: 'utf8' }), s);
