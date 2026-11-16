@@ -18,9 +18,11 @@ test('status names the unmerged dependencies a waiting ticket waits on, and the 
     add('w-03-behind', ['w-01-first', 'w-02-merged']);
     add('w-04-alone');
     add('w-05-planned-ahead', ['w-01-first']);
+    add('w-06-asked', ['w-01-first']);
     F.g(['commit', '-qm', 'w-02-merged: done', '--allow-empty'], F.old);
     F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
-    for (const id of ['w-03-behind', 'w-04-alone']) { phaseLine(id, null, 'starting', 3 * H); phaseLine(id, 'starting', 'blocked', 2 * H); }
+    for (const id of ['w-03-behind', 'w-04-alone', 'w-06-asked']) { phaseLine(id, null, 'starting', 3 * H); phaseLine(id, 'starting', 'blocked', 2 * H); }
+    F.hand('w-06-asked', { id: `m-${stamp(new Date(Date.now() - 90 * 60000))}-w-06-asked`, type: 'message', kind: 'blocked', to: 'supervisor', text: 'which API version?' }, 90 * 60000, 'w-06-asked.jsonl');
     // planned ahead of an unmerged dependency, now asking for its approve-plan: the supervisor's word
     phaseLine('w-05-planned-ahead', null, 'starting', 3 * H); phaseLine('w-05-planned-ahead', 'starting', 'awaiting-word', 2 * H);
     const row = (id) => F.sup(['status']).split('\n').find((l) => new RegExp(`\\s${id}(\\s|$)`).test(l)) ?? '';
@@ -28,5 +30,12 @@ test('status names the unmerged dependencies a waiting ticket waits on, and the 
     assert.doesNotMatch(row('w-03-behind'), /SUPERVISOR|w-02-merged/);
     assert.match(row('w-04-alone'), /WAITING ON SUPERVISOR\]/, 'no dependency: the supervisor owes it');
     assert.match(row('w-05-planned-ahead'), /WAITING ON SUPERVISOR\]/, 'awaiting-word is the supervisor\'s word, dependencies or not');
+    // blocked behind an unmerged dependency, but it asked the supervisor something still unanswered
+    assert.match(row('w-06-asked'), /WAITING ON SUPERVISOR\]/, 'an unanswered message is the supervisor\'s, dependencies or not');
+    // the blocked finding: none for a ticket held only by dependencies; still one when the supervisor owes it
+    const blocked = JSON.parse(F.sup(['metrics', '--json'])).findings.filter((f) => f.kind === 'blocked').map((f) => f.subject);
+    assert.ok(!blocked.includes('w-03-behind'), 'held only by its dependency: not a stuck session');
+    assert.ok(blocked.includes('w-04-alone'), 'no dependency: the supervisor owes it');
+    assert.ok(blocked.includes('w-06-asked'), 'an unanswered message: the supervisor owes it');
   } finally { F.done(); }
 });
