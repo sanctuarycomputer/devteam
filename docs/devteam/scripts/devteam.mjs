@@ -1693,6 +1693,12 @@ function holdRefusal(h, cur, curBy, cls) {
     const p = cur.prior ?? { mode: 'run' };
     return h.mode === p.mode && (h.fleet ?? null) === (p.fleet ?? null) ? null : `undoing ${h.undoes} puts back ${p.mode}${p.fleet ? ` (${p.fleet})` : ''}, not ${h.mode}`;
   }
+  // A fleet op in force marked a move (fleet park|drain --move on a held fleet): the same hold with move
+  // added, nothing else changed. It only releases the claim, which unpark then park --move could too.
+  if (h.fleet && h.move && cur.fleet === h.fleet && !cur.move) {
+    const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+    return h.mode === cur.mode && same(h.prior, cur.prior) && (h.reason ?? null) === (cur.reason ?? null) ? null : 'marking a fleet op a move changes nothing else in its hold';
+  }
   // A fleet op only tightens (drain a running goal, park one not parked) and records what it replaced.
   if (h.fleet) {
     if (!['drain', 'park'].includes(h.mode)) return 'a fleet op drains or parks';
@@ -3673,10 +3679,14 @@ function cmdValidate() {
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
     if (isActive(t) && t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
+  // The feature this checkout's plan/<feature> branch plans, or re-plans; check-pr validates a plan
+  // PR's head detached, so it names the feature with --plan.
+  const branchFeature = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+  const planFeature = typeof flags.plan === 'string' ? flags.plan : branchFeature;
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
   {
-    const pf = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const pf = branchFeature;
     const b = pf ? idBlockFor(pf) : null;
     if (b) for (const t of ts.values()) {
       if (t.created_by !== `plan-${pf}`) continue;
@@ -3723,9 +3733,10 @@ function cmdValidate() {
         if (r.verdict && !r.shaValid) errors.push(`feature ${fid}: review ${r.file} needs the full 40-character SHA`);
       }
       // In strict mode (a plan PR) each verdict must also hold at this head: nothing but review
-      // records added since the commit it names (quality.md §3).
+      // records added since the commit it names (quality.md §3). A feature already landed on main is
+      // history, unless this branch is re-planning it: then its latest reviews are this PR's.
       const landed = mainRef() && git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${projectRel}/log/plan-${fid}.jsonl`]) !== null;
-      const head = flags.strict && commonDir && !landed ? resolveCommit('HEAD') : null;
+      const head = flags.strict && commonDir && (!landed || fid === planFeature) ? resolveCommit('HEAD') : null;
       const holds = (r) => !head || verdictHolds(r.sha, head, `${projectRel}/reviews/`);
       const lg = latestPerTrack(reviews, 'graph');
       if (!lg.length) sink.push(`feature ${fid}: no graph review in project/reviews/${fid}/graph-<n>.md`);
@@ -3926,6 +3937,13 @@ function fleetOpInForce() {
   const hs = holdableGoals().map((g) => g.hold).filter((h) => h?.fleet);
   return hs.sort((a, b) => b.fleet.localeCompare(a.fleet))[0] ?? null;
 }
+// How many holdable goals (Upkeep included) are running, draining and parked: a fleet whose goals
+// are mixed is partly held, which fleetMode alone (every goal one way, or null) can't say. hello
+// --json carries it and machine status reads it, so a fleet with most goals parked never looks fully running.
+const goalModeCounts = () => { const c = { run: 0, drain: 0, park: 0 }; for (const g of holdableGoals()) { const m = goalMode(g); if (m in c) c[m]++; } return c; };
+// The fleet is held to move to another machine: a fleet op made with --move, or an old drain (which
+// was only ever for a move). A pause (throttling, waiting on the owner) keeps the machine's claim.
+const movingFleet = () => !!draining() || !!fleetOpInForce()?.move;
 const newFleetId = () => { const at = nowIso(); return `f-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
 // A session's goals: a worker's ticket's; a planner's feature line's, its questions', or its launch's.
 function sessionGoals(name) {
@@ -4167,16 +4185,29 @@ function cmdWaves() {
   out(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}`);
 }
 
+// The sessions with a message to the supervisor still unanswered (a blocked or review request, a
+// question): their wait is the supervisor's, whatever else they also wait on.
+function idsAwaitingReply() {
+  const msgs = logObjects('message');
+  const replied = new Set([...msgs, ...logObjects('question')].map((m) => m.re).filter(Boolean));
+  return new Set(msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).flatMap((m) => [m.created_by, m.ticket]).filter(Boolean));
+}
 function cmdStatus() {
   const rows = deriveStatus();
   if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
+  const asking = idsAwaitingReply();
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     // held on purpose or stopped before it ran: never stale (a held one shows its hold, which wins)
     const held = r.held && r.phase !== 'done' && !r.merge_sha ? r.held : null;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
-    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
+    // a blocked ticket whose dependencies haven't merged, and that asked the supervisor nothing still
+    // unanswered, waits on them, not on the supervisor: say which. awaiting-word is always the
+    // supervisor's word to give (a plan-ahead ticket's approval too); so is an unanswered message.
+    const deps = r.phase === 'blocked' && !asking.has(r.id) ? (r.depends_on ?? []).filter((d) => !mergeShaFor(d)) : [];
+    const waitsOn = deps.length ? ` WAITING ON ${deps.join(', ')} TO MERGE` : ' WAITING ON SUPERVISOR';
+    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? waitsOn : '';
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
@@ -4900,7 +4931,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     // runner has neither the project's untracked files nor its toolchain).
     const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
-      execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
+      execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict', '--plan', feature], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
       fails.push(`validate --strict fails at ${sha.slice(0, 12)}:\n${(e.stdout ?? '').toString().trim()}`);
     } finally {
@@ -12449,6 +12480,9 @@ function collectMetrics(since) {
     if (p.phase === 'blocked' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `blocked for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
     // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
+    // blocked only on dependencies that haven't merged, with nothing asked of the supervisor: it
+    // waits as planned (status says WAITING ON <ids> TO MERGE), and isn't a stuck session
+    else if (p.phase === 'blocked' && (ts.get(id)?.depends_on ?? []).some((d) => !mergeShaFor(d)) && !openMsgs.some((m) => m.created_by === id || m.ticket === id)) {}
     else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
     // the first hour of the same: blocked with nothing holding it, raised at once
     else if (p.phase === 'blocked' && h < 1 && !H.has(id) && live(id)) add('medium', 'blocked-without-question', id, `blocked for ${Math.round(h * 60)} min with no open owner question naming it`, `if it waits on the owner, ask (ask --blocks ${id}); otherwise answer its blocked message so it can move`);
@@ -13365,7 +13399,9 @@ const ACCOUNTS_FRESH_MS = 10 * 60000;
 const RESTART_EVERY_MS = 10 * 60000;
 const RESTART_SPAN_MS = 6 * 3600000;
 const RESTART_MAX = 3;
-// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: one relaunch a tick.
+// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: each relaunch or
+// restart has up to 100 s, and another starts only with at least 30 s (100 s, after the first, for a
+// relaunch whose repo has a worktree_setup) of the tick's 110 left.
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
@@ -13632,9 +13668,10 @@ function restartPane(name, launch, budget) {
 }
 // A machine that died (a dead battery, a redeploy) took the tmux server with it, and what survives
 // on disk says which sessions to bring back: every worker and planner the kit launched, not held
-// or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
-// gone, or was created after that session's last launch: a window closed in a session older than
-// its launch was closed on purpose, and stays closed (the findings report it).
+// (its goal or the fleet parked, let go or drained, or its ticket's held field) or finished, whose
+// worktree still exists and whose window doesn't. Only when the tmux session is gone, or was
+// created after that session's last launch: a window closed in a session older than its launch was
+// closed on purpose, and stays closed (the findings report it). Work in progress comes back first.
 const LAUNCH_ACT = /^(?:made|resumed) (worker|planner) (\S+) in /;
 const SETTLED_MS = 2 * 60000;
 function lastLaunches() {
@@ -13669,7 +13706,41 @@ function sessionsToRelaunch(launchOf, held) {
     if (role === 'worker' ? !lastPhaseOf(name) || tickets().get(name)?.superseded_by : !planners().some((p) => p.feature === launch[1])) continue;
     found.push({ name, launch });
   }
-  return found;
+  // stable: within a tier, the launch order
+  const tier = new Map(found.map((f) => [f.name, relaunchTier(f.name, f.launch)]));
+  return found.sort((a, b) => tier.get(a.name) - tier.get(b.name));
+}
+// Which gone sessions come back first: 0, work in progress (uncommitted changes in its worktree, a
+// planner the owner waits on, a worker in build); 2, a worker idle on a dependency (blocked or
+// awaiting word, or its last message to the supervisor an unanswered blocked); 1, the rest.
+function relaunchTier(name, [role, id]) {
+  const wt = path.join(mainRoot, '.worktrees', name);
+  // a checkout of its own: a plain directory would read the enclosing repo's status
+  if (fs.existsSync(path.join(wt, '.git'))) {
+    const r = spawnSync('git', ['status', '--porcelain'], { cwd: wt, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
+    if (r.status === 0 && r.stdout.trim()) return 0;
+  }
+  if (role === 'planner') return plannerAwaitsOwner(name, id) ? 0 : 1;
+  const ph = lastPhaseOf(name)?.to;
+  if (ph === 'build') return 0;
+  if (['blocked', 'awaiting-word'].includes(ph)) return 2;
+  const said = logObjects('message').filter((m) => m.created_by === name).sort(byTime).pop();
+  return said?.kind === 'blocked' && !handledMessages().has(said.id) ? 2 : 1;
+}
+// An open question on the planner's goals or plan branch (its row's waiting_on_owner), or an open
+// thread on it: on its card (planner:<feature>) or on an artifact drawn in its worktree.
+function plannerAwaitsOwner(name, feature) {
+  if (planners().find((p) => p.feature === feature)?.waiting_on_owner?.length) return true;
+  const on = (s) => isObj(s) && ((s.kind === 'item' && [`planner:${feature}`, `planner:${name}`].includes(s.ref)) || (s.kind === 'artifact' && s.at === name));
+  return threadViews(readLog().objects).some((t) => t.status === 'open' && on(t.subject));
+}
+// Whether a resume of this session runs a worktree_setup: its repo's setting (a worker's ticket's
+// repo, a planner's home). repo() exits on a link it can't read, so that is checked first, and a
+// repo that can't be read counts as having one.
+function hasWorktreeSetup(name, [role]) {
+  const t = role === 'worker' ? tickets().get(name) : null;
+  if (t && !repoReadable(repoOfTicketLink(t))) return true;
+  return !!(t ? repoOfTicket(t) : repo('home')).settings.worktree_setup;
 }
 // Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
@@ -14031,10 +14102,10 @@ function recoverOne() {
   if (supervisorRunningNow(rec)) return { say: 'already running' };
   if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
   const s = loadSettings();
-  // A fleet whose hold can't be read is not started.
-  let held;
-  try { held = draining() ? 'park' : fleetMode(); } catch { return { say: 'NOT started (could not read whether its fleet is held)' }; }
-  if (held && !force) return { say: `left stopped (its fleet is held: ${held})` };
+  // A supervisor is never down by accident: a parked or drained fleet's comes back like any other.
+  // Under a pause it answers threads and questions and keeps the Inbox and log current; under a move
+  // its prompt has it carry the move on and start nothing. It is down only when someone exited it
+  // (recoverRefusal: stopped before the restart), as the last step of a move does (supervisor.md §12).
   if (!force && !flags['was-up']) {
     const no = recoverRefusal(rec);
     if (no) return { say: no };
@@ -15095,6 +15166,8 @@ function machineLine(last) {
 // What the last check-in saw, and what this one leaves for the next: kept at least DEVTEAM_STATUS_SECONDS
 // (20 minutes), so a run by hand in between doesn't hide a change from the next check-in.
 const statusLastFile = () => path.join(os.homedir(), '.devteam', `status-last-${HUB_PORT}`);
+// box-status's fleet= when goals are mixed: (2 of 11 goals running), with draining ones named too
+const partlyHeld = (f) => { const c = f?.goals; if (!c) return ''; const all = c.run + c.drain + c.park; if (!all || c.run === all || c.park === all || (c.drain === all)) return ''; return `(${c.run} of ${all} goals running${c.drain ? `, ${c.drain} draining` : ''})`; };
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -15151,7 +15224,7 @@ async function machineStatus() {
     const ks = harvestOf(root, notes);
     if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
     const sib = siblingOf(root, roots);
-    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
+    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'}${partlyHeld(hello.fleet)} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
   }
   // every agent's pane (never the owner's shell, never read): those stuck, and those that moved since the last reading
   const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_current_command}\t#{session_name}']) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
@@ -15193,10 +15266,12 @@ function cmdAccountsTick() {
   let supervisorRefused = null;
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
-  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
-  // one relaunch a tick, in what's left of it; the rest still report if they've given up
-  let tried = false;
-  const budget = () => { const left = RESTART_TICK_MS - (Date.now() - began); return tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left); };
+  // a ticket's held field holds it too: nothing runs for a held ticket
+  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || isHeld(tickets().get(name) ?? {}) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+  // one restart a tick (up to 3 relaunches, below), in what's left of it; the rest still report if
+  // they've given up. A budget of 0 only looks: claimRestart takes nothing from the record.
+  let tries = 0;
+  const budget = (cap = 1, need = RESTART_MIN_MS) => { const left = RESTART_TICK_MS - (Date.now() - began); return tries >= cap || left < need ? 0 : Math.min(RESTART_CHILD_MS, left); };
   if (bin) {
     const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
     const saySwitched = (e) => out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
@@ -15234,14 +15309,14 @@ function cmdAccountsTick() {
         const sup = restartSupervisor(budget());
         if (sup?.refused) { supervisorRefused = sup.refused; out(`the supervisor is stopped at a usage limit and was not restarted: ${sup.refused}`); }
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
-        else if (sup) tried = true;
+        else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
-          else if (did) tried = true;
+          else if (did) tries += 1;
           if (did === 'restarted') state.resumed.push(name);
         }
       }
@@ -15250,11 +15325,17 @@ function cmdAccountsTick() {
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
   // would only stop again, and it is still there for a later tick.
+  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), 1 at or over it. A
+  // resume runs its repo's worktree_setup before its window exists, and that can take most of the
+  // 100 s: a later relaunch whose repo has one starts only with the full 100 s left, so it is never
+  // cut short into a spent attempt; it waits for the next tick instead.
   if (!state.active_no_room) {
-    for (const { name, launch } of sessionsToRelaunch(launchOf, held)) {
-      const did = relaunchGone(name, launch, budget());
+    const gone = sessionsToRelaunch(launchOf, held);
+    const cap = gone.length ? (memoryFull() ? 1 : 3) : 0;
+    for (const { name, launch } of gone) {
+      const did = relaunchGone(name, launch, budget(cap, tries && tries < cap && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
-      else if (did) tried = true;
+      else if (did) tries += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
   }
@@ -15669,7 +15750,7 @@ async function cmdDashboard() {
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
-    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
+    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) && (b.move === undefined || typeof b.move === 'boolean') ? ['fleet', b.op, '--owner', ...(b.move === true && ['drain', 'park'].includes(b.op) ? ['--move'] : []), ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     // the card's Mark met: goal status met, which reads a repo or prod check again first
     'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
     // the owner's goal order (kit-234's drag to reorder): the goals named, first to last
@@ -16547,7 +16628,7 @@ async function cmdDashboard() {
 
 const PROMPTS = {
   supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
-  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Before asking for a spec or plan review, run the first-pass checks in worker.md §4 (every done-when shown by acceptance checks that fail when the behaviour breaks, a TL;DR that names the approach and matches the plan, a plan buildable as written). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
@@ -17610,14 +17691,17 @@ function cmdFleet() {
     if (inForce('drain')) fleetUndo('drain');
     return;
   }
-  die('usage: fleet drain | park [--reason "…"]   |   fleet undrain | unpark | resume   |   fleet status   |   fleet host [--release | --take]   (add --owner when the owner runs it)');
+  die('usage: fleet drain | park [--reason "…"] [--move]   |   fleet undrain | unpark | resume   |   fleet status   |   fleet host [--release | --take]   (add --owner when the owner runs it)');
 }
 // Set every goal's hold at once (Upkeep included), recording what each was. A fleet drain touches
 // only running goals and a fleet park only goals not already parked, so undoing it puts back
 // exactly what it changed.
 function fleetOp(mode) {
   const by = fleetWriter();
-  const reason = flagStr('reason') ?? (mode === 'park' ? 'moving the fleet to another machine' : 'finishing in-flight work, starting none');
+  // A park or drain is a pause unless it says it is a move (--move): throttling spend, waiting on
+  // the owner or on information, a quiet week. Only a move releases the host claim (hostClaimBody).
+  const move = !!flags.move;
+  const reason = flagStr('reason') ?? (mode === 'park' ? (move ? 'moving the fleet to another machine' : 'paused: nothing runs until the fleet is unparked') : (move ? 'finishing in-flight work, then moving the fleet to another machine' : 'finishing in-flight work, starting none'));
   const op = newFleetId();
   const host = os.hostname();
   const changed = [];
@@ -17626,14 +17710,34 @@ function fleetOp(mode) {
     if (mode === 'drain' ? m !== 'run' : m === 'park') continue;
     const cur = g.hold ?? { mode: 'run' };
     const prior = { mode: cur.mode, ...(cur.reason ? { reason: cur.reason } : {}), ...(cur.fleet ? { fleet: cur.fleet } : {}) };
-    writeHold(g, { mode, reason, fleet: op, host, prior }, by);
+    writeHold(g, { mode, reason, fleet: op, host, ...(move ? { move: true } : {}), prior }, by);
     changed.push(isUpkeep(g) ? 'upkeep' : g.id);
   }
+  // a pause already in force becomes a move with --move: mark each held goal's hold a move (same op),
+  // so the claim is released, without unparking and re-sending the park rulings
+  if (!changed.length && move) {
+    const marked = [];
+    for (const g of holdableGoals()) {
+      const m = goalMode(g);
+      // only a fleet op's hold can be marked (movingFleet reads fleetOpInForce): a goal's own hold,
+      // the owner's per-goal toggle, has no fleet op to carry the move
+      if (m === 'run' || !g.hold?.fleet || g.hold.move) continue;
+      writeHold(g, { ...g.hold, move: true }, by);
+      marked.push(isUpkeep(g) ? 'upkeep' : g.id);
+    }
+    const own = holdableGoals().filter((g) => goalMode(g) !== 'run' && !g.hold?.fleet).map((g) => (isUpkeep(g) ? 'upkeep' : g.id));
+    if (!marked.length && own.length && !fleetOpInForce()) return out(`nothing marked: ${own.length} goal(s) are held by their own holds, not a fleet op (${own.slice(0, 5).join(', ')}${own.length > 5 ? ', …' : ''}), so there is no fleet op to make a move. A move needs one: fleet unpark (or the owner lifts those holds), then fleet ${mode} --move`);
+    if (!marked.length) return out(`every goal is already held as a move; nothing to do`);
+    logCache = null;
+    if (by === 'supervisor') { hostCheck(); appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `marked the held fleet on ${host} a move: ${reason}`, refs: marked.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor'); }
+    out(`marked the held fleet a move: ${marked.length} goal(s), Upkeep included; this machine releases its claim`);
+    return out('then: fleet status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
+  }
   if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
-  // the claim says the fleet is held for a move, so the machine it moves to may take it over
+  // only a move releases the claim, so the machine it moves to may take it over; a pause keeps it here
   logCache = null;
   if (by === 'supervisor') hostCheck();
-  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})${move ? ' to move it' : ''}: ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
   out(`${mode === 'park' ? 'parked' : 'draining'} the fleet (${op}): ${changed.length} goal(s) set to ${mode}, Upkeep included; nothing new starts until fleet un${mode}`);
   if (mode === 'park') {
     if (by === 'supervisor') {
@@ -17642,10 +17746,10 @@ function fleetOp(mode) {
       out("next: once every session is parked, write your own handoff (what you were in the middle of, what you are waiting on, what you told the owner you would do, and anything from your agent's own memory the next supervisor needs: owner rules belong in knowledge) and push it: devteam.mjs handoff --supervisor, the note on stdin");
     } else nudgeSupervisor(`[devteam fleet park ${op} from owner] send the park rulings (goal park-sessions --all), write your handoff and land it, then fleet status`);
   } else {
-    out('in-flight work carries on and merges; fleet status says "ready to move" once nothing is running');
+    out(move ? 'in-flight work carries on and merges; fleet status says "ready to move" once nothing is running' : 'in-flight work carries on and merges; nothing new starts until fleet undrain');
     if (by !== 'supervisor') nudgeSupervisor(`[devteam fleet drain ${op} from owner] start nothing new; let in-flight work finish and merge`);
   }
-  out('then: fleet status until it says "ready to move" if you are moving machines (it lists what is left, and the new machine\'s checklist)');
+  out(move ? 'then: fleet status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)' : `a pause on this machine, not a move: it keeps supervising here. To move machines, fleet ${mode} --move (supervisor.md §12)`);
 }
 // Everything the move needs, checked, then the new machine's checklist. Writes nothing.
 // A whole fleet parked or drained can move: parked sessions carry their work in git with a handoff
@@ -17840,6 +17944,7 @@ function fleetStatus() {
   out(`open owner questions (they move with the log): ${openQs.length ? openQs.map((q) => `${q.id} "${q.question.slice(0, 60)}"`).join('; ') : 'none'}`);
   if (blockers.length) { out('\nleft to do:'); for (const b of blockers) out(`  - ${b}`); }
   if (warnings.length) { out('\nwarnings:'); for (const w of warnings) out(`  - ${w}`); }
+  if (fm && !movingFleet()) out(`\n${fm === 'park' ? 'parked' : 'draining'} as a pause on this machine, not a move (its claim stays here); to move it, ${op ? `fleet ${fm} --move` : `make it a fleet op first (fleet unpark, or the owner lifts each goal's own hold), then fleet ${fm} --move`}`);
   out(`\nready to move: ${ready ? 'yes' : 'no'}`);
   if (parity) out(`parity: ${parity.hash} (${parity.lines} log entries). fleet un${fm} on the new machine prints its own before it writes anything; they match when the move is 1:1. Stop now: anything you log from here on stays on this machine.`);
   out('\nnew-machine checklist:');
@@ -17951,7 +18056,9 @@ function drainedPreface() {
   const op = fleetOpInForce();
   const host = legacy ? drainHost(legacy) : op?.host ?? null;
   const what = legacy ? `drained by an old drain (${legacy.id}, ${legacy.created_at}: ${drainReason(legacy)})` : `${fm === 'park' ? 'parked' : 'draining'}${op ? ` (${op.fleet}${op.reason ? `: ${op.reason}` : ''})` : ' (every goal is held)'}`;
-  if (fm === 'drain' && !legacy) return `The fleet is ${what}${host ? `, set on ${host}` : ''}: every goal is draining, so in-flight work finishes and merges and nothing new starts. Carry on with what is running; fleet status says "ready to move" once nothing is. fleet undrain lifts it.`;
+  if (fm === 'drain' && !legacy) return `The fleet is ${what}${host ? `, set on ${host}` : ''}: every goal is draining, so in-flight work finishes and merges and nothing new starts. Carry on with what is running${movingFleet() ? '; fleet status says "ready to move" once nothing is' : ''}. fleet undrain lifts it.`;
+  // a pause, not a move: this machine keeps supervising, and nothing here is about moving
+  if (!legacy && !movingFleet()) return `The fleet is ${what}${host ? `, on ${host}` : ''}: a pause on this machine, not a move (the owner may be throttling spend or waiting on something). Start no ticket and no planner. Keep the loop: observe, answer threads and messages, keep questions and the log current. Resume when the owner unparks it, or says to (fleet unpark). Moving machines is fleet park --move (supervisor.md §12).`;
   // A checkout with no live log is a fresh clone; hostnames repeat (a default laptop name), so a
   // matching one counts only where run/log is still there.
   const liveHere = fs.existsSync(liveLogDir()) && fs.readdirSync(liveLogDir()).some((f) => f.endsWith('.jsonl'));
@@ -17971,7 +18078,7 @@ function drainedPreface() {
 // compare-and-swap push (--force-with-lease on that one ref) means two machines taking it at once
 // can't both win. The supervisor's start (prompt supervisor, recover, fleet unpark|undrain) and its
 // tick (observe-metrics, and wait every 10 minutes) read it, and refresh it while they hold it;
-// fleet park|drain marks it released for a move; fleet status and fleet host show it. Nothing else
+// fleet park|drain --move marks it released for a move (a pause keeps it); fleet status and fleet host show it. Nothing else
 // touches the network for it.
 //
 // The claim grants nothing. It is coordination between machines, not trust: no check anywhere reads
@@ -18066,7 +18173,7 @@ const minutesAgo = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? 'l
 // The refusal, in plain words: who holds the repo, when it was last seen, and how to hand over.
 function hostRefusal(claim, age) {
   const lapses = new Date(Date.parse(claim.at) + HOST_FRESH_MS).toISOString();
-  return `${claim.hostname} is supervising this repo (machine ${claim.machine}), last seen ${minutesAgo(age)} (${claim.at}). One machine supervises a repo at a time, so a second supervisor here would write over its work: this machine (${hostName()}) won't supervise it. To move it here: on ${claim.hostname}, park or drain the fleet (fleet park or fleet drain, supervisor.md §12), then start the supervisor here again. If ${claim.hostname} is gone (dead, or rebuilt without its disk), its claim lapses 45 minutes after it was last seen (at ${lapses}) and the next start anywhere takes over; the owner, sure it is gone, can free it now from any terminal of theirs (node docs/devteam/scripts/devteam.mjs fleet host --release), or take it for the machine they run that on (fleet host --take).`;
+  return `${claim.hostname} is supervising this repo (machine ${claim.machine}), last seen ${minutesAgo(age)} (${claim.at}). One machine supervises a repo at a time, so a second supervisor here would write over its work: this machine (${hostName()}) won't supervise it. To move it here: on ${claim.hostname}, mark the fleet a move (fleet park --move or fleet drain --move, supervisor.md §12; a park or drain without --move is a pause and keeps the claim there), then start the supervisor here again. If ${claim.hostname} is gone (dead, or rebuilt without its disk), its claim lapses 45 minutes after it was last seen (at ${lapses}) and the next start anywhere takes over; the owner, sure it is gone, can free it now from any terminal of theirs (node docs/devteam/scripts/devteam.mjs fleet host --release), or take it for the machine they run that on (fleet host --take).`;
 }
 // The claim this machine would write now: its heartbeat, and the fleet's hold as this log has it.
 function hostClaimBody(prev) {
@@ -18075,6 +18182,7 @@ function hostClaimBody(prev) {
   let fleet = null;
   try {
     fleet = draining() ? 'park' : fleetMode();
+    if (fleet && !movingFleet()) fleet = null;
     if (fleet === 'drain' && liveSessions().some((s) => lastPhaseOf(s.name)?.to !== 'parked')) fleet = null;
   } catch {}
   const me = hostMachineId();
@@ -20093,7 +20201,7 @@ function cmdHello() {
   const workers = ourWindows(tmuxSession()).length;
   // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
   // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, threads: threadCounts(), fleet: { mode: fleetMode() ?? 'run', workers, goals: goalModeCounts(), moving: movingFleet() }, ...(helloAlert() ? { alert: helloAlert() } : {}), pulse: helloPulse(), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   // and what its terminal is asking, if anything: the dashboard's card, and the hub's Overview
   if (flags.pane) {
     const a = supervisorAsk();
@@ -21070,9 +21178,9 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
-  fleet drain | park [--reason r] [--owner]   every goal at once (Upkeep included): drain sets running goals to drain, park sets every goal not parked to park; each records what it replaced
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
   handoff [--file f] [--supervisor]   a parked worker or planner: the note (stdin) as an empty "devteam handoff: <name>" commit on its branch, pushed; the supervisor: an annotated devteam-handoff/<op> tag on origin
+  fleet park|drain [--reason r] [--move] [--owner]   hold every goal: a pause on this machine, or with --move a move to another (it releases the host claim)
   fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist; which machine supervises the repo
   fleet host [--json] [--no-fetch] | --release | --take   which machine supervises this repo (origin's refs/devteam/host claim); the owner's, when that machine is gone: --release frees it for the next start anywhere, --take takes it for the machine it runs on. It grants nothing
   drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
@@ -21080,7 +21188,7 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
-  validate [--strict]            graph rules D1-D11, reviews, goals, log health
+  validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
