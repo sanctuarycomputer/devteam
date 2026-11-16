@@ -1474,8 +1474,8 @@ function effWhere(d) {
   const blocks = [
     ['flame', 'Tokens by phase', src.tokens_by_phase ? effBars(Object.fromEntries(Object.entries(src.tokens_by_phase).map(([k, t]) => [k, all(t)])), effM) : effNone()],
     ['clock', 'Hours by phase', effBars(src.phase_hours, (v) => `${v}h`)],
-    ['dollar-sign', 'USD by phase', effBars(src.phase_usd, (v) => `${v}`)],
-    ['cpu', 'USD by model', effBars(Object.fromEntries(Object.entries(src.by_model || {}).map(([k, v]) => [k, v?.usd])), (v) => `${v}`)],
+    ['dollar-sign', 'USD by phase', effBars(src.phase_usd, (v) => `$${v}`)],
+    ['cpu', 'USD by model', effBars(Object.fromEntries(Object.entries(src.by_model || {}).map(([k, v]) => [k, v?.usd])), (v) => `$${v}`)],
     ['coins', 'Tokens', effBars({ input: tk.input, output: tk.output, 'cache reads': tk.cache_read, 'cache writes': tk.cache_write }, effM)],
   ];
   const c = m.cost || {}, un = Object.keys(c.unpriced_models || {});
@@ -1498,9 +1498,117 @@ function renderEfficiency(d) {
   if (!el || el.__html === html) return;
   el.__html = html;
   el.innerHTML = html;
+  fitCharts();
 }
-// filled by the tasks that follow
-function effScore() { return effNone(); }
+// ---- the score charts (ported from the mock, project/artifacts/dashboard-cleanup at main): a null is a
+// gap, never a zero. kit-93 and kit-99 reuse them for Trust: a chart drawn at the width it gets is a
+// .fit[data-fit=<key>] element, drawn by FIT_DRAW[key](el, W) whenever its width changes ----
+const weekName = (i, n) => (i === n - 1 ? 'this week' : i === n - 2 ? 'last week' : `${n - 1 - i} weeks ago`);
+const effNum = (x) => typeof x === 'number' && Number.isFinite(x);
+// a path through the points, broken at every null: one M per run
+const gapPath = (v, X, Y) => { let d = '', run = false; v.forEach((x, i) => { if (!effNum(x)) { run = false; return; } d += `${run ? 'L' : 'M'}${X(i).toFixed(1)},${Y(x).toFixed(1)}`; run = true; }); return d; };
+// a sparkline over the weeks, scaled to its own non-null values
+function spark(v, label) {
+  const xs = v.filter(effNum), max = xs.length ? Math.max(...xs) : 1, min = xs.length ? Math.min(...xs) : 0;
+  const X = (i) => 1 + (i * 78) / Math.max(1, v.length - 1), Y = (x) => (max === min ? 9 : 17 - (15 * (x - min)) / (max - min));
+  return `<svg class="sparkline" viewBox="0 0 80 18" width="100%" height="24" preserveAspectRatio="none" role="img" aria-label="${esc(label)}, the last 12 weeks"><path fill="none" stroke="var(--series-1)" stroke-width="1.5" vector-effect="non-scaling-stroke" d="${gapPath(v, X, Y)}"/></svg>`;
+}
+// a score over the weeks, oldest first, on a fixed axis (0 to 100 by default): this week last and
+// marked, last week marked, its value labelled; a null week has no point and breaks the line
+function scoreLine(v, W = 560, { min = 0, max = 100 } = {}) {
+  const H = 120, P = 34, n = v.length, tw = n - 1, lw = n - 2;
+  const X = (i) => P + (i * (W - P - 6)) / Math.max(1, n - 1);
+  const Y = (x) => H - 18 - ((H - 30) * (Math.min(max, Math.max(min, x)) - min)) / (max - min || 1);
+  const ty = (y) => Math.min(H - 14, Math.max(10, y));
+  return `<svg class="score-line" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="The score over the last 12 weeks">
+    ${[min, (min + max) / 2, max].map((g) => `<line x1="${P}" x2="${W}" y1="${Y(g)}" y2="${Y(g)}" stroke="var(--line-2)"/><text x="0" y="${Y(g) + 3}" class="lc-t">${g}%</text>`).join('')}
+    <path class="line" fill="none" stroke="var(--series-1)" stroke-width="2" d="${gapPath(v, X, Y)}"/>
+    ${v.map((x, i) => (!effNum(x) ? '' : `<circle data-i="${i}"${i === tw ? ' class="tw"' : i === lw ? ' class="lw"' : ''} cx="${X(i).toFixed(1)}" cy="${Y(x).toFixed(1)}" r="${i >= lw ? 4 : 2.5}" fill="${i === lw ? 'var(--surface)' : 'var(--series-1)'}" stroke="var(--series-1)" stroke-width="${i === lw ? 2 : 0}"><title>${weekName(i, n)}: ${x}%</title></circle>`)).join('')}
+    ${effNum(v[lw]) ? `<text x="${X(lw) + 4}" y="${ty(Y(v[lw]) + 18)}" text-anchor="end" class="lc-t">last week ${v[lw]}%</text>` : ''}
+    ${effNum(v[tw]) ? `<text x="${X(tw)}" y="${ty(Y(v[tw]) - 9)}" text-anchor="end" class="lc-t lc-b">this week ${v[tw]}%</text>` : ''}
+    <text x="${P}" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>`;
+}
+// The charts drawn at the width they get, by key (a page adds its own); one ResizeObserver redraws a
+// chart whose width changed, a page coming into view or the window resized
+const FIT_DRAW = {};
+const FIT_SEEN = typeof ResizeObserver === 'function' ? new ResizeObserver(() => requestAnimationFrame(fitCharts)) : null;
+function fitCharts() {
+  for (const el of document.querySelectorAll('.fit[data-fit]')) {
+    if (!el.__fitSeen) { el.__fitSeen = true; FIT_SEEN?.observe(el); }
+    const W = Math.floor(el.clientWidth), draw = FIT_DRAW[el.dataset.fit];
+    if (!W || !draw || +el.dataset.w === W) continue;
+    el.dataset.w = W;
+    el.innerHTML = draw(el, W);
+  }
+}
+addEventListener('resize', () => requestAnimationFrame(fitCharts));
+
+// Spend by phase, each week: a stacked bar a week, one segment per phase key (the union of the weeks'
+// keys, the most spent over the 12 weeks at the bottom; ties by key); a week with no spend is an empty slot
+const EFF_COLORS = ['var(--series-1)', 'var(--amber)', 'var(--green)', 'var(--red)', 'color-mix(in srgb, var(--series-1) 50%, var(--surface))', 'color-mix(in srgb, var(--amber) 50%, var(--surface))', 'color-mix(in srgb, var(--green) 50%, var(--surface))', 'var(--muted)'];
+const effUsd = (x) => `$${+(+x).toFixed(2)}`;
+function effPhaseKeys(weeks) {
+  const tot = {};
+  for (const w of weeks) for (const [k, v] of Object.entries(w.usd_by_phase || {})) if (effNum(v)) tot[k] = (tot[k] ?? 0) + v;
+  return Object.keys(tot).sort((a, b) => tot[b] - tot[a] || (a < b ? -1 : 1));
+}
+function effPhaseBars(weeks, W = 560) {
+  const keys = effPhaseKeys(weeks), n = weeks.length;
+  const val = (w, k) => (effNum(w.usd_by_phase?.[k]) && w.usd_by_phase[k] > 0 ? w.usd_by_phase[k] : 0);
+  const tot = (w) => keys.reduce((a, k) => a + val(w, k), 0);
+  const max = Math.max(0, ...weeks.map(tot));
+  if (!keys.length || !max) return effNone();
+  const H = 96, slot = W / n, bw = Math.max(1, slot - 6), col = (j) => EFF_COLORS[j % EFF_COLORS.length];
+  return `<svg class="split" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Spend by phase, each week">${weeks.map((w, i) => {
+    let y = H - 14;
+    return keys.map((k, j) => { const v = val(w, k); if (!v) return ''; const h = ((H - 24) * v) / max; y -= h;
+      return `<rect data-i="${i}" x="${(i * slot).toFixed(1)}" y="${y.toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" style="fill:${col(j)}"><title>${esc(`${weekName(i, n)}: ${k} ${effUsd(v)} of ${effUsd(tot(w))}`)}</title></rect>`; }).join('');
+  }).join('')}<text x="0" y="${H - 2}" class="lc-t">12 weeks ago</text><text x="${W - 6}" y="${H - 2}" text-anchor="end" class="lc-t">this week</text></svg>
+    <div class="legend small">${keys.map((k, j) => `<span><i style="border-top-color:${col(j)}"></i>${esc(k)} ${effUsd(val(weeks[n - 1] || {}, k))}</span>`).join('')}</div>`;
+}
+let EFF_WEEKS = [];
+FIT_DRAW['eff-score'] = (el, W) => scoreLine(EFF_WEEKS.map((w) => w.score), W, { min: 0, max: 100 });
+FIT_DRAW['eff-phase'] = (el, W) => effPhaseBars(EFF_WEEKS, W);
+
+// The Score section: this and last week's score, the three parts with their ratios, the 12-week line,
+// a sparkline per measure, and spend by phase. A week with an escaped defect takes another week's
+// spend and time (kit-173), so its ratio would disagree with its part: it says so instead.
+const EFF_FIRST_TIP = 'first passes of each spec, plan, final and task review';
+function effScore(e) {
+  const weeks = Array.isArray(e.weeks) ? e.weeks : [], w = weeks[weeks.length - 1] || {}, best = e.best || {};
+  EFF_WEEKS = weeks;
+  const pc = (x) => (effNum(x) ? `${Math.round(100 * x)}%` : '–');
+  const sc = (x) => (effNum(x) ? `${x}%` : '–');
+  const usd = (x) => (effNum(x) ? `$${Math.round(x)}` : '–'), hr = (x) => (effNum(x) ? x.toFixed(1) : '–');
+  const held = 'held down: an escaped defect this week';
+  const ratio = (b, t, f, unit) => (effNum(b) && effNum(t) ? `best ${f(b)} ÷ this week ${f(t)} ${unit}` : '–');
+  const defect = w.escaped_defects > 0;
+  const parts = [
+    ['spend', pc(e.parts?.spend), defect ? held : ratio(best.usd_per_point, w.usd_per_point, usd, 'per point'), ''],
+    ['time', pc(e.parts?.time), defect ? held : ratio(best.hours_per_point, w.hours_per_point, hr, 'hours per point'), ''],
+    ['rework', pc(e.parts?.rework), 'reviews passed the first time', EFF_FIRST_TIP],
+  ];
+  const pair = (t, b, f) => (effNum(t) || effNum(b) ? `${f(t)} · best ${f(b)}` : '–');
+  const col = (k) => weeks.map((x) => (effNum(x[k]) ? x[k] : null));
+  const counts = [
+    ['$ per merged point', pair(w.usd_per_point, best.usd_per_point, usd), col('usd_per_point'), ''],
+    ['hours per merged point', pair(w.hours_per_point, best.hours_per_point, hr), col('hours_per_point'), ''],
+    ['reviews passed the first time', pc(w.first_pass), col('first_pass'), EFF_FIRST_TIP],
+    ['cache reads of input tokens', pc(w.cache_read_share), col('cache_read_share'), ''],
+    ['escaped defects', effNum(w.escaped_defects) ? `${w.escaped_defects} (target 0)` : '–', col('escaped_defects'), ''],
+    ['merged points', effNum(w.points) ? String(w.points) : '–', col('points'), ''],
+  ];
+  const tip = (t) => (t ? ` title="${esc(t)}"` : '');
+  // the charts' data in their attributes, so new data is a new card (renderEfficiency compares the html)
+  const sig = esc(JSON.stringify(weeks.map((x) => [x.score, x.usd_by_phase])));
+  return `<div class="score"><b>${sc(e.score?.this_week)}</b><span class="dim">last week ${sc(e.score?.last_week)}</span></div>
+    <p class="score-w">spend, time and rework against the best of the last 12 weeks, with quality held</p>
+    <div class="eff-parts">${parts.map(([k, v, s, t]) => `<div class="stat"${tip(t)}><span class="k">${k}</span><b>${v}</b><span class="dim">${esc(s)}</span></div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">The score, 12 weeks</h4><div class="fit" data-fit="eff-score" data-v="${sig}"></div></div>
+    <div class="score-mod score-counts">${counts.map(([k, v, s, t]) => `<div class="stat mini"${tip(t)}><span class="k">${esc(k)}</span><b>${esc(v)}</b>${spark(s, k)}</div>`).join('')}</div>
+    <div class="score-mod"><h4 class="props-h">Spend by phase, each week</h4><div class="fit" data-fit="eff-phase" data-v="${sig}"></div></div>`;
+}
+// filled by the task that follows
 function effWaste() { return effNone(); }
 function effSuggestions() { return effNone('None this week'); }
 
