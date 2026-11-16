@@ -271,6 +271,17 @@ try {
   .pagebar .tt .n.q { color: var(--red-fg); }
   main.page > section[data-page]:not(.on) { display: none; }
   main.page > section[data-page] { margin-top: 0; }
+  /* the Settings page (kit-87 spec §8), as the mock at main draws it */
+  .badge.amber { --c: var(--amber-fg); }
+  button.mini { height: 22px; padding: 0 8px; margin: 0; }
+  .stepper { display: inline-flex; align-items: center; } .seg .stepper { border-left: 1px solid var(--line-2); }
+  .stepper button { height: 28px; width: 28px; padding: 0; margin: 0; border: 0; border-radius: 0; }
+  .limit { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; } .limit .stepper b { min-width: 18px; text-align: center; display: inline-block; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .set-key { font: 11px var(--mono); color: var(--muted); margin-left: 6px; } .set-desc { font-size: 12px; margin: -2px 0 8px; max-width: var(--measure); } .set-row .r { text-align: right; max-width: 55%; min-width: 0; white-space: normal; overflow-wrap: anywhere; } .set-row .t { flex: 1 1 auto; min-width: 0; }
+  @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; text-align: left; white-space: normal; overflow-wrap: anywhere; margin-top: 2px; } .limit { justify-content: flex-start; } }
+  .ready-card { margin-bottom: 14px; }
+  .ready-card .rowline .t { white-space: normal; overflow-wrap: anywhere; }
+  .ready-card .rowline .r { color: var(--fg-2); flex: none; max-width: 60%; overflow-wrap: anywhere; }
   @media (max-width: 900px) {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
     /* the second row takes the spare height: with no content yet, the nav would get half of it */
@@ -1334,6 +1345,8 @@ function showPage(id, { keepScroll = false } = {}) {
     if (a.getAttribute('href') === `#${pg.id}`) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
   }
   if (changed && !keepScroll) window.scrollTo(0, 0);
+  // arriving on Settings: fetch from origin and check again (what Check did), and draw it
+  if (changed && pg.id === 'settings') { drawSettings(); loadFleet(true); }
   // the pins are drawn only for subjects on the page shown (one on a hidden page has no box)
   tlPins();
 }
@@ -2804,17 +2817,133 @@ bindFleetSwitch(document.querySelector('.app'), {
   onConfirm: () => { if ((DATA?.fleet || {}).mode === 'park') { FLEET_UI.confirming = false; drawFleet(); return; } postFleet('park'); },
   onCancel: () => { FLEET_UI.confirming = false; drawFleet(); },
 });
+// A fetch (fetchToo: fetch from origin and check again) asked for while a read is out is kept in
+// FLEET.wantFetch and runs once that read ends, so arriving on Settings always checks again.
 async function loadFleet(fetchToo = false) {
-  if (FLEET.busy) return;
+  if (FLEET.busy) { if (fetchToo) FLEET.wantFetch = true; return; }
   FLEET.busy = true;
   try { const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`); if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now() }; } catch {}
   const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
   FLEET.prevReady = !!FLEET.data?.ready;
   drawFleet();
+  drawSettings();
   // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
   if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? RAW);
+  if (FLEET.wantFetch) { FLEET.wantFetch = false; loadFleet(true); }
 }
+
+// ---- the Settings page (kit-87 spec §8): Ready to move? while the fleet is held, then every setting
+// under its group, as settings_all gives them; the two worker limits are set on their own rows ----
+const LIMITS = ['max_active_tickets', 'max_active_per_component'];
+// each limit's control across redraws: pending (undefined: as asked; null: No limit; else 1..20), busy, error
+const SET_UI = Object.fromEntries(LIMITS.map((k) => [k, { pending: undefined, busy: false, error: null }]));
+// the limits' names (the server's) for a server whose settings_all can't be read
+const LIMIT_NAMES = { max_active_tickets: 'Workers at once, in all', max_active_per_component: 'Workers at once, per component' };
+const SET_SAVED_LABEL = 'saved; applies once the supervisor lands it';
+const settingList = (a) => (a.length ? `${a.length}: ${a.join(', ')}` : 'none');
+// a setting's value in words, by what of it the server shows
+function settingText(e) {
+  if (e.withheld) return 'withheld';
+  if (e.shown === 'hidden') return 'not shown here';
+  if (e.shown === 'names') return settingList(Array.isArray(e.value) ? e.value.map(String) : []);
+  if (e.shown === 'count') return e.value ? String(e.value) : 'none';
+  const v = e.value;
+  if (v === null || v === undefined) return 'not set';
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (Array.isArray(v)) return settingList(v.map(String));
+  if (typeof v === 'object') return settingList(Object.keys(v));
+  return String(v);
+}
+// the value a limit stands at: the one the owner asked for while it waits to land, else the one in force
+function limitAsked(key) {
+  const a = DATA?.asked_settings?.[key];
+  if (!a) return null;
+  return a.act && String(a.label ?? '').toLowerCase() === SET_SAVED_LABEL ? a.asked ?? null : a.value ?? null;
+}
+const limitShown = (key) => (SET_UI[key].pending !== undefined ? SET_UI[key].pending : limitAsked(key));
+// the No limit / number control, then Save while the value differs from the one asked for (the mock's limitControl)
+function limitControl(key) {
+  const u = SET_UI[key], v = limitShown(key), dis = u.busy ? ' disabled' : '';
+  return `<span class="limit" data-limit="${key}"><span class="seg" role="group" aria-label="Limit"><button type="button" aria-pressed="${v === null}" data-limit-none="${key}"${dis}>No limit</button><span class="stepper"><button type="button" class="ghost" data-limit-step="-1" data-k="${key}" aria-label="Fewer"${dis}>−</button><b>${v ?? '–'}</b><button type="button" class="ghost" data-limit-step="1" data-k="${key}" aria-label="More"${dis}>+</button></span></span><button type="button" class="mini" data-limit-save="${key}"${v === limitAsked(key) ? ' hidden' : ''}${dis}>Save</button>${u.busy ? '<span class="msg dim">saving…</span>' : ''}${u.error ? `<span class="err" role="alert">${esc(u.error)}</span>` : ''}</span>`;
+}
+// One setting's row (data-setting: a thread target), and its description under it. A limit's
+// description adds the value in force and the server's label for it.
+function settingRow(e) {
+  const limit = LIMITS.includes(e.key);
+  const a = limit ? DATA?.asked_settings?.[e.key] : null;
+  const desc = [e.description ? esc(e.description) : '', a ? `in force: ${esc(a.shown ?? '')}` : '', a?.label ? `<span class="set-label">${esc(a.label)}</span>` : ''].filter(Boolean).join(' · ');
+  return `<div class="rowline set-row" data-setting="${esc(e.key)}"><span class="t"><span class="set-name">${esc(e.name)}</span> <code class="set-key">${esc(e.key)}</code></span><span class="r">${limit ? limitControl(e.key) : `<span class="set-val">${esc(settingText(e))}</span>`}${e.owner_only ? ` <span class="badge amber" title="${esc(e.owner_only)}">yours to change</span>` : ''}</span></div><div class="set-desc dim" data-setting-desc="${esc(e.key)}">${desc}</div>`;
+}
+// Ready to move? (fleet status), while the fleet is held: ready or not, each blocker, the parity; no button
+function readyCard(d) {
+  const f = d.fleet || {};
+  if (!(f.mode || f.op)) return '';
+  const st = FLEET.data;
+  const badge = st ? (st.ready ? '<span class="badge good">ready to move</span>' : '<span class="badge medium">not ready to move</span>') : '<span class="dim">checking…</span>';
+  const rows = [`<div class="rowline"><span class="t">Held</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
+  if (st) {
+    for (const b of st.blockers || []) rows.push(`<div class="rowline ready-blocker"><span class="dot amber"></span><span class="t">${linkify(b)}</span></div>`);
+    if (!(st.blockers || []).length) rows.push(`<div class="rowline"><span class="dot green"></span><span class="t">Nothing left before a move</span></div>`);
+    if (st.parity) rows.push(`<div class="rowline"><span class="t">Parity</span><span class="r"><code>${esc(st.parity.hash)}</code></span></div>`);
+  }
+  return `<div class="card ready-card"><div class="card-head"><i class="icon-truck" aria-hidden="true"></i>Ready to move?<span class="grow">${badge}</span></div><div class="rows">${rows.join('')}</div></div>`;
+}
+// The page, drawn from DATA on every render, on arriving and when fleet status comes back. It is
+// written only when its HTML changed, and focus goes back to the same control.
+let SET_DRAWN = null;
+function drawSettings() {
+  const el = $('settings');
+  if (!el || !DATA) return;
+  // a pending value back at the one asked for is no change
+  for (const k of LIMITS) if (SET_UI[k].pending !== undefined && !SET_UI[k].busy && SET_UI[k].pending === limitAsked(k)) SET_UI[k].pending = undefined;
+  const all = Array.isArray(DATA.settings_all) ? DATA.settings_all : null;
+  const groups = new Map();
+  for (const e of all ?? LIMITS.map((key) => ({ key, group: 'Fleet and capacity', name: LIMIT_NAMES[key], description: '', owner_only: null }))) {
+    if (!groups.has(e.group)) groups.set(e.group, []);
+    groups.get(e.group).push(e);
+  }
+  const html = readyCard(DATA)
+    + (all ? '' : `<p class="dim set-unread">The settings list can't be read from this dashboard's server; only the two worker limits show.</p>`)
+    + [...groups].map(([g, rows]) => `<div class="sec"><div class="lbl">${esc(g)}</div><div class="rows">${rows.map(settingRow).join('')}</div></div>`).join('');
+  if (html === SET_DRAWN) return;
+  const ae = document.activeElement;
+  const at = ae && el.contains(ae) ? (['limitNone', 'limitSave'].map((n) => ae.dataset[n] && `[data-${n === 'limitNone' ? 'limit-none' : 'limit-save'}="${CSS.escape(ae.dataset[n])}"]`).find(Boolean) || (ae.dataset.limitStep && `[data-limit-step="${CSS.escape(ae.dataset.limitStep)}"][data-k="${CSS.escape(ae.dataset.k)}"]`)) : null;
+  el.innerHTML = html;
+  SET_DRAWN = html;
+  if (at) el.querySelector(at)?.focus({ preventScroll: true });
+}
+// Save: POST /api/owner-setting { key, value } through press(). The overlay shows the value asked for
+// until the server's data says so; a refusal keeps the owner's value and shows the reason by the control.
+function saveLimit(key, value) {
+  const u = SET_UI[key];
+  const prevAct = DATA?.asked_settings?.[key]?.act ?? null;
+  return press(`owner-setting:${key}`, {
+    build: () => ({ action: 'owner-setting', body: { key, value } }),
+    overlay: {
+      data: (d) => ({ ...d, asked_settings: { ...(d.asked_settings || {}), [key]: { ...(d.asked_settings?.[key] || {}), asked: value, act: 'saving', label: 'Saved; applies once the supervisor lands it' } } }),
+      agrees: (raw) => { const a = raw.asked_settings?.[key]; return !!a && !!a.act && a.act !== prevAct && a.asked === value; },
+    },
+    apply: () => { Object.assign(u, { busy: true, error: null, pending: undefined }); redrawNow(); drawSettings(); },
+    onOk: () => { u.busy = false; drawSettings(); },
+    onError: (error) => { Object.assign(u, { busy: false, pending: value, error: `Not saved: ${error}` }); },
+    errId: `set-${key}`,
+  });
+}
+$('settings').addEventListener('click', (e) => {
+  if (e.shiftKey || TL.pin) return; // a thread's point, not a press
+  const b = e.target.closest('[data-limit-none], [data-limit-step], [data-limit-save]');
+  if (!b || b.disabled) return;
+  const key = b.dataset.limitNone ?? b.dataset.k ?? b.dataset.limitSave;
+  if (!LIMITS.includes(key)) return;
+  const u = SET_UI[key];
+  if (b.dataset.limitSave) { saveLimit(key, limitShown(key)); return; }
+  u.error = null;
+  if (b.dataset.limitNone) u.pending = null;
+  // 1 to 20; + or − from No limit gives 1
+  else u.pending = Math.min(20, Math.max(1, (limitShown(key) ?? 0) + Number(b.dataset.limitStep)));
+  drawSettings();
+});
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
@@ -4881,6 +5010,7 @@ function render(d) {
   renderMonitoring(d);
   // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Settings
   drawFleet();
+  drawSettings();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();

@@ -24,7 +24,9 @@ async function pagesFixture(t, name, { records = true } = {}) {
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
-  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE'].includes(k)) delete env[k];
+  // DEVTEAM_BOX stays (lib/kit.mjs sets it off): the kit under test sees no box, as on a CI runner, even
+  // on a machine that is one (its owner saves would otherwise need the box's gateway)
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
   for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, name);
   const ids = {};
@@ -600,4 +602,163 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
     const r = sw.getBoundingClientRect(), s = side.getBoundingClientRect();
     return getComputedStyle(sw).display !== 'none' && r.width > 0 && r.height > 0 && r.top >= s.top && r.bottom <= s.bottom && r.left >= -1 && r.right <= innerWidth + 1 && s.top < 200;
   })()`), 'the switch in the nav row at 390');
+});
+
+// The Settings page (spec §8, done-whens 3, 6 and 7): every setting under its group, the two worker
+// limits set on their own rows, and Ready to move? while the fleet is held.
+test('settings page', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const { p, port, size, load, onPage } = await pagesFixture(t, 'setpage', { records: false });
+  const api = async (route) => { const r = await fetch(`http://127.0.0.1:${port}${route}`); assert.equal(r.status, 200, route); return r.json(); };
+  await size(1440, 900);
+  await load('#overview');
+  // every GET's URL in window.__gets; every POST /api/owner-setting body in window.__sets; __holdFleet
+  // holds a plain GET /api/fleet until __releaseFleet()
+  await p.ev(`(() => {
+    window.__gets = []; window.__sets = []; window.__holdFleet = false;
+    const real = window.fetch;
+    window.fetch = (u, o) => {
+      const url = String(u);
+      if (!o || !o.method || o.method === 'GET') window.__gets.push(url);
+      if (url === '/api/owner-setting' && o && o.method === 'POST') window.__sets.push(JSON.parse(o.body));
+      if (url === '/api/fleet' && window.__holdFleet) return new Promise((res) => { window.__releaseFleet = () => res(real(u, o)); });
+      return real(u, o);
+    };
+  })()`);
+  const S = '#settings';
+  await p.ev("location.hash = '#settings'");
+  await onPage('settings');
+  await until(() => p.ev(`!!document.querySelector('${S} [data-setting="max_active_tickets"]')`), 'the Settings rows');
+  // arriving fetches and checks again, as Check did
+  await until(() => p.ev("window.__gets.includes('/api/fleet?fetch=1')"), 'a fetch=1 request on arriving');
+  // no Fleet section; the switch stays in the sidebar; no card while the fleet runs
+  assert.equal(await p.ev(`!!document.querySelector('${S} .fleet-switch')`), false, 'no fleet switch on Settings');
+  assert.equal(await p.ev(`[...document.querySelectorAll('${S} .sec .lbl')].some((l) => /^fleet$/i.test(l.textContent.trim()))`), false, 'no Fleet section');
+  assert.equal(await p.ev(`!!document.querySelector('${S} .ready-card')`), false, 'no Ready to move? while the fleet runs');
+
+  // every setting, once, under its group, in settings_all's order
+  const data = await api('/api/data');
+  const all = data.settings_all;
+  assert.ok(Array.isArray(all) && all.length > 20, 'settings_all served');
+  const list = (a) => (a.length ? `${a.length}: ${a.join(', ')}` : 'none');
+  const text = (e) => {
+    if (e.withheld) return 'withheld';
+    if (e.shown === 'hidden') return 'not shown here';
+    if (e.shown === 'names') return list(e.value || []);
+    if (e.shown === 'count') return e.value ? String(e.value) : 'none';
+    const v = e.value;
+    if (v === null || v === undefined) return 'not set';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
+    if (Array.isArray(v)) return list(v.map(String));
+    if (typeof v === 'object') return list(Object.keys(v));
+    return String(v);
+  };
+  const order = [...new Set(all.map((e) => e.group))].flatMap((g) => all.filter((e) => e.group === g));
+  const rows = JSON.parse(await p.ev(`JSON.stringify([...document.querySelectorAll('${S} .set-row')].map((r) => ({
+    key: r.dataset.setting, group: r.closest('.sec')?.querySelector('.lbl')?.textContent,
+    name: r.querySelector('.set-name')?.textContent, code: r.querySelector('code.set-key')?.textContent,
+    value: r.querySelector('.set-val')?.textContent ?? null, limit: !!r.querySelector('.r .limit'),
+    badge: [...r.querySelectorAll('.badge')].map((b) => [b.textContent, b.title]),
+    desc: r.nextElementSibling?.matches('.set-desc') ? r.nextElementSibling.textContent : null,
+    controls: r.querySelectorAll('input, button, select, textarea').length,
+  })))`));
+  assert.deepEqual(rows.map((r) => r.key), order.map((e) => e.key), 'every setting once, grouped, in order');
+  const LIMITS = ['max_active_tickets', 'max_active_per_component'];
+  for (const [i, e] of order.entries()) {
+    const r = rows[i];
+    assert.equal(r.group, e.group, `${e.key}: under its group`);
+    assert.equal(r.name, e.name, `${e.key}: its name`);
+    assert.equal(r.code, e.key, `${e.key}: its key in mono`);
+    assert.deepEqual(r.badge, e.owner_only ? [['yours to change', e.owner_only]] : [], `${e.key}: "yours to change" exactly on owner_only`);
+    assert.ok(r.desc !== null && r.desc.startsWith(e.description), `${e.key}: its description under it`);
+    if (LIMITS.includes(e.key)) { assert.ok(r.limit, `${e.key}: the control`); assert.equal(e.group, 'Fleet and capacity'); }
+    else { assert.equal(r.value, text(e), `${e.key}: its value`); assert.equal(r.controls, 0, `${e.key}: nothing editable`); }
+  }
+  assert.ok(LIMITS.every((k) => rows.some((r) => r.key === k)), 'both limits drawn');
+
+  // a limit: No limit, − and + around the number, Save hidden until changed
+  const L = `${S} [data-setting="max_active_tickets"]`;
+  const num = () => p.ev(`document.querySelector('${L} .stepper b').textContent`);
+  const saveShown = () => p.ev(`(() => { const b = document.querySelector('${L} [data-limit-save]'); return !!b && !b.hidden && getComputedStyle(b).display !== 'none'; })()`);
+  assert.ok(await p.ev(`!!document.querySelector('${L} .seg [data-limit-none]') && document.querySelector('${L} [data-limit-none]').textContent === 'No limit'`), 'a No limit button');
+  assert.ok(await p.ev(`!!document.querySelector('${L} [data-limit-step="-1"]') && !!document.querySelector('${L} [data-limit-step="1"]')`), '− and +');
+  assert.equal(await p.ev(`document.querySelector('${L} [data-limit-none]').getAttribute('aria-pressed')`), 'true', 'no limit by default');
+  assert.equal(await saveShown(), false, 'Save hidden until changed');
+  await p.click(`${L} [data-limit-step="1"]`);
+  await until(async () => (await num()) === '1', '+ from No limit gives 1');
+  assert.ok(await saveShown(), 'Save shown once changed');
+  await p.click(`${L} [data-limit-step="-1"]`);
+  assert.equal(await num(), '1', '− at 1 stays 1');
+  for (let i = 0; i < 21; i++) await p.click(`${L} [data-limit-step="1"]`);
+  await until(async () => (await num()) === '20', 'up to 20');
+  assert.equal(await num(), '20', '+ at 20 stays 20');
+  // back to 2, and a redraw keeps it and Save (review focus 2)
+  await p.click(`${L} [data-limit-none]`);
+  await p.click(`${L} [data-limit-step="1"]`);
+  await p.click(`${L} [data-limit-step="1"]`);
+  await until(async () => (await num()) === '2', 'the value 2');
+  await p.ev('render(DATA); render(DATA)');
+  assert.equal(await num(), '2', 'a redraw keeps the pressed value');
+  assert.ok(await saveShown(), 'a redraw keeps Save');
+
+  // Save posts { key, value }; the label is then the server's: saved, until the supervisor lands it
+  await p.click(`${L} [data-limit-save]`);
+  await until(() => p.ev('window.__sets.length === 1'), 'the save posted');
+  assert.deepEqual(JSON.parse(await p.ev('JSON.stringify(window.__sets)')), [{ key: 'max_active_tickets', value: 2 }]);
+  const label = () => p.ev(`document.querySelector('${S} [data-setting-desc="max_active_tickets"] .set-label')?.textContent ?? null`);
+  let asked = null;
+  await until(async () => { asked = (await api('/api/data')).asked_settings?.max_active_tickets; return asked && asked.asked === 2 && (await label()) === asked.label; }, "the row's label is the server's");
+  assert.match(asked.label, /^saved; applies once the supervisor lands it$/i, 'saved, not yet in force (main still has none)');
+  await until(async () => !(await saveShown()), 'Save hidden once saved');
+  assert.equal(await num(), '2', 'the control shows the value asked for');
+
+  // No limit, then Save: value null
+  await p.click(`${L} [data-limit-none]`);
+  await until(() => saveShown(), 'Save shown for No limit');
+  await p.click(`${L} [data-limit-save]`);
+  await until(() => p.ev('window.__sets.length === 2'), 'the No limit save posted');
+  assert.deepEqual(JSON.parse(await p.ev('JSON.stringify(window.__sets[1])')), { key: 'max_active_tickets', value: null });
+  await until(async () => !(await saveShown()) && await p.ev('SAVING === 0'), 'the No limit save done');
+
+  // a refusal: the server's reason by the control
+  await p.ev("saveLimit('max_active_tickets', 0)");
+  await until(() => p.ev(`/whole number from 1 to 20/.test(document.querySelector('${L} .err')?.textContent ?? '')`), "the server's reason by the control");
+  await until(() => p.ev('SAVING === 0'), 'the refusal done');
+  assert.match(await p.ev(`document.querySelector('${L} .err').textContent`), /whole number from 1 to 20/, 'a redraw keeps the reason');
+
+  // below 700px a row's value sits under its name
+  await size(690, 800);
+  await until(() => p.ev(`(() => { const r = document.querySelector('${S} [data-setting="tick_minutes"]'); const t = r.querySelector('.t').getBoundingClientRect(), v = r.querySelector('.r').getBoundingClientRect(); return v.top >= t.bottom - 1; })()`), 'the value box below the name box at 690');
+  await size(1440, 900);
+
+  // the fleet parked: Ready to move? with each blocker and no button, after a fetch=1 request
+  assert.equal(await p.ev("fetch('/api/fleet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'park' }) }).then((r) => r.status)"), 200, 'parked');
+  await until(() => p.ev("DATA.fleet && DATA.fleet.mode === 'park'"), 'the data says parked');
+  await p.ev("location.hash = '#overview'");
+  await onPage('overview');
+  // a loadFleet() already in flight on arrival: the fetch=1 request still follows
+  await p.ev("window.__gets = []; window.__holdFleet = true; window.__releaseFleet = null; FLEET.busy = false; void loadFleet(); true");
+  await until(() => p.ev("typeof window.__releaseFleet === 'function' && FLEET.busy"), 'a plain loadFleet in flight');
+  await p.ev("location.hash = '#settings'");
+  await onPage('settings');
+  await p.ev('window.__holdFleet = false; window.__releaseFleet()');
+  await until(() => p.ev("window.__gets.includes('/api/fleet?fetch=1')"), 'a fetch=1 request after the one in flight');
+  await until(() => p.ev(`!!document.querySelector('${S} .ready-card')`), 'Ready to move? while parked');
+  const st = await api('/api/fleet?fetch=1');
+  assert.ok(Array.isArray(st.blockers), 'fleet status');
+  await until(async () => {
+    const got = JSON.parse(await p.ev(`JSON.stringify([...document.querySelectorAll('${S} .ready-card .ready-blocker')].map((r) => r.textContent.trim()))`));
+    return JSON.stringify(got) === JSON.stringify(st.blockers);
+  }, 'each /api/fleet blocker as a row');
+  const card = await p.ev(`(() => { const c = document.querySelector('${S} .ready-card'); return { first: c === document.querySelector('${S}').firstElementChild, head: c.querySelector('.card-head').textContent, buttons: c.querySelectorAll('button').length }; })()`);
+  assert.ok(card.first, 'Ready to move? first');
+  assert.match(card.head, /Ready to move\?/);
+  assert.equal(card.buttons, 0, 'no button in Ready to move?');
+
+  // settings_all missing: the limits and the card still draw, and a line says the list can't be read
+  await p.ev('FLEET.busy = true; DATA = { ...DATA, settings_all: undefined }; render(DATA)');
+  assert.ok(await p.ev(`!!document.querySelector('${S} [data-setting="max_active_tickets"] .limit') && !!document.querySelector('${S} [data-setting="max_active_per_component"] .limit')`), 'the limits still draw');
+  assert.ok(await p.ev(`!!document.querySelector('${S} .ready-card')`), 'the card still draws');
+  assert.match(await p.ev(`document.querySelector('${S}').textContent`), /settings list can't be read/, "a line says the list can't be read");
+  assert.equal(await p.ev(`document.querySelectorAll('${S} .set-row').length`), 2, 'only the limits');
+  await p.ev('FLEET.busy = false');
 });
