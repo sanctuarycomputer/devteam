@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T4-1 | Suggestion | - | docs/devteam/process/supervisor.md:325 | "Up to 3 a tick" doesn't say that a supervisor or limit restart earlier in the same tick counts toward the 3 (spec Edge cases). The code shares `tries`, so after a limit restart a tick brings back at most 2, and that "first" relaunch already needs the full 100 s when its repo has a `worktree_setup`. The text is still true as an upper bound. Optional clarification. | |
+| T4-1 | Suggestion | - | docs/devteam/process/supervisor.md:325 | "Up to 3 a tick" doesn't say that a supervisor or limit restart earlier in the same tick counts toward the 3 (spec Edge cases). The code shares `tries`, so after a limit restart a tick brings back at most 2, and that "first" relaunch already needs the full 100 s when its repo has a `worktree_setup`. The text is still true as an upper bound. Optional clarification. | fixed: §11 says a restart earlier in the same tick counts toward the 3 |
 
 Checked against done_when 4 and the code at 42aaab8 / 1bfda34:
 - Order: work in progress first (uncommitted changes, a planner the owner waits on through a question or a thread on it or its mock, a worker in `build`), sessions idle on a dependency last (`blocked`/`awaiting-word`, or an unanswered `blocked` as its last message), launch order otherwise. This matches `relaunchTier`.
