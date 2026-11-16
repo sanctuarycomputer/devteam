@@ -2122,12 +2122,38 @@ async function previewSetup(name, { hubDelay = 0 } = {}) {
 }
 const NAV = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none', accept: 'text/html' };
 const previewRow = (name, port, over = {}) => ({ name, port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false, ...over });
+// A dev server on the port the OS gives it at listen, its own ready signal: a port probed, closed and
+// bound later (freePort) is anyone's in between, on a runner busy with other suites. Never a port the
+// gateway refuses a preview by design (its terminal's, the hub's, the instance block).
+async function devServer(srv, S, host = '127.0.0.1') {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, host, () => { srv.off('error', reject); resolve(); }); });
+    const { port } = srv.address();
+    if (port !== S.gw.ttydPort && port !== HUB && !(port >= P && port < P + 25)) return port;
+    await new Promise((r) => srv.close(r));
+  }
+  return assert.fail(`no dev port apart from the gateway's own (terminal ${S.gw.ttydPort}, hub ${HUB}, instances ${P}..${P + 24})`);
+}
+// What the ports were, and what the gateway's own page of previews says, for a failure's message.
+async function previewState(S, devPort) {
+  const dev = await S.gw.req('GET', '/dev/');
+  return `dev port ${devPort}, terminal ${S.gw.ttydPort}, hub ${HUB}, instances ${P}..${P + 24}; /dev/ ${dev.status}: ${dev.body.replace(/<(style|script)[\s\S]*?<\/\1>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1500)}`;
+}
+// One request through the relay, after the poll, before anything is asserted: the app's own answer,
+// first time, with no second read of the hub (the map is the poll's). Never retried: a 503 here is the
+// failure under test, reported with the ports and the gateway's view instead of a bare status.
+async function previewReady(S, name, devPort, body) {
+  const hits = S.hub.hits;
+  const r = await S.req(name, 'GET', '/', { headers: { 'sec-fetch-mode': 'cors', accept: '*/*' } });
+  if (r.status === 200 && r.body === body && S.hub.hits === hits) return;
+  assert.fail(`${name}: ${r.status} ${JSON.stringify(r.body.slice(0, 200))} (hub read ${S.hub.hits - hits} more times); ${await previewState(S, devPort)}`);
+}
 
 test('a preview: the owner reaches the dev server on its own name, with localhost headers and nothing of the owner\'s', async () => {
   const S = await previewSetup('preview-proxy');
   const { gw, hub, instance, req, origin } = S;
   const seen = [];
-  const devPort = await freePort();
+  let devPort = 0;
   const dev = http.createServer((q, s) => {
     seen.push({ url: q.url, method: q.method, h: q.headers });
     const headers = { 'content-type': 'text/plain', 'x-frame-options': 'DENY', 'content-security-policy': `default-src http://127.0.0.1:${devPort}; connect-src ws://localhost:${devPort}`, 'set-cookie': ['a=1; Domain=box.localhost', 'b=2', `devteam_session=evil`] };
@@ -2136,7 +2162,7 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     s.writeHead(q.url === '/go' ? 302 : 200, headers);
     s.end('hello from the app');
   });
-  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  devPort = await devServer(dev, S);
   // an upstream instance, for the header on /api/data
   const inst = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'application/json' }); s.end('{}'); });
   await new Promise((r) => inst.listen(P + 2, '127.0.0.1', r));
@@ -2151,7 +2177,9 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     assert.equal((await req('never-heard', 'GET', '/', { cookie: '', headers: NAV })).status, 302);
     assert.equal((await req('never-heard', 'GET', '/x.js', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
     assert.equal(hub.hits, before, 'no anonymous request makes the gateway poll the hub');
-    // with the session
+    // with the session, once the poll has the name
+    await gw.g.pollPush();
+    await previewReady(S, 'cool-tiger', devPort, 'hello from the app');
     r = await req('cool-tiger', 'GET', '/page', { headers: { ...NAV, referer: `${site}/old`, 'x-forwarded-host': 'evil' }, cookie: `${gw.jar()}; app=1` });
     assert.equal(r.status, 200, r.body);
     assert.equal(r.body, 'hello from the app');
@@ -2188,7 +2216,8 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     if (onV6) {
       hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort), previewRow('cool-owl', v6Port)])];
       await gw.g.pollPush();
-      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}');
+      await previewReady(S, 'cool-owl', v6Port, 'v6:');
+      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}', `the body survives the retry on ::1 (port ${v6Port})`);
       v6.close();
       hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
       await gw.g.pollPush();
@@ -2303,7 +2332,12 @@ function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc'
       parse();
     });
     const send = (text) => { const mask = Buffer.from([1, 2, 3, 4]); const body = Buffer.from(text).map((b, i) => b ^ mask[i % 4]); sock.write(Buffer.concat([Buffer.from([0x81, 0x80 | body.length]), mask, body])); };
-    const next = () => new Promise((r) => { if (frames.length) return r(frames.shift()); waiters.push(() => r(frames.shift())); });
+    // a frame, or a failure after 5 s: a relay that drops frames fails here rather than hanging the file
+    const next = () => new Promise((r, reject) => {
+      if (frames.length) return r(frames.shift());
+      const t = setTimeout(() => reject(new Error('no frame came back within 5 s')), 5000);
+      waiters.push(() => { clearTimeout(t); r(frames.shift()); });
+    });
     sock.on('error', () => {});
     sock.on('close', () => { if (!handshaken) resolve({ status: 0 }); });
   });
@@ -2314,7 +2348,6 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
   const { gw, hub, instance, origin, on } = S;
   const seen = [];
   let upstreamClosed = 0;
-  const devPort = await freePort();
   const dev = http.createServer((q, s) => s.end('page'));
   dev.on('upgrade', (q, sock) => {
     seen.push({ url: q.url, h: q.headers });
@@ -2331,14 +2364,16 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
       sock.write(Buffer.concat([Buffer.from([0x81, len]), body]));
     });
   });
-  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const devPort = await devServer(dev, S);
   const site = origin('cool-tiger');
   const sockets = [];
+  let c = null;
   try {
     hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
     await gw.g.pollPush();
-    let c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
-    assert.equal(c.status, 101);
+    await previewReady(S, 'cool-tiger', devPort, 'page');
+    c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    if (c.status !== 101) assert.fail(`the first socket: ${c.status}; ${await previewState(S, devPort)}`);
     assert.doesNotMatch(c.head, /bad=1|devteam_session/i, 'the handshake\'s cookies get the same rule as any response');
     assert.match(c.head, /set-cookie: ok=1/i, 'a host-only cookie still passes');
     assert.doesNotMatch(c.head, /max-age=9/, 'and so do the other headers');
@@ -2367,7 +2402,7 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
     assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 503, 'ambiguous');
     // the terminal's socket is unchanged
     assert.equal((await wsClient(gw.port, `term.${S.box}`, { origin: gw.term, path: '/nope', cookie: gw.jar() })).status, 404);
-  } finally { for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
+  } finally { c?.close?.(); for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
 });
 
 test('/dev/ lists every preview on the box with its state, for the owner only, as a document', async () => {

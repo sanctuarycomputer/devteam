@@ -2,7 +2,7 @@ name: test-stress
 # A stress run of the kit's tests, for the failures that come only sometimes or only under load.
 # Daily on main it runs the chrome and rest groups three times; dispatched (gh workflow run
 # test-stress.yml --ref <branch> -f files=... -f repeat=... -f load=... -f node=...) it runs chosen
-# files, with CPU burners beside them if asked, on the Node major chosen (24 by default, and on a
+# files, with CPU burners beside them if asked, on the Node major chosen (18 to 24; 24 by default, and on a
 # schedule). The job summary names every file that failed on any repeat.
 # Never a pull_request check and never required: test.yml is the gate.
 on:
@@ -28,7 +28,7 @@ on:
       node:
         description: 'Node major to run on'
         type: choice
-        options: ['20', '22', '24']
+        options: ['18', '20', '22', '24']
         required: false
         default: '24'
 permissions:
