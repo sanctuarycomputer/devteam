@@ -315,6 +315,33 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
   });
 
+  await t.test('a slide out that sends neither end nor cancel still hides: the safety net, well past --dur', async () => {
+    await openPeek(`#ticket/${T}`);
+    // the frame's transitionend and transitioncancel stopped on the way down (a background tab, a frame
+    // whose display changed): the slide runs, and nothing tells peekHide it is over
+    const r = await p.ev(`new Promise((resolve) => {
+      const d = document.getElementById('drawer'), swallowed = [];
+      const swallow = (e) => { if (e.target === d) { swallowed.push(e.type); e.stopPropagation(); } };
+      for (const ty of ['transitionend', 'transitioncancel']) addEventListener(ty, swallow, true);
+      let ran = false;
+      d.addEventListener('transitionrun', (e) => { if (e.propertyName === 'transform') ran = true; });
+      const dur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--dur'));
+      let mo = null;
+      const done = (hiddenAt) => { for (const ty of ['transitionend', 'transitioncancel']) removeEventListener(ty, swallow, true); mo.disconnect(); resolve({ ran, hiddenAt, swallowed, dur, open: document.body.classList.contains('peek-open') }); };
+      const t0 = performance.now();
+      mo = new MutationObserver(() => { if (d.hidden) done(Math.round(performance.now() - t0)); });
+      mo.observe(d, { attributes: true, attributeFilter: ['hidden'] });
+      setTimeout(() => done(null), 6000);
+      document.getElementById('drawer-close').click();
+    })`);
+    assert.ok(r.dur > 0, `a slide to run: --dur ${r.dur}`);
+    assert.ok(r.ran, `the slide out ran: ${JSON.stringify(r)}`);
+    assert.ok(r.hiddenAt !== null, `hidden, with no end or cancel: ${JSON.stringify(r)}`);
+    assert.ok(r.hiddenAt >= r.dur + 900, `by the safety net, not the slide's own timer: ${JSON.stringify(r)}`);
+    assert.equal(r.open, false, 'and closed');
+    await soon(isClosed, 'the scrim gone too');
+  });
+
   await t.test('a preview over the scrim: overlay-open shows it, and its close clears it', async () => {
     // a fresh visit (see the viewer cases below)
     await load('#library');
@@ -474,23 +501,30 @@ const peekDrawn = (kind) => `(() => { const b = document.getElementById('drawer-
 test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, ids, size, soon, load } = await peekPage(t, { fixture: peekFixture, name: 'peeks' });
   await size(1440, 900);
-  await load('#board');
+  // Chrome throttles a page's navigations: past 200 in 10 s it drops the rest until the window ends
+  // ("Throttling navigation to prevent the browser from hanging" on the console; the hash stays as it
+  // was). Each open() costs 4 (two hash sets, each stamped by the router's replaceState), so a walk
+  // over the kinds passes 200 in a few seconds. The page counts its own (the Navigation API's navigate
+  // fires for each), and past NAV_BUDGET the walk goes on from a fresh visit.
+  const NAV_BUDGET = 120;
+  const visit = async () => {
+    await load('#board');
+    await p.ev("window.__navn = 0; navigation.addEventListener('navigate', () => { window.__navn++; }); void 0");
+  };
+  await visit();
   const H = peekHashes(ids);
   const open = async (key) => {
     const [kind, hash] = H[key];
+    if (await p.ev('window.__navn') > NAV_BUDGET) await visit();
     await p.ev("location.hash = '#board'");
     await soon("!document.body.classList.contains('peek-open')", 'back on Board');
-    // set until it takes: Chrome drops a same-document navigation now and then when a page makes many
-    // in a row (the hash stays as it was, with no hashchange), which a walk over thirty peeks does
-    // in a row (the hash stays as it was, with no hashchange), which a walk over thirty peeks does. The
-    // re-sets are counted and told, so an app that put the hash back would show here, not pass unseen
+    // a hash that doesn't take is set again, but at most twice: more is the throttle back (or the app
+    // moving the hash), told with the count and the hashes read in between ('#board' alone: dropped)
     const h = JSON.stringify(hash);
-    // with the hashes read in between: '#board' alone is a dropped navigation; any other is the app moving it
-    const told = async () => `set again ${await p.ev('window.__resets')} times; read in between: ${JSON.stringify(await p.ev('[...window.__seen]'))}`;
+    const told = async () => `set again ${await p.ev('window.__resets')} times; read in between: ${JSON.stringify(await p.ev('[...window.__seen]'))}; ${await p.ev('window.__navn')} navigations on this visit`;
     await p.ev(`window.__resets = 0; window.__seen = new Set(); location.hash = ${h}; void 0`);
-    await soon(`location.hash === ${h} || (window.__resets++, window.__seen.add(location.hash), location.hash = ${h}, false)`, `${key}: its hash`).catch(async (e) => {
-      throw new Error(`${e.message} (${await told()})`);
-    });
+    await soon(`location.hash === ${h} || (window.__resets < 3 && (window.__resets++, window.__seen.add(location.hash), location.hash = ${h}), false) || window.__resets > 2`, `${key}: its hash`);
+    if (await p.ev(`location.hash !== ${h}`)) assert.fail(`${key}: ${hash} did not take: ${await told()}`);
     if (await p.ev('window.__resets') > 0) t.diagnostic(`${key}: ${hash} ${await told()}`);
     return kind;
   };

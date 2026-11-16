@@ -3783,13 +3783,16 @@ function peekHide({ now = false } = {}) {
   if (now || d.hidden || !(dur > 0)) return hide();
   const end = (e) => { if (e.target === d && e.propertyName === 'transform') hide(); };
   // a slide that never starts (nothing to move) ends at --dur; one that runs ends with its transitionend
-  // (or its cancel), however long a loaded machine takes to draw it: once it runs, the timer is off
+  // (or its cancel), however long a loaded machine takes to draw it: once it runs, that timer is off.
+  // One that runs and sends neither (a background tab, the frame's display changed) is caught by the
+  // safety net, well past --dur, which hides only a frame still closed: never shown-but-closed
   const timer = setTimeout(hide, dur + 100);
+  const net = setTimeout(() => { if (!body.classList.contains('peek-open')) hide(); }, dur + 1000);
   const run = (e) => { if (e.target === d && e.propertyName === 'transform') clearTimeout(timer); };
   d.addEventListener('transitionrun', run);
   d.addEventListener('transitionend', end);
   d.addEventListener('transitioncancel', end);
-  PEEK_HIDE = { cancel: () => { clearTimeout(timer); d.removeEventListener('transitionrun', run); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
+  PEEK_HIDE = { cancel: () => { clearTimeout(timer); clearTimeout(net); d.removeEventListener('transitionrun', run); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
 }
 // Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
 // over every entry this visit pushed down to the page, else in place to the page in its stamp.
