@@ -1,0 +1,6 @@
+# REPRO measured: {"x":600.640625,"y":450.234375,"answeredShown":true}
+# REPRO then: {"noteTop":306.734375,"noteBottom":363.734375,"atTheMeasuredPoint":"DETAILS Answered (1)\\n    Please tidy six records on the da"}
+      error: `timed out: the note focused; the server said, last: "devteam dashboard: port N is outside A-B: the hub won't list it\\ndevteam dashboard on http://127.0.0.1:34363\\n"`
+  error: '1 subtest failed'
+# pass 4
+# fail 2
