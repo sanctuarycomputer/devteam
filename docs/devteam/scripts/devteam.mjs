@@ -13365,7 +13365,9 @@ const ACCOUNTS_FRESH_MS = 10 * 60000;
 const RESTART_EVERY_MS = 10 * 60000;
 const RESTART_SPAN_MS = 6 * 3600000;
 const RESTART_MAX = 3;
-// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: one relaunch a tick.
+// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: each relaunch or
+// restart has up to 100 s, and another starts only with at least 30 s (100 s, after the first, for a
+// relaunch whose repo has a worktree_setup) of the tick's 110 left.
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
@@ -15295,7 +15297,7 @@ function cmdAccountsTick() {
     const gone = sessionsToRelaunch(launchOf, held);
     const cap = gone.length ? (memoryFull() ? 1 : 3) : 0;
     for (const { name, launch } of gone) {
-      const did = relaunchGone(name, launch, budget(cap, tries && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
+      const did = relaunchGone(name, launch, budget(cap, tries && tries < cap && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
       else if (did) tries += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }

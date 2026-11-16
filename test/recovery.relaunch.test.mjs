@@ -300,12 +300,13 @@ test('with a worktree_setup, a later relaunch in a tick starts only with the ful
     const sf = path.join(F.root, 'docs/devteam/project/settings.md');
     fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', '"worktree_setup": "sleep 12",\n  "project":'));
     execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
-    for (const id of ['demo-90-a', 'demo-91-b', 'demo-92-c']) F.worker(id);
+    // a planner's resume runs home's worktree_setup too
+    F.worker('demo-90-a'); F.planner('p91'); F.worker('demo-92-c');
     F.tick(UNDER(F));
     assert.deepEqual(F.state().relaunched, ['demo-90-a'], 'the first took 12 s of the 110: under 100 s left for another');
     const record = json(fs.readFileSync(F.restartsFile, 'utf8'));
-    assert.ok(!record['demo-91-b'] && !record['demo-92-c'], 'the others are not claimed');
+    assert.ok(!record['plan-p91'] && !record['demo-92-c'], 'the others are not claimed');
     F.tick(UNDER(F));
-    assert.deepEqual(F.state().relaunched, ['demo-91-b']);
+    assert.deepEqual(F.state().relaunched, ['plan-p91']);
   } finally { F.done(); }
 });
