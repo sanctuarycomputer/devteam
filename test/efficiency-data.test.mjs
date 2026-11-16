@@ -255,13 +255,13 @@ test('observe is the window\'s metrics plus tokens_by_phase', () => {
 
 // five merged S tickets at $1, and an open one (eff-20-k) at $20 whose recent spend mostly missed the
 // cache: metrics raises costly-ticket and low-cache-hit; an escaped defect raises a finding that
-// isn't about spend
+// isn't about spend. eff-20-n ($6) merged 11+ days ago, too old for costly-ticket on any weekday.
 function spendFindings(name) {
   const E = effFixture(name);
   for (const i of [0, 1, 2, 3, 4]) E.shipped(`eff-20-m${i}`, 9, i, { spends: [{ usd: 1 }] });
   E.addTicket('eff-20-k'); E.phase('eff-20-k', 'build', Date.now() - 3 * HOUR);
   E.spend('eff-20-k', { usd: 20, input: 4e6, cache_read: 2e6, atMs: Date.now() - HOUR });
-  E.shipped('eff-20-n', 10, 0, { spends: [{ usd: 6 }] });
+  E.shipped('eff-20-n', 9, 13, { spends: [{ usd: 6 }] }); // after the trials' since, and over 7 days old any weekday, so not costly
   obs(E, { subject: 'eff', kind: 'escaped-defect', detail: 'found after merge', severity: 3 }, E.mergeAt(10, 5));
   E.land();
   return E;
