@@ -1218,16 +1218,19 @@ function setRow(name, key, value, desc, yours = false) {
   row.append(t, r);
   return [row, el('div', 'set-desc', desc)];
 }
+let testBtn = null; // the Test row's button, made once
 let pushSub = null; // this device's push subscription, on a box, once notifications are on
 const notifyOn = () => (box?.push ? Boolean(pushSub) : NOTIFY_OK && Notification.permission === 'granted');
 function paintSettings() {
   if (selected !== SETTINGS) return;
   const page = $('hub-settings');
+  // read before anything moves: building the rows moves the Notify control out of its old one
+  const had = page.contains(document.activeElement) ? document.activeElement : null;
   const head = el('div', 'ov-head');
   head.append(el('h2', '', 'Settings'));
   const sec = (name, rows) => { const d = el('div', 'sec'); const r = el('div', 'rows'); for (const x of rows) r.append(...x); d.append(el('div', 'lbl', name), r); return d; };
   const text = (t, cls = '') => el('span', cls, t);
-  const link = (href, words) => { const a = document.createElement('a'); a.href = href; a.textContent = words; return a; };
+  const link = (href, words) => { const a = document.createElement('a'); a.href = href; a.textContent = words; a.dataset.k = `settings:${words}`; return a; };
   // This machine: on a box, the box line's parts; on a laptop, which kit serves this hub
   const parts = boxLine(box?.image ?? null, hubSeen);
   const machine = [];
@@ -1245,22 +1248,26 @@ function paintSettings() {
   // Notifications: the control itself (one node, kept: notifyControl writes into it), then a test once they're on
   const notes = [setRow('New Inbox items', 'on this device', $('notify'), 'a notification on this device when any project asks you something', true)];
   if (notifyOn()) {
-    const b = el('button', '', 'Send a test');
-    b.type = 'button';
-    b.dataset.k = 'settings:test';
-    b.onclick = async () => {
-      b.disabled = true;
-      try {
-        if (box?.push) {
-          const r = await fetch('push/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: pushSub.endpoint }) });
-          b.textContent = r.ok ? 'Test sent' : `Test failed: ${(await r.json()).error}`;
-        } else {
-          new Notification('devteam', { body: 'A test notification from this hub' });
-          b.textContent = 'Test sent';
-        }
-      } catch (e) { b.textContent = `Test failed: ${e.message}`; }
-      setTimeout(() => { b.textContent = 'Send a test'; b.disabled = false; }, 4000);
-    };
+    // one button, kept: its answer ("Test sent") and its focus outlive the 10 s repaint
+    if (!testBtn) {
+      const b = testBtn = el('button', '', 'Send a test');
+      b.type = 'button';
+      b.dataset.k = 'settings:test';
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          if (box?.push) {
+            const r = await fetch('push/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: pushSub.endpoint }) });
+            b.textContent = r.ok ? 'Test sent' : `Test failed: ${(await r.json()).error}`;
+          } else {
+            new Notification('devteam', { body: 'A test notification from this hub' });
+            b.textContent = 'Test sent';
+          }
+        } catch (e) { b.textContent = `Test failed: ${e.message}`; }
+        setTimeout(() => { b.textContent = 'Send a test'; b.disabled = false; }, 4000);
+      };
+    }
+    const b = testBtn;
     notes.push(setRow('Test', 'on this device', b, 'send one now, to see that this device gets them'));
   }
   groups.push(sec('Notifications', notes));
@@ -1268,11 +1275,13 @@ function paintSettings() {
     const a = document.createElement('a');
     a.href = box.previews;
     a.textContent = 'Previews';
+    a.dataset.k = 'settings:Previews';
     groups.push(sec('Serving', [setRow('Previews', 'previews', a, 'the live previews this box runs for drafts')]));
   }
-  const at = page.contains(document.activeElement) ? document.activeElement.dataset.k : null;
+  // whatever had the keyboard keeps it: the same element when it is kept (the Notify control, the
+  // Test button), else the new one with its data-k
   page.replaceChildren(head, ...groups);
-  if (at) page.querySelector(`[data-k="${CSS.escape(at)}"]`)?.focus({ preventScroll: true });
+  if (had && had !== document.activeElement) (had.isConnected ? had : had.dataset.k ? page.querySelector(`[data-k="${CSS.escape(had.dataset.k)}"]`) : null)?.focus({ preventScroll: true });
 }
 // ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
 // The dock, the pin and the card of a project's dashboard (index.html, "threads"), ported: here every

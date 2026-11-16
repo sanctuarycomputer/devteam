@@ -735,6 +735,7 @@ test('Settings on a laptop: from the link only, This machine and Notifications',
   assert.equal(await p.ev(`!document.querySelector('header #notify, header #box-links')`), true, 'nothing of it left in the header');
   assert.equal(await p.ev(`!!document.querySelector('.ov-box') || /Box v/.test(document.getElementById('ov-body').textContent)`), false, 'no box line on the Overview');
   // a cold load at #settings, with a project named settings: Settings shows, the project's key is its own
+  await p.send('Page.navigate', { url: 'about:blank' });
   await p.send('Page.navigate', { url: F.url('/#settings') });
   await p.until('Settings again', `!document.getElementById('settings-view')?.hidden && document.querySelectorAll('#tabs [role=tab]').length >= 2`);
   await p.ev(`${tabOf('settings')}.click()`);
@@ -745,6 +746,35 @@ test('Settings on a laptop: from the link only, This machine and Notifications',
   assert.equal(await p.ev(`!document.getElementById('settings-view').hidden && location.hash === '#settings'`), true, 'a draw keeps it');
   await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview').click()`);
   await p.until('the Overview', `!document.getElementById('overview').hidden && document.getElementById('settings-view').hidden`);
+});
+
+test('Settings: the Notify button is the live control, the Test row once notifications are on, focus kept across the repaint', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A] });
+  F.setList([hello('alpha', A)]);
+  const p = await hubPage(t, F.url('/#settings'));
+  await p.until('Settings', `!document.getElementById('settings-view').hidden && document.querySelectorAll('#hub-settings .set-row').length >= 2`);
+  const notify = `[...document.querySelectorAll('#hub-settings .set-row')].find((r) => r.querySelector('.t').firstChild.textContent.trim() === 'New Inbox items').querySelector('.r button')`;
+  assert.equal(await p.ev(`${notify}?.textContent ?? null`), 'Notify me of new Inbox items');
+  assert.equal(await p.ev(setRow('Test')), null, 'no Test row while notifications are off');
+  // the button's focus outlives a repaint
+  await p.ev(`${notify}.focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement === ${notify}`), true, 'focus kept');
+  // the row's button is the page's own control: pressed, with notifications allowed, it turns them on
+  await p.send('Browser.grantPermissions', { origin: F.url('/').replace(/\/$/, ''), permissions: ['notifications'] });
+  await p.ev(`${notify}.click()`);
+  await p.until('on', `${setRow('New Inbox items')}?.value === 'Notifying you of new Inbox items'`);
+  const test = await p.ev(setRow('Test'));
+  assert.deepEqual([test?.key, test?.desc], ['on this device', 'send one now, to see that this device gets them']);
+  const send = `[...document.querySelectorAll('#hub-settings .set-row')].find((r) => r.querySelector('.t').firstChild.textContent.trim() === 'Test').querySelector('button')`;
+  await p.ev(`${send}.focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement === ${send}`), true, 'its focus outlives a repaint');
+  await p.ev(`${send}.click()`);
+  await p.until('sent', `${send}.textContent === 'Test sent'`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`${send}.textContent`), 'Test sent', 'its answer outlives a repaint');
 });
 
 test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async (t) => {
