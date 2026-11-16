@@ -1054,6 +1054,14 @@ test('merge covered_by: when coverage fails, the gate runs as today', async (t) 
       assert.doesNotMatch(r.text, /not run here|runs here/);
       assert.equal(C.views().length, 1);
     });
+    await t.test('covered_by on a --dry-run with no PR yet: nothing to read, the gate runs', () => {
+      C.setGate();
+      C.gh(['fail']);
+      const body = path.join(C.F.base, 'no-pr-body.md');
+      write(body, '## One-way doors\n\nNone.\n');
+      runs(/gate test runs here: no PR to read/, ['--dry-run', '--title', 'console-01-a: work', '--body-file', body]);
+      assert.equal(C.views().length, 1, 'gh is asked once, for the PR that is not there');
+    });
     await t.test('covered_by with --no-gates: no re-read of the PR', () => {
       C.setGate();
       C.gh([green]);

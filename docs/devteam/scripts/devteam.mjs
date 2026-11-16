@@ -5340,8 +5340,6 @@ function releaseAnswerGap(d, targets) {
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
-// The forge's own checks on a PR at its head: pending is not passed and failing fails; the names in
-// ignored are skipped. what names the PR in the message (the records PR in home, say).
 // One entry of gh's statusCheckRollup, read the one way both merge's check and covered_by read it:
 // a status (StatusContext, or anything with a state) by its state; a check run by its conclusion
 // once COMPLETED. Uppercased; anything empty or unknown is PENDING, so it is never green.
@@ -5371,6 +5369,8 @@ function forgeCoverage(coveredBy, rollup, ignored = []) {
   }
   return { covered: true, checks: [...coveredBy] };
 }
+// The forge's own checks on a PR at its head: pending is not passed and failing fails; the names in
+// ignored are skipped. what names the PR in the message (the records PR in home, say).
 function forgeCheckFails(pr, ignoredChecks, sha, what = "the forge's checks") {
   const ignored = new Set(ignoredChecks ?? []);
   const pending = [], failing = [];
