@@ -49,6 +49,7 @@ const timeless = (weeks) => weeks.map(({ hours_waiting, ...w }) => w);
 const floor10 = (x) => Math.floor(x * 10) / 10;
 const ceil10 = (x) => Math.ceil(x * 10) / 10;
 const PRIO = 'Should we raise the importer rewrite above the billing export work';
+const MAILER = 'Should the mailer retry failed sends every hour now';
 
 // The main fixture: the log's first line is in week 6, a stored record for week 7, the owner's
 // decisions of every kind in week 8, a correction in week 9, a question left open from week 10.
@@ -89,6 +90,17 @@ function decisionsFixture(F) {
   // week 9: d2 corrected; the class rule retired
   hand('owner', { type: 'decision', op: 'set', id: X.d2, corrected: { reason: 'not the uploader' } }, h(9, 1, 0));
   hand('owner', { type: 'knowledge', op: 'set', id: X.rule, status: 'retired' }, h(9, 1, 1));
+  // the owner parks Upkeep: a hold on the built-in goal is a decision like any goal's
+  X.upkeep = hand('owner', { type: 'goal', kind: 'upkeep', title: 'Upkeep' }, h(9, 2, 0));
+  hand('owner', { type: 'goal', op: 'set', id: X.upkeep, hold: { mode: 'park', reason: 'a quiet week' } }, h(9, 2, 0.1));
+  // two declared re-asks after a withdrawn question whose linked page moved, each failing one of
+  // the exclusion's conditions, so both count: another class, and asked before it was withdrawn
+  X.P9 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: MAILER, options: ['Yes', 'No'], links: [{ artifact: 'gone-page', at: 'main', sha256: 'cd'.repeat(32) }] }, h(9, 2, 10));
+  X.Q9b = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: MAILER.replace('hour', 'day'), options: ['Yes', 'No'], new_because: 'the page it linked changed' }, h(9, 2, 11));
+  hand('supervisor', { type: 'question', op: 'set', id: X.Q9b, status: 'withdrawn' }, h(9, 2, 11.5));
+  hand('supervisor', { type: 'question', op: 'set', id: X.P9, status: 'withdrawn' }, h(9, 2, 12));
+  X.Q9a = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'other-class', question: MAILER.replace('hour', 'day'), options: ['Yes', 'No'], new_because: 'the page it linked changed' }, h(9, 2, 13));
+  hand('supervisor', { type: 'question', op: 'set', id: X.Q9a, status: 'withdrawn' }, h(9, 2, 13.5));
   // week 10: q5 asked two hours before this Monday and left open
   X.q5 = hand('supervisor', { type: 'question', kind: 'owner-decision', class: 'priority-change', question: 'Archive the old exports?', options: ['Yes', 'No'] }, W(11) - 2 * HOUR);
   return { hand, rung, X };
@@ -123,7 +135,7 @@ test("each week's decisions from the record and the log", (t) => {
     row(6, { record: null, alone: 1, asked: 0, corrected: 0, decisions: 1, score: 100, answers: 0, asked_again: 0, hours_waiting: 0 });
     row(7, { record: X.rec, alone: 1, asked: 0, corrected: 1, decisions: 2, score: 50, merged: 4, answers: 0, merged_per_answer: 4, with_recommendation: { count: 2, of: 3, share: 0.67 }, lessons: [] });
     row(8, { record: null, alone: 2, asked: 6, corrected: 1, decisions: 9, score: 22, answers: 1, merged: 0, merged_per_answer: 0, with_recommendation: { count: 1, of: 1, share: 1 }, asked_again: 1, hours_waiting: 6, lessons: [] });
-    row(9, { record: null, alone: 0, asked: 0, corrected: 1, decisions: 1, score: 0, hours_waiting: 0 });
+    row(9, { record: null, alone: 0, asked: 1, corrected: 1, decisions: 2, score: 0, asked_again: 2, hours_waiting: 2.5 });
     row(10, { record: null, alone: 0, asked: 0, corrected: 0, decisions: 0, score: 0, hours_waiting: 2 });
     row(11, { record: null, alone: base.alone + 1, asked: base.asked, corrected: base.corrected });
     assert.equal(weeks[11].score, Math.round((100 * weeks[11].alone) / weeks[11].decisions));
@@ -147,7 +159,7 @@ test('a stored record wins over a recompute; a week with no decisions reads 0', 
     assert.deepEqual([weeks[7].corrected, weeks[7].merged], [1, 4]);
     for (const k of [0, 1, 2, 3, 4, 5, 10]) {
       assert.equal(weeks[k].score, 0, `week ${k}`);
-      for (const [f, v] of Object.entries(weeks[k])) if (!['starts_at', 'record', 'lessons', 'with_recommendation'].includes(f)) assert.equal(typeof v, 'number', `week ${k} ${f}`);
+      for (const [f, v] of Object.entries({ ...weeks[k], ...Object.fromEntries(Object.entries(weeks[k].with_recommendation).map(([g, n]) => [`with_recommendation.${g}`, n])) })) if (!['starts_at', 'record', 'lessons', 'with_recommendation'].includes(f)) assert.equal(typeof v, 'number', `week ${k} ${f}`);
     }
     // a rule retired later still counts in the week it was made
     assert.equal(weeks[8].asked, 6);
@@ -224,19 +236,59 @@ test("trust: kinds on its own, and this week's moves", (t) => {
     };
     // an earlier week's move: not counted this week
     trustAnswer(Y.class, 2, h(9, 1, 9));
+    // Y's drop comes before X's raise, against the ladder's order, so the changes are sorted by time
+    const dY = hand('supervisor', { type: 'decision', class: Y.class, what: `went ahead on ${Y.class}`, authority: 'rung', rung: 2 }, M + span() * 0.2);
+    hand('owner', { type: 'decision', op: 'set', id: dY, corrected: { reason: 'too soon' } }, M + span() * 0.25);
     const qX = trustAnswer(X.class, 3, M + span() * 0.3);
-    const dY = hand('supervisor', { type: 'decision', class: Y.class, what: `went ahead on ${Y.class}`, authority: 'rung', rung: 2 }, M + span() * 0.5);
-    hand('owner', { type: 'decision', op: 'set', id: dY, corrected: { reason: 'too soon' } }, M + span() * 0.6);
+    // an answer that leaves Y's rung where it was is no move
+    trustAnswer(Y.class, 1, M + span() * 0.4);
     const T = autonomy(F).trust;
     assert.equal(T.raised, 1);
     assert.equal(T.dropped, 1);
-    assert.deepEqual(T.changes.map(({ at, ...c }) => c), [{ class: X.class, from: X.start, to: 3, id: qX }, { class: Y.class, from: 2, to: 1, id: dY }]);
+    assert.deepEqual(T.changes.map(({ at, ...c }) => c), [{ class: Y.class, from: 2, to: 1, id: dY }, { class: X.class, from: X.start, to: 3, id: qX }]);
     assert.ok(T.changes.every((c) => Date.parse(c.at) >= M), JSON.stringify(T.changes));
-    assert.ok(T.changes[0].at <= T.changes[1].at, 'oldest first');
+    assert.ok(T.changes[0].at < T.changes[1].at, 'oldest first');
     const now = json(F.ok(F.old, ['trust', '--json']));
     assert.equal(T.kinds, now.length);
     assert.equal(T.own, now.filter((r) => r.rung === 3).length);
     assert.ok(T.own >= 1, 'X is at 3 now');
+  } finally { F.done(); }
+});
+
+test('trust: each step capped as rungFor caps it', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const F = fleetFixture('autonomy-trust-caps');
+  try {
+    const hand = handFor(F);
+    // merging releases (incident-fix waits on release-production), and new-feature's ceiling lowered
+    // below its start
+    const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+    const text = fs.readFileSync(sf, 'utf8');
+    const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+    fs.writeFileSync(sf, text.replace(m[1], JSON.stringify({ ...JSON.parse(m[1]), release: 'merge', autonomy_ceilings: { 'new-feature': 1 } }, null, 2)));
+    F.g(['add', '-A'], F.old);
+    F.g(['commit', '-qm', 'release on merge; new-feature at most 1'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    const rows = Object.fromEntries(json(F.ok(F.old, ['trust', '--json'])).map((r) => [r.class, r]));
+    assert.deepEqual([rows['incident-fix'].start, rows['release-production'].rung, rows['new-feature'].rung, rows['production-remediation'].ceiling], [2, 1, 1, 2], 'the constitution this test was written against');
+    const trustAnswer = (cls, rung, ms) => {
+      const q = hand('supervisor', { type: 'question', kind: 'trust', class: cls, question: `May I decide ${cls} at rung ${rung}?`, recommendation: 'Yes', options: ['Yes', 'No'] }, ms);
+      hand('owner', { type: 'question', op: 'set', id: q, answer: 'Yes', autonomy: { class: cls, rung } }, ms + 60000);
+      return q;
+    };
+    const qFix = trustAnswer('incident-fix', 3, M + span() * 0.2);
+    trustAnswer('new-feature', 1, M + span() * 0.3);
+    const qRem = trustAnswer('production-remediation', 3, M + span() * 0.4);
+    let T = autonomy(F).trust;
+    // incident-fix held at 2 while release-production is 1; new-feature starts at its ceiling, 1;
+    // production-remediation's 3 is its ceiling, 2
+    assert.deepEqual(T.changes.map(({ at, ...c }) => c), [{ class: 'production-remediation', from: 1, to: 2, id: qRem }]);
+    // release-production to 3: incident-fix's answer now takes it to 3, the cap as it is now
+    const qRel = trustAnswer('release-production', 3, M + span() * 0.5);
+    T = autonomy(F).trust;
+    assert.deepEqual(T.changes.map(({ at, ...c }) => c), [{ class: 'incident-fix', from: 2, to: 3, id: qFix }, { class: 'production-remediation', from: 1, to: 2, id: qRem }, { class: 'release-production', from: 1, to: 3, id: qRel }]);
+    const now = json(F.ok(F.old, ['trust', '--json']));
+    assert.equal(T.own, now.filter((r) => r.rung === 3).length);
   } finally { F.done(); }
 });
 

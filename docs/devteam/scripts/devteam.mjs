@@ -10529,7 +10529,8 @@ function autonomyContext(now) {
   const first = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
   const qs = questions();
   const goalAts = [];
-  for (const g of logObjects('goal')) for (const u of g.updates ?? []) if (writerClass(u.by) === 'owner' && (u.decision || u.status !== undefined || u.hold !== undefined)) goalAts.push(u.at);
+  // every goal, Upkeep's too (logObjects leaves it out; decisionRecords reads it)
+  for (const g of readLog().byType.get('goal') ?? []) for (const u of g.updates ?? []) if (writerClass(u.by) === 'owner' && (u.decision || u.status !== undefined || u.hold !== undefined)) goalAts.push(u.at);
   return {
     now, first, qs, goalAts, merges: mergeTimes(),
     records: new Map(learningRecords().map((r) => [r.week, r])),
