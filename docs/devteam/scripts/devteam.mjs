@@ -4123,12 +4123,16 @@ function cmdStatus() {
   const rows = deriveStatus();
   if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
+  const ts = tickets();
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     // held on purpose or stopped before it ran: never stale (a held one shows its hold, which wins)
     const held = r.held && r.phase !== 'done' && !r.merge_sha ? r.held : null;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha && !held && !r.not_started;
-    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : '';
+    // a waiting ticket whose dependencies haven't merged waits on them, not on the supervisor: say which
+    const deps = waiting ? (ts.get(r.id)?.depends_on ?? []).filter((d) => !mergeShaFor(d)) : [];
+    const waitsOn = deps.length ? ` WAITING ON ${deps.join(', ')} TO MERGE` : ' WAITING ON SUPERVISOR';
+    const flag = r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : held ? ` HELD: ${held}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? waitsOn : '';
     const shown = r.not_started && !held && !r.waiting ? '  [not started: no window or worktree]' : `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${flag}]`;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? shown : ''}${r.records_landed ? `  [${RECORDS_ONLY_FIX(r.id)}]` : ''}`);
   }
