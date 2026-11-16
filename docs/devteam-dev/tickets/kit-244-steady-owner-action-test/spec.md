@@ -11,7 +11,7 @@ An answered question's card does not leave the Inbox when it is answered. `answe
 
 When that redraw falls between `p.click`'s measure and its press, the press lands below the note. In the repro it lands on the Inbox's "Answered (1)" section. Nothing is focused, nothing throws, and `soon(... 'the note focused')` waits its 20 s and fails with `timed out: the note focused`. That is the CI failure (run 43804955902 attempt 1, job 133093504641: subtest 5 took 20478 ms and failed at line 187). The same race can hit Q2's clicks, when Q's note leaves above it. Q3's "Done", Send and "Can't right now" clicks are exposed as well. (The shrink to the note isn't a race: it happens inside the Send press, before the test measures the next card.) Any later height change above the Inbox moves Q3 the same way. The Goals section is drawn from the server's open questions, and Q and Q2 serve goal GQ, so it can redraw on a later read too. That means the cards leaving is not enough on its own (plan review F2).
 
-Repro: `evidence/repro-race.test.mjs.txt`, run with `evidence/repro.sh`. It holds `/api/data` reads from Q's Done press on, so the answered cards stay up. It measures the note the way `p.click` does, lets the reads go, waits for the cards to leave, then presses at the point it measured. Output at main: `evidence/repro-race-at-main.txt`, which shows `timed out: the note focused`, the note moved from y≈450 to 307–364, and the point now on "DETAILS Answered (1)".
+Repro: `evidence/repro-race.test.mjs.txt`, run with `evidence/repro.sh`. It holds `/api/data` reads from Q's Done press on, so the answered cards stay up. It measures the note the way `p.click` does, lets the reads go, waits for the cards to leave, then presses at the point it measured. Output at main: `evidence/repro-race.txt`, which shows `timed out: the note focused`, the note moved from y≈450 to 307–364, and the point now on "DETAILS Answered (1)".
 
 ## Approaches
 
@@ -24,7 +24,7 @@ Repro: `evidence/repro-race.test.mjs.txt`, run with `evidence/repro.sh`. It hold
 
 1. In the test, Q2's clicks wait until the page has drawn Q answered by the server (`Answered (n0+1)` and Q's card gone). Q3's clicks wait the same way for Q2. Both waits read the page's DOM, never a sleep. The note and the record are still waited for through the page's own signals (`document.activeElement`, the `Done: …` texts). The test adds no fixed `setTimeout` or sleep. The PR names the cause above.
 2. test-stress.yml, dispatched on the ticket branch with `files=test/dashboard-owner-action.test.mjs`, `node=22`, has 20 passing runs, linked in the PR. The workflow takes `repeat` from 1 to 5 only, so this is four completed dispatches of `repeat=5` (my call; that file is outside touches). The workflow's concurrency group cancels a pending run when a newer one queues, so each run is dispatched only after the one before it has finished (plan review F3). verification.md lists the four run ids.
-3. A mutation that lets Done through while a record is unchanged makes the test fail. The mutation turns `if (open.length)` into `if (false && open.length)` in the dashboard's Done gate, `docs/devteam/dashboard/index.html` ~l.6262. The diff and the failing output go in the PR. It is applied to the working tree only and reverted, never committed. The PR shows the target subtest's own `not ok` line. Under this mutation it fails at l.180 with `timed out: not done yet` (plan review F6).
+3. A mutation that lets Done through while a record is unchanged makes the test fail. The mutation skips the dashboard's Done gate (`docs/devteam/dashboard/index.html` ~l.6262) for Q3 only: `if (open.length && !/look at one rule/.test(qv.question))`. Scoped like that, the earlier subtests still hold Q's Done, and the target subtest is the first to meet the mutation (plan review 2, G1). The diff and the failing output go in the PR. It is applied to the working tree only and reverted, never committed. The PR shows the target subtest's own `not ok` line. Under this mutation it fails at l.180, `timed out: not done yet` (plan review F6, G1).
 
 ## Contracts
 
@@ -41,7 +41,7 @@ None provided or consumed. Test-only change.
 
 ## Plan review 1 (CHANGES at 710deb9)
 
-F1: the shrink's timing is corrected above. F2: the stronger page signal is in approach 1. F3 and F6: in the acceptance checks. F4 and F5: in plan.md.
+F1: the shrink's timing is corrected above. F2: the stronger page signal is in approach 1. F3 and F6: in the acceptance checks. F4 and F5: in plan.md. Review 2 (CHANGES at ed092b8): G1, the mutation is scoped to Q3 (above). G2 and G3: `evidence/repro.sh [race|fixed]` and `evidence/mutate.sh` write their evidence files.
 
 ## Rulings
 
