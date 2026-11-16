@@ -3775,8 +3775,9 @@ http.createServer((req, res) => {
 
   step('dashboard: Library and the artifact viewer', () => {
     const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
-    assert.match(html, /href="#library"/);
-    assert.match(html, /<section id="library">/);
+    // the nav is drawn from the page registry (kit-87): Library is registered in the Project group
+    assert.match(html, /\['library', 'Library', 'project', 'library'\]/);
+    assert.match(html, /<section id="library"[\s>]/);
     assert.match(html, /id="artifact-view"/);
     assert.match(html, /<iframe id="av-frame"[^>]* sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer">/);
     assert.ok(!/artifact[^\n]*allow-same-origin/.test(html), 'the viewer never shares the dashboard origin');
