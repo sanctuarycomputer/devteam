@@ -4239,16 +4239,17 @@ function parseReview(file, text) {
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
+  let ruleIdx = -1;
   let width = 0;
   for (const row of text.split('\n')) {
     if (!row.trim().startsWith('|')) continue;
     const cells = tableCells(row);
     const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); width = cells.length; continue; }
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); ruleIdx = lower.indexOf('rule'); width = cells.length; continue; }
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(ruleIdx > 0 && cells[ruleIdx] ? { rule: cells[ruleIdx] } : {}), ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -4289,6 +4290,9 @@ const FINDING_ID = /^[A-Z]{1,4}\d+(?:-\d+)?[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
+// The rule a finding cites, as one key: a Law, value or refusal id (L-LOGIC-3, V2, R1) alone; a
+// document and its section (spec §3, quality.md §6) as written, capped.
+const ruleKey = (rule) => { const t = String(rule).trim().replace(/\s+/g, ' '); const id = t.match(/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\b/); return (id && /\d/.test(id[0]) ? id[0] : t).slice(0, 40); };
 function reviewStats() {
   const byStage = {};
   let findings = 0;
@@ -4299,11 +4303,18 @@ function reviewStats() {
   for (const r of all) {
     for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
     if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0 };
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0, rules: {} };
     byStage[r.stage].first_passes++;
     if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
+    // what first passes keep blocking on, by the rule each blocking finding cites: what a new
+    // session's prompt, or the stage's template, should have said from the start (supervisor.md §10)
+    for (const f of r.findings) if (blocking(f.severity) && f.rule) { const k = ruleKey(f.rule); byStage[r.stage].rules[k] = (byStage[r.stage].rules[k] ?? 0) + 1; }
   }
-  for (const s of Object.values(byStage)) s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
+  for (const s of Object.values(byStage)) {
+    s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
+    s.top_blocking_rules = Object.entries(s.rules).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([rule, count]) => ({ rule, count }));
+    delete s.rules;
+  }
   return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
 }
 function reviewPasses() {
@@ -12200,6 +12211,16 @@ function collectMetrics(since) {
   };
   // what efficiencyData recomputes per calendar week, by the same code (not in the JSON)
   Object.defineProperty(m, METRICS_INTERNALS, { value: { cycles, ticketUsd, perPoint, items, POINTS } });
+  // Efficiency (supervisor.md §3, Orient): tokens and clock time together, over ticket work (the
+  // supervisor's own spend and planning are overhead, read from phase_usd). Waiting produces nothing:
+  // a ticket in awaiting-word, blocked, parked or starting. This is over the whole window metrics
+  // reads (--since); the dashboard's top-level efficiency (efficiencyData) is the same cycles and
+  // spend counted per calendar week, with a score against the best of 12 weeks.
+  // mis_rated: merged tickets whose results contradict their rating (supervisor.md §9).
+  m.mis_rated = misRated(cycles, ts, ticketUsd, POINTS);
+  // merged tickets' hours, start to merge, for hours per point (the tickets cost.per_point counts)
+  m.cycle_hours_total = +(cycles.filter((c) => ticketUsd[c.id] !== undefined).reduce((a, c) => a + c.ms, 0) / 3600000).toFixed(2);
+  m.efficiency = efficiencyOf(m);
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
   const threadsNow = threadViews(readLog().objects);
@@ -12518,6 +12539,16 @@ function collectMetrics(since) {
     const tw = m.cost.per_point_this_week, lw = m.cost.per_point_last_week;
     if (tw && lw && tw.tickets >= 3 && lw.tickets >= 3 && tw.usd_per_point > 1.5 * lw.usd_per_point) add('medium', 'cost-per-point-rising', 'spend', `$${tw.usd_per_point} per merged point this week, $${lw.usd_per_point} last week`, 'find what changed (model, ticket mix, review rounds) and trial a fix (supervisor.md §9)');
   }
+  // Time efficiency, from phase hours and review records, so a fleet whose spend is only reported
+  // (or not known) gets them too: tickets spending most of their clock waiting, stages whose first
+  // passes are mostly rejected, and tickets rated small that weren't.
+  const eff = m.efficiency;
+  if (eff?.wait_hours_pct !== null && eff?.wait_hours_pct > 50 && m.tickets_merged >= EFF_MIN_MERGED()) add('medium', 'waiting-heavy', 'tickets', `${eff.wait_hours_pct}% of ticket hours were spent waiting (awaiting-word, blocked, parked, starting)`, 'answer review and merge requests the tick they arrive, give owner questions a default where one is allowed, and look at whether small tickets need every review stage (a trial, kept only while quality holds)');
+  for (const x of m.mis_rated ?? []) add('low', 'mis-rated', x.id, `rated ${x.rated}, but: ${x.why.join('; ')}`, 'at the retro, fold what it teaches into how planners rate (a lesson), which tasks go to a fast model, or the review depth');
+  for (const stage of ['spec', 'plan']) {
+    const st = m.reviews?.by_stage?.[stage];
+    if (st && st.first_passes >= EFF_MIN_PASSES() && st.rejection_rate > 0.6) add('medium', 'review-churn', `${stage} review`, `${Math.round(100 * st.rejection_rate)}% of ${stage} first passes were rejected (${st.rejected} of ${st.first_passes})${st.top_blocking_rules?.length ? `; most cited: ${st.top_blocking_rules.slice(0, 3).map((x) => `${x.rule} ×${x.count}`).join(', ')}` : ''}`, `turn what first passes keep citing into what new sessions are told from the start: a lesson scoped to who writes the ${stage} (it reaches every new prompt), or a fix to the ${stage} template; or, if reviewers block on what isn't Critical or Important, fix the review prompt`);
+  }
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -12636,6 +12667,62 @@ function cmdAck() {
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
+// Merged tickets (the last 30 days) rated light (S, normal risk, not high uncertainty) whose results
+// say otherwise: over three times the median merged cost per point, three or more final-review passes,
+// or an escaped defect that names them. What the loop reads to calibrate ratings (supervisor.md §9).
+function misRated(cycles, ts, ticketUsd, POINTS) {
+  const now = Date.now();
+  const recent = cycles.filter((c) => now - (mergedAt(c.id) ?? 0) < 30 * 86400000);
+  const per = (c) => (ticketUsd[c.id] === undefined ? null : ticketUsd[c.id] / (POINTS[ts.get(c.id)?.size] ?? 1));
+  const costs = cycles.map(per).filter((x) => x !== null);
+  const med = median(costs);
+  const passes = reviewPasses();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect');
+  const out = [];
+  for (const c of recent) {
+    const t = ts.get(c.id);
+    if (!t || t.size !== 'S' || t.risk === 'high' || t.uncertainty === 'high') continue;
+    const why = [];
+    const p = per(c);
+    if (med && p !== null && costs.length >= 5 && p > 3 * med) why.push(`cost ${(p / med).toFixed(1)}x the median per point`);
+    if ((passes[c.id] ?? 0) >= 3) why.push(`${passes[c.id]} final-review passes`);
+    if (defects.some((o) => (o.refs ?? []).includes(c.id) || String(o.subject ?? '') === c.id)) why.push('an escaped defect traced to it');
+    if (why.length) out.push({ id: c.id, rated: `S, ${t.risk ?? 'normal'}, ${t.uncertainty ?? 'low'} uncertainty`, why });
+  }
+  return out;
+}
+const EFFICIENCY_WAIT = ['awaiting-word', 'blocked', 'parked', 'starting'];
+// How much evidence a finding needs before it speaks: 5 merged tickets for waiting-heavy, 10 first
+// passes at a stage for review-churn. The environment can lower them, for tests and a tiny project
+// (DEVTEAM_EFFICIENCY_MIN_MERGED, DEVTEAM_CHURN_MIN_PASSES; named in supervisor.md §3, Orient).
+// review-churn is the all-time, evidence-floored sibling of the dashboard's weekly tighter-specs
+// suggestion (efficiencySuggestions): the same rejections, a longer window and a higher bar.
+const envInt = (k, d) => { const n = Number(process.env[k]); return Number.isInteger(n) && n > 0 ? n : d; };
+const EFF_MIN_MERGED = () => envInt('DEVTEAM_EFFICIENCY_MIN_MERGED', 5);
+const EFF_MIN_PASSES = () => envInt('DEVTEAM_CHURN_MIN_PASSES', 10);
+const EFFICIENCY_OVERHEAD = ['supervisor', 'planning', 'review'];
+function efficiencyOf(m) {
+  const split = (o) => {
+    const rows = Object.entries(o ?? {}).filter(([k]) => !EFFICIENCY_OVERHEAD.includes(k));
+    const total = rows.reduce((a, [, v]) => a + v, 0);
+    const waiting = rows.filter(([k]) => EFFICIENCY_WAIT.includes(k)).reduce((a, [, v]) => a + v, 0);
+    return { total, waiting, share: total ? waiting / total : null };
+  };
+  const h = split(m.phase_hours);
+  const u = split(m.phase_usd);
+  const points = m.cost?.per_point?.points ?? null;
+  const rej = (stage) => m.reviews?.by_stage?.[stage]?.rejection_rate ?? null;
+  const pct = (x) => (x === null ? null : Math.round(100 * x));
+  return {
+    wait_hours_pct: pct(h.share),
+    wait_usd_pct: pct(u.share),
+    hours_per_point: points && m.cycle_hours_total !== undefined ? +(m.cycle_hours_total / points).toFixed(1) : null,
+    usd_per_point: m.cost?.per_point?.usd_per_point ?? null,
+    first_pass_rejection: { spec: rej('spec'), plan: rej('plan'), final: rej('final') },
+    mis_rated: m.mis_rated ?? [],
+  };
+}
+
 function cmdMetrics() {
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
@@ -12646,6 +12733,7 @@ function cmdMetrics() {
     `since: ${m.since ?? 'the beginning'}`,
     `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
     `time by phase (h): ${kv(m.phase_hours)}`,
+    `efficiency: waiting ${m.efficiency.wait_hours_pct ?? '-'}% of ticket hours, ${m.efficiency.wait_usd_pct ?? '-'}% of ticket dollars; ${m.efficiency.hours_per_point ?? '-'}h and $${m.efficiency.usd_per_point ?? '-'} per point; mis-rated ${m.efficiency.mis_rated.length}`,
     `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
     `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
     `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
@@ -15863,7 +15951,7 @@ async function cmdDashboard() {
   let paneAnswering = false;
   const tmuxAsync = (args) => new Promise((resolve) => { try { execFile('tmux', args, { encoding: 'utf8', timeout: 10000 }, (err, so) => resolve(err ? null : so)); } catch { resolve(null); } });
   const PANE_SETTLE_MS = 1500;
-  async function paneAnswer({ digest, option, proof }) {
+  async function paneAnswer({ digest, option, escape = false, proof }) {
     const no = (error, status = 400) => ({ status, body: { error } });
     const r = await run(['pane', 'question', '--json', '--pane'], { timeout: 20000 });
     let st = null;
@@ -15872,18 +15960,40 @@ async function cmdDashboard() {
     if (!st.ask) return no(`nothing was answered: the supervisor's terminal is not asking anything now (the question is gone)${st.problem ? `; ${st.problem}` : ''}`);
     if (st.ask.kind !== 'menu' || typeof st.target !== 'string') return no(`nothing was answered: what the supervisor's terminal shows now is answered in the terminal, not here${st.problem ? ` (${st.problem})` : ''}`);
     if (st.ask.digest !== digest) return no("nothing was answered: the question in the supervisor's terminal has changed since the page showed it; read the one showing now and answer that");
-    const opt = st.ask.options.find((o) => o.n === option);
-    if (!opt) return no(`nothing was answered: that question has no option ${option}`);
+    const opt = escape ? null : st.ask.options.find((o) => o.n === option);
+    if (!escape && !opt) return no(`nothing was answered: that question has no option ${option}`);
+    // Esc only where the menu itself says it cancels: on a menu whose Esc exits (a folder-trust form) it ends the session
+    const notCancel = `nothing was answered: Esc here may not cancel (the terminal says: ${String(st.ask.hint ?? '').replace(/\s+/g, ' ').trim() || 'nothing about Esc'}); answer it in the terminal`;
+    if (escape && !paneEscCancels(st.ask.hint)) return no(notCancel);
     const look = async () => { const t = await tmuxAsync(['-u', 'capture-pane', '-p', '-t', st.target]); return t === null ? null : screenLines(t); };
     const menuIn = (lines) => { const a = lines ? paneAskingIn(lines) : null; return a?.kind === 'menu' && a.digest === digest ? a : null; };
     // once more, right before the key
-    if (!menuIn(await look())) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    const last = menuIn(await look());
+    if (!last) return no("nothing was answered: the question in the supervisor's terminal changed or went as you clicked; read what it shows now");
+    if (escape && !paneEscCancels(last.hint)) return no(notCancel);
     // tests only: the moment between that look and the key, in which a question can go
     const pause = Number(process.env.DEVTEAM_PANE_ANSWER_DELAY_MS ?? 0);
     if (pause > 0) await new Promise((w) => setTimeout(w, pause));
-    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     // until the question is gone or changed, or its cursor has moved
     const settle = async (was) => { let lines = null; for (let t = 0; t < PANE_SETTLE_MS; t += 100) { await new Promise((w) => setTimeout(w, 100)); lines = await look(); const m = menuIn(lines); if (!lines || !m || m.selected !== was) break; } return lines; };
+    // the Escape key, by name, alone: no digit, no Enter. The menu gone is the answer; the same menu
+    // still up is reported as a key that may not have landed, as a digit's is, with no second key.
+    const record = (fields, why) => runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, ...fields, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
+    const finish = async (rec, keys, why, after) => {
+      if (hello) hello.supervisor_question = null;
+      refreshHello();
+      const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
+      if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
+      if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal${after}.`, 409);
+      return { status: 200, body: { ok: true, out: said } };
+    };
+    if (escape) {
+      if ((await tmuxAsync(['send-keys', '-t', st.target, 'Escape'])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
+      const lines = await settle(st.ask.selected);
+      const why = menuIn(lines) ? 'the same question still shows after Esc' : !lines ? 'the terminal could not be read after the key' : null;
+      return finish(await record({ escape: true, keys: 'Escape' }, why), 'Escape', why, '');
+    }
+    if ((await tmuxAsync(['send-keys', '-t', st.target, '-l', String(option)])) === null) return no(`nothing was answered: the key could not be sent to ${st.target}`, 500);
     let lines = await settle(st.ask.selected);
     let keys = String(option);
     let still = menuIn(lines);
@@ -15903,13 +16013,7 @@ async function cmdDashboard() {
     // what the pane shows after: the menu took the key unless the digit is sitting in the input box
     const draft = lines ? paneDraftIn(lines) : null;
     const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
-    const rec = await runAction(['pane', 'answered', '--owner'], { timeout: 30000, input: JSON.stringify({ digest, option, label: opt.label, first: String(st.ask.first ?? ''), artifact: st.ask.artifact ?? undefined, keys, taken: !why, ...(why ? { why } : {}), ...(proof ? { proof } : {}) }) });
-    if (hello) hello.supervisor_question = null;
-    refreshHello();
-    const said = rec.ok ? rec.stdout.trim() : rec.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '');
-    if (!rec.ok) return no(`the key was sent (${keys}), but the answer could not be recorded: ${said || 'the command failed'}`, 500);
-    if (why) return no(`The key was sent, but it may not have landed: ${why}. Look at the terminal, and clear its input box if the digit is there.`, 409);
-    return { status: 200, body: { ok: true, out: said } };
+    return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
@@ -16220,7 +16324,8 @@ async function cmdDashboard() {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-        if (!isObj(parsed) || typeof parsed.digest !== 'string' || !/^[0-9a-f]{40}$/.test(parsed.digest) || !Number.isInteger(parsed.option) || parsed.option < 1 || parsed.option > 9 || typeof parsed.token !== 'string') return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token }' }));
+        // exactly an option's press or an Esc's, as the page sends them (paneAnswerShape): nothing else reaches the terminal
+        if (!paneAnswerShape(parsed)) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { digest, option, token } or { digest, escape: true, token }' }));
         if (!paneTokenOk(parsed.digest, parsed.token)) return send(res, 403, 'application/json', JSON.stringify({ error: "nothing was answered: that is not this page's card for the question (reload the page)" }));
         let proof = null;
         if (threadsNeedGateway()) {
@@ -16235,7 +16340,7 @@ async function cmdDashboard() {
         }
         if (paneAnswering) return send(res, 409, 'application/json', JSON.stringify({ error: 'another answer is on its way to the terminal; wait for it' }));
         paneAnswering = true;
-        paneAnswer({ digest: parsed.digest, option: parsed.option, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
+        paneAnswer({ digest: parsed.digest, option: parsed.option, escape: parsed.escape === true, proof }).then((a) => a, (e) => ({ status: 500, body: { error: `nothing more was done: ${e?.message ?? e}` } })).then((a) => { paneAnswering = false; if (!res.headersSent) send(res, a.status, 'application/json', JSON.stringify(a.body)); });
       }));
     }
     // The owner's Save on the Settings page: exactly { key, value }, an askable key, and on a box the
@@ -16329,7 +16434,7 @@ async function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). Your default is to act: decide what is yours and log it; when work needs a credential or access, ask for it at once with an owner-action question and --secrets, and never ask whether to ask, in the Inbox or in chat; write to the owner in plain words, without the kit\'s vocabulary (supervisor.md §6, Ask less, act more). Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers, and while it waits your whole loop stops. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers (worker.md §3).',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Run any multi-step shell (rm, redirects, quotes inside quotes) as a script file you write and then run, never inline: an inline one stops on a permission prompt nobody answers. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -16483,6 +16588,17 @@ const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'su
 // page that asked. pane answered is what it runs after: the owner's act for the log, and the lines
 // held for the pane while it asked. On a box it takes that only with the gateway's signature for
 // the press, each taken once, as a thread with the operator does.
+// A press the dashboard's card sends: exactly { digest, option, token } (option 1 to 9) or exactly
+// { digest, escape: true, token }. The route takes nothing else, and on a box pane answered holds the
+// gateway's signed body to the same shape.
+function paneAnswerShape(b) {
+  if (!isObj(b) || typeof b.digest !== 'string' || !/^[0-9a-f]{40}$/.test(b.digest) || typeof b.token !== 'string') return false;
+  const keys = Object.keys(b).sort().join(',');
+  if (keys === 'digest,option,token') return Number.isInteger(b.option) && b.option >= 1 && b.option <= 9;
+  return keys === 'digest,escape,token' && b.escape === true;
+}
+// Whether a numbered menu's hint says Esc cancels it, and nowhere that Esc exits or quits.
+const paneEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
 const paneSigned = (port, ts, nonce, body) => Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
 // The owner's Save on the Settings page (gateway.mjs, ownerSettingSignature): the same, under its own name.
 const ownerSettingSigned = (port, ts, nonce, body) => Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${sha256(body)}`);
@@ -16560,7 +16676,10 @@ function cmdPane() {
   let b = null;
   try { if (!process.stdin.isTTY) b = JSON.parse(fs.readFileSync(0, 'utf8') || 'null'); } catch {}
   const line1 = (x, max) => typeof x === 'string' && x.length <= max;
-  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !Number.isInteger(b.option) || b.option < 1 || b.option > 9 || !line1(b.label, 4000) || !line1(b.first, 4000) || !/^\d(, Enter)?$/.test(b.keys ?? '') || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
+  // an option (its number, its label, the keys that took it) or Esc (the Escape key, no option, no label)
+  const asOption = isObj(b) && b.escape === undefined && Number.isInteger(b.option) && b.option >= 1 && b.option <= 9 && line1(b.label, 4000) && /^\d(, Enter)?$/.test(b.keys ?? '');
+  const asEsc = isObj(b) && b.escape === true && b.option === undefined && b.label === undefined && b.keys === 'Escape';
+  if (!isObj(b) || !/^[0-9a-f]{40}$/.test(b.digest ?? '') || !(asOption || asEsc) || !line1(b.first, 4000) || typeof b.taken !== 'boolean' || (b.why !== undefined && !line1(b.why, 400))) die('pane answered: this is what the dashboard runs after the owner\'s click on its card; nothing was recorded');
   let proof = null;
   if (threadsNeedGateway()) {
     const no = (why) => die(`pane answered: on a box the owner answers only on the dashboard through the box's gateway, which signs the press, and ${why}`);
@@ -16568,14 +16687,14 @@ function cmdPane() {
     if (why) no(why);
     let signed = null;
     try { signed = JSON.parse(Buffer.from(b.proof.body, 'base64').toString('utf8')); } catch {}
-    if (!isObj(signed) || signed.digest !== b.digest || signed.option !== b.option) no('the gateway signed another press than this one');
+    if (!paneAnswerShape(signed) || signed.digest !== b.digest || signed.option !== b.option || signed.escape !== b.escape) no('the gateway signed another press than this one');
     if (logObjects('act').some((a) => a.class === 'pane-answer' && a.proof?.nonce === b.proof.nonce)) no('that press was taken already');
     proof = { port: b.proof.port, ts: b.proof.ts, nonce: b.proof.nonce, sig: b.proof.sig, body: b.proof.body };
   }
   const flat = (t, max) => { const x = noArtifactLinks(t).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim(); return x.length > max ? `${x.slice(0, max - 1)}…` : x; };
   const about = `"${flat(b.first, 120) || '(no words above the options)'}"${typeof b.artifact === 'string' && /^[A-Za-z0-9-]{6,64}$/.test(b.artifact) ? ` (artifact ${b.artifact})` : ''}`;
-  const chose = `${b.option}. ${flat(b.label, 120)}`;
-  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}, option ${chose}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
+  const chose = asEsc ? 'Esc' : `${b.option}. ${flat(b.label, 120)}`;
+  appendLog({ type: 'act', class: 'pane-answer', what: b.taken ? `answered the supervisor's terminal: ${about} with ${chose} (keys: ${b.keys}; question ${b.digest})` : `sent ${b.keys} to the supervisor's terminal for ${about}${asEsc ? '' : `, option ${chose}`}, and it may not have landed: ${flat(b.why ?? 'the terminal did not show that it took it', 300)} (question ${b.digest})`, ...(proof ? { proof } : {}) }, by);
   out(b.taken ? `answered: ${chose}` : `sent, and it may not have landed: ${chose}`);
   // the dashboard has its answer; then what was held for the pane while it asked, if it took the key
   replyNow();
