@@ -4213,7 +4213,18 @@ const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.en
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
 // A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
 // branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+// A dashboard request reads every ticket's records several times (deriveStatus and collectMetrics
+// each run more than once, and metrics reads them for reviewStats and reviewPasses): while one runs,
+// each ticket's folder is read once (reviewMemo, set by dashboardData) and reviewReads counts reads.
+let reviewMemo = null;
+let reviewReads = 0;
 const ticketReviews = (id, src) => {
+  if (!reviewMemo) return ticketReviewsRead(id, src);
+  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}`}`;
+  if (!reviewMemo.has(k)) { reviewReads++; reviewMemo.set(k, ticketReviewsRead(id, src)); }
+  return reviewMemo.get(k);
+};
+const ticketReviewsRead = (id, src) => {
   if (recordsInHomeId(id)) {
     const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
     return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
@@ -11841,6 +11852,200 @@ function threadAnswersUnbound() {
     return why ? { id: l.id, why } : null;
   }).filter(Boolean);
 }
+// ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
+
+const METRICS_INTERNALS = Symbol('metrics internals');
+// kit-98's weeks: the last 12 calendar weeks (Monday 00:00 UTC), oldest first, ending with this one.
+const efficiencyWeeks = (now) => Array.from({ length: 12 }, (_, i) => { const start = mondayOf(now) - (11 - i) * WEEK; return { start, end: start + WEEK }; });
+// A ticket's review record as a pass of its own work, by file name: parseReview reads task-2.md as
+// pass 2 and task-2-2.md as stage task-2-2, but each task-<n>.md is task n's first review (ruling
+// m-20261115-204118085-supervisor). Tracks, contracts, designs and graphs aren't counted.
+function reviewPassOf(file) {
+  const x = /^(spec|plan|final)-(\d+)\.md$/.exec(file);
+  if (x) return { stage: x[1], first: Number(x[2]) === 1 };
+  if (/^task-\d+\.md$/.test(file)) return { stage: 'task', first: true };
+  if (/^task-\d+-\d+\.md$/.test(file)) return { stage: 'task', first: false };
+  return null;
+}
+function firstPassOf(records) {
+  const firsts = records.filter((r) => r.verdict && reviewPassOf(r.file)?.first);
+  return { first_passes: firsts.length, rejected: firsts.filter((r) => r.verdict === 'CHANGES').length };
+}
+// every ticket's records, from where reviewStats reads them (shared through reviewMemo)
+const ticketReviewWalk = () => new Map([...tickets().keys()].map((id) => { const b = ticketBranchRef(id); return [id, ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)]; }));
+const TOKEN_KINDS = ['input', 'output', 'cache_read', 'cache_write'];
+function tokensByPhase(items) {
+  const o = {};
+  for (const r of items) { const t = (o[r.phase] ??= { input: 0, output: 0, cache_read: 0, cache_write: 0 }); for (const k of TOKEN_KINDS) t[k] += r[k]; }
+  return o;
+}
+// The score (the design's Efficiency section): a week with 3 or more tickets is scored against the
+// best (lowest) dollars and hours per point among the 12 weeks' scored weeks. A week with an escaped
+// defect can't score a saving it made by letting the defect through: its spend and time are the
+// lowest raw values of the other scored weeks, 0 with none.
+function scoreWeeks(weeks) {
+  const scored = weeks.filter((w) => w.tickets >= 3);
+  if (!scored.length) return { best: null };
+  const best = { usd_per_point: Math.min(...scored.map((w) => w.usd_per_point)), hours_per_point: Math.min(...scored.map((w) => w.hours_per_point)) };
+  const raw = (w, k) => (w[k] === 0 ? 1 : best[k] / w[k]);
+  for (const w of scored) {
+    const others = scored.filter((o) => o !== w);
+    const part = (k) => (!w.escaped_defects ? Math.min(1, raw(w, k)) : others.length ? Math.min(...others.map((o) => raw(o, k))) : 0);
+    const p = { spend: part('usd_per_point'), time: part('hours_per_point'), rework: w.first_pass };
+    w.score = Math.round((100 * (p.spend + p.time + p.rework)) / 3);
+    w.parts = Object.fromEntries(Object.entries(p).map(([k, v]) => [k, +v.toFixed(2)]));
+  }
+  return { best };
+}
+const SPEND_FINDINGS = ['cost-hotspot', 'costly-ticket', 'low-cache-hit', 'cost-per-point-rising', 'unpriced-model'];
+// Orient: the open spend findings, each with the newest observation that recorded it (null until
+// observe-metrics logs one).
+function efficiencyWaste(m) {
+  const newest = new Map();
+  for (const o of logObjects('observation')) if (o.source_key?.startsWith('metrics:') && (!newest.has(o.source_key) || o.created_at >= newest.get(o.source_key).created_at)) newest.set(o.source_key, o);
+  return m.findings.filter((f) => SPEND_FINDINGS.includes(f.kind)).map((f) => ({ id: newest.get(`metrics:${f.kind}:${f.subject}`)?.id ?? null, kind: f.kind, subject: f.subject, detail: f.detail }));
+}
+// Act: the levers on trial: improvement-trial acts that cite a spend finding or name cost per point,
+// newest first; running until an outcome observation cites one, then kept or dropped by the newest.
+function efficiencyTrials(perPoint) {
+  const spendObs = new Set(logObjects('observation').filter((o) => SPEND_FINDINGS.includes(o.kind)).map((o) => o.id));
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const now = Date.now();
+  return logObjects('act').filter((a) => a.class === 'improvement-trial' && ((a.refs ?? []).some((r) => spendObs.has(r)) || /cost[- ]per[- ](merged )?point/i.test(a.what ?? '')))
+    .sort(byTime).reverse().map((a) => {
+      const since = Date.parse(a.created_at);
+      const last = outcomes.filter((o) => (o.refs ?? []).includes(a.id)).pop();
+      return {
+        id: a.id, what: a.what ?? '', since: a.created_at,
+        usd_per_point_start: perPoint(since - WEEK, since)?.usd_per_point ?? null, usd_per_point_now: perPoint(since, now + 1)?.usd_per_point ?? null,
+        escaped_defects_since: defects.filter((t) => t >= since).length,
+        state: !last ? 'running' : (last.valence ?? 0) >= 0 ? 'kept' : 'dropped',
+      };
+    });
+}
+// Model families from the top, for "a smaller model": the same version one family down, or, when
+// that version isn't priced, that family's newest priced version. Priced means named exactly in
+// MODEL_PRICES or settings.model_prices (priceFor's prefix fallback prices versions nobody listed).
+/* model families start */
+const MODEL_FAMILIES = [['fable', 'mythos'], ['opus'], ['sonnet'], ['haiku']];
+const parseModelKey = (k) => { const x = /^claude-([a-z]+)-(\d+(?:-\d+)*)$/.exec(k ?? ''); return x ? { family: x[1], version: x[2] } : null; };
+const versionCmp = (a, b) => { const p = a.split('-').map(Number), q = b.split('-').map(Number); for (let i = 0; i < Math.max(p.length, q.length); i++) { const d = (p[i] ?? 0) - (q[i] ?? 0); if (d) return d; } return 0; };
+function smallerModel(key, priced) {
+  const m = parseModelKey(key);
+  const tier = m ? MODEL_FAMILIES.findIndex((f) => f.includes(m.family)) : -1;
+  if (tier < 0 || tier === MODEL_FAMILIES.length - 1) return null;
+  const down = MODEL_FAMILIES[tier + 1][0];
+  if (priced.includes(`claude-${down}-${m.version}`)) return `claude-${down}-${m.version}`;
+  const newest = priced.map(parseModelKey).filter((x) => x?.family === down).sort((a, b) => versionCmp(b.version, a.version))[0];
+  return newest ? `claude-${down}-${newest.version}` : null;
+}
+// a model as the owner reads it: claude-sonnet-5-5 is Sonnet 5.5
+const modelWords = (key) => { const m = parseModelKey(key); return m ? `${m.family[0].toUpperCase()}${m.family.slice(1)} ${m.version.replace(/-/g, '.')}` : 'that model'; };
+/* model families end */
+// A suggestion's id: stable while its condition holds, never from a rank or a date, and safe as a
+// thread subject (suggestion:<id>).
+const effId = (kind, subject) => `eff-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+const dollars = (x) => `$${Number.isInteger(x) ? x : x.toFixed(2)}`;
+// Decide: up to five suggestions whose condition holds this week, by estimated dollars (the design's
+// five kinds). ids are this week's tickets, ids12 the 12 weeks', [start, end) this week.
+function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS }) {
+  const ts = tickets();
+  const out = [];
+  const add = (kind, subject, usd, per, what, evidence) => out.push({ id: effId(kind, subject), kind, what, evidence, effect: `about ${dollars(+usd.toFixed(2))} ${per === 'once' ? 'once' : 'a week'}`, usd: +usd.toFixed(2), per });
+  const recs = (id) => walk.get(id) ?? [];
+  // a review pass, priced from final-review reviewer spend: the median over the 12 weeks' tickets
+  // with a final record of their reviewer spend over their final records
+  const perTicket = ids12.map((id) => {
+    const finals = recs(id).filter((r) => r.verdict && /^final-\d+[a-z]?\.md$/.test(r.file)).length;
+    const usd = items.filter((x) => x.who === id && x.role === 'reviewer' && (x.phase === 'final-review' || x.phase === 'review')).reduce((a, x) => a + x.usd, 0);
+    return finals ? usd / finals : null;
+  }).filter((x) => x !== null);
+  // with no spend items (spend reported on phase lines only) there is no reviewer spend to price from
+  const perPass = items.length ? median(perTicket) : null;
+  if (perPass !== null) {
+    const small = ids.filter((id) => ts.get(id)?.size === 'S' && ts.get(id)?.risk === 'normal');
+    const passes = small.reduce((a, id) => a + recs(id).filter((r) => r.verdict && ['spec', 'plan'].includes(reviewPassOf(r.file)?.stage)).length, 0);
+    if (passes >= 3) add('review-depth', 's-normal', passes * perPass, 'week', 'Fit review depth to small, normal-risk tickets: fewer spec and plan review rounds, keeping the final review', `${passes} spec and plan reviews this week on ${small.length} small, normal-risk ticket${small.length === 1 ? '' : 's'}, at about ${dollars(+perPass.toFixed(2))} a review`);
+    for (const stage of ['spec', 'plan', 'task', 'final']) {
+      const all = ids.flatMap((id) => recs(id)).filter((r) => r.verdict && reviewPassOf(r.file)?.stage === stage);
+      const firsts = all.filter((r) => reviewPassOf(r.file).first);
+      const rejected = firsts.filter((r) => r.verdict === 'CHANGES').length;
+      if (firsts.length >= 4 && rejected / firsts.length > 0.5) add('tighter-specs', stage, (all.length - firsts.length) * perPass, 'week', `Tighten ${stage} work before it is reviewed: most first ${stage} reviews asked for changes`, `${rejected} of ${firsts.length} first ${stage} reviews asked for changes this week, and ${all.length - firsts.length} more rounds followed`);
+    }
+  }
+  // a smaller model: one model over 90% of this week's spend above $50
+  const week = items.filter((x) => x.at >= start && x.at < end);
+  const total = week.reduce((a, x) => a + x.usd, 0);
+  const byModel = {};
+  for (const x of week) for (const [mdl, v] of Object.entries(x.by_model)) byModel[modelKey(mdl)] = (byModel[modelKey(mdl)] ?? 0) + v.usd;
+  const [dom, domUsd] = Object.entries(byModel).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (total > 50 && domUsd > 0.9 * total) {
+    const priced = [...Object.keys(MODEL_PRICES), ...Object.keys(loadSettings().model_prices ?? {})].map(modelKey);
+    const target = smallerModel(dom, priced);
+    const from = priceFor(dom), to = target && priceFor(target);
+    if (from && to && to.output < from.output) {
+      const NOT = ['final-review', 'review', 'spec', 'plan', 'planning'];
+      const work = week.filter((x) => !NOT.includes(x.phase)).reduce((a, x) => a + Object.entries(x.by_model).filter(([mdl]) => modelKey(mdl) === dom).reduce((b, [, v]) => b + v.usd, 0), 0);
+      add('smaller-model', dom, work * (1 - to.output / from.output), 'week', `Try ${modelWords(target)} for building, outside reviews, specs and planning`, `${modelWords(dom)} was ${Math.round((100 * domUsd) / total)}% of this week's ${dollars(+total.toFixed(2))}, ${dollars(+work.toFixed(2))} of it outside reviews, specs and planning`);
+    }
+  }
+  // keep the prompt cache: low-cache-hit's window, priced at its highest-spend priced model
+  if (m.findings.some((f) => f.kind === 'low-cache-hit')) {
+    const recent = items.filter((x) => x.at >= Date.now() - 7 * DAY);
+    const inSide = recent.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    const reads = recent.reduce((a, x) => a + x.cache_read, 0);
+    const spendBy = {};
+    for (const x of recent) for (const [mdl, v] of Object.entries(x.by_model)) spendBy[modelKey(mdl)] = (spendBy[modelKey(mdl)] ?? 0) + v.usd;
+    const model = Object.entries(spendBy).sort((a, b) => b[1] - a[1]).map(([k]) => k).find((k) => priceFor(k));
+    if (model) { const p = priceFor(model); add('cache', 'prompt-cache', (Math.max(0, 0.6 * inSide - reads) * (p.input - p.read)) / 1e6, 'week', 'Keep the prompt cache: resume sessions instead of relaunching them, and keep prompts stable at the start', `${inSide ? Math.round((100 * reads) / inSide) : 0}% of input tokens were cache reads in the last 7 days, short of 60%`); }
+  }
+  // a costly ticket: its spend above the median per point (as the finding counts it), once
+  const pp = (id) => (m.cost.by_ticket[id] ?? 0) / (POINTS[ts.get(id)?.size] ?? 1);
+  const merged = [...ts.keys()].filter((id) => mergedAt(id) && m.cost.by_ticket[id] !== undefined).map(pp).sort((a, b) => a - b);
+  const med = merged[Math.floor(merged.length / 2)];
+  for (const f of m.findings.filter((x) => x.kind === 'costly-ticket')) {
+    const points = POINTS[ts.get(f.subject)?.size] ?? 1;
+    const spent = m.cost.by_ticket[f.subject] ?? 0;
+    add('costly-ticket', f.subject, spent - med * points, 'once', `Find where ${f.subject}'s spend went, and try a lever on the next tickets like it`, `${dollars(+spent.toFixed(2))} on ${points} point${points === 1 ? '' : 's'}, against a median of ${dollars(+med.toFixed(2))} a point`);
+  }
+  return out.sort((a, b) => b.usd - a.usd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 5);
+}
+function efficiencyData(m) {
+  const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];
+  const weekIds = [];
+  const walk = ticketReviewWalk();
+  const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
+  const r2 = (x) => +x.toFixed(2);
+  const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
+    // the week's tickets: merged in it with spend recorded, the set perPoint counts
+    const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
+    weekIds.push(done.map((c) => c.id));
+    const pp = perPoint(start, end);
+    const points = pp?.points ?? 0;
+    const fp = done.map((c) => firstPassOf(walk.get(c.id) ?? [])).reduce((a, f) => ({ n: a.n + f.first_passes, bad: a.bad + f.rejected }), { n: 0, bad: 0 });
+    // the week's spend items: those timed in it, as collectMetrics selects them for its window
+    const its = items.filter((x) => x.at >= start && x.at < end);
+    const usd = {};
+    for (const r of its) usd[r.phase] = (usd[r.phase] ?? 0) + r.usd;
+    const inSide = its.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    return {
+      starts_at: new Date(start).toISOString(), tickets: done.length, points, usd_per_point: pp?.usd_per_point ?? null,
+      hours_per_point: points ? r2(done.reduce((a, c) => a + c.ms, 0) / 3600000 / points) : null,
+      first_pass: fp.n ? r2((fp.n - fp.bad) / fp.n) : 1, first_passes: fp.n,
+      cache_read_share: inSide ? r2(its.reduce((a, x) => a + x.cache_read, 0) / inSide) : null,
+      escaped_defects: defects.filter((t) => t >= start && t < end).length,
+      usd_by_phase: Object.fromEntries(Object.entries(usd).map(([k, v]) => [k, r2(v)])), tokens_by_phase: tokensByPhase(its),
+      score: null, parts: null,
+    };
+  });
+  const { best } = scoreWeeks(weeks);
+  return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
+    observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
+    waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint),
+    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: Date.parse(weeks[11].starts_at), end: Date.parse(weeks[11].starts_at) + WEEK, POINTS }) };
+}
+
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -11943,6 +12148,8 @@ function collectMetrics(since) {
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
     escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
   };
+  // what efficiencyData recomputes per calendar week, by the same code (not in the JSON)
+  Object.defineProperty(m, METRICS_INTERNALS, { value: { cycles, ticketUsd, perPoint, items, POINTS } });
   // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
   // reply takes. Only once there is one, so a project without threads reads as it did before.
   const threadsNow = threadViews(readLog().objects);
@@ -12464,7 +12671,12 @@ function collectOoda() {
   };
 }
 function dashboardData() {
+  reviewMemo = new Map();
+  try { return dashboardDataRead(); } finally { reviewMemo = null; }
+}
+function dashboardDataRead() {
   const settings = loadSettings();
+  const metrics = collectMetrics(0);
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
@@ -12480,7 +12692,8 @@ function dashboardData() {
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
-    metrics: collectMetrics(0),
+    metrics,
+    efficiency: efficiencyData(metrics),
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
@@ -12519,7 +12732,11 @@ function dashboardKit() {
   if (!dashboardKitCache || Date.now() - dashboardKitCache.at > 60000) dashboardKitCache = { at: Date.now(), kit: kitVersion() };
   return dashboardKitCache.kit;
 }
-const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
+const cmdDashboardData = () => {
+  gitReadCache = new Map();
+  out(JSON.stringify(dashboardData()));
+  if (process.env.DEVTEAM_TEST_REVIEW_READS) process.stderr.write(`review reads: ${reviewReads}\n`);
+};
 
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
