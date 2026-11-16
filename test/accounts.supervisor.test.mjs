@@ -165,3 +165,62 @@ test("the supervisor's own pane: a lost Enter is pressed, at most three times, n
     }
   } finally { F.done(); }
 });
+
+test("the supervisor's own pane: a lost Enter is pressed again while only the harness chrome changes, never into a busy pane", { skip: !hasTmux }, async () => {
+  const F = fixture('sup-chrome');
+  try {
+    const text = '[devteam answer q-1 from owner] read it with: devteam.mjs questions --id q-1';
+    const sent = path.join(F.root, 'docs/devteam/run/sent', `${encodeURIComponent(`${F.session}:sup-chrome`)}.json`);
+    const deliver = (agoSec) => write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
+    const later = () => { const r = json(fs.readFileSync(sent, 'utf8')); write(sent, JSON.stringify({ ...r, at: new Date(Date.now() - 60 * 1000).toISOString() })); };
+    let s;
+    const pane = (shown) => {
+      spawnSync('tmux', ['kill-window', '-t', `=${F.session}:sup-chrome`]);
+      s = F.agent('sup-chrome', shown, F.root);
+      for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:sup-chrome`);
+      return s;
+    };
+    // each redraw is a new stand-in with its own keys: that pane's one Enter, and the record's count
+    const step = async (shown, n) => {
+      pane(shown);
+      await until(() => s.shows().includes('devteam answer'), 'the pane');
+      if (n > 1) later();
+      F.tick();
+      await until(() => s.keys() === '\r', `Enter ${n} of 3`);
+      if (n < 3) assert.equal(json(fs.readFileSync(sent, 'utf8')).tries, n, `kept after try ${n}`);
+      else assert.ok(!fs.existsSync(sent), 'and then it stops');
+    };
+    const R = '─'.repeat(60);
+    const said = '⏺ The plan names each one as stricter than before.';
+    // a Claude Code pane (like the saved incident pane): the footer, the agent list and the status
+    // line's shell count change on their own while the text sits in the input; the shell ends at C
+    const A = [said, '✻ Cogitated for 20s · done 9:56 PM · 1 shell still running', R, `❯ ${text}`, R, '⏵⏵ bypass permissions on · 1 shell · ↓ to manage', '◯ general-purpose  Re-review Task 2 fixes   20s · ↓ 46.1k tokens'];
+    const B = [said, '✻ Cogitated for 20s · done 9:56 PM · 2 shells still running', R, `❯ ${text}`, R, '⏵⏵ bypass permissions on · PR #671 · 2 shells · ↓ to manage', '● main', '◯ general-purpose  Re-review Task 2 fixes   1m 5s · ↓ 52.3k tokens', '◯ Explore  Find the footer  4s · ↓ 1.2k tokens'];
+    const C = [said, '✻ Cogitated for 20s · done 9:56 PM', R, `❯ ${text}`, R, '⏵⏵ bypass permissions on · ↓ to manage'];
+    deliver(3600);
+    await step(A, 1);
+    await step(B, 2);
+    await step(C, 3);
+    F.tick();
+    assert.equal(s.keys(), '\r', 'never a fourth');
+    // another harness, no input box: its shell and agent lines change, then the shell line goes
+    deliver(3600);
+    await step(['⏺ Earlier output', `> ${text}`, '1 shell running', '◯ agent  12s · ↓ 3.1k tokens'], 1);
+    await step(['⏺ Earlier output', `> ${text}`, '2 shells running', '◯ agent  40s · ↓ 9.8k tokens'], 2);
+    await step(['⏺ Earlier output', `> ${text}`, '◯ agent  1m 2s · ↓ 1.2M tokens'], 3);
+    // a rule in the output with the text below it: no input box there, so nothing is cut as a footer
+    deliver(3600);
+    await step(['⏺ Summary', R, `> ${text}`, '1 shell running'], 1);
+    // never into a busy pane: busy only in the footer, or a spinner above a long agent list
+    const agents = [1, 2, 3, 4, 5, 6, 7].map((n) => `◯ agent${n}  ${n}s · ↓ ${n}.1k tokens`);
+    for (const [why, shown] of [['busy in the footer', [...A.slice(0, 5), '⏵⏵ bypass permissions on · 1 shell · esc to interrupt']], ['a spinner above a long agent list', ['⏺ work', '✻ Cogitating… (12s · ↓ 1.2k tokens · esc to interrupt)', R, `❯ ${text}`, R, '⏵⏵ bypass permissions on · 1 shell', ...agents]]]) {
+      fs.rmSync(sent, { force: true });
+      pane(shown);
+      await until(() => s.shows().includes('devteam answer'), 'the busy pane');
+      deliver(3600);
+      F.tick();
+      assert.equal(s.keys(), '', `left alone: ${why}`);
+      assert.ok(fs.existsSync(sent), `the text is still there, so the record is kept: ${why}`);
+    }
+  } finally { F.done(); }
+});
