@@ -19,13 +19,6 @@ trap cleanup EXIT
 mkdir -p docs/devteam/project/tickets
 ln -s "$PWD/docs/devteam-dev/tickets/$T" "$L"
 f=task-2.md
-node $D dispose $T $f T1-1 "wont-fix in T1, Minor: T2's implementer makes the check __threadsQueue.length > 0 (ledger)"
-node $D dispose $T $f T1-2 "wont-fix: the approved plan's T5 names both dev-links lines (~559, ~560); T2 rewords the step message"
-node $D dispose $T $f T1-3 "wont-fix in T1, Minor: T4 restores the real path through #tt-peek, as its plan step says"
-node $D dispose $T $f T1-4 "wont-fix in T1, Minor: T2 adds console.error beside the panel's error line"
-node $D dispose $T $f T1-5 "wont-fix in T1, Minor: panel Escape is T2's (spec §2.9), in its plan step"
-node $D dispose $T $f T1-6 "wont-fix in T1, Minor: T2 counts questions only in the label, or says 'waiting on you'"
-f=task-2.md
 node $D dispose $T $f T2-1 "fixed: 5596b79, thBack drops a + draft first; thApply keeps a draft over the route's thread; test step added"
 node $D dispose $T $f T2-2 "fixed: 5596b79, the card clamped left of the open panel; 960px test"
 node $D dispose $T $f T2-3 "fixed: 5596b79, wording says the Threads panel"
