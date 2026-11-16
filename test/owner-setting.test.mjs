@@ -124,3 +124,107 @@ test('null means no limit wherever a cap is read', () => {
     assert.match(ok(old, ['ready'], ENV), /^active workers: 1\/1 \(\+1 for fix tickets\)$/m);
   } finally { F.done(); }
 });
+
+// Every log line here, in every file of run/log.
+const logLines = (F) => { const dir = path.join(F.old, 'docs/devteam/run/log'); return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))) : []; };
+const DASH = { DEVTEAM_CHANNEL: 'dashboard' };
+
+test('owner-setting writes one owner act and touches no file or git', () => {
+  const F = monoFixture('owner-setting-act');
+  const { old, run, g } = F;
+  try {
+    F.lines(F.STD);
+    const snapshot = () => `${g(['status', '--porcelain'], old)}\n${g(['ls-files', '-s'], old)}\n${g(['diff'], old)}`;
+    const before = snapshot();
+    const n = logLines(F).length;
+    const r = run(old, ['owner-setting', 'max_active_tickets', '7'], DASH);
+    assert.equal(r.status, 0, r.err);
+    const added = logLines(F).slice(n);
+    assert.equal(added.length, 1, JSON.stringify(added));
+    const a = added[0];
+    assert.equal(r.out, a.id);
+    assert.deepEqual([a.type, a.class, a.by, a.channel, a.key, a.value, a.what, a.reversible], ['act', 'owner-setting', 'owner', 'dashboard', 'max_active_tickets', 7, 'asked for max_active_tickets 7', true]);
+    assert.deepEqual(a.refs, []);
+    assert.ok(!Number.isNaN(Date.parse(a.at)), "the envelope's at");
+    assert.equal(JSON.stringify(a).match(/"at":/g).length, 1, 'no other at');
+    assert.equal(snapshot(), before, 'no file or git change');
+    const none = run(old, ['owner-setting', 'max_active_per_component', 'none'], DASH);
+    assert.equal(none.status, 0, none.err);
+    const b = logLines(F).at(-1);
+    assert.deepEqual([b.key, b.value, b.what], ['max_active_per_component', null, 'asked for max_active_per_component no limit']);
+    assert.equal(run(old, ['log-check']).status, 0);
+  } finally { F.done(); }
+});
+
+test('owner-setting refuses, writes nothing and names why', () => {
+  const F = monoFixture('owner-setting-refuse');
+  const { old, run } = F;
+  try {
+    F.lines(F.STD);
+    const runDir = path.join(old, 'docs/devteam/run');
+    fs.mkdirSync(runDir, { recursive: true });
+    const refused = (args, env, re, input) => {
+      const n = logLines(F).length;
+      const r = run(old, ['owner-setting', ...args], env, input);
+      assert.notEqual(r.status, 0, `${args.join(' ')} ${JSON.stringify(env)}: ${r.out}`);
+      assert.match(r.err, re);
+      assert.equal(logLines(F).length, n, 'nothing written');
+    };
+    refused(['max_active_tickets', '7'], { ...DASH, DEVTEAM_ROLE: 'worker' }, /DEVTEAM_ROLE=worker/);
+    refused(['max_active_tickets', '7'], { ...DASH, TMUX: 'x', TMUX_PANE: '%9', DEVTEAM_SUPERVISOR: '%9' }, /supervisor's session/);
+    for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.writeFileSync(path.join(runDir, n), '%9');
+    refused(['max_active_tickets', '7'], { ...DASH, TMUX: 'x', TMUX_PANE: '%9' }, /recorded as the supervisor's/);
+    for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.rmSync(path.join(runDir, n));
+    refused(['max_active_planners', '3'], DASH, /not a setting the owner asks for/);
+    const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+    for (const k of [...src.match(/const OWNER_SETTINGS = \{([\s\S]*?)\};/)[1].matchAll(/([a-z_]+):/g)].map((m) => m[1])) refused([k, '3'], DASH, /owner's own setting/);
+    refused(['links', '3'], DASH, /links change through link set and link land/);
+    for (const v of ['0', '21', '7.5']) refused(['max_active_tickets', v], DASH, /whole number from 1 to 20/);
+    // an agent's shell: no dashboard channel, and stdin a pipe
+    refused(['max_active_tickets', '7'], {}, /on the dashboard's Settings page or in their own terminal/, '');
+  } finally { F.done(); }
+});
+
+test('validate takes proof on owner-setting and pane-answer only', () => {
+  const F = monoFixture('owner-setting-validate');
+  const { old, run } = F;
+  const hand = handFor(F);
+  const proof = { port: 4400, ts: 1, nonce: 'n', sig: 's', body: 'e30=' };
+  const check = () => run(old, ['log-check']);
+  const ownerFile = path.join(old, 'docs/devteam/run/log', `owner-${month()}.jsonl`);
+  const supFile = path.join(old, 'docs/devteam/run/log', `supervisor-${month()}.jsonl`);
+  // one hand line at a time, removed again after it is judged
+  const judged = (by, o) => {
+    const file = by === 'owner' ? ownerFile : supFile;
+    const keep = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    hand(by, { type: 'act', refs: [], reversible: true, ...o });
+    const r = check();
+    if (keep === null) fs.rmSync(file); else fs.writeFileSync(file, keep);
+    return r;
+  };
+  try {
+    F.lines(F.STD);
+    const ask = { class: 'owner-setting', key: 'max_active_tickets', value: 7, what: 'asked for max_active_tickets 7' };
+    let r = judged('owner', { ...ask, proof });
+    assert.equal(r.status, 0, r.err || r.out);
+    r = judged('owner', { class: 'goal-order', what: 'ordered the goals', proof });
+    assert.notEqual(r.status, 0);
+    assert.match(`${r.out}\n${r.err}`, /proof is the gateway's signature/);
+    r = judged('supervisor', ask);
+    assert.notEqual(r.status, 0);
+    assert.match(`${r.out}\n${r.err}`, /owner-setting is the owner's/);
+    for (const bad of [{ value: 21 }, { value: 0 }, { value: '7' }, { key: 'Bad Key' }]) assert.notEqual(judged('owner', { ...ask, ...bad }).status, 0, JSON.stringify(bad));
+    assert.equal(judged('owner', { ...ask, value: null, what: 'asked for max_active_tickets no limit' }).status, 0);
+    r = judged('owner', { ...ask, key: 'max_active_planners', what: 'asked for max_active_planners 7' });
+    assert.equal(r.status, 0, `shape, not today's allowlist: ${r.err || r.out}`);
+  } finally { F.done(); }
+});
+
+test('CLASS_WORDS names both classes', () => {
+  const F = monoFixture('owner-setting-words');
+  try {
+    const d = json(F.ok(F.old, ['dashboard-data']));
+    assert.equal(d.class_words['owner-setting'], 'Asking for a setting');
+    assert.equal(d.class_words['settings-edit'], 'Changing one of its own settings');
+  } finally { F.done(); }
+});

@@ -931,7 +931,7 @@ const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
 const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The only acts the owner writes: records of what the owner did, never calls.
-const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order'];
+const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-setting'];
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -1433,11 +1433,14 @@ function integrity(o, file) {
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
     // The owner's only acts are records: of publishing an artifact (artifact publish|unpublish), of
     // answering what the supervisor's terminal asked (pane answer), and of putting the goals in order
-    // (goal order). Nobody else writes those classes: an agent can't make the log say the owner
-    // published, gave a tool their yes, or ordered the goals.
+    // (goal order), and of asking for one of the supervisor's settings (owner-setting). Nobody else
+    // writes those classes: an agent can't make the log say the owner published, gave a tool their
+    // yes, ordered the goals or asked for a setting.
     if (o.type === 'act' && (cls === 'owner') !== OWNER_ACTS.includes(o.class)) return cls === 'owner' ? `the owner\'s acts are ${OWNER_ACTS.join(', ')} only` : `${o.class} is the owner\'s`;
     if (o.type === 'act' && cls === 'owner' && o.class === 'pane-answer' && (o.artifact !== undefined || o.tree !== undefined)) return 'a pane-answer act says what was answered and names no artifact';
-    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && o.class === 'pane-answer' && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer act, and nothing else carries one';
+    if (o.type === 'act' && 'proof' in o && !(cls === 'owner' && ['pane-answer', 'owner-setting'].includes(o.class) && isObj(o.proof))) return 'proof is the gateway\'s signature on the owner\'s pane-answer or owner-setting act, and nothing else carries one';
+    // its shape, not today's allowlist: narrowing OWNER_ASKABLE later never breaks an old act
+    if (o.type === 'act' && cls === 'owner' && o.class === 'owner-setting' && (typeof o.key !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(o.key) || !askableValue(o.value) || o.artifact !== undefined || o.tree !== undefined)) return 'an owner-setting act names a setting (key) and its value, a whole number from 1 to 20 or null (no limit), and no artifact';
     if (o.type === 'act' && cls === 'owner' && o.class === 'artifact-publish' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
@@ -16401,6 +16404,23 @@ function paneProofProblem(proof, now = Date.now()) {
 }
 // Another account's artifact is named by its id, never its link: the log is mirrored to git.
 const noArtifactLinks = (t) => String(t ?? '').replace(/(?:https?:\/\/)?claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]{6,64})\S*/g, 'artifact $1');
+// The owner's requests for the supervisor's askable settings, oldest first, and the latest one.
+const ownerSettingActs = (key) => logObjects('act').filter((a) => a.class === 'owner-setting' && a.created_by === 'owner' && a.key === key).sort(byTime);
+const latestOwnerSetting = (key) => ownerSettingActs(key).at(-1) ?? null;
+// owner-setting <key> <1..20|none>: the owner asks for one of the supervisor's own settings (the
+// dashboard's Settings page runs it on Save). It writes one owner act and nothing else: the
+// supervisor lands it with settings set in its settings chore, and owner-setting-unlanded stays
+// raised until main has it. Only the dashboard's channel or the owner's own terminal runs it.
+function cmdOwnerSetting() {
+  const [key, arg] = positional;
+  if (!key || arg === undefined) die('usage: owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor\'s settings; the dashboard\'s Settings page runs it)');
+  const { by } = ownerWriter('the owner asks for a setting on the dashboard\'s Settings page; you change your own with settings set in the settings chore');
+  if (process.env.DEVTEAM_CHANNEL !== 'dashboard' && !process.stdin.isTTY) die('owner-setting: the owner asks for a setting on the dashboard\'s Settings page or in their own terminal; you change your own with settings set in the settings chore');
+  const value = parseAskable(arg);
+  const why = askableProblem(key, value === undefined ? NaN : value);
+  if (why) die(`owner-setting: ${why}`);
+  out(appendLog({ type: 'act', class: 'owner-setting', key, value, what: `asked for ${key} ${value === null ? 'no limit' : value}`, refs: [], reversible: true }, by).id);
+}
 function cmdPane() {
   const sub = positional[0];
   if (sub === 'question') {
@@ -20681,6 +20701,7 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
   thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
@@ -20745,7 +20766,7 @@ const COMMANDS = {
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, pane: cmdPane, 'owner-setting': cmdOwnerSetting, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, governance: cmdGovernance, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
