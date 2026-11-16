@@ -267,8 +267,11 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     // The drawer is drawn at once, before the goal's record (its peek) arrives, and again when it
     // lands: the record's rows go above "Why it matters" and push Wrong? down. p.click measures and
     // presses in two steps, so a record landing between them makes the press miss. Wait for the
-    // record: no `.loading` left and `.hist-h` there (a failed load draws no `.hist-h`).
-    await soon(`!!document.querySelector('[data-correct="${key}"]') && !!document.querySelector('#drawer-body .hist-h') && !document.querySelector('#drawer-body .loading')`, 'the goal drawer with its record');
+    // record: its Created row there (a load pending or failed draws a Record row instead) and no
+    // `.loading` left.
+    await soon(`!!document.querySelector('[data-correct="${key}"]') && [...document.querySelectorAll('#drawer-body section.attrs dt')].some((dt) => dt.textContent === 'Created') && !document.querySelector('#drawer-body .loading')`, 'the goal drawer with its record');
+    // the peek slides in (kit-88): click once it is at rest, or the click lands where the button was
+    await soon(`(() => { const d = document.getElementById('drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()`, 'the goal drawer at rest');
     assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
     await p.click(`[data-correct="${key}"]`);
     // the click's effect; and the focused field holds the drawer's redraws while the values go in
