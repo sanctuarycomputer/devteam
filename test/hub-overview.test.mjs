@@ -300,6 +300,7 @@ test('the Overview\'s rules: tab counts', () => {
   assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 2 })), { q: 0, th: { n: 2, tone: 'ok', title: '2 ready to accept' } });
   assert.deepEqual(plain(tabCounts(0, { you: 2, waiting: 0, ready: 0 }).th), { n: 2, tone: 'you', title: '2 your move' });
   assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 2, ready: 0 }).th), { n: 2, tone: 'wait', title: 'all waiting on the supervisor' });
+  assert.deepEqual(plain(tabCounts(0, { you: 1, waiting: 2, ready: 0 }).th), { n: 1, tone: 'you', title: '1 your move' }, 'your move before waiting');
   assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 0 })), { q: 0, th: null });
   assert.deepEqual(plain(tabCounts(1, null)), { q: 1, th: null }, 'an older kit: questions only');
   assert.deepEqual(plain(tabCounts('x', { you: -1 })), { q: 0, th: null });
@@ -320,6 +321,7 @@ test('the Overview\'s rules: the partly-held pill', () => {
   assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 25, held: many } }).title.split('\n').length, 20, 'at most 20');
   assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: [{ title: 'a‮b', mode: 'park', why: 'c\nd' }] } }).title, 'a b: c d', 'what a reader\'s eye acts on goes, as tLine does');
   assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: 'nope' } }).title, '1 parked, 0 draining', 'held not a list: the counts');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: [{ title: 'Quiet', mode: 7 }] } }).title, 'Quiet: held', 'no why and no mode: held');
 });
 
 test('the Overview\'s rules: the machine switch\'s mode', () => {
@@ -328,6 +330,7 @@ test('the Overview\'s rules: the machine switch\'s mode', () => {
   assert.deepEqual(plain(machineMode(['park', 'park'])), { mode: 'park', counts: { running: 0, draining: 0, parked: 2 } });
   assert.deepEqual(plain(machineMode(['run', 'park', 'drain'])), { mode: 'mixed', counts: { running: 1, draining: 1, parked: 1 } });
   assert.deepEqual(plain(machineMode([])), { mode: null, counts: { running: 0, draining: 0, parked: 0 } });
+  assert.deepEqual(plain(machineMode(['run', 'nope', null])), { mode: 'run', counts: { running: 1, draining: 0, parked: 0 } }, 'what is no mode is not counted');
 });
 
 test('the Overview\'s rules: addresses a view never loses', () => {

@@ -1024,14 +1024,15 @@ function heldPill(fleet) {
   const total = run + drain + park;
   if (!total || [run, drain, park].filter(Boolean).length < 2) return null;
   const word = park ? 'Partly parked' : 'Partly draining';
-  const named = Array.isArray(g.held) ? g.held.filter((h) => h && typeof h === 'object' && typeof h.title === 'string').slice(0, 20).map((h) => `${tLine(h.title, 200)}: ${tLine(typeof h.why === 'string' && h.why ? h.why : h.mode, 200)}`) : [];
+  const named = Array.isArray(g.held) ? g.held.filter((h) => h && typeof h === 'object' && typeof h.title === 'string').slice(0, 20).map((h) => `${tLine(h.title, 200)}: ${tLine(typeof h.why === 'string' && h.why ? h.why : typeof h.mode === 'string' && h.mode ? h.mode : 'held', 200)}`) : [];
   return { word, running: run, total, text: `${word} · ${run} of ${total} goals running`, title: named.length ? named.join('\n') : `${park} parked, ${drain} draining` };
 }
 // the machine switch: the mode every steerable project shares, or mixed; and the three tallies
 function machineMode(modes) {
   const counts = { running: 0, draining: 0, parked: 0 };
-  for (const m of modes) counts[{ run: 'running', drain: 'draining', park: 'parked' }[m]]++;
-  const mode = !modes.length ? null : modes.every((m) => m === modes[0]) ? modes[0] : 'mixed';
+  const ms = modes.filter((m) => ['run', 'drain', 'park'].includes(m));
+  for (const m of ms) counts[{ run: 'running', drain: 'draining', park: 'parked' }[m]]++;
+  const mode = !ms.length ? null : ms.every((m) => m === ms[0]) ? ms[0] : 'mixed';
   return { mode, counts };
 }
 // a project's address: its name, with 6 hex of its root when two share it or the name is a view's
