@@ -1,0 +1,7 @@
+# REPRO drawer drawn; record loaded: false
+# REPRO Wrong? measured at y=246
+# REPRO at press time Wrong? is at y=415; the point is on BUTTON "Start a thread"
+# REPRO after the press the form is hidden
+  error: "timed out waiting for the owner's value"
+# pass 0
+# fail 1

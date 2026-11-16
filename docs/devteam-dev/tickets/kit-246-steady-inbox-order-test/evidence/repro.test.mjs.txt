@@ -32,7 +32,10 @@ test(`repro (${VARIANT}): Wrong? measured, then the goal's record lands, then th
     const key = `imp:${D}`;
     const btn = `[data-correct="${key}"]`;
     await soon(`!!document.querySelector('${btn}')`, 'the goal drawer');
-    const loaded = `!!document.querySelector('#drawer-body .hist-h') && !document.querySelector('#drawer-body .loading')`;
+    // kit-88's slide-in, on a dashboard that has one: measured only once the drawer is at rest
+    await soon(`(() => { const d = document.getElementById('drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()`, 'the goal drawer at rest');
+    // the record drawn: its Created row there (before and after kit-88) and no Loading… left
+    const loaded = `[...document.querySelectorAll('#drawer-body dt')].some((dt) => dt.textContent.trim().startsWith('Created')) && !document.querySelector('#drawer-body .loading')`;
     console.log(`REPRO drawer drawn; record loaded: ${await p.ev(loaded)}`);
     if (VARIANT === 'fixed') { await p.ev('window.__release()'); await soon(loaded, 'the goal\'s record'); }
     const at = await p.at(btn); // what p.click measures
