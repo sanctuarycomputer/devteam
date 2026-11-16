@@ -2,6 +2,8 @@
 // button, which carries the threads' counts. Headless Chrome against a real dashboard on a project of
 // its own (threadsFixture), skipped where Chrome can't be driven, as the kit's other Chrome tests are.
 import { test } from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
 import assert from 'node:assert/strict';
 import { threadsFixture, dashboardOnFreePort, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
@@ -732,4 +734,166 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon("!!document.querySelector('#tl-card [data-tl-resolve-go]')", 'the resolve form');
   await p.click('#tl-card [data-tl-resolve-go]');
   await soon(`location.hash === '#goals' && ${CARD}.hidden`, 'resolved: closed, t gone');
+});
+
+// An artifact on main, as the supervisor lands one (dashboard.test.mjs's landArtifact).
+const VIEWER_MOCK = {
+  'artifact.json': JSON.stringify({ v: 1, title: 'Viewer mock', summary: 'A page to point at', by: 'supervisor', for: [] }),
+  'index.html': '<!doctype html><html><body><p id="art">the mock</p></body></html>',
+};
+function landArtifact(F, slug, files) {
+  const dir = path.join(F.old, 'docs/devteam/project/artifacts', slug);
+  for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); }
+  F.g(['add', '-A', dir], F.old);
+  F.g(['commit', '-qm', `artifact: ${slug}`], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+}
+// Shown: rendered, not hidden, not faded out.
+const SEEN_FN = "const seen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && c.opacity !== '0' && el.getClientRects().length > 0; };";
+// Where #tt-peek is, against .tt's own place and the window's top right, and what is at its centre.
+const MIRROR = `(() => { ${SEEN_FN} const m = document.getElementById('tt-peek'), r = m.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2, hit = document.elementFromPoint(x, y);
+  const pad = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--header-pad')), bar = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--bar-h'));
+  const av = document.getElementById('artifact-view');
+  return { seen: seen(m), hit: !!hit?.closest('#tt-peek'), fromRight: innerWidth - r.right, pad, cy: y, bar, bottom: r.bottom, avTop: av.hidden ? null : av.getBoundingClientRect().top, z: +getComputedStyle(m).zIndex, avZ: +getComputedStyle(av).zIndex }; })()`;
+const VIEWER_UP = "(!document.getElementById('artifact-view').hidden && document.body.classList.contains('av-open') && document.body.classList.contains('overlay-open'))";
+const MIRROR_SHOWN = `(() => { ${SEEN_FN} const m = document.getElementById('tt-peek'); return seen(m) && getComputedStyle(m).opacity === '1'; })()`;
+
+test('with the viewer', { skip: SKIP, timeout: 600000 }, async (t) => {
+  const F = threadsFixture('threads-viewer');
+  landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  const TK = 'ch-01-tidy-docs';
+  F.sup(['ticket', 'add', TK, '--json', JSON.stringify({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
+  const { p, soon, size, reload } = await open(t, F, '#overview');
+  const AV = '#artifact/main/viewer-mock';
+  const probe = "document.getElementById('av-right-probe').getBoundingClientRect().width";
+  await p.ev("(() => { const d = document.createElement('div'); d.id = 'av-right-probe'; d.style.cssText = 'position: fixed; left: 0; top: 0; height: 1px; width: var(--av-right, 0px); pointer-events: none'; document.body.append(d); return true; })()");
+  assert.equal(await p.ev(probe), 0, '--av-right unset with the panel closed');
+
+  // the viewer up: #tt-peek at the window's top right, above it; .tt hidden; the viewer has no Inbox button
+  await p.ev(`location.hash = '${AV}'; void 0`);
+  await soon(VIEWER_UP, 'the viewer up, av-open set');
+  await soon(MIRROR_SHOWN, '#tt-peek shown above the viewer');
+  let m = await p.ev(MIRROR);
+  assert.ok(m.hit, 'the element at its centre is #tt-peek');
+  assert.ok(Math.abs(m.fromRight - m.pad) <= 1, `--header-pad from the right: ${JSON.stringify(m)}`);
+  assert.ok(Math.abs(m.cy - m.bar / 2) <= 1.5, `centred in the --bar-h band: ${JSON.stringify(m)}`);
+  assert.ok(m.bottom <= m.avTop && m.z > m.avZ, `above the viewer: ${JSON.stringify(m)}`);
+  assert.equal(await p.ev("getComputedStyle(document.querySelector('.pagebar .tt')).visibility"), 'hidden', '.tt itself hidden');
+  assert.equal(await p.ev("!!document.querySelector('#artifact-view .tt, #artifact-view [data-inbox]')"), false, 'the viewer has no Inbox button');
+  // the backdrop: #scrim's background is --backdrop
+  assert.equal(await p.ev("(() => { const d = document.createElement('div'); d.style.background = 'var(--backdrop)'; document.body.append(d); const v = getComputedStyle(d).backgroundColor; d.remove(); return getComputedStyle(document.getElementById('scrim')).backgroundColor === v && v !== 'rgba(0, 0, 0, 0)'; })()"), true, "#scrim's background is --backdrop");
+
+  // pressed: the panel above the viewer, the viewer still up, #artifact/… still the hash
+  await p.click('#tt-peek');
+  await soon(`${AT_REST} && history.state?.page === '#overview?th=open' && !!${ROW(A)}`, 'the panel over the viewer');
+  assert.deepEqual(await p.ev(`[location.hash, ${VIEWER_UP}]`), [AV, true], 'the viewer still open');
+  const inPanel = await p.ev("(() => { const r = document.getElementById('threads').getBoundingClientRect(); return !!document.elementFromPoint(r.left + 60, r.top + 300)?.closest('#threads'); })()");
+  assert.ok(inPanel, 'a point in the panel is the panel');
+  assert.equal(await p.ev(probe), 396, '--av-right: --threads-w + 16px while open above 900px');
+  // a thread opened in the panel under the viewer, then the viewer closed: its page head keeps th and t (spec §2.5)
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(`${IN_PANEL(A)} && history.state?.page === '#overview?th=open&t=${A}' && location.hash === '${AV}'`, 'A in the panel, under the viewer');
+  await p.clickAt(10, 450);
+  await soon(`document.getElementById('artifact-view').hidden && !document.body.classList.contains('av-open') && location.hash === '#overview?th=open&t=${A}' && ${IN_PANEL(A)}`, 'the viewer closed: the page head carries th and t, A still in the panel');
+  await soon(AT_REST, 'the panel at rest');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && location.hash === '#overview'`, 'the panel closed');
+  await soon(`${probe} === 0`, '--av-right gone once it closes');
+
+  // a peek and the panel at 1440x900: the drawer meets the panel, the scrim doesn't cover it, the three bars level
+  await p.ev(`location.hash = '#ticket/${TK}'; void 0`);
+  await soon(PEEK, 'the peek');
+  await soon(MIRROR_SHOWN, '#tt-peek beside the peek');
+  assert.deepEqual(await p.ev("(() => { const a = document.querySelector('.pagebar .tt'), b = document.getElementById('tt-peek'); return [b.getAttribute('aria-label'), b.getAttribute('title')].join('|') === [a.getAttribute('aria-label'), a.getAttribute('title')].join('|') && !!b.getAttribute('title'); })()"), true, "#tt-peek's aria-label and title are .tt's");
+  await p.click('#tt-peek');
+  await soon(`${AT_REST} && ${PEEK}`, 'the panel beside the peek');
+  await soon("getComputedStyle(document.getElementById('drawer')).right === '380px'", 'the drawer moved over');
+  const g = await p.ev("(() => { const d = document.getElementById('drawer').getBoundingClientRect(), th = document.getElementById('threads').getBoundingClientRect(); const b = (s) => document.querySelector(s).getBoundingClientRect().bottom; return { dr: d.right, tl: th.left, hit: !!document.elementFromPoint(th.left + 60, th.top + 300)?.closest('#threads'), heads: [b('.drawer-head'), b('.pagebar'), b('.threads-head')] }; })()");
+  assert.ok(Math.abs(g.dr - g.tl) <= 1, `the drawer's right edge is the panel's left edge: ${JSON.stringify(g)}`);
+  assert.ok(g.hit, 'the scrim does not cover the panel');
+  assert.ok(Math.max(...g.heads) - Math.min(...g.heads) <= 1, `the three bars level: ${JSON.stringify(g)}`);
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && ${PEEK}`, 'the panel closed, the peek open');
+
+  // the viewer opened over the peek: #tt-peek at the window's top right, not beside the peek
+  await soon(MIRROR_SHOWN, '#tt-peek beside the peek again');
+  await p.ev(`location.hash = '${AV}'; void 0`);
+  await soon(`${VIEWER_UP} && document.body.classList.contains('peek-open')`, 'the viewer over the peek');
+  await soon(`(() => { const r = document.getElementById('tt-peek').getBoundingClientRect(); return Math.abs(innerWidth - r.right - 16) <= 1; })()`, '#tt-peek moved to the top right');
+  m = await p.ev(MIRROR);
+  assert.ok(m.seen && m.hit && Math.abs(m.fromRight - m.pad) <= 1, `over a peek, at the top right: ${JSON.stringify(m)}`);
+
+  // 720x800: the panel overlays (left 0); with the viewer up #tt-peek is hidden and #av-close is what is at its place
+  await p.ev(`location.hash = '#overview'; void 0`);
+  await soon(`location.hash === '#overview' && document.getElementById('artifact-view').hidden && ${NO_PEEK}`, 'back on Overview');
+  await size(720, 800);
+  await soon("innerWidth === 720", '720 wide');
+  await soon(STEADY('.pagebar .tt'), '.tt at rest');
+  await p.click('.pagebar .tt');
+  await soon(AT_REST, 'the panel open at 720');
+  assert.equal(await p.ev("document.getElementById('threads').getBoundingClientRect().left"), 0, 'it overlays: its left edge is 0');
+  assert.equal(await p.ev(probe), 0, 'no --av-right at 900px and below');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN}`, 'closed');
+  await reload();
+  await p.ev(`location.hash = '${AV}'; void 0`);
+  await soon(VIEWER_UP, 'the viewer up at 720');
+  const small = await p.ev(`(() => { ${SEEN_FN} const c = document.getElementById('av-close').getBoundingClientRect(); return { mirror: seen(document.getElementById('tt-peek')), close: !!document.elementFromPoint(c.left + c.width / 2, c.top + c.height / 2)?.closest('#av-close') }; })()`);
+  assert.deepEqual(small, { mirror: false, close: true }, '#tt-peek hidden, #av-close not covered');
+  await size(1440, 900);
+});
+
+test('the /view/ tab', { skip: SKIP, timeout: 300000 }, async (t) => {
+  const F = threadsFixture('threads-view-tab');
+  landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const later = cleanup(t);
+  later(() => F.done());
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  await until(async () => { try { return (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).inbox === 1; } catch { return false; } }, "hello's inbox");
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await size(1440, 900);
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: "window.__asked = []; { const rf = window.fetch; window.fetch = (u, o) => { window.__asked.push(String(u)); return rf(u, o); }; }" });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/view/artifact/viewer-mock` });
+  const soon = soonIn(p, 30000, () => dash.out());
+  await soon("document.documentElement.classList.contains('viewer') && typeof TL === 'object' && TL.have > 0", 'the viewer and its threads read');
+
+  // #tt-peek at the window's top right with the thread count and the red count; the stage below a --bar-h band
+  for (const [w, h] of [[1440, 900], [720, 800]]) {
+    await size(w, h);
+    await soon(`innerWidth === ${w} && ${MIRROR_SHOWN} && document.querySelector('#tt-peek .n.th')?.textContent === '2' && document.querySelector('#tt-peek .n.q')?.textContent === '1'`, `#tt-peek with the counts at ${w}`);
+    const m = await p.ev(MIRROR);
+    assert.ok(m.hit && Math.abs(m.fromRight - m.pad) <= 1 && Math.abs(m.cy - m.bar / 2) <= 1.5, `${w}: at the top right, centred in the band: ${JSON.stringify(m)}`);
+    assert.equal(m.avTop, 49, `${w}: #artifact-view's top is --bar-h`);
+  }
+  await size(1440, 900);
+  await soon(`innerWidth === 1440 && ${MIRROR_SHOWN}`, 'back at 1440');
+
+  // pressed: the panel with the list; A's row in the pane, G's (a dashboard item: no page here) in the pane too; × closes
+  await p.click('#tt-peek');
+  await soon(`${AT_REST} && !!${ROW(A)} && !!${ROW(G)}`, 'the panel with the list');
+  await p.click(`#tl-list [data-tl-open="${A}"]`);
+  await soon(IN_PANEL(A), 'A in the pane');
+  await p.click('#th-pane [data-tl-back]');
+  await soon(`!!${ROW(G)}`, 'the list again');
+  await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
+  await p.click(`#tl-list [data-tl-open="${G}"]`);
+  await soon(IN_PANEL(G), 'G in the pane');
+  await p.click('#th-close');
+  await soon(`!${IS_OPEN} && ${MIRROR_SHOWN}`, 'closed, #tt-peek again');
+  assert.equal(await p.ev("location.pathname + location.hash"), '/view/artifact/viewer-mock', 'no route');
+  assert.deepEqual(await p.ev("window.__asked.filter((u) => u.startsWith('/api/data'))"), [], '/api/data never asked');
 });

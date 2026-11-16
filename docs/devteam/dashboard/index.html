@@ -816,9 +816,10 @@ try {
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
   .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
   .av-pins .tl-pin { pointer-events: auto; }
-  /* the viewer: the stage is the whole tab, and nothing else of the dashboard shows */
+  /* the viewer: the stage is the whole tab below a --bar-h band for the Inbox button (kit-89 spec §2.8), and nothing
+     else of the dashboard shows */
   .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
-  .viewer #artifact-view:not([hidden]) { inset: 0; border: 0; border-radius: 0; box-shadow: none; }
+  .viewer #artifact-view:not([hidden]) { inset: var(--bar-h) 0 0; border: 0; border-radius: 0; box-shadow: none; }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
@@ -894,6 +895,21 @@ try {
   .tt .n.th.you { color: var(--blue-fg); }
   .tt .n.th.wait { color: var(--muted); }
   :where(.shell).threads-open .pagebar .tt, :where(.shell).threads-open #tt-peek { visibility: hidden; }
+  /* with the artifact viewer up (kit-89 spec §2.7; av-open, set by openArtifact and openPreview): the Inbox button
+     floats above it at its own place (the window's top right, --header-pad in; its top .tt's, by ttPeekPlace), over
+     a peek too (the viewer is on top: after kit-88's rule, and more specific), and .tt is hidden; the panel opens
+     above the viewer and its scrim. At 900px and below the viewer (inset 8px) has its own bar there: no mirror */
+  .shell.av-open:not(.threads-open) #tt-peek, .shell.av-open.peek-open:not(.threads-open) #tt-peek { right: var(--header-pad); z-index: 24; visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  @media (min-width: 901px) { .shell.av-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
+  @media (max-width: 900px) { .shell.av-open #tt-peek { display: none; } }
+  .shell.av-open .threads { z-index: 23; }
+  /* the viewer narrowed by the open panel above 900px is kit-141's; the page only sets how much */
+  @media (min-width: 901px) { :where(.shell).threads-open { --av-right: calc(var(--threads-w) + 16px); } }
+  /* the /view/ tab (spec §2.8): the button at the window's top right, centred in a --bar-h band above the stage,
+     at every width; the panel above the stage */
+  .viewer #tt-peek { display: inline-flex; top: calc(var(--bar-h) / 2); right: var(--header-pad); transform: translateY(-50%); z-index: 24; }
+  .viewer .shell:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  .viewer .threads { z-index: 23; }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   /* what the supervisor's terminal asks: its words as the terminal has them, one button an option */
@@ -1488,6 +1504,8 @@ $('inbox-btn').addEventListener('click', () => thGo({ th: 'open', focus: true })
 function ttPeekPlace() {
   const tt = document.querySelector('.pagebar .tt'), mirror = $('tt-peek');
   if (!tt || !mirror) return;
+  // .tt not drawn (the /view/ tab hides .app): the page's CSS places it (kit-89 spec §2.8)
+  if (!tt.getClientRects().length) { if (mirror.style.top) mirror.style.top = ''; return; }
   const top = `${Math.round(tt.getBoundingClientRect().top * 100) / 100}px`;
   if (mirror.style.top !== top) mirror.style.top = top;
 }
@@ -1504,7 +1522,7 @@ const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
 // The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>] or
-// /view/preview/<name>, one artifact or preview on the stage, the thread layer and the dock over it,
+// /view/preview/<name>, one artifact or preview on the stage, the thread layer and the Threads panel over it,
 // and nothing else: no sections, no routes, no /api/data.
 const VIEWER = (() => {
   const m = /^\/view\/(artifact|preview)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
@@ -5024,6 +5042,8 @@ async function openPreview(raw) {
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // the Inbox button floats above the stage (kit-89 spec §2.7)
+  document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -5044,6 +5064,8 @@ function openArtifact(raw) {
   showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // the Inbox button floats above the stage (kit-89 spec §2.7)
+  document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -5058,12 +5080,20 @@ function closeArtifact() {
   $('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
   if (!RV) document.body.classList.remove('overlay-open');
+  document.body.classList.remove('av-open');
   if (!peekIsOpen() && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
   return true;
 }
-// a viewer tab has nothing to go back to: it never closes
-function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
+// a viewer tab has nothing to go back to: it never closes. Back to the entry below, which has its own head: the
+// panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5)
+function leaveArtifact() {
+  if (VIEWER) return;
+  if (!AV_FROM) return void (location.hash = '#library');
+  TH_CARRY = history.state?.page ?? null;
+  TH_CARRY_FROM = location.hash;
+  history.back();
+}
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => {
   const f = tsFrame(), src = f.getAttribute('src');
@@ -7060,10 +7090,12 @@ function thFocusBack() {
 const thWidth = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--threads-w')) || 380;
 // Panel or floating (kit-89 spec §2.4), by whether the subject is drawn anywhere the dashboard draws, never by
 // whether its page is shown: no subject, an item with no element (gone), a page subject whose section doesn't
-// exist. The /view/ tab's "not this stage's" branch is kit-89 T4's.
+// exist. In the /view/ tab, also a subject not this stage's (a dashboard item or page, another artifact or
+// preview): that tab has no page to go to.
 function tlInPanel(t) {
   const s = t?.subject;
   if (!s) return true;
+  if (VIEWER) return !(s.kind === VIEWER.kind && (s.kind === 'artifact' ? s.slug : s.name) === VIEWER.name);
   if (s.kind === 'item') return !tlHome(s);
   if (s.kind === 'page') { const id = String(s.view ?? '').replace(/^#/, '').split(/[/?]/)[0]; return !document.querySelector(`main section[id="${CSS.escape(id)}"]`) && !Object.hasOwn(SHELL_ROUTES.redirects, id); }
   return false;
@@ -7801,11 +7833,14 @@ async function viewerArtifact() {
 // Nothing else.
 async function viewerBoot() {
   document.documentElement.classList.add('viewer');
+  // the Inbox button, above the stage: placed by the page's CSS now that .tt isn't drawn (kit-89 spec §2.8)
+  ttPeekPlace();
   if (VIEWER.kind === 'preview') { if (showPreview(VIEWER.name, await previewInfo(VIEWER.name)) === 'reload') return; }
   else await viewerArtifact();
   document.title = `${$('av-title').textContent} · devteam`;
-  // the instance's name, and for a preview whether it answers, as the dashboard's tick last found it
-  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
+  // the instance's name, the Inbox's red count (the button's; #tt-peek copies it), and for a preview whether it
+  // answers, as the dashboard's tick last found it
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; $('inbox-btn-n').textContent = Number.isInteger(h.inbox) && h.inbox > 0 ? String(h.inbox) : ''; if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
   hello();
   setInterval(hello, 30000);
   // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)

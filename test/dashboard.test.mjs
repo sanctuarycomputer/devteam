@@ -1915,7 +1915,9 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     await soon(`document.getElementById('av-title').textContent === 'Viewer mock' && document.getElementById('av-project').textContent === 'viewer-page'`, 'the bar');
     assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), '/artifact/main/viewer-mock/');
     assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
-    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 0 && r.width === innerWidth && r.height === innerHeight; })()`), true, 'the whole tab');
+    // the whole tab below a --bar-h band, where the Inbox button floats at the top right (kit-89 spec §2.8)
+    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 49 && r.width === innerWidth && r.height === innerHeight - 49; })()`), true, 'the whole tab below the band');
+    await soon(`(() => { const m = document.getElementById('tt-peek'), c = getComputedStyle(m), r = m.getBoundingClientRect(); return c.display !== 'none' && c.visibility === 'visible' && c.opacity === '1' && r.bottom <= 49 && Math.abs(innerWidth - r.right - 16) <= 1; })()`, '#tt-peek shown at the top right');
     assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.fp === TS.mainFp, /^[0-9a-f]{64}$/.test(TS.fp)].join()`), 'artifact,viewer-mock,main,true,true');
     assert.equal(await p.ev(`!document.getElementById('tl-pill') && !!document.getElementById('threads')`), true, 'no dock; the Threads panel');
   });
@@ -2583,14 +2585,19 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 
   await t.test('in pin mode the wheel scrolls the artifact, and the pin follows', async () => {
     await p.ev('document.activeElement?.blur()');
-    // the panel's Pin, pressed with the viewer up (until kit-89's T4 floats the Inbox button above the viewer)
-    await p.ev(`document.getElementById('tl-pinbtn').click(); void 0`);
+    // the panel's Pin, with the viewer up: #tt-peek above the viewer opens the panel, then Pin
+    await soon(`getComputedStyle(document.getElementById('tt-peek')).opacity === '1'`, '#tt-peek above the viewer');
+    await p.click('#tt-peek');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel over the viewer');
+    await p.click('#tl-pinbtn');
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay in pin mode');
     const at = await frameAt(300, 300);
     await p.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: at.x, y: at.y, deltaX: 0, deltaY: 100 });
     await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && parseInt(b.style.top, 10) === 140 - 100 - 11; })()`, 'the pin, 100 px up');
     await p.key('Escape');
     await soon(`document.getElementById('av-over').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && !document.getElementById('artifact-view').hidden`, 'the panel closed, the viewer still up');
   });
 
   await t.test('the pin opens its card beside it, and the card says when the artifact changed since', async () => {
