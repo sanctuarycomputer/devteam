@@ -190,6 +190,10 @@ test('owner-setting refuses, writes nothing and names why', () => {
     for (const v of ['0', '21', '7.5']) refused(['max_active_tickets', v], DASH, /whole number from 1 to 20/);
     // an agent's shell: no dashboard channel, and stdin a pipe
     refused(['max_active_tickets', '7'], {}, /on the dashboard's Settings page or in their own terminal/, '');
+    // the channel is checked before the key (task-2 T2-2)
+    refused(['max_active_planners', '3'], {}, /on the dashboard's Settings page or in their own terminal/, '');
+    // one key and one value, nothing more (task-2 T2-4)
+    refused(['max_active_tickets', '7', '9'], DASH, /usage: owner-setting <key> <1\.\.20\|none>/);
   } finally { F.done(); }
 });
 
@@ -221,7 +225,13 @@ test('validate takes proof on owner-setting and pane-answer only', () => {
     r = judged('supervisor', ask);
     assert.notEqual(r.status, 0);
     assert.match(`${r.out}\n${r.err}`, /owner-setting is the owner's/);
-    for (const bad of [{ value: 21 }, { value: 0 }, { value: '7' }, { key: 'Bad Key' }]) assert.notEqual(judged('owner', { ...ask, ...bad }).status, 0, JSON.stringify(bad));
+    // validate's own rule names each (task-2 T2-1): readers skip the schema, so it is their guard
+    const shapeRule = /an owner-setting act names a setting \(key\) and its value/;
+    for (const bad of [{ value: 21 }, { value: 0 }, { value: '7' }, { key: 'Bad Key' }, { key: undefined }, { value: undefined }, { artifact: 'some-page' }]) {
+      const x = judged('owner', JSON.parse(JSON.stringify({ ...ask, ...bad })));
+      assert.notEqual(x.status, 0, JSON.stringify(bad));
+      assert.match(`${x.out}\n${x.err}`, shapeRule, JSON.stringify(bad));
+    }
     assert.equal(judged('owner', { ...ask, value: null, what: 'asked for max_active_tickets no limit' }).status, 0);
     r = judged('owner', { ...ask, key: 'max_active_planners', what: 'asked for max_active_planners 7' });
     assert.equal(r.status, 0, `shape, not today's allowlist: ${r.err || r.out}`);

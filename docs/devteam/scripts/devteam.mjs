@@ -16453,7 +16453,7 @@ const latestOwnerSetting = (key) => ownerSettingActs(key).at(-1) ?? null;
 // raised until main has it. Only the dashboard's channel or the owner's own terminal runs it.
 function cmdOwnerSetting() {
   const [key, arg] = positional;
-  if (!key || arg === undefined) die('usage: owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor\'s settings; the dashboard\'s Settings page runs it)');
+  if (!key || arg === undefined || positional.length !== 2) die('usage: owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor\'s settings; the dashboard\'s Settings page runs it)');
   const { by } = ownerWriter('the owner asks for a setting on the dashboard\'s Settings page; you change your own with settings set in the settings chore');
   if (process.env.DEVTEAM_CHANNEL !== 'dashboard' && !process.stdin.isTTY) die('owner-setting: the owner asks for a setting on the dashboard\'s Settings page or in their own terminal; you change your own with settings set in the settings chore');
   const value = parseAskable(arg);
