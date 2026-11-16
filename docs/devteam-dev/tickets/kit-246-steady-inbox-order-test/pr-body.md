@@ -8,9 +8,11 @@ The subtest opened the goal drawer and waited only for the "Wrong?" button to ex
 
 Reproduced deterministically: `evidence/repro.sh race` holds the page's `/api/peek` answers, measures "Wrong?" as `p.click` does, lets the record land, and presses at the measured point. The button moved from y=246 to y=494, the point is on the `Created` row, the form stays hidden, and the subtest fails with `timed out waiting for the owner's value` (`evidence/repro-race.txt`). Waiting for the record first, then measuring, passes (`evidence/repro-fixed.txt`).
 
+kit-88 (merged first) added a wait for the drawer's slide-in to come to rest. That is a different move, and it doesn't cover this one: at this branch's merge of main (a7a13a8), the repro waits for the drawer at rest, measures, lets the record land, and the button moves from y=246 to y=415. The press lands on "Start a thread", and the subtest times out the same way (`evidence/repro-race-a7a13a8.txt`; the fixed order passes, `evidence/repro-fixed-a7a13a8.txt`). Both waits stay.
+
 ## The fix (test only)
 
-- Before "Wrong?": wait for the drawer drawn with its record (`.loading` gone and `.hist-h` present; a failed load draws no `.hist-h`).
+- Before "Wrong?": wait for the drawer drawn with its record: its `Created` row there (a load pending or failed draws a `Record` row instead) and no `.loading` left. Then kit-88's wait for the drawer at rest, as merged.
 - After "Wrong?": wait for the form open with its reason field focused. That is the click's own effect, and the focus is what holds the drawer's and the page's redraws while the values go in.
 - After Send: wait for `Correction sent`, or the button reading `Change it` once a refresh has redrawn the drawer with the owner's value; then the server value as before.
 

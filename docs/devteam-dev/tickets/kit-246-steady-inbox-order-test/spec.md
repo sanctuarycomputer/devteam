@@ -56,3 +56,4 @@ F1: the Send wait takes the note or `Change it` (above). F2: reworded (above). F
 - m-20261116-163453784-supervisor: full review depth (the trial's comparison half); reproduce, fix on the page's own signal as kit-244 did, stress ×20, mutation.
 - m-20261116-170723373-supervisor: approve-spec and approve-plan at 06d6637. Build.
 - m-20261116-173311500-supervisor: kit-88 adds a wait (drawer at rest before the [data-correct] click) to this test file and merges first; merge main once it lands and reconcile its wait with this one.
+- Merged main with kit-88 (8bb8f05) at a7a13a8. kit-88 dropped `.hist-h` (History is now a `psect` card, drawn for a failed load too), so the record signal became the record's `Created` row in `section.attrs` (drawn only when the record loaded; pending or failed draws a `Record` row) and no `.loading`. kit-88's at-rest wait is kept after it. The race still reproduces at a7a13a8 past kit-88's wait (`evidence/repro-race-a7a13a8.txt`).
