@@ -3,8 +3,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { hasTmux, until, write } from './lib/kit.mjs';
+import { hasTmux, realTmux, until, write } from './lib/kit.mjs';
 import { agent, baseEnv, box, conversation, dtIn, home, KIT, kitAt, link, machine, nowhere, prompt, repo, REPO, shown, SID, tmp, tmuxSh } from './lib/machine-fixture.mjs';
 
 const lines = (r) => Object.fromEntries(r.stdout.trim().split('\n').filter(Boolean).map((l) => { const i = l.indexOf(': '); return [l.slice(0, i), l.slice(i + 2)]; }));
@@ -232,9 +233,10 @@ const devteamDev = () => {
   const from = df.indexOf("COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev");
   return df.slice(from + 1, df.indexOf('EOF', from));
 };
+const HUB_CHECK = "timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window";
 const hubLine = (prefix) => { const l = devteamDev().find((x) => x.trim().startsWith(prefix)); assert.ok(l, `devteam-dev's line ${prefix}`); return l; };
 const hubFakes = path.join(tmp, 'hub-fakes');
-write(path.join(hubFakes, 'tmux'), '#!/bin/sh\n{ for a; do printf \'%s\\037\' "$a"; done; echo; } >> "$CALLS"\ncase $1 in\n  has-session) exit "${HAS_SESSION_EXIT:-1}" ;;\n  list-windows) [ -n "${WINDOWS+x}" ] || exit 1; printf \'%s\' "$WINDOWS" ;;\nesac\nexit 0\n');
+write(path.join(hubFakes, 'tmux'), '#!/bin/sh\n{ for a; do printf \'%s\\037\' "$a"; done; echo; } >> "$CALLS"\ncase $1 in\n  has-session) exit "${HAS_SESSION_EXIT:-1}" ;;\n  list-sessions) exit "${LIST_SESSIONS_EXIT:-0}" ;;\n  list-windows) [ -n "${WINDOWS+x}" ] || exit 1; printf \'%s\' "$WINDOWS" ;;\nesac\nexit 0\n');
 write(path.join(hubFakes, 'curl'), '#!/bin/sh\necho "$*" >> "$CURLS"\n[ -n "${BODY+x}" ] || exit 7\nprintf \'%s\' "$BODY"\n');
 write(path.join(hubFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
 for (const f of ['tmux', 'curl', 'timeout']) fs.chmodSync(path.join(hubFakes, f), 0o755);
@@ -293,7 +295,7 @@ test('the boot waits for the hub at most DEVTEAM_HUB_WAIT_SECONDS, and notes it 
 });
 
 test('the minute loop recreates home:hub only when it is gone', () => {
-  const line = hubLine('timeout 20 tmux list-windows -t =home');
+  const line = hubLine(HUB_CHECK);
   const there = bootHub(line, { WINDOWS: 'operator\nshell\nhub\n', HAS_SESSION_EXIT: '0' });
   assert.deepEqual(made(there.calls), []);
   assert.deepEqual(there.calls[0].slice(0, 3), ['list-windows', '-t', '=home']);
@@ -301,21 +303,27 @@ test('the minute loop recreates home:hub only when it is gone', () => {
   assert.deepEqual(made(gone.calls).map((c) => c.slice(0, 6)), [['new-window', '-d', '-t', '=home:', '-n', 'hub']]);
   const noSession = bootHub(line, { HAS_SESSION_EXIT: '1' });
   assert.deepEqual(made(noSession.calls).map((c) => c.slice(0, 6)), [['new-session', '-d', '-s', 'home', '-n', 'hub']]);
+  // no tmux server at all: hub_window starts none (a server holding only the hub hid a lost box);
+  // the minute loop's restore starts everything
+  const noServer = bootHub(line, { HAS_SESSION_EXIT: '1', LIST_SESSIONS_EXIT: '1' });
+  assert.deepEqual(made(noServer.calls), []);
 });
 
 test('the boot\'s hub lines sit where the boot needs them', () => {
   assert.ok(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').includes('ENV DEVTEAM_IMAGE_HUB=4320'));
   const d = devteamDev();
   const at = (pred, what) => { const i = d.findIndex(pred); assert.ok(i >= 0, what); return i; };
-  const operator = at((l) => l.trim().startsWith('tmux new-session -d -s home -n operator'), 'the home session');
+  at((l) => l.trim().startsWith('timeout 20 tmux new-session -d -s home -n operator'), 'the home session, in start_operator');
+  const operator = at((l) => l === 'start_operator boot', 'the operator, at boot');
   const defs = at((l) => l.startsWith('hub_window() {'), 'hub_window');
-  const call = at((l) => l === "timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window", 'the call, only if home has no hub yet');
+  const call = at((l) => l === HUB_CHECK, 'the call, only if home has no hub yet');
   const wait = at((l) => l === 'hub_wait || :', 'the wait');
-  const dash = at((l) => l === 'for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do', 'the dashboard loop');
-  assert.ok(operator < defs && defs < call && call < wait && wait < dash, [operator, defs, call, wait, dash].join(' '));
-  const minute = at((l) => l.startsWith('  timeout 20 tmux list-windows -t =home'), 'the minute loop\'s line');
-  assert.equal(d[minute].trim(), d[call], 'the same line at boot and each minute');
-  assert.equal(d[minute - 1], '  sleep 60');
+  const dash = at((l) => l === 'start_dashboards', 'the dashboards');
+  const recover = at((l) => l === 'start_recover', 'box-recover');
+  assert.ok(operator < defs && defs < call && call < wait && wait < dash && dash < recover, [operator, defs, call, wait, dash, recover].join(' '));
+  const minute = d.findIndex((l, i) => i > recover && l.trim() === HUB_CHECK);
+  assert.ok(minute > recover, 'the minute loop\'s line');
+  assert.deepEqual(d.slice(minute - 2, minute), ['  sleep 60', '  [ -e "$HOME/.box/stopping" ] && continue'], 'first in each minute, unless the box is stopping');
 });
 
 test('hub_window makes home:hub on a real tmux even when another session has a window named home', { skip: !hasTmux }, async () => {
@@ -408,4 +416,238 @@ test('a pane noted moments ago counts as the supervisor starting only if it star
     fs.utimesSync(paneFile, old, old);
     assert.match(dry(), new RegExp(`^would resume session ${SID}`), 'and only for a few minutes');
   } finally { tmuxSh(['kill-pane', '-t', elsewhere]); tmuxSh(['kill-pane', '-t', atRoot]); }
+});
+
+// The box's tmux (cloud/Dockerfile, /usr/local/bin/tmux): Debian's tmux behind two guards. Run here
+// against the real tmux, every server on a socket of the test's own: the wrapper's exec of
+// /usr/bin/tmux points at this machine's tmux, and the box's socket at one the test made.
+const dockerScript = (dest) => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n');
+  const from = df.indexOf(`COPY --chmod=755 <<'EOF' ${dest}`);
+  assert.ok(from >= 0, `the Dockerfile writes ${dest}`);
+  return df.slice(from + 1, df.indexOf('EOF', from)).join('\n') + '\n';
+};
+test('the box\'s tmux refuses a kill-server aimed at the box, and honours a private TMUX_TMPDIR inside a pane', { skip: !hasTmux || !realTmux }, () => {
+  const uid = String(process.getuid());
+  const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tw-')));
+  const boxDir = path.join(d, 'b');
+  const boxSock = path.join(boxDir, `tmux-${uid}`, 'default');
+  let text = dockerScript('/usr/local/bin/tmux');
+  assert.ok(text.includes('\nexec /usr/bin/tmux "$@"\n') && text.includes('\n  box=/tmp/tmux-$(id -u dev 2>/dev/null)/default\n'));
+  // under dash where there is one: the box's /bin/sh
+  if (fs.existsSync('/bin/dash')) text = text.replace(/^#!\/bin\/sh\n/, '#!/bin/dash\n');
+  text = text.replace('\nexec /usr/bin/tmux "$@"\n', `\nexec '${realTmux}' "$@"\n`).replace('\n  box=/tmp/tmux-$(id -u dev 2>/dev/null)/default\n', `\n  box='${boxSock}'\n`);
+  const wrapper = path.join(d, 'tmux');
+  fs.writeFileSync(wrapper, text, { mode: 0o755 });
+  assert.equal(spawnSync('sh', ['-n', wrapper]).status, 0, 'sh -n');
+  const env = (extra = {}) => { const e = { ...process.env, ...extra }; for (const k of ['TMUX', 'TMUX_PANE', 'TMUX_TMPDIR', 'DEVTEAM_ALLOW_KILL_SERVER']) if (!(k in extra)) delete e[k]; return e; };
+  const real = (args, extra) => spawnSync(realTmux, args, { encoding: 'utf8', env: env(extra) });
+  const wrap = (args, extra) => spawnSync(wrapper, args, { encoding: 'utf8', env: env(extra) });
+  const boxUp = () => real(['-S', boxSock, 'has-session', '-t', '=home']).status === 0;
+  const pane = `${boxSock},${process.pid},0`;
+  try {
+    // the box: a server on the default socket under its tmpdir, as dev's is under /tmp
+    fs.mkdirSync(boxDir);
+    assert.equal(real(['-f', '/dev/null', 'new-session', '-d', '-s', 'home', 'sleep 600'], { TMUX_TMPDIR: boxDir }).status, 0);
+    assert.ok(boxUp());
+    const refused = [
+      [['kill-server'], { TMUX_TMPDIR: boxDir }, 'the default socket'],
+      [['-S', boxSock, 'kill-server'], {}, '-S'],
+      [[`-S${boxSock}`, 'kill-server'], {}, '-S, joined'],
+      [['-u', '-S', boxSock, 'kill-ser'], {}, 'a prefix tmux takes for kill-server'],
+      [['-L', 'default', 'kill-server'], { TMUX_TMPDIR: boxDir }, '-L under the tmpdir'],
+      [['kill-server'], { TMUX: pane }, '$TMUX, in a pane of the box'],
+      [['-S', boxSock, 'has-session', ';', 'kill-server'], {}, 'after ;'],
+      [['-S', boxSock, 'has-session', 'kill-server;'], {}, 'ending in ;'],
+      [['-S', boxSock, 'kill-server'], { DEVTEAM_ALLOW_KILL_SERVER: '0' }, 'anything but 1'],
+    ];
+    for (const [args, extra, what] of refused) {
+      const r = wrap(args, extra);
+      assert.equal(r.status, 1, what);
+      assert.equal(r.stderr, 'tmux: kill-server refused: this would stop every supervisor on the box; use a private server: tmux -S <socket> …\n', what);
+      assert.ok(boxUp(), `${what}: the box's server lives`);
+    }
+    // a private -S server: made and killed through the wrapper
+    const priv = path.join(d, 'p');
+    assert.equal(wrap(['-S', priv, '-f', '/dev/null', 'new-session', '-d', '-s', 't', 'sleep 600']).status, 0);
+    assert.equal(wrap(['-S', priv, 'kill-server']).status, 0, 'a private server may be killed');
+    assert.notEqual(real(['-S', priv, 'has-session']).status, 0);
+    assert.ok(boxUp());
+    // the incident: in a pane of the box ($TMUX), a test meant a private server with TMUX_TMPDIR
+    const mine = path.join(d, 'm');
+    fs.mkdirSync(mine);
+    const inPane = { TMUX: pane, TMUX_PANE: '%0', TMUX_TMPDIR: mine };
+    assert.equal(wrap(['-f', '/dev/null', 'new-session', '-d', '-s', 't', 'sleep 600'], inPane).status, 0);
+    assert.equal(real(['-S', path.join(mine, `tmux-${uid}`, 'default'), 'has-session', '-t', '=t']).status, 0, 'the session is on the private server');
+    assert.notEqual(real(['-S', boxSock, 'has-session', '-t', '=t']).status, 0, 'and not on the box\'s');
+    const k = wrap(['kill-server'], inPane);
+    assert.equal(k.status, 0, k.stderr);
+    assert.ok(boxUp(), 'the box\'s server lives');
+    assert.notEqual(real(['-S', path.join(mine, `tmux-${uid}`, 'default'), 'has-session']).status, 0, 'the private one is gone');
+    // a $TMUX inside the caller's own TMUX_TMPDIR is kept: a pane of that private server
+    const other = path.join(mine, 'other');
+    assert.equal(real(['-S', other, '-f', '/dev/null', 'new-session', '-d', '-s', 'o', 'sleep 600']).status, 0);
+    assert.equal(wrap(['display-message', '-p', '#{socket_path}'], { TMUX: `${other},1,0`, TMUX_TMPDIR: mine }).stdout.trim(), other);
+    // everything else passes straight through: arguments as given, and tmux's own exit codes
+    const odd = ['a b', '"q"', "it's", '$HOME', '', 'x -S y', 'kill-server x', '\\;'];
+    for (const a of odd) assert.equal(wrap(['-S', other, 'display-message', '-p', a]).stdout, real(['-S', other, 'display-message', '-p', a]).stdout, JSON.stringify(a));
+    assert.equal(wrap(['-S', other, 'display-message', '-p', 'a b "q" it\'s $HOME']).stdout, 'a b "q" it\'s $HOME\n');
+    assert.equal(wrap(['-S', other, 'has-session', '-t', '=nope']).status, real(['-S', other, 'has-session', '-t', '=nope']).status);
+    assert.equal(wrap(['-S', other, 'kill-server']).status, 0);
+    // a deliberate stop, as the box's own does
+    assert.equal(wrap(['kill-server'], { TMUX_TMPDIR: boxDir, DEVTEAM_ALLOW_KILL_SERVER: '1' }).status, 0);
+    assert.ok(!boxUp());
+  } finally {
+    for (const s of [boxSock, path.join(d, 'p'), path.join(d, 'm', `tmux-${uid}`, 'default'), path.join(d, 'm', 'other')]) real(['-S', s, 'kill-server']);
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// The minute loop's restore, from cloud/Dockerfile's devteam-dev: the functions and one turn of the
+// loop, under sh with a tmux of the test's own that keeps a server's state in files (its pid, each
+// session's windows, the panes), and stand-ins for timeout, flock, node and box-recover.
+const loopFakes = path.join(tmp, 'loop-fakes');
+write(path.join(loopFakes, 'tmux'), `#!/bin/sh
+{ for a; do printf '%s\\037' "$a"; done; echo; } >> "$CALLS"
+cmd=$1; shift
+t= s= n=
+while [ $# -gt 0 ]; do case $1 in -t) t=$2; shift ;; -s) s=$2; shift ;; -n) n=$2; shift ;; -F|-c) shift ;; esac; shift; done
+pid=$(cat "$ST/pid" 2>/dev/null)
+[ "$pid" = hang ] && exit 124
+sess=\${t#=}; sess=\${sess%%:*}
+case $cmd in
+  display-message) [ -n "$pid" ] || exit 1; echo "$pid" ;;
+  list-sessions) [ -n "$pid" ] || exit 1; ls "$ST"/win-* >/dev/null 2>&1 ;;
+  has-session) [ -n "$pid" ] && [ -f "$ST/win-$sess" ] ;;
+  list-windows) [ -n "$pid" ] && [ -f "$ST/win-$sess" ] || exit 1; cat "$ST/win-$sess" ;;
+  list-panes) [ -n "$pid" ] || exit 1; cat "$ST/panes" 2>/dev/null ;;
+  new-session) [ -n "$pid" ] || echo 900 > "$ST/pid"; echo "$n" >> "$ST/win-$s" ;;
+  new-window) [ -n "$pid" ] && [ -f "$ST/win-$sess" ] || exit 1; case $t in *:0) [ -s "$ST/win-$sess" ] && exit 1 ;; esac; echo "$n" >> "$ST/win-$sess" ;;
+  send-keys) [ -n "$pid" ] ;;
+esac
+`);
+write(path.join(loopFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
+write(path.join(loopFakes, 'flock'), '#!/bin/sh\nexit 0\n');
+write(path.join(loopFakes, 'node'), '#!/bin/sh\ncase $* in *"settings --get tmux_session"*) cat .session 2>/dev/null || echo null ;; esac\n');
+write(path.join(loopFakes, 'box-recover'), '#!/bin/sh\necho ran >> "$HOME/.recovers"\n');
+for (const f of ['tmux', 'timeout', 'flock', 'node', 'box-recover']) fs.chmodSync(path.join(loopFakes, f), 0o755);
+const minuteTurn = () => {
+  const d = devteamDev();
+  const fn = (name) => { const i = d.findIndex((l) => l.startsWith(`${name}() {`)); assert.ok(i >= 0, name); return d[i].trimEnd().endsWith('}') ? [d[i]] : d.slice(i, d.indexOf('}', i) + 1); };
+  const first = d.findIndex((l) => l.startsWith('srv=$(timeout 20 tmux display-message'));
+  assert.ok(first > 0, 'the server\'s pid, noted before the loop');
+  assert.equal(d[first + 1], 'while :; do');
+  assert.equal(d[first + 2], '  sleep 60');
+  const body = d.slice(first + 3, d.indexOf('done &', first));
+  const defs = [...fn('note'), ...fn('hub_window'), ...fn('start_operator'), ...fn('start_dashboards'), ...fn('start_recover')];
+  // one turn: what the loop does each minute, with the pid as the last turn left it
+  return [...defs, 'up="$HOME/.devteam-supervisors"', 'srv=$(cat "$HOME/.srv" 2>/dev/null)', 'for once in 1; do', ...body, 'done', 'echo "$srv" > "$HOME/.srv"', 'wait']
+    .join('\n').replaceAll('/usr/local/bin/box-recover', `${loopFakes}/box-recover`).replaceAll('/usr/local/bin/node', `${loopFakes}/node`);
+};
+test('the minute loop brings back a lost tmux server as a boot does, from the list it had, and never overwrites that list', () => {
+  const script = minuteTurn();
+  const h = fs.mkdtempSync(path.join(tmp, 'loop-'));
+  const st = path.join(h, '.st');
+  fs.mkdirSync(path.join(h, '.box'), { recursive: true });
+  fs.mkdirSync(st);
+  const repoAt = (name, session) => {
+    const r = path.join(h, 'code', name);
+    write(path.join(r, 'docs', 'devteam', 'scripts', 'devteam.mjs'), '');
+    write(path.join(r, 'docs', 'devteam', 'project', 'settings.md'), '');
+    if (session) write(path.join(r, '.session'), `${session}\n`);
+    return r;
+  };
+  const a = repoAt('a', 'proj-a');
+  const b = repoAt('b');
+  const up = path.join(h, '.devteam-supervisors');
+  const paneOf = (r, p) => write(path.join(r, 'docs', 'devteam', 'run', 'supervisor-pane'), `${p}\n`);
+  const state = ({ pid, home, panes }) => {
+    for (const f of fs.readdirSync(st)) fs.rmSync(path.join(st, f));
+    if (pid) fs.writeFileSync(path.join(st, 'pid'), `${pid}\n`);
+    if (home) fs.writeFileSync(path.join(st, 'win-home'), home.map((w) => `${w}\n`).join(''));
+    if (panes !== undefined) fs.writeFileSync(path.join(st, 'panes'), panes);
+  };
+  const calls = path.join(h, '.calls');
+  const turn = () => {
+    fs.rmSync(calls, { force: true });
+    const r = spawnSync(fs.existsSync('/bin/dash') ? '/bin/dash' : 'sh', ['-c', script], { cwd: h, encoding: 'utf8', env: { PATH: `${loopFakes}:/usr/bin:/bin`, HOME: h, ST: st, CALLS: calls, DEVTEAM_KIT_RELEASE: 'v1.2.3' } });
+    assert.equal(r.status, 0, r.stderr);
+    return (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean) : []).map((l) => l.split('\x1f').slice(0, -1));
+  };
+  const read = (f) => (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null);
+  const recovers = () => (read(path.join(h, '.recovers')) ?? '').split('\n').filter(Boolean).length;
+  const boxLog = () => (read(path.join(h, 'box.log')) ?? '').split('\n').filter(Boolean);
+  const made = (c) => c.filter((x) => x[0] === 'new-session' || x[0] === 'new-window').map((x) => [x[0], x[x.indexOf('-n') + 1]]);
+  assert.equal(spawnSync('sh', ['-n', '-c', script]).status, 0, 'sh -n');
+
+  // steady: the same server, the operator there; the list is rewritten from the panes
+  fs.writeFileSync(path.join(h, '.srv'), '100\n');
+  paneOf(a, '%5'); paneOf(b, '%6');
+  state({ pid: 100, home: ['operator', 'shell', 'hub'], panes: '%5 claude\n%6 bash\n' });
+  let c = turn();
+  assert.equal(read(up), `${a}\n`, 'a is up; b is back at a shell (stopped by the owner)');
+  assert.equal(recovers(), 0);
+  assert.deepEqual(boxLog(), []);
+  assert.deepEqual(made(c), []);
+
+  // the server replaced (the terminal started a new one, holding a shell): restore as a boot does
+  fs.writeFileSync(up, `${a}\n${b}\n`);  // the last good list: both were up
+  state({ pid: 200, home: ['bash'] });
+  c = turn();
+  assert.equal(read(up), `${a}\n${b}\n`, 'the list is not overwritten from the new server');
+  assert.match(read(`${up}.boot`), new RegExp(`^\\d{10} ${a}\\n\\d{10} ${b}\\n$`), 'added to the restore list, timed, as at boot');
+  assert.ok(!fs.existsSync(path.join(a, 'docs', 'devteam', 'run', 'supervisor-pane')), 'pane ids start again on a new server: the noted ones go');
+  // the hub first (that server answers), then the operator (window 0 taken, so added), every dashboard
+  assert.deepEqual(made(c), [['new-window', 'hub'], ['new-window', 'operator'], ['new-window', 'operator'], ['new-session', 'dashboard'], ['new-window', 'dash-b']]);
+  assert.ok(c.some((x) => x[0] === 'send-keys' && x.includes('-l') && /claude {2}--dangerously-skip-permissions/.test(x.at(-1))), 'the operator is started');
+  assert.equal(recovers(), 1, 'box-recover ran');
+  assert.equal(boxLog().length, 1);
+  assert.match(boxLog()[0], /^\S+Z tmux server lost \(pid 100, now 200\): bringing the box back as at a boot/);
+  assert.equal(read(path.join(h, '.srv')).trim(), '200', 'the new server is the one watched now');
+
+  // the next minute, on the restored server: nothing again; the list follows the new server
+  state({ pid: 200, home: ['bash', 'operator', 'hub'], panes: '' });
+  c = turn();
+  assert.equal(recovers(), 1, 'one restore per loss');
+  assert.equal(boxLog().length, 1);
+  assert.equal(read(up), '', 'nobody up yet');
+  assert.match(read(`${up}.boot`), new RegExp(`^\\d{10} ${a}\\n\\d{10} ${b}\\n$`), 'the restore list still holds both');
+
+  // no server at all: hub_window starts none; the restore starts it, operator first
+  fs.writeFileSync(up, `${a}\n`);
+  fs.rmSync(`${up}.boot`);
+  state({});
+  c = turn();
+  assert.deepEqual(c.find((x) => x[0] === 'new-session' || x[0] === 'new-window').slice(0, 6), ['new-session', '-d', '-s', 'home', '-n', 'operator'], 'the operator\'s window starts the server, not the hub\'s');
+  assert.equal(recovers(), 2);
+  assert.match(read(`${up}.boot`), new RegExp(`^\\d{10} ${a}\\n$`));
+  assert.equal(read(up), `${a}\n`);
+  assert.match(boxLog()[1], /tmux server lost \(pid 200, now none\)/);
+  assert.equal(read(path.join(h, '.srv')).trim(), '900');
+
+  // the same server, only the operator's window gone: it comes back; the list and noted panes stay
+  paneOf(a, '%5');
+  state({ pid: 900, home: ['shell', 'hub'], panes: '%5 claude\n' });
+  fs.rmSync(`${up}.boot`);
+  c = turn();
+  assert.ok(made(c).some((x) => x[1] === 'operator'));
+  assert.ok(fs.existsSync(path.join(a, 'docs', 'devteam', 'run', 'supervisor-pane')), 'the noted pane is still right');
+  assert.ok(!fs.existsSync(`${up}.boot`), 'nothing added: nobody went');
+  assert.match(boxLog()[2], /the operator's window is gone/);
+
+  // tmux not answering (a call timing out): nothing, the list as it was
+  state({ pid: 'hang' });
+  fs.writeFileSync(up, `${a}\n`);
+  const before = recovers();
+  turn();
+  assert.equal(recovers(), before);
+  assert.equal(read(up), `${a}\n`);
+  assert.equal(read(path.join(h, '.srv')).trim(), '900');
+
+  // the box stopping: nothing at all
+  fs.writeFileSync(path.join(h, '.box', 'stopping'), '');
+  state({});
+  c = turn();
+  assert.deepEqual(c, []);
+  assert.equal(recovers(), before);
 });
