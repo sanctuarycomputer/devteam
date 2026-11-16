@@ -3146,7 +3146,7 @@ function readyCard(d) {
   const rows = [`<div class="rowline"><span class="t">${held ? 'Held' : 'Fleet'}</span><span class="r">${fleetStateLine(f, st)}</span></div>`];
   if (FLEET.error) rows.push(`<div class="rowline"><span class="err" role="alert">Couldn't check: ${esc(FLEET.error)}</span></div>`);
   if (!st) {
-    rows.push(`<div class="rowline ready-pending"><span class="t dim">${held || FLEET.busy ? 'checking what a move needs…' : 'Park or drain the fleet to move it; Check now says what a move needs'}</span></div>`);
+    rows.push(`<div class="rowline ready-pending"><span class="t dim">${held || FLEET.busy ? 'checking what a move needs…' : 'A move is fleet park --move (or drain --move) from the supervisor; Park and Drain here pause the fleet on this machine. Check now says what a move needs'}</span></div>`);
     rows.push('<div class="rowline ready-pending"><span class="t">Parity</span><span class="r dim">–</span></div>');
   }
   if (st) {
