@@ -661,3 +661,226 @@ export function dataRewriteInit(fx) {
   };
 })();`;
 }
+
+
+// kit-88: a project with a record for every side peek, every "How it changes" case and every item of
+// the design's peek inventory ("Every detail and widget stays"), for test/dashboard-peek.test.mjs (and
+// the measure's peek entries). The kit's own commands where they exist (goal, feature, ticket,
+// questions, knowledge, a correction, a sensor ignore), lines as the kit would have written them for
+// the rest (acts, decisions, problems, signals, learning, retros, a message, phases, gate runs, spend),
+// git as the kit reads it (a merged ticket, a ticket branch with its documents, a review and a
+// handoff commit, a planner's branch with its draft), sensor files as the poller writes them, and
+// files committed on main. Returns the project and the id of each record.
+// decision rests on qDefaulted (authority default), so its "The answer it rests on" is a defaulted
+// answered card. decisionNotMine is older than the 80 rows the Decide tab draws (81 later calls), so
+// no row on Self Improvement has its Correct.
+export const PEEK_LONG = `Should the checkout keep the card form on one page, ${'with every field the processor asks for and every one it may ask for later, '.repeat(3)}or split it?`;
+export function peekFixture(base, name = 'peek') {
+  const root = bareProject(base, name);
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE', 'DEVTEAM_BOX'].includes(k)) delete env[k];
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const dt = (args, role = 'supervisor') => {
+    const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root, encoding: 'utf8' }).trim();
+  const logDir = path.join(root, 'docs/devteam/run/log');
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  const T0 = Date.now();
+  const PFX = { observation: 'o', problem: 'p', decision: 'd', act: 'a', knowledge: 'k', message: 'm', phase: 'h', gate: 'r', spend: 's' };
+  // a line by hand at T0 - ago ms, in its writer's file; each picks a distinct ago, so ids differ
+  const hand = (by, o, ago) => {
+    const d = new Date(T0 - ago);
+    const id = o.id ?? `${PFX[o.type]}-${stamp(d)}-${by}`;
+    const file = ['owner', 'supervisor'].includes(by) ? `${by}-${d.toISOString().slice(0, 7)}.jsonl` : `${by}.jsonl`;
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, file), line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: d.toISOString(), by }));
+    return id;
+  };
+  const H = 3600000, DAY = 24 * H;
+  const ids = {};
+  // files: a plain document, a governance file (the kit's own), a probe, an artifact, the feature's
+  // design (its TL;DR), three retros' write-ups with their numbers; and two sensors
+  write(path.join(root, 'docs/guide.md'), '# The guide\n\nHow the checkout works.\n');
+  ids.file = 'docs/guide.md';
+  ids.governanceFile = 'docs/devteam/governance/constitution.md';
+  // a document with a diagram, an image, a page and a PDF (each file view the peek draws)
+  write(path.join(root, 'docs/flow.md'), '# The flow\n\n```mermaid\nflowchart LR\n  cart --> pay\n```\n');
+  ids.fileDiagram = 'docs/flow.md';
+  fs.writeFileSync(path.join(root, 'docs/dot.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
+  ids.fileImage = 'docs/dot.png';
+  write(path.join(root, 'docs/page.html'), '<!doctype html><html><head><meta charset="utf-8"><title>A page</title></head><body><p>a page</p></body></html>\n');
+  ids.fileHtml = 'docs/page.html';
+  const pdfObjs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] >>'];
+  let pdf = '%PDF-1.4\n';
+  const offs = pdfObjs.map((o, i) => { const at = pdf.length; pdf += `${i + 1} 0 obj\n${o}\nendobj\n`; return at; });
+  const xref = pdf.length;
+  pdf += `xref\n0 ${pdfObjs.length + 1}\n0000000000 65535 f \n${offs.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${pdfObjs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  write(path.join(root, 'docs/brief.pdf'), pdf);
+  ids.filePdf = 'docs/brief.pdf';
+  write(path.join(root, 'docs/devteam/project/sensors/reader.mjs'), 'export default async function () { return { events: [] }; }\n');
+  write(path.join(root, 'docs/devteam/project/designs/launch-checkout.md'), '# Launch checkout\n\n## TL;DR\n\nAdmins pay by card without help.\n');
+  write(path.join(root, 'docs/devteam/project/designs/pay.md'), '# Pay\n\n## TL;DR\n\nAn admin pays by card on one page.\n\n## The rest\n\nDetails.\n');
+  const retroDoc = (n) => `# Retro\n\n\`\`\`json devteam-retro\n${JSON.stringify({ merged: n, reverts: n - 1, escaped: 0 })}\n\`\`\`\n`;
+  for (const [f, n] of [['2026-11-02', 2], ['2026-11-09', 4], ['2026-11-16', 5]]) write(path.join(root, `docs/devteam/project/retros/${f}.md`), retroDoc(n));
+  const sf = path.join(root, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"links": { "docs-site": { "kind": "url", "url": "https://example.com/docs" } }, "sensors": { "web": { "kind": "http", "url": "https://example.com/health", "slo": { "uptime": 0.99, "p95_ms": 300 } }, "reader": { "kind": "probe", "probe": "project/sensors/reader.mjs", "every_minutes": 5 } }, "gates": {}'));
+  ids.sensorHttp = 'web';
+  ids.sensorReader = 'reader';
+  const art = path.join(root, 'docs/devteam/project/artifacts/peek-mock');
+  write(path.join(art, 'artifact.json'), JSON.stringify({ v: 1, title: 'Peek mock', summary: 'A page to view', by: 'supervisor', for: [] }));
+  write(path.join(art, 'index.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Peek mock</title></head><body><p>the mock</p></body></html>\n');
+  ids.artifact = 'peek-mock';
+  git('add', '-A');
+  git('commit', '-qm', 'the project');
+  // the sensors' own files, as their poller writes them: the URL check's samples over a week (two
+  // failed) and its state; the reader's fingerprints (one ignored below), their hourly counts, the
+  // cached raw event of one, and its state with an invalid line
+  const sdir = (n) => path.join(root, 'docs/devteam/run/sensors', n);
+  const samples = [];
+  for (let m = 7 * 24 * 60; m > 0; m -= 30) samples.push({ at: new Date(T0 - m * 60000).toISOString(), ok: !(m === 90 || m === 3000), ms: m === 90 || m === 3000 ? 40 : 100 + (m % 7) * 30, ...(m === 90 || m === 3000 ? { error: 'HTTP 503' } : {}) });
+  write(path.join(sdir('web'), 'samples.jsonl'), samples.map((s) => `${JSON.stringify(s)}\n`).join(''));
+  write(path.join(sdir('web'), 'state.json'), JSON.stringify({ state: 'up', since: new Date(T0 - DAY).toISOString(), last_at: new Date(T0 - 30 * 60000).toISOString(), last: { ok: true, ms: 120 }, fails: 0, tls_days: 40 }));
+  const hourKey = (ago) => new Date(T0 - ago).toISOString().slice(0, 13);
+  const fpE1 = { kind: 'exception', level: 'error', class: 'TypeError', title: 'card is undefined', total: 5, users: 2, first_seen: new Date(T0 - 5 * H).toISOString(), last_seen: new Date(T0 - H).toISOString(), frames: [{ file: 'pay/form.js', line: 12 }] };
+  const fpE2 = { kind: 'exception', level: 'warning', class: 'Error', title: 'a crawler hit /cart', total: 2, first_seen: new Date(T0 - 3 * H).toISOString(), last_seen: new Date(T0 - 2 * H).toISOString() };
+  write(path.join(sdir('reader'), 'fingerprints.json'), JSON.stringify({ 'exception:E1': fpE1, 'exception:E2': fpE2 }));
+  write(path.join(sdir('reader'), 'counts.json'), JSON.stringify({ 'exception:E1': { [hourKey(H)]: 3, [hourKey(3 * H)]: 2 }, 'exception:E2': { [hourKey(2 * H)]: 2 } }));
+  write(path.join(sdir('reader'), 'events', `${crypto.createHash('sha1').update('exception:E1').digest('hex').slice(0, 16)}.json`), JSON.stringify({ at: new Date(T0 - H).toISOString(), event: { message: 'TypeError: card is undefined', at: 'pay/form.js:12' } }));
+  const today = new Date(T0).toISOString().slice(0, 10);
+  write(path.join(sdir('reader'), 'state.json'), JSON.stringify({ state: 'ok', fails: 0, last_at: new Date(T0 - 10 * 60000).toISOString(), last: { ok: true, events: 2, ms: 120 }, invalid: { lines: [{ why: 'a line that is not an event' }] }, days: { [today]: { events: 7, qualified: 1, runs: 3, fails: 0, invalid: 1, ms_sum: 360, by_level: {} } } }));
+  // the work: two goals (the second one the first plans after), a milestone, a feature with its
+  // design and a story in a release; tickets: one merged, one with every stored field (held, waiting
+  // on the merged one) that another waits on, and one replaced by it
+  ids.goal = dt(['goal', 'add', '--title', 'Launch checkout', '--outcome', 'admins pay alone']);
+  ids.goal2 = dt(['goal', 'add', '--title', 'Launch receipts', '--outcome', 'every payment has a receipt']);
+  dt(['goal', 'set', ids.goal, '--measure', 'cards taken a day', '--target', '10', '--horizon', '2027-06-30', '--non-goals', '["refunds"]', '--preconditions', '["a card form","a processor account"]',
+    '--milestones', JSON.stringify([{ title: 'First card taken', target: 1, preconditions: [1], tickets: 1 }, { title: 'Ten a day', target: 10, preconditions: [2], tickets: 2 }]), '--plan-after', ids.goal2, '--reason', 'the receipts design first']);
+  ids.milestone = `${ids.goal}:1`;
+  dt(['feature', 'add', 'pay', '--json', JSON.stringify({ title: 'Pay', goals: [ids.goal], design: 'project/designs/pay.md', notes: 'one page', preconditions: [`${ids.goal}#1`], stories: [{ id: 'PAY-S1', text: 'admin adds a card', release: 'v0.2.0' }] })]);
+  ids.feature = 'pay';
+  ids.story = 'PAY-S1';
+  ids.release = 'v0.2.0';
+  ids.ticketMerged = 'pay-00-schema';
+  dt(['ticket', 'add', ids.ticketMerged, '--json', JSON.stringify({ title: 'card schema', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: ['PAY-S1'], depends_on: [], touches: ['pay/schema/**'], done_when: ['the schema test passes'] })]);
+  ids.ticket = 'pay-01-card';
+  dt(['ticket', 'add', ids.ticket, '--json', JSON.stringify({ title: 'card capture', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'high', serves: ['PAY-S1'], depends_on: [ids.ticketMerged], touches: ['pay/**'], done_when: ['the card check passes in CI'],
+    contracts: { provides: ['card-api@1'], consumes: [] }, links: ['docs-site'], one_way_doors: ['where card numbers are kept'], notes: 'keep the form on one page' })]);
+  dt(['ticket', 'set', ids.ticket, '--json', JSON.stringify({ held: 'until the processor is chosen' })]);
+  dt(['ticket', 'add', 'pay-02-receipt', '--json', JSON.stringify({ title: 'card receipt', feature: 'pay', component: 'pay', kind: 'build', size: 'M', risk: 'normal', serves: ['PAY-S1'], depends_on: [ids.ticket], touches: ['pay/receipt/**'], done_when: ['a receipt is sent'] })]);
+  ids.ticketReplaced = 'pay-09-old-form';
+  dt(['ticket', 'add', ids.ticketReplaced, '--json', JSON.stringify({ title: 'the old card form', feature: 'pay', component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: ['PAY-S1'], depends_on: [], touches: ['pay/old/**'], done_when: ['the old form still renders'], superseded_by: ids.ticket })]);
+  // the last wave: the held ticket, in the wave before, is not merged
+  ids.wave = '3';
+  // the merged ticket: its branch merged into main as a PR merge
+  git('checkout', '-q', '-b', `ticket/${ids.ticketMerged}`);
+  write(path.join(root, 'pay/schema/card.json'), '{}\n');
+  git('add', '-A');
+  git('commit', '-qm', 'the card schema');
+  git('checkout', '-q', 'main');
+  git('merge', '-q', '--no-ff', `ticket/${ids.ticketMerged}`, '-m', `Merge pull request #1 from o/ticket/${ids.ticketMerged}`);
+  // the held ticket's branch: its spec and a spec review (Documents, Reviews, Branch), and the
+  // handoff commit its session made when it parked (the Handoff)
+  git('checkout', '-q', '-b', `ticket/${ids.ticket}`);
+  write(path.join(root, `docs/devteam/project/tickets/${ids.ticket}/spec.md`), '# pay-01-card: spec\n\nTake the card.\n');
+  write(path.join(root, `docs/devteam/project/tickets/${ids.ticket}/reviews/spec-1.md`), `# spec review 1\n\n- Reviewer: claude\n\nVerdict: APPROVE ${'a'.repeat(40)}\n`);
+  git('add', '-A');
+  git('commit', '-qm', `${ids.ticket}: spec`);
+  git('commit', '-q', '--allow-empty', '-m', `devteam handoff: ${ids.ticket}`, '-m', 'The card form is half done: the expiry field is next.');
+  git('checkout', '-q', 'main');
+  // its phases (Time per phase; the last, parked, is the handoff's), gate runs on four commits (a
+  // pass, a fail, a flaky one that both passed and failed, and a slow lint at over twice its median),
+  // and its spend (worker and reviewer)
+  for (const [to, from, h] of [['starting', null, 12], ['spec', 'starting', 11], ['build', 'spec', 8], ['parked', 'build', 1.5]]) hand(ids.ticket, { type: 'phase', to, from }, h * H);
+  const shas = ['1111111aaaa', '2222222bbbb', '3333333cccc', '4444444dddd'].map((s) => s.padEnd(40, '0'));
+  const gates = [[0, 'test', true, 1000], [0, 'lint', true, 1000], [1, 'test', false, 1100], [1, 'lint', true, 1000], [2, 'test', false, 1000], [2, 'test', true, 1000], [2, 'lint', true, 1000], [3, 'lint', true, 9000], [3, 'test', true, 1000]];
+  gates.forEach(([s, gate, ok, ms], i) => hand(ids.ticket, { type: 'gate', gate, ok, ms, sha: shas[s], tests_total: 3, tests: [] }, (7 - i * 0.5) * H));
+  hand('supervisor', { type: 'spend', who: ids.ticket, role: 'worker', phase: 'build', through: new Date(T0 - 6 * H).toISOString(), usd: 1.25 }, 6 * H - 5);
+  hand('supervisor', { type: 'spend', who: ids.ticket, role: 'worker', phase: 'build', through: new Date(T0 - 3 * H).toISOString(), usd: 0.75 }, 3 * H - 5);
+  hand('supervisor', { type: 'spend', who: ids.ticket, role: 'reviewer', phase: 'spec', through: new Date(T0 - 9 * H).toISOString(), usd: 0.4 }, 9 * H - 5);
+  // a planner at work on a second feature: its branch holds its plan file (the feature with its
+  // design, and a draft of two tickets, one waiting on the other) and the design
+  ids.planner = 'receipts';
+  git('checkout', '-q', '-b', `plan/${ids.planner}`);
+  write(path.join(root, 'docs/devteam/project/designs/receipts.md'), '# Receipts\n\n## TL;DR\n\nEvery payment mails a receipt.\n');
+  const pl = (o, ago) => line({ op: 'new', ...o, at: new Date(T0 - ago).toISOString(), by: `plan-${ids.planner}` });
+  write(path.join(root, `docs/devteam/project/log/plan-${ids.planner}.jsonl`), [
+    pl({ id: ids.planner, type: 'feature', title: 'Receipts', goals: [ids.goal], design: 'project/designs/receipts.md', stories: [] }, 50 * 60000),
+    pl({ id: 'rec-01-email', type: 'ticket', title: 'email the receipt', feature: ids.planner, component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['pay/mail/**'], done_when: ['a mail is sent'] }, 40 * 60000),
+    pl({ id: 'rec-02-pdf', type: 'ticket', title: 'a receipt as a PDF', feature: ids.planner, component: 'pay', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: ['rec-01-email'], touches: ['pay/pdf/**'], done_when: ['a PDF is attached'] }, 30 * 60000),
+  ].join(''));
+  git('add', '-A');
+  git('commit', '-qm', `plan-${ids.planner}: the draft`);
+  git('checkout', '-q', 'main');
+  // a message from the ticket's worker: its thread
+  ids.thread = hand(ids.ticket, { type: 'message', to: 'supervisor', kind: 'info', text: 'the card form is in' }, 2 * H);
+  // questions: open, answered (with context, choices with their effect for users, a recommendation,
+  // its goal and the ticket it held up), defaulted (in the Inbox's Answered list), withdrawn, and one
+  // too long for a line
+  const RATE = ['--stake', '1', '--urgency', '1'];
+  ids.qOpen = dt(['ask', '--question', 'Which processor?', '--choices', '[{"label":"Stripe"},{"label":"Adyen"}]', ...RATE]);
+  ids.qAnswered = dt(['ask', '--question', 'Keep the receipts?', '--context', 'Receipts take space; the processor keeps a copy too.', '--choices', JSON.stringify([{ label: 'Yes', detail: 'keep them a year', effect: 'an admin can find last month\'s receipt' }, { label: 'No', effect: 'an admin asks the processor' }]),
+    '--recommendation', 'Yes', '--goal', ids.goal, '--blocks', ids.ticket, ...RATE]);
+  dt(['answer', ids.qAnswered, 'Yes'], null);
+  ids.qDefaulted = dt(['ask', '--question', 'Which port?', '--default', '8080']);
+  pastDeadline(root, ids.qDefaulted);
+  dt(['answer', ids.qDefaulted, '--defaulted']);
+  ids.qWithdrawn = dt(['ask', '--question', 'Split the form?', '--choices', '[{"label":"Yes"},{"label":"No"}]', ...RATE]);
+  dt(['withdraw', ids.qWithdrawn, '--reason', 'asked twice']);
+  ids.qLong = dt(['ask', '--question', PEEK_LONG, '--choices', '[{"label":"One page"},{"label":"Split"}]', ...RATE]);
+  dt(['answer', ids.qLong, 'One page'], null);
+  // the goal: judged, read, approved by the owner, then drained by the supervisor
+  dt(['goal', 'impact', ids.goal, '3', '--rationale', 'checkout moves the number the strategy watches']);
+  dt(['goal', 'reading', ids.goal, '--value', '4']);
+  dt(['goal', 'decide', ids.goal, 'approve', '--force', '--notes', 'go'], null);
+  // a change to the goal you approved, applied as asked (its Approved)
+  ids.qGoalChange = dt(['ask', '--class', 'goal-change', '--goal', ids.goal, '--question', 'Leave chargebacks out of the checkout goal?', '--change', JSON.stringify({ non_goals: ['refunds', 'chargebacks'] }),
+    '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', ...RATE]);
+  dt(['answer', ids.qGoalChange, 'Yes'], null);
+  dt(['goal', 'set', ids.goal, '--approved', ids.qGoalChange]);
+  dt(['goal', 'hold', ids.goal, 'drain', '--reason', 'waiting on the processor']);
+  // knowledge, observations, a recurring signal, a problem and an incident
+  ids.observation = dt(['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
+  ids.lesson = dt(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'payments time out under load', '--evidence', ids.observation]).match(/k-\S+/)[0];
+  // a lesson sent to the owner: its plain words, and the Inbox is where it is kept or retired
+  ids.lessonOwner = dt(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'ask before changing the processor', '--for-owner', '--plain', 'Ask the owner before the checkout changes processor.', '--evidence', ids.observation]).match(/k-\S+/)[0];
+  ids.signal = 'metrics:flaky-gate:web/e2e';
+  for (const h of [30, 28, 2]) hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed, then passed', source_key: ids.signal }, h * H);
+  ids.problem = hand('supervisor', { type: 'problem', title: 'the card form drops input', severity: 2, realized: true, status: 'open', threatens: [ids.goal], refs: [ids.observation] }, 5 * H);
+  hand('supervisor', { type: 'problem', op: 'set', id: ids.problem, status: 'owned' }, 5 * H - 1000);
+  // the incident on the reader's fingerprint, which the reader observed (its related signal), and
+  // the reader's other fingerprint ignored
+  hand('supervisor', { type: 'observation', source: 'reader', subject: 'sensor:reader', detector: 'sensor', kind: 'exception', severity: 2, detail: 'TypeError: card is undefined', source_key: 'sensor:reader:exception:E1' }, 4.5 * H);
+  ids.incident = hand('supervisor', { type: 'problem', title: 'payment errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [], fingerprints: ['reader:exception:E1'], sensor: 'reader' }, 4 * H);
+  dt(['sensor', 'ignore', 'reader:exception:E2', '--reason', 'a crawler, not a person']);
+  // calls: a decision on the defaulted answer, drawing on the lesson, and an act under it given the
+  // lesson; an act of its own, one corrected; an act your answer approved (What used it); a start
+  // given the lesson in last week (the learning record's efficacy)
+  ids.decision = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'put checkout first', rationale: 'the default said so', authority: 'default', approved_by: ids.qDefaulted, knowledge: [ids.lesson], refs: [ids.goal], reversible: true }, 3 * H);
+  ids.actUnderDecision = hand('supervisor', { type: 'act', class: 'priority-change', decision: ids.decision, what: 'moved checkout to the top', knowledge: [ids.lesson], refs: [ids.goal], reversible: true }, 3 * H - 1000);
+  ids.act = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved receipts down', refs: [ids.goal], reversible: true }, 3 * H - 2000);
+  ids.actCorrected = hand('supervisor', { type: 'act', class: 'priority-change', what: 'moved the docs up', refs: [ids.goal], reversible: true }, 3 * H - 3000);
+  dt(['correct', ids.actCorrected, '--reason', 'the docs can wait'], null);
+  ids.actAnswered = hand('supervisor', { type: 'act', class: 'priority-change', what: 'kept the receipts', approved_by: ids.qAnswered, refs: [ids.goal], reversible: true }, 3 * H - 4000);
+  // a decision on a standing rule (the lesson)
+  ids.decisionRule = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'kept payments light', authority: 'standing-rule', approved_by: ids.lesson, refs: [], reversible: true }, 3 * H - 5000);
+  ids.decisionNotMine = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'an old call', authority: 'rung', refs: [], reversible: true }, 40 * DAY);
+  // 81 later calls: with the newer rows above them, decisionNotMine is past the 80 the Decide tab draws
+  for (let i = 0; i < 81; i++) hand('supervisor', { type: 'decision', class: 'priority-change', what: `a later call ${i + 1}`, authority: 'rung', refs: [], reversible: true }, 20 * DAY - i * 60000);
+  hand('supervisor', { type: 'act', class: 'worker-slots', what: `started ${ids.ticket}`, knowledge: [ids.lesson], refs: [ids.ticket], reversible: true }, 9 * DAY);
+  // last week's learning record and three closed retros, ids.retro the middle one (its previous and
+  // next), each with its write-up's numbers
+  // last week's ISO week (its Thursday's year and week)
+  const th = new Date(T0 - 7 * DAY);
+  th.setUTCDate(th.getUTCDate() + 3 - ((th.getUTCDay() + 6) % 7));
+  const jan4 = new Date(Date.UTC(th.getUTCFullYear(), 0, 4));
+  const week = `${th.getUTCFullYear()}-W${String(1 + Math.round(((th - jan4) / DAY - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7)).padStart(2, '0')}`;
+  ids.learning = hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week, source_key: `learning:${week}`, detail: 'the week in figures',
+    figures: { informed: { knowledge: 1, signals_explained: 0, signals_formed: 1, starts_given: 0, starts: 0 }, autonomous: { trusted_calls: 1, ladder_calls: 2, questions: 3, merged: 0 }, trusted: { agreed: 1, answered: 2, corrections: 1, calls: 3 } } }, 6 * DAY);
+  hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week of schema work', source_ref: 'project/retros/2026-11-02.md', refs: [] }, 8 * DAY);
+  ids.retro = hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week of checkout', source_ref: 'project/retros/2026-11-09.md', refs: [ids.lesson] }, 1 * H);
+  hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week of receipts', source_ref: 'project/retros/2026-11-16.md', refs: [] }, 0.5 * H);
+  return { root, ids };
+}

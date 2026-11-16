@@ -56,6 +56,8 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
   const KE = lesson('Only the owner changes DNS', 'accepted');
   const KR = lesson('Banners ship without asking', 'retired');
   const KO = mk(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make', '--for-owner', '--plain', 'The project is built with one standard tool.'], SUP);
+  // an owner candidate no question names: its Inbox card's Retire it is the positive control
+  const KP = mk(['knowledge', 'add', '--kind', 'fact', '--statement', 'Releases go out on Tuesdays', '--for-owner', '--plain', 'Releases have a fixed day.'], SUP);
   const [G, GT, GB, GQ, GL] = ['Faster pages', 'Fewer pages', 'Better pages', 'Kept pages', 'A goal'].map(goal);
   dt(['goal', 'decide', GL, 'let-go', '--owner']);
   const T = mk(['thread', 'new', 'Tidy the leftovers']);
@@ -155,12 +157,24 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
     await soon(`SAVING === 0`, 'the presses back');
     await polls(2);
     assert.equal(await p.ev(done(Q, KO)), 'Done: kept', 'kept, from the data');
-    // the positive controls: the Knowledge drawer's Retire it and a goal's hold bar post the same bodies
+    // the positive controls: the Inbox lesson card's Retire it and a goal's hold bar post the same bodies
+    await soon(`!!document.querySelector('#inbox [data-know="${KP}"][data-status="retired"]')`, 'the Inbox lesson card');
+    await p.ev(`document.querySelector('#inbox [data-know="${KP}"][data-status="retired"]').click(); void 0`);
+    await soon(`window.__posts.some((x) => x.url === '/api/knowledge' && x.body.id === ${JSON.stringify(KP)})`, 'the Inbox card posted');
+    assert.deepEqual((await posts('/api/knowledge', (x) => x.body.id === KP)).map((x) => x.body), [{ id: KP, status: 'retired' }]);
+    // the lesson peek's Retire it is no write (kit-88 spec §2.3): it starts a thread on the lesson, and
+    // nothing goes to /api/knowledge
     await p.ev(`location.hash = '#lesson/${KB}'`);
-    await soon(`!!document.querySelector('[data-know="${KB}"][data-status="retired"]')`, 'the Knowledge drawer');
-    await p.ev(`document.querySelector('[data-know="${KB}"][data-status="retired"]').click(); void 0`);
-    await soon(`window.__posts.some((x) => x.url === '/api/knowledge' && x.body.id === ${JSON.stringify(KB)})`, 'the drawer posted');
-    assert.deepEqual((await posts('/api/knowledge', (x) => x.body.id === KB)).map((x) => x.body), [{ id: KB, status: 'retired' }]);
+    const retire = `[...document.querySelectorAll('#drawer-body button')].find((b) => b.textContent.trim() === 'Retire it')`;
+    await soon(`DRAWER.id === ${JSON.stringify(KB)} && !!${retire}`, 'the lesson peek with its Retire it');
+    assert.equal(await p.ev(`${retire}.dataset.threadOn`), `lesson:${KB}`, 'Retire it starts a thread on the lesson');
+    const knowBefore = (await posts('/api/knowledge')).length;
+    await p.ev(`${retire}.click(); void 0`);
+    await soon(`TL.draft?.subject?.ref === ${JSON.stringify(`lesson:${KB}`)}`, 'a thread draft pinned to the lesson');
+    await polls(1);
+    assert.equal((await posts('/api/knowledge')).length, knowBefore, 'the peek\'s Retire it posts nothing to /api/knowledge');
+    assert.equal(statusOf(KB), 'accepted', 'the lesson unchanged');
+    await p.ev('tlClose(); void 0');
     await p.ev(`location.hash = '#goal/${GB}'`);
     await soon(`!!document.querySelector('[data-hold-id="${GB}"][data-mode="let-go"]')`, 'the goal\'s hold bar');
     await p.ev(`(() => { const b = document.querySelector('[data-hold-id="${GB}"][data-mode="let-go"]'); b.click(); b.click(); })(); void 0`);
