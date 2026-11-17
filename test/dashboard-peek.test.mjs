@@ -570,7 +570,8 @@ const inventory = (ids) => {
     row('goal', 'goal', 'every stored field', 'stored:goal'),
     row('goal', 'goal', 'outcome', 'dt:Outcome >> text:admins pay alone'),
     row('goal', 'goal', 'horizon', 'dt:Horizon'),
-    row('goal', 'goal', 'measure', 'dt:Measure >> text:cards taken a day'),
+    // the stored measure reads Measured by in the goal peek (kit-90 spec §5)
+    row('goal', 'goal', 'measure', 'dt:Measured by >> text:cards taken a day'),
     row('goal', 'goal', 'numbered milestones', `dt:Milestones >> ol li a[href^="#milestone/"]`),
     row('goal', 'goal', 'preconditions with "no plan yet"', 'dt:Preconditions >> ol >> text:no plan yet'),
     row('goal', 'goal', 'not in scope', 'dt:Not in scope >> text:refunds'),
