@@ -8297,6 +8297,63 @@ function artifactTreeOkSync(id, slug) {
   if (ok) artifactTrees.add(key);
   return ok;
 }
+// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
+// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
+// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
+// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
+// when there is nothing at all.
+const ARTIFACT_VERSIONS_MAX = 200;
+function artifactVersions(slug) {
+  const drafts = draftArtifacts().filter((a) => a.slug === slug)
+    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    .map((a) => {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    });
+  const ref = mainRef();
+  let main = [];
+  let truncated = false;
+  if (ref) {
+    const folder = `${ARTIFACTS_REL}/${slug}`;
+    const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
+    // a failed read is a failure (exit 1), never an empty history (exit 3)
+    if (raw === null) die(`${slug}: could not read main's history`);
+    const seen = new Set();
+    for (const chunk of raw.split('\x01').slice(1)) {
+      const [head, ...lines] = chunk.split('\n');
+      const [commit, time] = head.split(' ');
+      let tree = null;
+      for (const l of lines) {
+        const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+        if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
+      }
+      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
+      seen.add(tree);
+      main.push({ tree, commit, time });
+    }
+    // only servable: a tree without artifact.json at its top (from before the manifest) is left out
+    if (main.length) {
+      const r = spawnSync('git', ['cat-file', '--batch-check'], { cwd: mainRoot, encoding: 'utf8', input: `${main.map((e) => `${e.tree}:artifact.json`).join('\n')}\n`, maxBuffer: 64 * 1024 * 1024 });
+      // a failed check is a failure (exit 1), never "nothing there" (exit 3)
+      if (r.status !== 0) die(`${slug}: its versions could not be checked (git cat-file)`);
+      const lines = r.stdout.split('\n');
+      main = main.filter((_, i) => lines[i] !== undefined && !lines[i].endsWith(' missing'));
+    }
+    const nowLs = git(treeFolderArgs(ref, slug).now, mainRoot);
+    // a folder missing on main is an empty answer (""), not a failure: only null is
+    if (nowLs === null) die(`${slug}: could not read main's history`);
+    const nowTree = treeNow(nowLs);
+    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
+    truncated = main.length > ARTIFACT_VERSIONS_MAX;
+    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+  }
+  if (!drafts.length && !main.length) return null;
+  return { slug, versions: [...drafts, ...main], truncated };
+}
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -8494,7 +8551,16 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact versions <slug>: its drafts, main's version, then earlier ones by date; the dashboard's
+  // /api/artifact-versions runs it. Exit 3: nothing there, which the route tells apart from a failure
+  if (sub === 'versions') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die('usage: artifact versions <slug> [--json]');
+    const r = artifactVersions(slugName) ?? die(`${slugName}: no versions`, 3);
+    if (flags.json) return json(r);
+    return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -16066,6 +16132,8 @@ async function cmdDashboard() {
   });
   // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
   const describing = new Map();
+  // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
+  const versioning = new Map();
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
@@ -16644,6 +16712,19 @@ async function cmdDashboard() {
       const r = await job;
       if (r.ok) return send(res, 200, 'application/json', r.stdout);
       return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+    }
+    // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
+    // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
+    if (req.method === 'GET' && u.pathname === '/api/artifact-versions') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      if (!LINK_ID.test(slug)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad slug' }));
+      let job = versioning.get(slug);
+      if (!job) { job = run(['artifact', 'versions', slug, '--json'], { timeout: 12000 }).finally(() => versioning.delete(slug)); versioning.set(slug, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no versions of ${slug}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the versions could not be read' }));
     }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
@@ -21699,6 +21780,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
+  artifact versions <slug> [--json]   an artifact's versions: its drafts, main's, then earlier ones by date (the dashboard's /api/artifact-versions reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
