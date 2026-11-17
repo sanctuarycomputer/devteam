@@ -139,6 +139,8 @@ None. The ticket lists none; every change is additive, and a removed route or fi
 - `m-20261117-003346949-supervisor`: approve-spec at `792afd99`.
 - `m-20261117-004552350-supervisor`: approve-plan at `ec29814c`, confirming two notes. B6 runs `log-check` (not `validate`, which doesn't check log lines). The laptop route keeps the dashboard's existing Host check, which also accepts the owner's own `--host` name.
 - `m-20261117-005812254-supervisor` (changes §3 step 6; from task review T2-3): the laptop sweep removes an empty upload folder of ours only once its mtime is older than `UPLOAD_STALL_MS`, as it does a `.part`. Otherwise one dashboard's sweep could delete the folder another dashboard for the same project has just made for an upload, against the Edge case "the sweep never removes a folder being received". A9 keeps a fresh empty folder. The gateway is unchanged.
+- Task reviews T5-2 and T6-2 (worker's call, within §6's intent): a recorded file `name` is also refused when it fails the kit's `UNSAFE_TEXT` rule (bidi controls, line breaks, LRM/RLM), the rule thread titles use, not only for control characters. The stored name on disk was already reduced to `[A-Za-z0-9._-]`.
+- Task review T6-1, a known limit, not a change: the lost-Enter rescue looks at the last 8 lines above the input. Many long non-image paths pasted into a narrow pane can push the line's end out of that window. The rescue then gives up quietly, as it does today for any long line. One to three files in a normal pane are inside it.
 
 ## Review history
 
