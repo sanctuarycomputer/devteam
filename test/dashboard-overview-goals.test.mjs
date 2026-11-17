@@ -474,6 +474,12 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   assert.match(await p.ev(`${card('g5')}.textContent`), /Let go/);
   assert.equal(await p.ev(`${card('g5')}.querySelector('.card-head .grow').textContent.trim()`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${JSON.stringify(ids.g5)}); return 'let go ' + when([...g.updates].reverse().find((u) => u.status === 'abandoned').at); })()`));
   assert.match(await p.ev(`${card('g5')}.textContent`), /processor’s page covers it|processor's page covers it/);
+  // done-when 3 as written: a reload at #goals?gt=met shows Met
+  await p.ev(`location.hash = '#goals?gt=met'; void 0`);
+  await soon(`!!${card('g4')}`, 'the met goal\'s card again');
+  await reload();
+  assert.equal(await p.ev('location.hash'), '#goals?gt=met');
+  await soon(`document.querySelector('#goals .tabbar [aria-selected="true"]')?.dataset.tab === 'met' && !!${card('g4')} && !${card('g1')}`, 'a reload keeps Met');
 });
 
 // Overview's ten tiles, in the mock's STATS order; bugs merged only with a production sensor
