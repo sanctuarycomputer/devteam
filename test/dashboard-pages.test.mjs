@@ -561,8 +561,10 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev(`document.querySelector('#side-state').textContent`), 'running');
 
   // Run on a running fleet: no post; Drain: one post, then the mode shows drain
-  const at0 = await place();
+  // the click scrolls its button into view, and a page taller than the window (Overview) scrolls with it,
+  // moving the sticky nav by a fraction of a pixel: the place is read once the press has scrolled
   await p.click(btn('run'));
+  const at0 = await place();
   await p.click(btn('drain'));
   await until(async () => (await posts()) !== '[]', 'the drain posted');
   assert.equal(await posts(), JSON.stringify([{ op: 'drain' }]), 'Run on a running fleet posts nothing; Drain posts once');
