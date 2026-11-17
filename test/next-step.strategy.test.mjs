@@ -258,7 +258,9 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     assert.ok(cards[3].lesson);
     assert.match(await p.ev(`document.querySelector('[id="q-${detail}"] .kv').textContent`), /Order2 of 3\. Score 6: impact 3 \(moves a number the project watches\) × stake 1 \(a detail\) × urgency 2 /);
     assert.match(await p.ev(`document.querySelector('[id="q-${gate}"] .kv').textContent`), /RatedWhen asked: stake 3, urgency 1, settles 1/);
-    assert.match(await p.ev(`document.querySelector('#strategy-link').getAttribute('href')`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/);
+    // Goals has no Strategy link of its own any more (kit-90 spec §7): the strategy is linked from the goal's
+    // Why it matters, in its peek (below)
+    assert.equal(await p.ev(`!!document.querySelector('#strategy-link') || [...document.querySelectorAll('#goals a')].some((a) => a.textContent.trim() === 'Strategy')`), false, 'no Strategy link on Goals');
     // the goal: its impact beside its priority, why, and Wrong? sends the owner's own value
     assert.match(await p.ev(`document.querySelector('#goals-list a.title-link[href="#goal/${G}"]').closest('.card').querySelector('.card-head').textContent`), /priority 1 · moves a number the project watches/);
     // #questions opened the Inbox in the panel (kit-100), which covers the window below 900px: closed, at
@@ -277,6 +279,7 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     // the peek slides in (kit-88): click once it is at rest, or the click lands where the button was
     await soon(`(() => { const d = document.getElementById('drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()`, 'the goal drawer at rest');
     assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
+    assert.match(await p.ev(`[...document.querySelector('[data-correct="${key}"]').parentElement.querySelectorAll('a')].find((a) => a.textContent.trim() === 'the strategy')?.getAttribute('href') ?? ''`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/, 'the strategy, linked from Why it matters');
     await p.click(`[data-correct="${key}"]`);
     // the click's effect; and the focused field holds the drawer's redraws while the values go in
     await soon(`document.activeElement === document.querySelector('input[data-reason="${key}"]')`, 'the correction form open');
