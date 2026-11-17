@@ -466,7 +466,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   // setTimeout draws what the press held back): a redraw can't move or replace what is clicked
   const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   const answeredOnServer = (q) => /answered/.test(dt(['questions', '--id', q]).split('\n')[0]);
-  await soon(`!!${card(Q1)} && !!${card(Q2)}`, 'the question cards');
+  // #questions opens the Inbox in the panel (kit-100): the cards, in the panel at rest (a click takes a box's centre once)
+  await soon(`!!${card(Q1)} && !!${card(Q2)} && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the question cards');
 
   await t.test('an answer: the card says so at once; the server has it once the post goes through', async () => {
     await hold();
@@ -593,7 +594,8 @@ test('a typed answer on a question with choices asks which choice it means, on t
   const ask = (q, where = card(q)) => `document.querySelectorAll('${where} [data-which-for="${q}"]').length`;
   const logged = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
   const write = async (sel, text) => { await p.click(sel); await soon(`document.activeElement === document.querySelector('${sel}')`, 'the note focused'); await p.type(text); };
-  await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}')`, 'the door cards');
+  // #questions opens the Inbox in the panel (kit-100): the cards, in the panel at rest (a click takes a box's centre once)
+  await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}') && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the door cards, in the panel at rest');
 
   await t.test('Something else and words: the ask, and nothing posted', async () => {
     await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
@@ -712,11 +714,15 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
     const box = `textarea[data-q="${Q}"]`;
     const soon = soonIn(p, 15000, () => dash.out());
-    await soon(`!!document.querySelector('${box}')`, 'the question card');
+    // the Inbox is the panel's tab (kit-100), and it scrolls in #th-body: the card, in the panel at rest (a click
+    // takes the field's centre once)
+    await soon(`!!document.querySelector('${box}') && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the question card');
     // Answered by polls actually arriving, however long /api/data takes.
     const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
     // jumped: a space on the page scrolls most of a screen; a pixel or two is a caret coming into view
-    const state = (y) => p.ev(`(() => { const a = document.activeElement, t = document.querySelector('${box}'); return { value: t.value, focus: a === t, start: t.selectionStart, end: t.selectionEnd, jumped: Math.abs(window.scrollY - ${y ?? 'window.scrollY'}) > 20 }; })()`);
+    // the Inbox's scroll: #th-body's, since the Inbox is the panel's tab (kit-100)
+    const TH_Y = "document.getElementById('th-body').scrollTop";
+    const state = (y) => p.ev(`(() => { const a = document.activeElement, t = document.querySelector('${box}'); return { value: t.value, focus: a === t, start: t.selectionStart, end: t.selectionEnd, jumped: Math.abs(${TH_Y} - ${y ?? TH_Y}) > 20 }; })()`);
     const wrote = (v) => ({ value: v, focus: true, start: v.length, end: v.length, jumped: false });
     // A new question lands in the log: the tab title says so at once, the cards wait.
     const newQuestion = async (q) => {
@@ -734,7 +740,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
         await soon('window.__gated > 0 && window.__quiet()', 'a refresh held at the gate');
         await p.click(box);
         await soon(`document.activeElement === document.querySelector('${box}')`, 'the field focused');
-        y = await p.ev('window.scrollY');
+        y = await p.ev(TH_Y);
         assert.ok(y > 0, 'the fixture page scrolls');
         await p.type('hello');
         await p.ev('window.__t = document.querySelector(\'' + box + '\'); void 0');
@@ -747,7 +753,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('the caret and a selection stay where they were', async () => {
-      const y = await p.ev('window.scrollY');
+      const y = await p.ev(TH_Y);
       for (let i = 0; i < 5; i++) await p.key('ArrowLeft');
       await p.type('X');
       await polls();
@@ -763,7 +769,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       const q = 'Arrived while you typed?';
       await newQuestion(q);
       assert.equal(await p.ev(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`), false, 'not drawn under the typing');
-      assert.equal(await p.ev(`document.getElementById('n-questions').textContent === document.title.match(/\\((\\d+)\\)/)[1]`), true, 'the Inbox count');
+      assert.equal(await p.ev(`document.getElementById('inbox-btn-n').textContent === document.title.match(/\\((\\d+)\\)/)[1]`), true, 'the Inbox count');
       await p.key('Tab');
       await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'the held data, once focus left');
       assert.equal(await p.ev(`document.querySelector('${box}').value`), 'hello Xworld', 'the draft survives the redraw');
@@ -771,7 +777,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('held for a long time: a hint, and clicking it draws without losing the field or the caret', async () => {
-      const y = await p.click(box).then(() => p.ev('window.scrollY'));
+      const y = await p.click(box).then(() => p.ev(TH_Y));
       const q = 'Urgent while you were idle?';
       await newQuestion(q);
       assert.equal(await p.ev(`getComputedStyle($('held')).display`), 'none', 'no hint while typing normally');
@@ -806,7 +812,7 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await soon(`document.querySelector('#questions').textContent.includes('Before the radio?')`, 'the redraw after the click');
       assert.equal(await p.ev(`document.querySelector('input[data-pick="${Q}"][value="Right"]').checked`), true, 'the pick took');
       assert.equal(await p.ev(`document.activeElement.dataset.pick`), Q, 'focus is back on the radio, not on the page');
-      const y = await p.ev('window.scrollY');
+      const y = await p.ev(TH_Y);
       await p.key(' ');
       // a space that scrolls does so smoothly, a little each frame: compared once the page is at rest
       await p.ev(AT_REST);
@@ -835,9 +841,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
       await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
-      // back to the Inbox, for the card
+      // back to the Inbox, for the card (#inbox opens the panel on its Inbox tab, kit-100)
       await p.ev(`location.hash = '#inbox'`);
-      await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
+      await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !document.getElementById('th-inbox').hidden`, 'the Inbox in the panel, at rest');
     });
 
     await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
@@ -3161,6 +3167,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   // look at where a button is could see the card before it moves. So a click ends once that has run.
   const released = () => soon('!TL.pressed && PRESSED === 0', 'the release handled');
   const click = (sel) => still(async () => { await p.click(sel); await released(); });
+  // the panel open on its Threads tab: the Inbox button opens it on its Inbox tab (kit-100), so Threads is a
+  // click on its tab, once the panel is at rest
+  const onThreads = async () => {
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) await click('.pagebar .tt');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest');
+    const tab = '#th-tabs [role="tab"][data-tab="threads"]';
+    if (await p.ev(`document.querySelector('${tab}')?.getAttribute('aria-selected') !== 'true'`)) await click(tab);
+    await soon(`document.querySelector('${tab}')?.getAttribute('aria-selected') === 'true' && !!document.getElementById('th-inbox').hidden`, 'the panel on Threads');
+  };
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
   // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
@@ -3203,9 +3218,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
-    // the field is on the Inbox page (one page at a time)
+    // the field is in the Inbox (the panel's Inbox tab, kit-100)
     await p.ev(`location.hash = '#inbox'`);
-    await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !document.getElementById('th-inbox').hidden`, 'the Inbox in the panel, at rest');
     await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
@@ -3213,11 +3228,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    await still(async () => { const g = await p.at('#inbox h2'); await p.move(g.x, g.y, 8); });
+    await still(async () => { const g = await p.at(`#q-${Q0} .card-head`); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+    // the panel closed by its ×, so Goals isn't opened with it remembered (kit-89 §2.5; the Inbox is its tab, kit-100)
+    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
     await p.ev(`location.hash = '#goals'`);
     await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
   });
@@ -3417,7 +3436,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-close]');
     F.sup(['thread', 'reply', T, 'Noted.']);
     await soon(`document.querySelector('.pagebar .tt .n.th.you')?.textContent === '1'`, 'the count: one your move');
-    { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await onThreads();
     await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals') && !!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you')`, 'where its subject is, and its mark');
     await click('[data-tl-new]');
     await soon(`${shown('tl-card')} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'a card in the panel');
@@ -3432,7 +3451,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
-    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await onThreads();
     await click('#tl-pinbtn');
     assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
     await still(async () => { const at = await p.at(`${goalSel} h4`); await p.move(at.x, at.y, 0); });
@@ -3442,7 +3461,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("a panel row keeps the keyboard's focus through reads that change the list", async () => {
-    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await onThreads();
     // the owner's word first, so the supervisor's reply below changes the row's mark
     F.owner(['thread', 'say', T, 'Over to you.']);
     await p.ev('tlRefresh()');
@@ -3689,7 +3708,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-accept]');
     await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
     await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await onThreads();
     await click('#th-pane [data-thf="resolved"]');
     await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'listed under Resolved');
     assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));

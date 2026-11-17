@@ -719,7 +719,8 @@ try {
   .qcard.review { border-left-color: var(--blue); }
   /* the review opens as a wide side panel over the page: a slim header, the agent's page filling
      the height, and a compact answer bar whose row list scrolls inside it */
-  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 21; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
+  /* above the Threads panel (22) and its in-panel pins (24), so a review opened from the Inbox tab is full size (kit-100 spec §2.8) */
+  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 25; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
   @media (max-width: 900px) { #review-view:not([hidden]) { width: 100vw; padding: 8px 10px 0; } }
   .rv-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .rv-top h4 { flex: 1; min-width: 0; margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -798,6 +799,8 @@ try {
 
   /* the artifact viewer: a page the fleet drew, centered over the scrim at 80% of the window */
   #artifact-view:not([hidden]) { position: fixed; inset: 10%; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
+  .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
   .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
   .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
   .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
@@ -850,8 +853,8 @@ try {
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
   /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
-  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
-  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+  .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
   /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
@@ -865,10 +868,24 @@ try {
   /* a floating card in the corner sits beside the open panel, never under it; at 900px and below, where the
      open panel covers the page, every floating card hides until it closes (spec §2.6) */
   @media (min-width: 901px) { .shell.threads-open .tl-card.in-dock { right: calc(var(--threads-w) + 16px); } }
-  @media (max-width: 900px) { .shell.threads-open #tl .tl-card { display: none; } }
+  @media (max-width: 900px) { .shell.threads-open #tl .tl-card:not(.in-threads) { display: none; } }
+  /* a thread whose home is the Inbox tab (kit-100 spec §2.6): its pin and floating card fixed, placed in the window's
+     coordinates (a page scroll doesn't move the panel), and above the panel (.threads: 22, 23 over the viewer); the
+     card's own z-index (50) already is. Each pin is its own layer (.tl-pins makes none), so only these are lifted */
+  .tl-pin.in-threads, .tl-card.in-threads { position: fixed; }
+  .tl-pin.in-threads { z-index: 24; }
   /* the Threads panel (kit-89): the block's frame (.threads, .threads-head, .threads-body, .thread-list) styles
      it; here only what the block leaves to the page. The tab bar fills the head up to its three buttons */
   #th-tabs { display: flex; flex: 1; min-width: 0; }
+  /* the Inbox tab (kit-100 spec §2.1, §2.2): its count red (tabBar draws a waiting count blue, and this one isn't);
+     its element one column the slot's width, the cards --gap apart, a card's rows wrapping rather than overflowing */
+  #th-tabs [data-tab="inbox"] .n { color: var(--red); }
+  #th-inbox { display: flex; flex-direction: column; gap: var(--gap); }
+  #th-inbox .card { margin: 0; }
+  #th-inbox .qcard .why { flex-wrap: wrap; }
+  /* a closed ⋯ menu's pop out of layout: Chrome keeps a closed <details>' content boxed at the summary's width
+     (26px), so its 70px key column would stick out of it (the measure, kit-100 spec AC6) */
+  #th-inbox details.menu:not([open]) > .pop { display: none; }
   .threads-head .end .icon-btn { margin: 0; }
   .th-filter { margin: 0 0 6px; }
   .th-filter .seg { display: flex; width: 100%; }
@@ -903,6 +920,16 @@ try {
   @media (min-width: 901px) { .shell.av-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
   @media (max-width: 900px) { .shell.av-open #tt-peek { display: none; } }
   .shell.av-open .threads { z-index: 23; }
+  /* at 900px and below the panel and a peek or the viewer each take the full width, so the one opened last is on top
+     (kit-100 final-1 F1): a peek or the viewer opened over the open panel marks it (th-under-peek, th-under-av), and
+     while that one is up the panel goes under the scrim, its fixed pins and floating card with it. The panel opening
+     clears both marks, and so does an Inbox road taken from the peek (final-2 F2-1). Above 900px nothing changes: the
+     peek sits beside the panel, and the rule above stands */
+  @media (max-width: 900px) {
+    .shell.th-under-peek.peek-open .threads, .shell.th-under-av.av-open .threads { z-index: 19; }
+    .shell.th-under-peek.peek-open .tl-pin.in-threads, .shell.th-under-av.av-open .tl-pin.in-threads,
+    .shell.th-under-peek.peek-open .tl-card.in-threads, .shell.th-under-av.av-open .tl-card.in-threads { visibility: hidden; }
+  }
   /* the viewer narrowed by the open panel above 900px is kit-141's; the page only sets how much */
   @media (min-width: 901px) { :where(.shell).threads-open { --av-right: calc(var(--threads-w) + 16px); } }
   /* the /view/ tab (spec §2.8): the button at the window's top right, centred in a --bar-h band above the stage,
@@ -955,13 +982,6 @@ try {
     <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
-  </section>
-
-  <section id="inbox" class="no-shell" data-page="inbox">
-    <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
-    <div id="ask-inbox"></div>
-    <div id="questions"></div>
-    <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
 
   <section id="progress" class="no-shell" data-page="progress">
@@ -1133,10 +1153,15 @@ try {
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
 </div>
 <!-- the Threads panel (kit-89 spec §2.1): on <body>, outside .app, so the /view/ tab has it too. Its head: the
-     tabs, then Pin, New thread and ×; its body: the selected tab's pane, and the slot the in-panel card lives in -->
+     tabs, then Pin, New thread and ×; its body: the selected tab's pane, the slot the in-panel card lives in, and
+     the Inbox (kit-100 spec §2.1: the one element, its children and ids kept, shown only on the Inbox tab) -->
 <aside class="threads" id="threads" aria-label="Threads">
   <div class="threads-head"><div id="th-tabs"></div><span class="end"><button type="button" class="ghost icon-btn" id="tl-pinbtn" aria-pressed="false" aria-label="Pin" title="Point at something to start a thread: for a phone, or for a long look around"><i class="icon-map-pin" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" data-tl-new aria-label="New thread" title="New thread"><i class="icon-plus" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" id="th-close" aria-label="Close Threads"><i class="icon-x" aria-hidden="true"></i></button></span></div>
-  <div class="threads-body" id="th-body"><div id="th-pane"></div><div id="th-card-slot" class="no-shell"></div></div>
+  <div class="threads-body" id="th-body"><div id="th-pane"></div><div id="th-card-slot" class="no-shell"></div><div id="th-inbox" class="th-inbox" hidden>
+    <div id="ask-inbox"></div>
+    <div id="questions"></div>
+    <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
+  </div></div>
 </aside>
 <script>
 /* devteam-shell-js start */
@@ -1418,7 +1443,7 @@ function saveFilters(page, state) {
 // shared block, so the tickets that change it never touch the block.
 // until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
 // governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
@@ -1433,9 +1458,8 @@ const SHELL_ROUTES = {
     monitoring: 'sensors',
     // permanent: the old Loop tab subjects open the Loop page (and its tab)
     'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
-    // until kit-100: today's Inbox list anchor, and every page's Threads "Inbox" tab, are the Inbox page
-    questions: 'inbox',
-    ...Object.fromEntries(SHELL_ROUTES_PAGES.map((p) => [`${p}?th=inbox`, 'inbox'])),
+    // the Inbox is the Threads panel's first tab (kit-100): its old heads open it over Overview
+    inbox: 'overview?th=inbox', questions: 'overview?th=inbox',
   },
 };
 /* shell-routes end */
@@ -1448,9 +1472,9 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
-  ['overview', 'Overview', 'project', 'layout-dashboard'], ['inbox', 'Inbox', 'project', 'inbox'], ['goals', 'Goals', 'project', 'target'],
+  ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
   ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
@@ -1478,8 +1502,9 @@ function showPage(id, { keepScroll = false } = {}) {
 }
 // The page an element is on: its section's data-page, else Overview.
 const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
-// The Inbox button opens the Threads panel (kit-89 spec §2.2); the Inbox page is the nav's.
-$('inbox-btn').addEventListener('click', () => thGo({ th: 'open', focus: true }));
+// The Inbox button opens the side panel on its Inbox tab (kit-100 spec §2.3); in the /view/ tab, on Threads (its
+// ruling, m-20261115-230458641-supervisor).
+$('inbox-btn').addEventListener('click', () => thGo({ th: VIEWER ? 'open' : 'inbox', focus: true }));
 // The top-right button beside an open peek (kit-88 spec §2.1): the sticky page bar can't lift .tt above the
 // scrim, so #tt-peek on <body> mirrors it: its content (ids dropped, so none is on the page twice), its
 // label and title, copied whenever .tt changes; its click is .tt's. CSS shows one or the other.
@@ -1521,6 +1546,7 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
+let INBOX_D = null; // the data inboxTitle last counted (inboxCount)
 // The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>] or
 // /view/preview/<name>, one artifact or preview on the stage, the thread layer and the Threads panel over it,
 // and nothing else: no sections, no routes, no /api/data.
@@ -3851,6 +3877,8 @@ function peekShow() {
   if (PEEK_HIDE) PEEK_HIDE.cancel();
   const d = $('drawer'), s = $('scrim');
   if (d.hidden || s.hidden) { d.hidden = false; s.hidden = false; void d.offsetWidth; }
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1); a redraw changes nothing
+  if (!document.body.classList.contains('peek-open')) document.body.classList.toggle('th-under-peek', document.body.classList.contains('threads-open'));
   document.body.classList.add('peek-open');
   document.body.style.overflow = 'hidden';
   ttPeekPlace();
@@ -4803,9 +4831,16 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  // an open question: its entry is replaced by the Inbox (Back returns to the page the link was
-  // clicked on), and its card is brought into view
-  if (q?.status === 'open') { hideDrawer(); goHead('#inbox', { replace: true }); document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }); return; }
+  // an open question (kit-100 spec §2.4): its entry is replaced by the page head in force with th=inbox (on a cold
+  // load #overview?th=inbox, its kind's home), stamped, so Back returns to the page the link was clicked on; then
+  // the panel's Inbox tab shows its card (a floating thread's t is kept, as thGo keeps it)
+  if (q?.status === 'open') {
+    hideDrawer();
+    const p = parseHead(thHead(), SHELL_ROUTES), state = { ...p.state, th: 'inbox' };
+    if (!state.t || thInPanelId(state.t)) delete state.t;
+    goHead(headFor({ page: p.page, state }), { replace: true });
+    return void inboxGo({ scrollTo: `#q-${CSS.escape(id)}` });
+  }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -5042,6 +5077,8 @@ async function openPreview(raw) {
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
+  if (!document.body.classList.contains('av-open')) document.body.classList.toggle('th-under-av', document.body.classList.contains('threads-open'));
   // the Inbox button floats above the stage (kit-89 spec §2.7)
   document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
@@ -5064,6 +5101,8 @@ function openArtifact(raw) {
   showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
+  if (!document.body.classList.contains('av-open')) document.body.classList.toggle('th-under-av', document.body.classList.contains('threads-open'));
   // the Inbox button floats above the stage (kit-89 spec §2.7)
   document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
@@ -5207,9 +5246,6 @@ function routeHead({ fresh = false, carry = null } = {}) {
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
   if (p.link !== undefined) return;
-  // th=inbox with other keys: the same <page>?th=inbox entry of the table, by the parsed page
-  const thInbox = `${p.page}?th=inbox`;
-  if (!p.redirected && p.state.th === 'inbox' && Object.hasOwn(SHELL_ROUTES.redirects, thInbox)) return void goHead(`#${String(SHELL_ROUTES.redirects[thInbox]).replace(/^#/, '')}`, { replace: true });
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
@@ -5229,12 +5265,14 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on a property's key closes its tooltip, not the drawer
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
+  // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
+  if (!AV && !RV && inboxTyping(document.activeElement)) return;
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
 let RV_FROM = null;
-function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#inbox'; }
+function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#overview?th=inbox'; }
 
 // ---- loop tabs ----
 // The tab is the route's (the lt state key, Observe when none): a click is a history entry, and
@@ -5545,8 +5583,6 @@ function render(d) {
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
-  count('n-questions', d.questions.length + o.knowledge.filter(ownerLesson).length, true);
-  $('inbox-btn-n').textContent = $('n-questions').textContent;
   count('n-active', active);
   {
     const rt = DATA.ooda.retro || {};
@@ -5581,11 +5617,11 @@ function render(d) {
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
-  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl, #threads')) drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!layerField(t)) drafts[t.dataset.q] = t.value; });
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl, #threads')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl, #threads')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !layerField(el)).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !layerField(el)).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   // only the lessons the supervisor sent you: the rest are about how the agents work, and its own to keep
@@ -5650,8 +5686,10 @@ function render(d) {
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
   for (const id of [...OA_PEEKS]) { const pk = PEEKS.get(peekKey('lesson', id)); if (pk && !pk.missing && pk.record?.fields?.status !== 'retired') fetchPeek('lesson', id); }
   // last, so every section that holds an input is drawn before its half-typed value comes back
-  for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
-  for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
+  // into the page's copy (the Inbox tab's), never the layer's (a thread's card, kit-89)
+  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el));
+  for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
+  for (const sel of keptChecks) { const el = pageField(sel); if (el) el.checked = true; }
   restoreSecretDrafts();
   focusBack(focus);
 }
@@ -5685,7 +5723,8 @@ const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T
 // What each kind is called where an item has no name of its own (the owner never reads a ref).
 const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
 // Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
-// feed, a question in a Decide row) is pinned in its home section.
+// feed, a question in a Decide row) is pinned in its home section. A question's, 'inbox', is the
+// Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
 const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
@@ -5950,8 +5989,16 @@ const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'art
 const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pressed: null, route: null };
 const tlEl = (id) => document.getElementById(id);
 // The layer's own: #tl and the Threads panel (a press there held, its focus leaving redraws it, its clicks
-// let through the Shift-point capture, no pin over it, its fields hold no page redraw).
-const tlOwn = (el) => !!el?.closest?.('#tl, #threads');
+// let through the Shift-point capture, no pin over it, its fields hold no page redraw), except the panel's
+// Inbox tab (#th-inbox), which is pointed at as a page is (kit-100 spec §2.6).
+const inInbox = (el) => !!el?.closest?.('#th-inbox');
+const tlOwn = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
+// A field of the layer's (#tl, the panel outside its Inbox tab): one holds no page redraw and render() keeps no
+// draft from it; a field in #th-inbox, which render() rebuilds, is the page's (kit-100 spec §2.7). The same split
+// as a press's (tlOwn), so the two can't drift.
+const layerField = tlOwn;
+// a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
+const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
@@ -5961,9 +6008,11 @@ function tlSection(el) {
   return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || T_SECTIONS[sec.id] || '').trim() };
 }
 // What is under a point, past the layer's own; over the Threads panel nothing (it overlays the page below
-// 900px, and the page behind it is not what the owner points at): the panel is never a thread target.
+// 900px, and the page behind it is not what the owner points at), except in its Inbox tab, where what is
+// under the point is found as on a page (kit-100 spec §2.6).
 function tlHitAt(x, y) {
-  if (document.elementFromPoint(x, y)?.closest?.('#threads')) return null;
+  const top = document.elementFromPoint(x, y);
+  if (top?.closest?.('#threads') && !inInbox(top)) return null;
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
   return el ? tSubjectAt(el, x, y, tlSection) : null;
 }
@@ -6013,6 +6062,9 @@ function tlPinMode(on) {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
+  // a text field in the Inbox tab: the key is the field's; pin mode left (above) hides nothing typed, but no thread
+  // and not the panel closes under a half-typed answer (kit-100 spec §2.7)
+  else if (e.key === 'Escape' && inboxTyping(document.activeElement)) return;
   else if (e.key === 'Escape' && !!document.activeElement?.closest?.('#tl') && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
   // the focus in the open panel (kit-89 spec §2.9): an in-panel thread back to the list, else the panel closed,
   // whatever else is open (a peek, a floating card)
@@ -6080,31 +6132,69 @@ document.addEventListener('click', (e) => {
   const title = tLine($('drawer-bar-title')?.querySelector('.dtitle')?.textContent, T_TITLE_MAX) || T_KIND[ref.split(':')[0]];
   tlStart({ subject: { kind: 'item', ref, quote: tCut(title, 300) }, title, x: r.left + r.width / 2, y: r.top + r.height / 2 });
 });
-// A defaulted question's How it changes: the Inbox, its Answered list open, the question's card in
-// view with its Overrule field focused (the target rides on the click: the head keeps no such key).
+// A defaulted question's How it changes: the panel's Inbox tab over the page shown (a peek it is in stays open),
+// its Answered list open, the question's card in view with its Overrule field focused (the target rides on the
+// click: the head keeps no such key).
 document.addEventListener('click', (e) => {
   const a = e.target.closest?.('[data-answered-go]');
-  if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if (!a || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   e.preventDefault();
   const qid = a.dataset.answeredGo;
-  const go = () => {
-    if (location.hash !== '#inbox') return;
-    $('answered-wrap').open = true;
-    const card = document.getElementById(`a-${qid}`);
-    card?.scrollIntoView({ block: 'center' });
-    card?.querySelector('[data-overrule]')?.focus({ preventScroll: true });
-  };
-  if (location.hash === '#inbox') { hideDrawer(); go(); return; }
-  addEventListener('hashchange', go, { once: true });
-  location.hash = '#inbox';
+  // the list opened first, so the card has a box to scroll to (a render keeps it open)
+  $('answered-wrap').open = true;
+  inboxGo({ scrollTo: `#a-${CSS.escape(qid)}`, then: (card) => card.querySelector('[data-overrule]')?.focus({ preventScroll: true }) });
 });
+// Any other in-page link to the Inbox (the Loop's "waiting for you in the Inbox", the lesson peek's "Keep or retire
+// it in the Inbox"): its tab over the page shown, never a #inbox hop, which would redirect to Overview (kit-100 spec
+// §2.4). The href stays #inbox for a new tab, which the redirect serves; a modified click is the browser's.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest?.('a[href="#inbox"]');
+  if (!a || a.matches('[data-answered-go]') || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.button) return;
+  e.preventDefault();
+  inboxGo();
+});
+// The panel's Inbox tab over the page in force (kit-100 spec §2.4): thGo({ th: 'inbox' }), then scrollTo, an element
+// in #th-inbox, brought into view inside #th-body once the tab shows and the element is drawn (thRouted and the
+// render after: the next render() at most), and then(el) run on it. Any other Threads change (thGo) drops it, so a
+// target never found can't scroll a later visit to the Inbox.
+let INBOX_AT = null;
+function inboxGo({ scrollTo = null, then = null } = {}) {
+  // taken from a peek or the viewer over the open panel (900px and below), the panel comes on top: thShow (final-2 F2-1)
+  TH.front = true;
+  thGo({ th: 'inbox' });
+  // set after thGo, which drops any target; its route, if a hashchange, comes later and finds this one
+  INBOX_AT = scrollTo ? { sel: scrollTo, then } : null;
+  inboxAt();
+}
+function inboxAt({ rendered = false } = {}) {
+  const at = INBOX_AT, box = $('th-inbox');
+  if (!at) return;
+  const el = box?.querySelector(at.sel);
+  if (box && !box.hidden && TH.th === 'inbox' && el) {
+    INBOX_AT = null;
+    el.scrollIntoView({ block: 'center' });
+    at.then?.(el);
+  } else if (rendered) INBOX_AT = null;
+}
 // The one element a subject's pin and card follow: the one in its home section (an observation is
-// also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
+// also in the Sensors feed, a question in a Decide row), else wherever main draws it. A question's home
+// is its open card in the panel's Inbox tab (kit-100 spec §2.6), never the Answered list's copy.
 function tlHome(s) {
   if (s?.kind !== 'item') return null;
   const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
   const k = s.ref.split(':')[0];
-  return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+  const home = Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview';
+  return document.querySelector(home === 'inbox' ? `#th-inbox #questions ${sel}` : `main #${home} ${sel}`) ?? document.querySelector(`main ${sel}`);
+}
+// A thread whose home is the panel's Inbox tab (kit-100 spec §2.6): its subject an item drawn in #th-inbox (a
+// question's open card), or a page subject whose view the router sends to th=inbox (an old Inbox page spot).
+// Never in a /view/ tab, which has no Inbox.
+function tlInboxHome(t) {
+  const s = t?.subject;
+  if (VIEWER || !s) return false;
+  if (s.kind === 'item') return inInbox(tlHome(s));
+  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && p.state?.th === 'inbox'; }
+  return false;
 }
 // A Settings row's element, as Settings draws it (null when it isn't drawn).
 const settingRow = (key) => (key ? document.querySelector(`#settings [data-setting="${CSS.escape(key)}"]`) : null);
@@ -6122,6 +6212,8 @@ function tlTargetRect(s) {
   const set = tlRowOf(s);
   if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
+    // a spot on the old Inbox page: that page is gone, so no pin, and its card in the corner (kit-100 spec §2.6)
+    if (tlInboxHome({ subject: s })) return null;
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
     // a spot on a Loop tab is on that tab: none while another is shown
@@ -6171,6 +6263,13 @@ function tlGoTo(s) {
 // else its kind's home page, else Overview; a page subject's view through the router's redirects
 // (#loop/orient is #loop?lt=orient, #monitoring is #sensors), so views already in the log keep working.
 function subjectHead(s) {
+  // a subject whose home is the Inbox tab: the page head in force (cold: talk's home, Overview) with th=inbox
+  if (tlInboxHome({ subject: s })) {
+    const p = parseHead(thHead(), SHELL_ROUTES);
+    const state = { ...p.state, th: 'inbox' };
+    delete state.t;
+    return headFor({ page: p.page, state });
+  }
   if (s?.kind === 'item') {
     const el = tlHome(s);
     if (el) {
@@ -6223,7 +6322,8 @@ async function tlRoute(id) {
   }
   // its subject's page head, the panel's th kept and t added (kit-89 spec §2.5)
   const cur = parseHead(thHead(), SHELL_ROUTES), sp = parseHead(subjectHead(t.subject), SHELL_ROUTES);
-  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) ? { th: cur.state.th } : {}), t: id } });
+  // (a thread whose home is the Inbox keeps the th=inbox its subject's head has, kit-100 spec §2.6)
+  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) && !tlInboxHome(t) ? { th: cur.state.th } : {}), t: id } });
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
   // the page head changed after the router's part drew the panel from the old one
@@ -6381,30 +6481,47 @@ function tlCardBody(t) {
   }
   tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
 }
-// Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
-// on the page (or it has none); a bottom sheet on a narrow screen.
+// Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
+// (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when
+// its subject isn't on the page (or it has none); a bottom sheet on a narrow screen.
 function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
   // in the panel it is the slot's: nothing to place
-  if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock'); card.style.left = ''; card.style.top = ''; return; }
-  let r = null;
-  if (t) r = tlTargetRect(t.subject);
-  else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock', 'in-threads'); card.style.left = ''; card.style.top = ''; return; }
+  // a thread whose home is the Inbox tab (kit-100 spec §2.6): fixed, in the window's coordinates, shown over the
+  // panel at 900px and below; its subject's card (a draft's, found again once a render redrew it)
+  const fixed = tlInboxHome(t ?? { subject: TL.draft.subject });
+  // fixed before anything is measured: a card still absolute at its last place can widen the page, and the scrollbar
+  // that brings moves the panel it is placed beside
+  card.classList.toggle('in-threads', fixed);
+  let r = null, el = null;
+  if (t) { r = tlTargetRect(t.subject); el = r && t.subject?.kind === 'item' ? tlHome(t.subject) : null; }
+  else if (TL.draft.el?.isConnected || fixed) { el = TL.draft.el?.isConnected ? TL.draft.el : tlHome(TL.draft.subject); r = tlVisible(el) ? el.getBoundingClientRect() : null; }
   else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   // beside its pin in the window left of the open panel (above 900px; below, the panel covers the page and the
   // card hides), never under the panel: tPlace is given the window narrowed by --threads-w (at least 640, since the
   // sheet is the whole window's), and the card is then kept inside that narrowed window
   const vw = innerWidth - (TH.th && innerWidth > 900 ? thWidth() : 0);
+  // a subject in the Inbox tab: its box clipped to the panel's left edge, so the card opens just outside the panel
+  // (named one by one: a DOMRect's sides are getters, which a spread doesn't copy)
+  if (r && inInbox(el)) { const panelLeft = $('threads').getBoundingClientRect().left; r = { left: panelLeft, right: panelLeft, top: r.top, bottom: r.bottom, width: 0, height: r.height }; }
   const w = card.offsetWidth || 360;
   let p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, w, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
   if (!p.sheet && !p.dock) p = { ...p, left: Math.max(8, Math.min(p.left, vw - w - 8)) };
   card.classList.toggle('sheet', !!p.sheet);
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
-  card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
-  card.style.top = p.sheet || p.dock ? '' : `${p.top + scrollY}px`;
+  card.style.left = p.sheet || p.dock ? '' : `${p.left + (fixed ? 0 : scrollX)}px`;
+  card.style.top = p.sheet || p.dock ? '' : `${p.top + (fixed ? 0 : scrollY)}px`;
+}
+// The pins and a floating card placed again where their subjects now are, nothing redrawn: on a scroll of #th-body,
+// the panel's slide ending and a change of tab (kit-100 spec §2.6); a resize redraws the lot.
+function tlReplace() {
+  tlPins();
+  const card = tlEl('tl-card'), t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (!card.hidden && (t || (!TL.open && TL.draft))) tlPlaceCard(t);
 }
 // The draft is kept in this browser, as review drafts are, so a reload or another card keeps it: per
 // thread, and for a thread not yet started per subject, let go after 7 days.
@@ -6493,6 +6610,8 @@ const ASK_NOTE_MS = 20000;
 const ASK_ARM_MS = 1000;
 const askShown = () => (ASK.q && ASK.q.digest !== ASK.sent ? ASK.q : null);
 const askArmed = () => Date.now() - ASK.since >= ASK_ARM_MS;
+// Esc cancels this menu: kit-241's paneEscCancels (devteam.mjs) exactly, so the button shows only where the server sends the key
+const askEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
 function askHtml() {
   const q = askShown();
   if (!q) return ASK.note && Date.now() - ASK.sentAt < ASK_NOTE_MS ? `<div class="card small ask done"><i class="icon-circle-check" aria-hidden="true"></i> Sent to the supervisor's terminal: <b>${esc(ASK.note)}</b></div>` : '';
@@ -6501,11 +6620,12 @@ function askHtml() {
     <pre class="ask-q">${esc(q.text || '(nothing readable)')}</pre>
     <div class="small muted">${q.kind === 'limit' ? 'Nothing to click here. With account rotation set up, the dashboard restarts it once an account has room; otherwise answer it in the terminal.' : 'This one has no buttons here: answer it in the terminal.'} Messages for the supervisor wait until it is answered; words in a thread never answer it.</div>${err}</div>`;
   const off = ASK.busy || !askArmed() || typeof q.token !== 'string';
+  const escOk = askEscCancels(q.hint);
   return `<div class="card ask" data-ask="${esc(q.digest)}"><div><i class="icon-triangle-alert" aria-hidden="true"></i> <b>The supervisor's terminal is asking</b></div>
     <pre class="ask-q">${esc(q.question || '(no words above the options)')}</pre>
-    <div class="ask-opts">${q.options.map((o) => `<button type="button" class="ghost" data-ask-option="${esc(o.n)}"${off || !(o.n >= 1 && o.n <= 9) ? ' disabled' : ''}>${esc(`${o.n}. ${o.label}`)}</button>`).join('')}</div>
+    <div class="ask-opts">${q.options.map((o) => `<button type="button" class="ghost" data-ask-option="${esc(o.n)}"${off || !(o.n >= 1 && o.n <= 9) ? ' disabled' : ''}>${esc(`${o.n}. ${o.label}`)}</button>`).join('')}${escOk ? `<button type="button" class="ghost" data-ask-esc${off ? ' disabled' : ''}>Esc</button>` : ''}</div>
     ${q.hint ? `<div class="small muted ask-hint">${esc(q.hint)}</div>` : ''}
-    <div class="small muted">Your click sends that option's number to the terminal and nothing else. Words in a thread never answer it; they wait until it is answered.</div>${err}</div>`;
+    <div class="small muted">Your click sends that option's number${escOk ? ', or Esc,' : ''} to the terminal and nothing else. Words in a thread never answer it; they wait until it is answered.</div>${err}</div>`;
 }
 function askDraw() {
   if (ASK.sent && (!ASK.q || ASK.q.digest !== ASK.sent || Date.now() - ASK.sentAt > 30000)) ASK.sent = null;
@@ -6521,7 +6641,7 @@ function askSet(q) {
   ASK.q = next && ASK.q && next.digest === ASK.q.digest && !next.token && ASK.q.token ? { ...next, token: ASK.q.token } : next;
 }
 document.addEventListener('click', async (e) => {
-  const b = e.target.closest?.('[data-ask-option]');
+  const b = e.target.closest?.('[data-ask-option], [data-ask-esc]');
   const digest = b?.closest('[data-ask]')?.dataset.ask;
   const q = askShown();
   // only the question this page is showing now, a second after it appeared
@@ -6530,9 +6650,11 @@ document.addEventListener('click', async (e) => {
   ASK.err = '';
   askDraw();
   try {
-    const r = await fetch('/api/pane-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ digest, option: Number(b.dataset.askOption), token: q.token }) });
+    // Esc (kit-100 spec §2.9): exactly { digest, escape: true, token }, which kit-241's server takes only where Esc cancels
+    const isEsc = b.dataset.askEsc !== undefined;
+    const r = await fetch('/api/pane-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(isEsc ? { digest, escape: true, token: q.token } : { digest, option: Number(b.dataset.askOption), token: q.token }) });
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { ASK.sent = digest; ASK.sentAt = Date.now(); ASK.note = String(j.out || '').replace(/^answered: /, ''); setTimeout(askDraw, ASK_NOTE_MS + 100); }
+    if (r.ok) { ASK.sent = digest; ASK.sentAt = Date.now(); ASK.note = isEsc ? 'Esc' : String(j.out || '').replace(/^answered: /, ''); setTimeout(askDraw, ASK_NOTE_MS + 100); }
     else ASK.err = String(j.error || `the dashboard answered ${r.status}`);
   } catch { ASK.err = 'The dashboard did not answer; look at the terminal before trying again.'; }
   ASK.busy = false;
@@ -6720,7 +6842,7 @@ document.addEventListener('click', (e) => {
     TL.draft = { subject: null, title: '', el: null };
     tlDraw();
     // a + pressed with the panel closed (a script's click) opens it, and the composer is focused once it shows
-    if (!TH.th) return void thGo({ th: 'open', t: null, focus: 'composer' });
+    if (!TH.th || TH.th === 'inbox') return void thGo({ th: 'open', t: null, focus: 'composer' });
     thDraw({ view: true });
     return void tlEl('tl-c-text')?.focus();
   }
@@ -6746,8 +6868,10 @@ const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
 function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter((u) => !u.pending).pop()?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
 // The pins: one numbered disc per subject on the page, at an item's top right corner or at the spot
-// on its section, for open threads only, in page coordinates. Placed again after every redraw, when
-// the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
+// on its section, for open threads only, in page coordinates; a subject inside the fixed panel (the Inbox
+// tab's cards: in-threads, kit-100 spec §2.6) in the window's coordinates. Placed again after every redraw, when
+// the threads change and on a resize (and the Inbox tab's on its scroll, tlReplace); a subject that isn't drawn
+// gets none (the dock still lists it).
 function tlPins() {
   const box = tlEl('tl-pins');
   const pins = tPins(TL.threads).map((g) => {
@@ -6756,8 +6880,17 @@ function tlPins() {
     const r = tlTargetRect(g.subject);
     if (!r) return null;
     const corner = g.subject.kind === 'item' || !!tlRowOf(g.subject);
-    const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
-    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+    let x = corner ? r.right - 10 : r.left + 1, y = corner ? r.top - 10 : r.top + 1;
+    // a subject inside the fixed panel (a question in the Inbox tab, kit-100 spec §2.6): its pin fixed, in the
+    // window's coordinates, over the panel; none once the subject is out of #th-body's visible box, and kept
+    // inside that box, never over the tab bar
+    const fixed = g.subject.kind === 'item' && !!tlHome(g.subject)?.closest('#threads');
+    if (fixed) {
+      const b = $('th-body').getBoundingClientRect();
+      if (r.bottom < b.top + 11 || r.top > b.bottom - 11) return null;
+      y = Math.min(Math.max(y, b.top), b.bottom - 22);
+    } else { x += scrollX; y += scrollY; }
+    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}${fixed ? ' in-threads' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   tlPinsInto(box, pins, tlHeld);
   tsWatch();
@@ -6779,13 +6912,13 @@ function tlPinsInto(box, pins, held) {
   }
 }
 // ---- the Threads panel (kit-89 spec §2.1-§2.3) ----
-// TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | null, t: a thread id or
+// TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | 'inbox' | null, t: a thread id or
 // null), what was last drawn (tabs, pane), and where a press in the panel or on the Inbox button asked the
 // focus to go once the route has drawn (focus: 'tab' | 'thf' | 'inbox' | 'back' | 'row' | 'composer' | null; focusRow: the
-// thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), and a + draft's
-// thread waiting for its id in the threads (adopt).
-const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null };
-const TH_LISTS = ['open', 'resolved'];
+// thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), a + draft's
+// thread waiting for its id in the threads (adopt), and an Inbox road's ask that the panel come on top once drawn (front).
+const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null, front: false };
+const TH_LISTS = ['open', 'resolved', 'inbox'];
 const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
@@ -6842,6 +6975,10 @@ function thListHtml() {
     : `<p class="empty">${which === 'open' ? 'No open threads. Hold Shift and click anything on the page, or start one with +.' : 'Nothing resolved yet.'}</p>`;
   return `<div id="ask-threads"></div>${seg}${body}`;
 }
+// The Inbox tab (kit-100 spec §2.2), first: its count is the Inbox's (red, by a page rule: not `waiting`); its pane
+// is empty, since #th-inbox, which render() fills, is shown by thDraw, so a throw here can't hide the Inbox. In the
+// /view/ tab (no Inbox data, no render()) the pane is one line to the dashboard's Inbox; the count is hello's (kit-100 spec §2.8).
+threadsTabs.register({ id: 'inbox', label: 'Inbox', count: () => inboxCount() || null, render: (el) => { el.innerHTML = VIEWER ? '<p><a class="linkish" href="/#overview?th=inbox">Answer questions on the dashboard.</a></p>' : ''; } });
 threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.threads).you || null, render: (el) => { el.innerHTML = thListHtml(); } });
 threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: true });
 threadsTabs.register({ id: 'shell', label: 'Shell', disabled: true });
@@ -6859,9 +6996,8 @@ function thButton() {
     if (n.className !== cls) n.className = cls;
     if (n.textContent !== String(b.n)) n.textContent = String(b.n);
   }
-  // the red count's number (inboxTitle's: the open questions and the lessons sent to the owner), so the name says what
-  // the button shows (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
-  const q = DATA ? (DATA.questions || []).length + (DATA.ooda?.knowledge ?? []).filter(ownerLesson).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
+  // the red count's number (inboxCount), so the name says what the button shows
+  const q = inboxCount();
   const parts = [...(q ? [`${q} open question${q === 1 ? '' : 's'}`] : []), ...(b.label ? [b.label] : [])];
   const label = parts.length ? `Inbox: ${parts.join(', ')}` : 'Inbox';
   const title = b.title || 'Open questions';
@@ -6875,17 +7011,29 @@ function thDraw({ view = false } = {}) {
   thButton();
   const tabs = $('th-tabs'), pane = $('th-pane');
   if (!tabs || !pane) return;
-  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: 'threads' });
+  // th=inbox selects the Inbox tab; open and resolved, or none, Threads
+  const sel = TH.th === 'inbox' ? 'inbox' : 'threads';
+  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: sel });
   if (th !== TH.tabs && (view || !tlHeld(tabs))) {
     TH.tabs = th;
     tabs.innerHTML = th;
     for (const [id, title] of Object.entries(TH_TITLES)) tabs.querySelector(`[data-tab="${id}"]`)?.setAttribute('title', title);
   }
-  let html;
-  try { html = thListHtml(); } catch (e) { console.error(e); html = `error: ${e}`; }
-  if (html !== TH.pane && (view || !tlHeld(pane))) { TH.pane = html; threadsTabs.render('threads', pane); askDraw(); }
+  let html = '';
+  if (sel === 'threads') try { html = thListHtml(); } catch (e) { console.error(e); html = `error: ${e}`; }
+  const key = `${sel}:${html}`;
+  if (key !== TH.pane && (view || !tlHeld(pane))) { TH.pane = key; threadsTabs.render(sel, pane); askDraw(); }
+  // the Inbox: shown only while the panel is open on its tab (a closed panel keeps its boxes, kit-100 spec §2.2)
+  const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox' || !!VIEWER; // never in /view/: no data, its tab's pane says where to go
+  // shown or hidden, the pins and a floating card on its cards placed again (kit-100 spec §2.6)
+  if (inbox && inbox.hidden !== off) { inbox.hidden = off; tlReplace(); }
+  // and no in-panel card beside it: a + draft left on Threads waits there, hidden
+  const slot = $('th-card-slot');
+  if (slot && slot.hidden !== (sel === 'inbox')) slot.hidden = sel === 'inbox';
 }
-bindTabBar($('th-tabs'), { onSelect: () => thDraw({ view: true }) });
+// Choosing a tab is a Threads change (kit-100 spec §2.2): Inbox gives th=inbox, Threads th=open; an in-panel t is
+// dropped either way (thGo keeps a floating one).
+bindTabBar($('th-tabs'), { onSelect: (id) => { if (id !== (TH.th === 'inbox' ? 'inbox' : 'threads')) thGo({ th: id === 'inbox' ? 'inbox' : 'open', focus: 'tab' }); } });
 // The page head in force: the entry's own, or under a link head (a peek, the viewer, a preview, a review,
 // talk/) the page head under it, history.state.page.
 function thHead() {
@@ -6899,6 +7047,8 @@ function thHead() {
 // panel), an in-panel one's dropped. focus: a press in the panel or on the Inbox button, so the focus follows
 // the change (or the kind of place to put it: 'composer').
 function thGo({ th = null, t, focus = false } = {}) {
+  // a pending Inbox road's target is inboxGo's own: any Threads change drops it (inboxGo sets its own after)
+  INBOX_AT = null;
   if (t === undefined) t = TH.t && !thInPanelId(TH.t) ? TH.t : null;
   const leaving = !t && !!TH.t && thInPanelId(TH.t);
   TH.focus = typeof focus === 'string' ? focus : !focus ? null : !th ? 'inbox' : t && thInPanelId(t) ? 'back' : leaving ? 'row' : TH.th ? 'thf' : 'tab';
@@ -6965,7 +7115,8 @@ function thDecide() {
   if (s.t && !TL.have && TH.ask?.t !== s.t) TH.ask = { t: s.t, seq: 0 };
   if (s.t && thReady()) {
     const t = TL.threads.find((x) => x.id === s.t);
-    if (t) { TH.ask = null; if (!s.th && tlInPanel(t)) s.th = 'open'; }
+    // an in-panel t is shown only on Threads: with none, or with th=inbox, th=open (kit-100 spec §2.3)
+    if (t) { TH.ask = null; if ((!s.th || s.th === 'inbox') && tlInPanel(t)) s.th = 'open'; }
     else if (thUnknown(s.t)) { TH.ask = null; delete s.t; }
   }
   const next = headFor({ page: p.page, state: s });
@@ -7032,6 +7183,8 @@ function thRouted() {
   thApply();
   if (TL.open !== open || TL.draft !== draft) { tlMarkRow(); tlCard(); tlPins(); }
   thShow();
+  // an Inbox road's target, once its tab shows (kit-100 spec §2.4)
+  inboxAt();
 }
 // The route's t (kit-89 spec §2.4, §2.5): the thread it names opens, in the panel or floating beside its
 // subject; a t gone closes the card it opened (never one a pin or a Shift+click opened). Nothing is decided
@@ -7056,6 +7209,9 @@ function thShow() {
   const moved = document.body.classList.contains('threads-open') !== !!TH.th;
   const wasIn = $('threads').contains(document.activeElement);
   document.body.classList.toggle('threads-open', !!TH.th);
+  // opened, or an Inbox road taken (inboxGo: TH.front), it is over a peek or the viewer already up (final-1 F1, final-2 F2-1)
+  if (TH.th && (moved || TH.front)) document.body.classList.remove('th-under-peek', 'th-under-av');
+  TH.front = false;
   thDraw({ view: true });
   // the page moved over (at once with no motion): its pins and a floating card placed again; again when its slide ends
   if (moved) { tlPins(); tlCard(); }
@@ -7070,6 +7226,15 @@ function thShow() {
 }
 // the page's slide beside the panel has ended: what sits on it (pins, a floating card) placed where it now is
 document.querySelector('.main')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right') tlDraw(); });
+// the Inbox tab's cards move with #th-body's scroll and the panel's slide: what sits on them placed again (kit-100 spec §2.6)
+// and with the page's scroll while that tab shows: fixed, they don't move with it, but the scrollbar a scroll comes
+// with can move the panel (a classic scrollbar narrows the window the panel is fixed to). One placing a frame,
+// however many scroll events come in it.
+let TL_REPLACE_RAF = 0;
+const tlReplaceSoon = () => { if (!TL_REPLACE_RAF) TL_REPLACE_RAF = requestAnimationFrame(() => { TL_REPLACE_RAF = 0; tlReplace(); }); };
+$('th-body')?.addEventListener('scroll', tlReplaceSoon, { passive: true });
+addEventListener('scroll', () => { if (TH.th === 'inbox') tlReplaceSoon(); }, { passive: true });
+$('threads')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget) tlReplace(); });
 const thSeen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && el.getClientRects().length > 0; };
 function thFocus(kind) {
   const tab = () => $('th-tabs').querySelector('[role="tab"][aria-selected="true"]')?.focus();
@@ -7106,6 +7271,8 @@ const thWidth = () => parseFloat(getComputedStyle(document.documentElement).getP
 function tlInPanel(t) {
   const s = t?.subject;
   if (!s) return true;
+  // a thread whose home is the Inbox tab floats beside it (kit-100 spec §2.6): no #inbox section exists to judge by
+  if (tlInboxHome(t)) return false;
   if (VIEWER) return !(s.kind === VIEWER.kind && (s.kind === 'artifact' ? s.slug : s.name) === VIEWER.name);
   if (s.kind === 'item') return !tlHome(s);
   if (s.kind === 'page') { const id = String(s.view ?? '').replace(/^#/, '').split(/[/?]/)[0]; return !document.querySelector(`main section[id="${CSS.escape(id)}"]`) && !Object.hasOwn(SHELL_ROUTES.redirects, id); }
@@ -7144,8 +7311,11 @@ function thOpenRow(id) {
   if (VIEWER || (s.kind !== 'item' && s.kind !== 'page')) return void tlOpen(id);
   const p = parseHead(subjectHead(s), SHELL_ROUTES);
   const state = { ...p.state };
-  delete state.th;
-  if (TH.th && innerWidth > 900) state.th = TH.th;
+  // a thread whose home is the Inbox keeps its head's th=inbox at every width (kit-100 spec §2.6)
+  if (!tlInboxHome(t)) {
+    delete state.th;
+    if (TH.th && innerWidth > 900) state.th = TH.th;
+  }
   state.t = id;
   const head = headFor({ page: p.page, state });
   if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); TH_MADE = head; location.hash = head; return; }
@@ -7364,9 +7534,10 @@ const PICK_HOLD = 60000, PRESS_HOLD = 3000;
 const HINT_AFTER = 30000;
 let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
 // A field in the thread layer or the Threads panel holds nothing: both are outside what a redraw rebuilds, so the page refreshes (and the counts move) under a half-written turn.
+// The panel's Inbox tab (#th-inbox) is the exception: render() rebuilds it, so its fields hold as a page's do (layerField, kit-100 spec §2.7).
 function holding() {
   const ae = document.activeElement;
-  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl, #threads')) || Date.now() - PRESSED < PRESS_HOLD
+  return COMPOSING || SENDING > 0 || (typingIn(ae) && !layerField(ae)) || Date.now() - PRESSED < PRESS_HOLD
     || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
 }
 async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }
@@ -7405,6 +7576,8 @@ function drawOrHold(d, force = false) {
     if (first) route();
     inboxTitle(shown);
     thDraw();
+    // an Inbox road's target, now drawn, or given up (kit-100 spec §2.4)
+    inboxAt({ rendered: true });
     // the thread layer, which the redraw doesn't touch: the open card as this data has its questions
     // (one answered elsewhere shows answered now, not at the next read), its pins on what was just
     // drawn, then its threads again
@@ -7483,14 +7656,20 @@ function staleNote() {
 // The rest are about how the agents work, and the supervisor's to keep (supervisor.md §4).
 function ownerLesson(k) { return k.status === 'candidate' && k.for_owner === true; }
 
-// The tab title carries the Inbox count. Notifications are the hub's, for every instance.
+// The Inbox's number (kit-100 spec §2.2): the open questions not answered on this page yet (ANSWERED), and the
+// lessons sent to the owner. Counted from the data inboxTitle last counted (newer data held back from a redraw
+// included), else the data drawn, so the tab, the button and the tab title always agree; the /view/ tab has no
+// data: hello's number, in the button.
+function inboxCount(d = INBOX_D ?? DATA) {
+  if (!d) return parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0;
+  return (d.questions || []).filter((q) => !ANSWERED.has(q.id)).length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
+}
+// The tab title and the Inbox button's red count carry the Inbox's number. Notifications are the hub's, for every instance.
 function inboxTitle(d) {
-  const n = d.questions.length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
+  INBOX_D = d;
+  const n = inboxCount(d);
   document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
-  const c = $('n-questions');
-  c.textContent = n || '';
-  c.classList.toggle('hot', n > 0);
-  $('inbox-btn-n').textContent = c.textContent;
+  $('inbox-btn-n').textContent = n || '';
 }
 
 document.addEventListener('click', (e) => {

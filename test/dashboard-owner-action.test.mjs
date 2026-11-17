@@ -158,8 +158,8 @@ test('owner-action: the named records\' own controls, Done and Can\'t right now,
     await polls(2);
     assert.equal(await p.ev(done(Q, KO)), 'Done: kept', 'kept, from the data');
     // the positive controls: the Inbox lesson card's Retire it and a goal's hold bar post the same bodies
-    await soon(`!!document.querySelector('#inbox [data-know="${KP}"][data-status="retired"]')`, 'the Inbox lesson card');
-    await p.ev(`document.querySelector('#inbox [data-know="${KP}"][data-status="retired"]').click(); void 0`);
+    await soon(`!!document.querySelector('#th-inbox [data-know="${KP}"][data-status="retired"]')`, 'the Inbox lesson card');
+    await p.ev(`document.querySelector('#th-inbox [data-know="${KP}"][data-status="retired"]').click(); void 0`);
     await soon(`window.__posts.some((x) => x.url === '/api/knowledge' && x.body.id === ${JSON.stringify(KP)})`, 'the Inbox card posted');
     assert.deepEqual((await posts('/api/knowledge', (x) => x.body.id === KP)).map((x) => x.body), [{ id: KP, status: 'retired' }]);
     // the lesson peek's Retire it is no write (kit-88 spec §2.3): it starts a thread on the lesson, and
