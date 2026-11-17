@@ -262,7 +262,7 @@ test("the dashboard page: the card at the top of the Inbox and in the dock, the 
   await new Promise((w) => setTimeout(w, 300));
   assert.equal(pane.typed(), '', 'a click in that second answers nothing');
   await soon(`!!document.querySelector('#ask-inbox [data-ask-option]:not([disabled])')`, 'its buttons live');
-  const card = await p.ev(`(() => { const c = document.querySelector('#ask-inbox .ask'); const r = c.getBoundingClientRect(); return { text: c.innerText, imgs: c.querySelectorAll('img').length, pwned: window.__pwned === 1, left: r.left, right: r.right, vw: innerWidth, page: document.documentElement.scrollWidth, buttons: [...c.querySelectorAll('[data-ask-option]')].map((b) => b.innerText.trim()), first: c.parentElement.previousElementSibling.tagName === 'H2' }; })()`);
+  const card = await p.ev(`(() => { const c = document.querySelector('#ask-inbox .ask'); const r = c.getBoundingClientRect(); return { text: c.innerText, imgs: c.querySelectorAll('img').length, pwned: window.__pwned === 1, left: r.left, right: r.right, vw: innerWidth, page: document.documentElement.scrollWidth, buttons: [...c.querySelectorAll('[data-ask-option]')].map((b) => b.innerText.trim()), first: !c.parentElement.previousElementSibling && c.parentElement.nextElementSibling?.id === 'questions' }; })()`);
   assert.match(card.text, /The supervisor's terminal is asking/);
   assert.match(card.text, /Claude wants to read someone else's artifact at/);
   assert.match(card.text, /<img src=x onerror=window\.__pwned=1>/, "the terminal's words, as text");
@@ -270,13 +270,17 @@ test("the dashboard page: the card at the top of the Inbox and in the dock, the 
   assert.deepEqual(card.buttons, ['1. Yes', '2. No']);
   assert.ok(card.first, 'above the questions');
   assert.ok(card.left >= 0 && card.right <= card.vw && card.page <= card.vw, `inside a phone's width: ${JSON.stringify(card)}`);
-  // at the top of the Threads panel too, where the owner was talking
-  await p.click('.pagebar .tt');
-  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#ask-threads [data-ask-option]')`, 'the card in the Threads panel, at rest');
+  // at the top of the Threads tab too, where the owner was talking (#inbox opened the panel on its Inbox tab, kit-100)
+  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon(`!!document.querySelector('#ask-threads [data-ask-option]')`, 'the card in the Threads tab');
   await p.click('#th-close');
   await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
-  // the full-width panel leaves with a transition: hidden before the page's Inbox card is pressed under it
-  await soon(`getComputedStyle(document.getElementById('threads')).visibility === 'hidden'`, 'the panel hidden');
+  // the Inbox's card is answered on the Inbox tab, the panel open on it again from the button
+  // the full-width panel leaves with a transition: hidden before the button under it is pressed
+  await soon(`getComputedStyle(document.getElementById('threads')).visibility === 'hidden' && getComputedStyle(document.querySelector('.pagebar .tt')).visibility === 'visible'`, 'the panel hidden, the button shown');
+  await p.click('.pagebar .tt');
+  await soon(`location.hash.endsWith('th=inbox') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#ask-inbox [data-ask-option]:not([disabled])')`, 'the panel on its Inbox tab, at rest');
   await p.click('#ask-inbox [data-ask-option="1"]');
   await until(() => pane.typed() === '1', 'the digit in the terminal');
   await soon(`/Sent to the supervisor's terminal: 1\\. Yes/.test(document.getElementById('ask-inbox').innerText) || !!document.querySelector('#ask-inbox [data-ask-kind]')`, 'what was sent');

@@ -884,3 +884,53 @@ export function peekFixture(base, name = 'peek') {
   hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week of receipts', source_ref: 'project/retros/2026-11-16.md', refs: [] }, 0.5 * H);
   return { root, ids };
 }
+
+// kit-100: a project whose Inbox has one of everything the panel's Inbox tab draws (spec §3), for
+// test/dashboard-inbox-panel.test.mjs (and the measure, which can seed a project with it). root is a
+// project bareProject made, env the environment its commands run in (its own HOME and ports). Built
+// with the kit's commands as the supervisor and the owner would: six open questions (q1 and q2 choices,
+// q1 with its standing-rule box; q3 an owner-action; q4 to q6 one secret each), a review question r with
+// its page and data committed, two lessons sent to the owner, one answered, one defaulted and one
+// withdrawn question, two goals and the threads Q (on q1), P (a spot on the old Inbox page, as an old
+// dashboard wrote it), S (no subject) and G (on goal's card; goal2 has none).
+export function inboxFixture(root, env) {
+  const dt = (args, role = 'supervisor') => {
+    const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: role ? { ...env, DEVTEAM_ROLE: role } : env, encoding: 'utf8' });
+    assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim().split('\n')[0].trim();
+  };
+  const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root, encoding: 'utf8' }).trim();
+  write(path.join(root, 'review/page.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Group the items</title></head>\n<body>\n<p>Look.</p>\n</body></html>\n');
+  write(path.join(root, 'review/data.json'), `${JSON.stringify({ rows: [{ id: 'g1' }, { id: 'g2' }] })}\n`);
+  git('add', '-A');
+  git('commit', '-qm', 'the review page');
+  const RATE = ['--stake', '1', '--urgency', '1'];
+  const goal = dt(['goal', 'add', '--title', 'Launch checkout', '--outcome', 'admins pay alone']);
+  const goal2 = dt(['goal', 'add', '--title', 'Launch receipts', '--outcome', 'every payment has a receipt']);
+  const q1 = dt(['ask', '--question', 'Which processor?', '--choices', '[{"label":"Stripe"},{"label":"Adyen"}]', '--goal', goal, ...RATE]);
+  const q2 = dt(['ask', '--question', 'Keep the card form on one page?', '--choices', '[{"label":"One page"},{"label":"Split it"}]', ...RATE]);
+  const q3 = dt(['ask', '--kind', 'owner-action', '--question', 'Please renew the certificate', '--context', 'It expires next week.', ...RATE]);
+  const secret = (n, words) => dt(['ask', '--kind', 'owner-action', '--question', words, '--secrets', JSON.stringify([{ name: `KEY_${n}`, sink: `file:.devteam-secrets/key-${n}` }]), ...RATE]);
+  const q4 = secret(4, 'Post the processor key');
+  const q5 = secret(5, 'Post the mail key');
+  const q6 = secret(6, 'Post the receipts key');
+  const r = dt(['ask', '--kind', 'review', '--question', 'Which items belong to each group?', '--ref', 'main', '--page', 'review/page.html', '--data', 'review/data.json', ...RATE]);
+  const o = dt(['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
+  const lesson = (statement, plain) => dt(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', statement, '--for-owner', '--plain', plain, '--evidence', o]).match(/k-\S+/)[0];
+  const L1 = lesson('ask before changing the processor', 'Ask the owner before the checkout changes processor.');
+  const L2 = lesson('ask before changing the receipts', 'Ask the owner before the receipts change.');
+  const answered = dt(['ask', '--question', 'Keep the receipts?', '--choices', '[{"label":"Yes"},{"label":"No"}]', ...RATE]);
+  dt(['answer', answered, 'Yes'], null);
+  const defaulted = dt(['ask', '--question', 'Which port?', '--default', '8080']);
+  pastDeadline(root, defaulted);
+  dt(['answer', defaulted, '--defaulted']);
+  const withdrawn = dt(['ask', '--question', 'Split the form?', '--choices', '[{"label":"Yes"},{"label":"No"}]', ...RATE]);
+  dt(['withdraw', withdrawn, '--reason', 'asked twice']);
+  // the threads, started through the owner channel (no role)
+  const thread = (text, subject) => dt(['thread', 'new', text, ...(subject ? ['--subject', JSON.stringify(subject)] : [])], null);
+  const Q = thread('About the processor', { kind: 'item', ref: `question:${q1}` });
+  const P = thread('On the Inbox', { kind: 'page', view: '#inbox', at: { x: 0.5, y: 0.2 } });
+  const S = thread('A thought about checkout');
+  const G = thread('About this goal', { kind: 'item', ref: `goal:${goal}` });
+  return { Q, P, S, G, q: { q1, q2, q3, q4, q5, q6 }, r, L1, L2, answered, defaulted, withdrawn, goal, goal2 };
+}

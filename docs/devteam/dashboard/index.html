@@ -869,6 +869,12 @@ try {
   /* the Threads panel (kit-89): the block's frame (.threads, .threads-head, .threads-body, .thread-list) styles
      it; here only what the block leaves to the page. The tab bar fills the head up to its three buttons */
   #th-tabs { display: flex; flex: 1; min-width: 0; }
+  /* the Inbox tab (kit-100 spec §2.1, §2.2): its count red (tabBar draws a waiting count blue, and this one isn't);
+     its element one column the slot's width, the cards --gap apart, a card's rows wrapping rather than overflowing */
+  #th-tabs [data-tab="inbox"] .n { color: var(--red); }
+  #th-inbox { display: flex; flex-direction: column; gap: var(--gap); }
+  #th-inbox .card { margin: 0; }
+  #th-inbox .qcard .why { flex-wrap: wrap; }
   .threads-head .end .icon-btn { margin: 0; }
   .th-filter { margin: 0 0 6px; }
   .th-filter .seg { display: flex; width: 100%; }
@@ -938,8 +944,6 @@ try {
     <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
   </div>
 </aside>
-<!-- the Inbox count's holder until kit-100 T2 gives its readers inboxCount() and removes it (it was the nav item's) -->
-<span id="n-questions" class="count" hidden></span>
 <div class="main">
 <header class="pagebar"><h1 id="page-title">Overview</h1><span class="extra"></span><button class="ghost tt" id="inbox-btn" type="button" title="Open questions"><i class="icon-inbox" aria-hidden="true"></i>Inbox <span class="n q" id="inbox-btn-n"></span></button></header>
 <main class="page waiting">
@@ -957,13 +961,6 @@ try {
     <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
-  </section>
-
-  <section id="inbox" class="no-shell" data-page="inbox">
-    <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
-    <div id="ask-inbox"></div>
-    <div id="questions"></div>
-    <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
 
   <section id="progress" class="no-shell" data-page="progress">
@@ -1135,10 +1132,15 @@ try {
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
 </div>
 <!-- the Threads panel (kit-89 spec §2.1): on <body>, outside .app, so the /view/ tab has it too. Its head: the
-     tabs, then Pin, New thread and ×; its body: the selected tab's pane, and the slot the in-panel card lives in -->
+     tabs, then Pin, New thread and ×; its body: the selected tab's pane, the slot the in-panel card lives in, and
+     the Inbox (kit-100 spec §2.1: the one element, its children and ids kept, shown only on the Inbox tab) -->
 <aside class="threads" id="threads" aria-label="Threads">
   <div class="threads-head"><div id="th-tabs"></div><span class="end"><button type="button" class="ghost icon-btn" id="tl-pinbtn" aria-pressed="false" aria-label="Pin" title="Point at something to start a thread: for a phone, or for a long look around"><i class="icon-map-pin" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" data-tl-new aria-label="New thread" title="New thread"><i class="icon-plus" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" id="th-close" aria-label="Close Threads"><i class="icon-x" aria-hidden="true"></i></button></span></div>
-  <div class="threads-body" id="th-body"><div id="th-pane"></div><div id="th-card-slot" class="no-shell"></div></div>
+  <div class="threads-body" id="th-body"><div id="th-pane"></div><div id="th-card-slot" class="no-shell"></div><div id="th-inbox" class="th-inbox" hidden>
+    <div id="ask-inbox"></div>
+    <div id="questions"></div>
+    <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
+  </div></div>
 </aside>
 <script>
 /* devteam-shell-js start */
@@ -1479,8 +1481,9 @@ function showPage(id, { keepScroll = false } = {}) {
 }
 // The page an element is on: its section's data-page, else Overview.
 const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
-// The Inbox button opens the Threads panel (kit-89 spec §2.2); the Inbox page is the nav's.
-$('inbox-btn').addEventListener('click', () => thGo({ th: 'open', focus: true }));
+// The Inbox button opens the side panel on its Inbox tab (kit-100 spec §2.3); in the /view/ tab, on Threads (its
+// ruling, m-20261115-230458641-supervisor).
+$('inbox-btn').addEventListener('click', () => thGo({ th: VIEWER ? 'open' : 'inbox', focus: true }));
 // The top-right button beside an open peek (kit-88 spec §2.1): the sticky page bar can't lift .tt above the
 // scrim, so #tt-peek on <body> mirrors it: its content (ids dropped, so none is on the page twice), its
 // label and title, copied whenever .tt changes; its click is .tt's. CSS shows one or the other.
@@ -1522,6 +1525,7 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
+let INBOX_D = null; // the data inboxTitle last counted (inboxCount)
 // The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>] or
 // /view/preview/<name>, one artifact or preview on the stage, the thread layer and the Threads panel over it,
 // and nothing else: no sections, no routes, no /api/data.
@@ -5543,8 +5547,6 @@ function render(d) {
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
-  count('n-questions', d.questions.length + o.knowledge.filter(ownerLesson).length, true);
-  $('inbox-btn-n').textContent = $('n-questions').textContent;
   count('n-active', active);
   {
     const rt = DATA.ooda.retro || {};
@@ -6718,7 +6720,7 @@ document.addEventListener('click', (e) => {
     TL.draft = { subject: null, title: '', el: null };
     tlDraw();
     // a + pressed with the panel closed (a script's click) opens it, and the composer is focused once it shows
-    if (!TH.th) return void thGo({ th: 'open', t: null, focus: 'composer' });
+    if (!TH.th || TH.th === 'inbox') return void thGo({ th: 'open', t: null, focus: 'composer' });
     thDraw({ view: true });
     return void tlEl('tl-c-text')?.focus();
   }
@@ -6777,13 +6779,13 @@ function tlPinsInto(box, pins, held) {
   }
 }
 // ---- the Threads panel (kit-89 spec §2.1-§2.3) ----
-// TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | null, t: a thread id or
+// TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | 'inbox' | null, t: a thread id or
 // null), what was last drawn (tabs, pane), and where a press in the panel or on the Inbox button asked the
 // focus to go once the route has drawn (focus: 'tab' | 'thf' | 'inbox' | 'back' | 'row' | 'composer' | null; focusRow: the
 // thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), and a + draft's
 // thread waiting for its id in the threads (adopt).
 const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null };
-const TH_LISTS = ['open', 'resolved'];
+const TH_LISTS = ['open', 'resolved', 'inbox'];
 const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
 // here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
@@ -6840,6 +6842,9 @@ function thListHtml() {
     : `<p class="empty">${which === 'open' ? 'No open threads. Hold Shift and click anything on the page, or start one with +.' : 'Nothing resolved yet.'}</p>`;
   return `<div id="ask-threads"></div>${seg}${body}`;
 }
+// The Inbox tab (kit-100 spec §2.2), first: its count is the Inbox's (red, by a page rule: not `waiting`); its pane
+// is empty, since #th-inbox, which render() fills, is shown by thDraw, so a throw here can't hide the Inbox.
+threadsTabs.register({ id: 'inbox', label: 'Inbox', count: () => inboxCount() || null, render: (el) => { el.innerHTML = ''; } });
 threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.threads).you || null, render: (el) => { el.innerHTML = thListHtml(); } });
 threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: true });
 threadsTabs.register({ id: 'shell', label: 'Shell', disabled: true });
@@ -6857,9 +6862,8 @@ function thButton() {
     if (n.className !== cls) n.className = cls;
     if (n.textContent !== String(b.n)) n.textContent = String(b.n);
   }
-  // the red count's number (inboxTitle's: the open questions and the lessons sent to the owner), so the name says what
-  // the button shows (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
-  const q = DATA ? (DATA.questions || []).length + (DATA.ooda?.knowledge ?? []).filter(ownerLesson).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
+  // the red count's number (inboxCount), so the name says what the button shows
+  const q = inboxCount();
   const parts = [...(q ? [`${q} open question${q === 1 ? '' : 's'}`] : []), ...(b.label ? [b.label] : [])];
   const label = parts.length ? `Inbox: ${parts.join(', ')}` : 'Inbox';
   const title = b.title || 'Open questions';
@@ -6873,17 +6877,28 @@ function thDraw({ view = false } = {}) {
   thButton();
   const tabs = $('th-tabs'), pane = $('th-pane');
   if (!tabs || !pane) return;
-  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: 'threads' });
+  // th=inbox selects the Inbox tab; open and resolved, or none, Threads
+  const sel = TH.th === 'inbox' ? 'inbox' : 'threads';
+  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: sel });
   if (th !== TH.tabs && (view || !tlHeld(tabs))) {
     TH.tabs = th;
     tabs.innerHTML = th;
     for (const [id, title] of Object.entries(TH_TITLES)) tabs.querySelector(`[data-tab="${id}"]`)?.setAttribute('title', title);
   }
-  let html;
-  try { html = thListHtml(); } catch (e) { console.error(e); html = `error: ${e}`; }
-  if (html !== TH.pane && (view || !tlHeld(pane))) { TH.pane = html; threadsTabs.render('threads', pane); askDraw(); }
+  let html = '';
+  if (sel === 'threads') try { html = thListHtml(); } catch (e) { console.error(e); html = `error: ${e}`; }
+  const key = `${sel}:${html}`;
+  if (key !== TH.pane && (view || !tlHeld(pane))) { TH.pane = key; threadsTabs.render(sel, pane); askDraw(); }
+  // the Inbox: shown only while the panel is open on its tab (a closed panel keeps its boxes, kit-100 spec §2.2)
+  const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox';
+  if (inbox && inbox.hidden !== off) inbox.hidden = off;
+  // and no in-panel card beside it: a + draft left on Threads waits there, hidden
+  const slot = $('th-card-slot');
+  if (slot && slot.hidden !== (sel === 'inbox')) slot.hidden = sel === 'inbox';
 }
-bindTabBar($('th-tabs'), { onSelect: () => thDraw({ view: true }) });
+// Choosing a tab is a Threads change (kit-100 spec §2.2): Inbox gives th=inbox, Threads th=open; an in-panel t is
+// dropped either way (thGo keeps a floating one).
+bindTabBar($('th-tabs'), { onSelect: (id) => { if (id !== (TH.th === 'inbox' ? 'inbox' : 'threads')) thGo({ th: id === 'inbox' ? 'inbox' : 'open', focus: 'tab' }); } });
 // The page head in force: the entry's own, or under a link head (a peek, the viewer, a preview, a review,
 // talk/) the page head under it, history.state.page.
 function thHead() {
@@ -6963,7 +6978,8 @@ function thDecide() {
   if (s.t && !TL.have && TH.ask?.t !== s.t) TH.ask = { t: s.t, seq: 0 };
   if (s.t && thReady()) {
     const t = TL.threads.find((x) => x.id === s.t);
-    if (t) { TH.ask = null; if (!s.th && tlInPanel(t)) s.th = 'open'; }
+    // an in-panel t is shown only on Threads: with none, or with th=inbox, th=open (kit-100 spec §2.3)
+    if (t) { TH.ask = null; if ((!s.th || s.th === 'inbox') && tlInPanel(t)) s.th = 'open'; }
     else if (thUnknown(s.t)) { TH.ask = null; delete s.t; }
   }
   const next = headFor({ page: p.page, state: s });
@@ -7481,14 +7497,20 @@ function staleNote() {
 // The rest are about how the agents work, and the supervisor's to keep (supervisor.md §4).
 function ownerLesson(k) { return k.status === 'candidate' && k.for_owner === true; }
 
-// The tab title carries the Inbox count. Notifications are the hub's, for every instance.
+// The Inbox's number (kit-100 spec §2.2): the open questions not answered on this page yet (ANSWERED), and the
+// lessons sent to the owner. Counted from the data inboxTitle last counted (newer data held back from a redraw
+// included), else the data drawn, so the tab, the button and the tab title always agree; the /view/ tab has no
+// data: hello's number, in the button.
+function inboxCount(d = INBOX_D ?? DATA) {
+  if (!d) return parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0;
+  return (d.questions || []).filter((q) => !ANSWERED.has(q.id)).length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
+}
+// The tab title and the Inbox button's red count carry the Inbox's number. Notifications are the hub's, for every instance.
 function inboxTitle(d) {
-  const n = d.questions.length + (d.ooda?.knowledge ?? []).filter(ownerLesson).length;
+  INBOX_D = d;
+  const n = inboxCount(d);
   document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
-  const c = $('n-questions');
-  c.textContent = n || '';
-  c.classList.toggle('hot', n > 0);
-  $('inbox-btn-n').textContent = c.textContent;
+  $('inbox-btn-n').textContent = n || '';
 }
 
 document.addEventListener('click', (e) => {

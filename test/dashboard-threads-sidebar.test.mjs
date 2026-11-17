@@ -113,28 +113,32 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   assert.equal(await p.ev(isOpen), false, 'closed at first');
   const closedRight = await p.ev("document.querySelector('.main').getBoundingClientRect().right");
   await p.click('.pagebar .tt');
-  await soon(`location.hash === '#overview?th=open' && ${isOpen}`, 'the panel open on #overview?th=open');
+  // the button opens the panel on its Inbox tab (kit-100 spec §2.3)
+  await soon(`location.hash === '#overview?th=inbox' && ${isOpen}`, 'the panel open on #overview?th=inbox');
   // at rest: the margin's slide (--dur) has ended
   await soon("getComputedStyle(document.querySelector('.main')).marginRight === '380px'", ".main's right margin is --threads-w");
   const openRight = await p.ev("document.querySelector('.main').getBoundingClientRect().right");
   assert.ok(Math.abs(closedRight - openRight - 380) <= 1, `.main's right edge moved left by 380px: ${closedRight} to ${openRight}`);
   assert.deepEqual(await p.ev(`[getComputedStyle(${tt}).visibility, getComputedStyle(document.getElementById('tt-peek')).visibility]`), ['hidden', 'hidden'], '.tt and #tt-peek hidden');
   await soon("getComputedStyle(document.getElementById('threads')).transform === 'none'", 'slid in');
-  assert.equal(await p.ev("document.activeElement?.closest('#th-tabs [role=\"tab\"]')?.dataset.tab"), 'threads', 'the focus on the selected tab');
+  assert.equal(await p.ev("document.activeElement?.closest('#th-tabs [role=\"tab\"]')?.dataset.tab"), 'inbox', 'the focus on the selected tab');
+  // the Threads tab: th=open
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon(`location.hash === '#overview?th=open' && ${isOpen} && !!document.querySelector('#th-pane [data-thf]')`, 'the panel on Threads, #overview?th=open');
 
   // its head: --bar-h tall, level with the page bar
   const head = await p.ev("(() => { const h = document.querySelector('#threads .threads-head').getBoundingClientRect(), b = document.querySelector('.pagebar').getBoundingClientRect(); return { h: h.height, hb: h.bottom, bb: b.bottom }; })()");
   assert.equal(head.h, 49, '.threads-head is 49px');
   assert.ok(Math.abs(head.hb - head.bb) <= 1, `level with .pagebar: ${JSON.stringify(head)}`);
 
-  // the tabs: Threads, then two disabled slots, with their titles
-  assert.deepEqual(await p.ev('threadsTabs.list().map((t) => [t.id, t.disabled])'), [['threads', false], ['supervisor', true], ['shell', true]]);
+  // the tabs: Inbox (kit-100), Threads, then two disabled slots, with their titles
+  assert.deepEqual(await p.ev('threadsTabs.list().map((t) => [t.id, t.disabled])'), [['inbox', false], ['threads', false], ['supervisor', true], ['shell', true]]);
   const tabs = await p.ev("[...document.querySelectorAll('#th-tabs [role=\"tab\"]')].map((b) => ({ id: b.dataset.tab, sel: b.getAttribute('aria-selected'), dis: b.getAttribute('aria-disabled'), title: b.getAttribute('title'), n: b.querySelector('.n')?.className ?? null, nt: b.querySelector('.n')?.textContent ?? null, text: b.textContent }))");
-  assert.deepEqual(tabs.map((x) => [x.id, x.sel, x.dis]), [['threads', 'true', null], ['supervisor', 'false', 'true'], ['shell', 'false', 'true']]);
-  assert.equal(tabs[1].title, "The supervisor's terminal: the follow-on goal");
-  assert.equal(tabs[2].title, 'A plain shell at the repo root: the follow-on goal');
-  assert.deepEqual([tabs[0].n, tabs[0].nt], ['n blue', '2'], 'Threads counts the two your-move threads, in blue');
-  assert.match(tabs[0].text, /^Threads/);
+  assert.deepEqual(tabs.map((x) => [x.id, x.sel, x.dis]), [['inbox', 'false', null], ['threads', 'true', null], ['supervisor', 'false', 'true'], ['shell', 'false', 'true']]);
+  assert.equal(tabs[2].title, "The supervisor's terminal: the follow-on goal");
+  assert.equal(tabs[3].title, 'A plain shell at the repo root: the follow-on goal');
+  assert.deepEqual([tabs[1].n, tabs[1].nt], ['n blue', '2'], 'Threads counts the two your-move threads, in blue');
+  assert.match(tabs[1].text, /^Threads/);
 
   // the split: Open 5 pressed, Resolved 2
   assert.deepEqual(await p.ev("[...document.querySelectorAll('#th-pane [data-thf]')].map((b) => [b.dataset.thf, b.textContent.replace(/\\s+/g, ' ').trim(), b.getAttribute('aria-pressed')])"), [['open', 'Open 5', 'true'], ['resolved', 'Resolved 2', 'false']]);
@@ -174,11 +178,13 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   await p.click('#th-close');
   await soon(`location.hash === '#overview' && !${isOpen} && getComputedStyle(${tt}).visibility === 'visible'`, 'closed, the button back');
   await soon(`document.activeElement === ${tt}`, 'the focus back on the button');
-  // the Inbox page by its redirect
+  // th=inbox: the panel's Inbox tab, over the page (kit-100 spec §2.3)
   await p.ev("location.hash = '#overview?th=inbox'");
-  await soon("location.hash === '#inbox' && document.querySelector('main.page > section[data-page=\"inbox\"]').classList.contains('on')", 'the Inbox page');
-  await p.ev("location.hash = '#overview'");
-  await soon("document.querySelector('main.page > section[data-page=\"overview\"]').classList.contains('on')", 'Overview');
+  await soon(`location.hash === '#overview?th=inbox' && ${isOpen} && document.querySelector('#th-tabs [data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !document.getElementById('th-inbox').hidden && document.querySelector('main.page > section[data-page="overview"]').classList.contains('on')`, 'the panel on its Inbox tab, over Overview');
+  // closed by its × (a fresh #overview would take the remembered th=inbox)
+  await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'at rest');
+  await p.click('#th-close');
+  await soon(`location.hash === '#overview' && document.querySelector('main.page > section[data-page="overview"]').classList.contains('on') && !${isOpen}`, 'Overview');
 
   // the dock is gone
   assert.deepEqual(await p.ev("['tl-pill', 'tl-panel', 'tl-dock', 'ask-dock'].filter((id) => document.getElementById(id))"), []);
@@ -189,6 +195,8 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   await soon(STEADY('.pagebar .tt'), 'the button at rest');
   await p.click('.pagebar .tt');
   await soon(`${isOpen} && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'open at 720');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon(`location.hash.endsWith('th=open') && !!document.querySelector('#th-pane [data-thf]')`, 'on Threads at 720');
   const mid = await p.ev("(() => { const r = document.getElementById('threads').getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()");
   await p.hold('Shift', true);
   await p.move(mid.x, mid.y, 8);
@@ -270,15 +278,15 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.deepEqual(await p.ev("[document.getElementById('tl-c-text').value, document.getElementById('tl-c-text').selectionStart, document.activeElement?.id]"), ['half a thought', 4, 'tl-c-text'], 'words, caret and focus kept');
   await p.ev("(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()");
 
-  // A's question in the panel: its words are its own, the Inbox page's copy untouched
+  // A's question in the panel: its words are its own, the Inbox's copy (in the panel's Inbox tab, kit-100) untouched
   const qBox = `#tl-c-turns textarea[data-q="${QA}"]`;
-  await soon(`!!document.querySelector('${qBox}') && !!document.querySelector('main textarea[data-q="${QA}"]')`, 'both copies of the question');
+  await soon(`!!document.querySelector('${qBox}') && !!document.querySelector('#th-inbox textarea[data-q="${QA}"]')`, 'both copies of the question');
   await p.ev(`document.querySelector('${qBox}').focus()`);
   await p.type('panel words');
   await p.ev('window.__threadsRead = 0; void 0');
   await soon('window.__threadsRead > 0', 'a read of the threads');
   await pause(700);
-  assert.deepEqual(await p.ev(`[document.querySelector('${qBox}').value, document.querySelector('main textarea[data-q="${QA}"]').value]`), ['panel words', ''], "the panel's words kept, the Inbox's copy unchanged");
+  assert.deepEqual(await p.ev(`[document.querySelector('${qBox}').value, document.querySelector('#th-inbox textarea[data-q="${QA}"]').value]`), ['panel words', ''], "the panel's words kept, the Inbox's copy unchanged");
   await p.ev(`(() => { const b = document.querySelector('${qBox}'); b.value = ''; b.blur(); })()`);
   await p.click('#th-pane [data-tl-back]');
   await soon(`location.hash === '#overview?th=open' && !!${row(X)}`, 'the list');
@@ -509,7 +517,9 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
   F.owner(['thread', 'say', Y2, 'Noted.']);
   await soon(`${n('.wait')} === '3'`, 'grey 3');
   await p.click('.pagebar .tt');
-  await soon("document.body.classList.contains('threads-open') && !!document.querySelector('#th-tabs [data-tab=\"threads\"]')", 'the panel');
+  await soon("document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#th-tabs [data-tab=\"threads\"]')", 'the panel');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon("location.hash.endsWith('th=open') && !!document.querySelector('#th-pane [data-thf]')", 'on Threads');
   assert.equal(await p.ev("document.querySelector('#th-tabs [data-tab=\"threads\"] .n')"), null, 'no number on Threads');
   assert.equal(await p.ev("document.querySelector('.pagebar .tt').getAttribute('title')"), '3 waiting on the supervisor');
   // none open: no thread count
@@ -548,6 +558,8 @@ test('a peek and a thread over a reload', { skip: SKIP, timeout: 300000 }, async
   const len = await p.ev('history.length');
   await soon("getComputedStyle(document.getElementById('tt-peek')).visibility === 'visible'", '#tt-peek shown');
   await p.click('#tt-peek');
+  await soon(`${AT_REST} && history.state?.page === '#board?th=inbox'`, 'the panel over the peek, on Inbox');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
   await soon(`${AT_REST} && history.state?.page === '#board?th=open' && !!${ROW(A)}`, 'the panel over the peek');
   await p.click(`#tl-list [data-tl-open="${A}"]`);
   await soon(`${IN_PANEL(A)} && history.state?.page === '#board?th=open&t=${A}'`, 'A in the panel, under the peek');
@@ -584,7 +596,9 @@ test('a peek and a thread over a reload', { skip: SKIP, timeout: 300000 }, async
 
   // G's row under the peek: the peek closes, Goals with G's card
   await p.click('#tt-peek');
-  await soon(`${AT_REST} && !!${ROW(G)}`, 'the panel over the peek');
+  await soon(AT_REST, 'the panel over the peek');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon(`${AT_REST} && !!${ROW(G)}`, 'the panel over the peek, on Threads');
   await soon(STEADY(`#tl-list [data-tl-open="${G}"]`), 'the row at rest');
   await p.click(`#tl-list [data-tl-open="${G}"]`);
   await soon(`location.hash === '#goals?th=open&t=${G}' && ${NO_PEEK} && ${FLOATING(G)}`, "Goals, the peek closed, G's card open");
@@ -657,8 +671,10 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // with the panel open on the list, a nav click carries th=open
   await soon(STEADY('.pagebar .tt'), 'the button at rest');
   await p.click('.pagebar .tt');
-  await soon(`location.hash === '#goals?th=open' && ${AT_REST}`, 'the panel on Goals');
+  await soon(`location.hash === '#goals?th=inbox' && ${AT_REST}`, 'the panel on Goals');
   assert.equal(await p.ev("document.activeElement?.closest('#th-tabs [role=\"tab\"]')?.getAttribute('aria-selected')"), 'true', 'the focus on the selected tab');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon(`location.hash === '#goals?th=open' && ${AT_REST}`, 'the panel on Goals, on Threads');
   await nav('overview');
   await soon(`location.hash === '#overview?th=open' && ${IS_OPEN}`, 'Overview with the panel');
   // with a floating card open and the panel open, a nav click carries th=open only
@@ -822,6 +838,8 @@ test('with the viewer', { skip: SKIP, timeout: 600000 }, async (t) => {
 
   // pressed: the panel above the viewer, the viewer still up, #artifact/… still the hash
   await p.click('#tt-peek');
+  await soon(`${AT_REST} && history.state?.page === '#overview?th=inbox'`, 'the panel over the viewer, on Inbox');
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
   await soon(`${AT_REST} && history.state?.page === '#overview?th=open' && !!${ROW(A)}`, 'the panel over the viewer');
   assert.deepEqual(await p.ev(`[location.hash, ${VIEWER_UP}]`), [AV, true], 'the viewer still open');
   const inPanel = await p.ev("(() => { const r = document.getElementById('threads').getBoundingClientRect(); return !!document.elementFromPoint(r.left + 60, r.top + 300)?.closest('#threads'); })()");
@@ -961,6 +979,9 @@ test('the gap-audit rows', { skip: SKIP, timeout: 300000 }, async (t) => {
   // 1. Pin starts a thread by pointing, without Shift: a floating draft beside the goal, pin mode ended
   await p.click('.pagebar .tt');
   await soon(`${IS_OPEN} && getComputedStyle(document.getElementById('threads')).transform === 'none' && getComputedStyle(document.querySelector('.main')).marginRight === '380px'`, 'the panel at rest');
+  // on its Threads tab (the button opens the Inbox tab, kit-100)
+  await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+  await soon("location.hash.endsWith('th=open') && !!document.querySelector('#th-pane [data-thf]')", 'the panel on Threads');
   await soon(STEADY('#tl-pinbtn'), 'Pin at rest');
   await p.click('#tl-pinbtn');
   await soon("TL.pin && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'true'", 'pin mode on');
