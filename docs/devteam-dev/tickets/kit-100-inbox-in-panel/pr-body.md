@@ -13,7 +13,8 @@ The Inbox moves out of the nav and into the side panel as its first tab, beside 
 
   The nav item and the `inbox` page are gone.
 - **Threads on questions.** Their home is the Inbox tab. Their pins are fixed and drawn above the panel, and the floating card sits 10px left of it. Above 900px, Shift+click works inside `#th-inbox`; at 900px and below, the card shows over the panel. Old Inbox-page spots open the tab with no pin.
-- **Typing is kept.** kit-89's `#threads` exceptions (redraw hold, draft keeping, presses) now exclude `#th-inbox`. Escape in an Inbox text field closes nothing. Reviews open full size above the panel.
+- **Typing is kept.** kit-89's `#threads` exceptions (redraw hold, draft keeping, presses) now exclude `#th-inbox`. Escape in an Inbox text field closes nothing.
+- **Reviews open full size above the panel** (`#review-view` at z 25). An artifact viewer opened from a review now sits above that review, at z 26 while one is open. CI's first run at the merged head caught that it had been drawn underneath (`0cfa580`; see `verification.md`).
 - **The /view/ tab** shows one line, "Answer questions on the dashboard.", linking to `/#overview?th=inbox`, with hello's count. The button there opens on Threads (ruling m-20261115-230458641).
 
 ## Added after approve-spec: please check against m-20261116-041710126
@@ -30,9 +31,15 @@ Spec §2.9 and AC5's Esc bullet came after approve-spec, by supervisor ruling m-
 
 The new `#settings?th=inbox` entry in `test/dashboard-measure.test.mjs` judges every check on the Inbox at 1440, 720 and 390. `page-top` is judged only at 1440. That is the known kit-wide skip, o-20261116-111831635: kit-87's nav row puts every shell page 104px below the bar under 900px. A follow-up ticket measures page-top at 720 and 390 (ruling m-20261117-051515268).
 
+## Known, logged, not fixed here
+
+With four tabs, the panel's tab row is wider than its 360px. Shell scrolls under the head buttons, as the screenshots show. Supervisor and Shell are disabled placeholders today. This is observation `o-20261117-053019024`, for when the follow-on goal fills them.
+
+"Don't use this sensor" moved with the element, unchanged, but no test reaches a sensor's question, before or after this PR (verification.md, AC7).
+
 ## How to verify
 
-- `test/dashboard-inbox-panel.test.mjs` (new; headless Chrome, Node 22) covers AC1 to AC5 and AC9.
+- `test/dashboard-inbox-panel.test.mjs` (new; headless Chrome, Node 22) covers AC1 to AC5, AC7's inventory and AC9. CI run 44029386866 is green at 7f52249.
 - `test/dashboard-measure.test.mjs` covers AC6.
 - AC8 is the migrated suite: `dashboard.test.mjs`, `dashboard-pages`, `dashboard-shell`, `dashboard-threads-sidebar`, `dashboard-peek`, `pane-question.answer`, `next-step.strategy`, `dashboard-answers`, `dashboard-owner-action` and `test/browser/dev-links.mjs`.
 - `docs/devteam-dev/tickets/kit-100-inbox-in-panel/verification.md` has a row per done-when, the AC7 inventory checklist and the screenshots.
