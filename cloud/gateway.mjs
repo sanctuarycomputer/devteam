@@ -866,6 +866,13 @@ export function isDropImage(p) {
 export function dropSpace(paths) {
   return paths.some((p) => !isDropImage(p));
 }
+// How a stored file is served back: these four as images, every other file (HTML and SVG among
+// them) as bytes to save, never to render. A .jpeg is saved too: the list is the design's.
+const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function uploadType(name) {
+  const ext = path.extname(name);
+  return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
+}
 // What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
 export function dropNote(paths) {
   const images = paths.filter(isDropImage).length;
@@ -1937,13 +1944,41 @@ export function createGateway(opts = {}) {
       await fh?.close().catch(() => {});
       await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
       if (e.tooBig) return tooBig();
-      if (req.destroyed || res.destroyed) return;
+      // req.destroyed is true once a body is read whole, so it can't say the client has gone: the socket can
+      if (res.destroyed || req.socket?.destroyed) return;
       if (e.code === 'ENOSPC') return refuse(507, 'the box\'s disk is too full for this file', { connection: 'close' });
       log(`a dropped file could not be stored: ${e.message}`);
       return refuse(500, 'the box could not store this file', { connection: 'close' });
     } finally {
       clearTimeout(stall);
       receiving.delete(id);
+    }
+  };
+
+  // GET /upload/<folder>/<name>: a file dropped on an instance's page, back to that page (spec §5).
+  // Matched on the raw path, so nothing URL parsing folds (.., %2e, %2F) can name another file:
+  // only a name exactly as one is stored, in a folder named as ours, really inside the root.
+  const serveUpload = async (req, res, rawPath) => {
+    const none = () => send(res, 404, 'text/plain', 'not found');
+    const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
+    if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
+    let fh = null;
+    try {
+      const root = await fs.promises.realpath(uploadsRoot);
+      const real = await fs.promises.realpath(path.join(uploadsRoot, m[1], m[2]));
+      // the separator too: without it, <root>-evil/… would count as inside
+      if (!real.startsWith(root + path.sep)) return none();
+      fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const st = await fh.stat();
+      if (!st.isFile()) { await fh.close(); return none(); }
+      const { type, attachment } = uploadType(m[2]);
+      res.writeHead(200, { 'content-type': type, ...(attachment ? { 'content-disposition': `attachment; filename="${m[2]}"` } : {}), 'content-length': st.size, 'x-content-type-options': 'nosniff', 'content-security-policy': 'sandbox', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', ...hsts });
+      if (req.method === 'HEAD') { await fh.close(); return res.end(); }
+      // pipeline: a reader who goes mid-file closes the file too
+      pipeline(fh.createReadStream(), res, () => {});
+    } catch {
+      await fh?.close().catch(() => {});
+      return res.headersSent ? res.destroy() : none();
     }
   };
 
@@ -2039,6 +2074,9 @@ export function createGateway(opts = {}) {
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
+        // dropped files, as on term. (receiveUpload, after the session and the Origin rule above), and served back
+        if (rawPath === '/upload' && req.method === 'POST') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
+        if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
         if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
