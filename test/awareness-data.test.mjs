@@ -290,7 +290,6 @@ test("awareness: each week's parts and score, read at its end", (t) => {
   });
   assert.deepEqual(a.score, { this_week: 17, last_week: 28 });
   assert.deepEqual(a.parts, a.weeks[11].parts);
-  assert.deepEqual(a.suggestions, []);
 });
 
 test("awareness: a stored learning record doesn't stand in for the log", (t) => {
@@ -303,17 +302,117 @@ test("awareness: a stored learning record doesn't stand in for the log", (t) => 
   assert.deepEqual({ parts, score }, expectedWeek(TABLE[7]));
 });
 
+// The second fixture: a log that begins this week, with four lessons in force and one start given
+// three of them (exactly a quarter unused).
+function youngFixture(name) {
+  const Fx = fleetFixture(name);
+  const hand = handFor(Fx);
+  const at = (f) => M + Math.floor(span() * f);
+  const ks = ['one', 'two', 'three', 'four'].map((w, i) => hand(O, { type: 'knowledge', kind: 'lesson', statement: `Lesson ${w}`, scope: 'project', status: 'accepted' }, at(0.1 + 0.05 * i)));
+  hand(S, { type: 'act', class: 'worker-slots', what: 'made worker t1 in s:t1', refs: ['t1'], knowledge: ks.slice(0, 3) }, at(0.5));
+  return { Fx, a: json(Fx.ok(Fx.old, ['dashboard-data'])).awareness };
+}
+
 test('awareness: a week before the log is not folded', (t) => {
   if (tooSoon()) return t.skip(TOO_SOON);
-  const Fx = fleetFixture('aw-young');
+  const { Fx, a } = youngFixture('aw-young');
   try {
-    const hand = handFor(Fx);
-    const at = (f) => M + Math.floor(span() * f);
-    const ks = ['one', 'two', 'three', 'four'].map((w, i) => hand(O, { type: 'knowledge', kind: 'lesson', statement: `Lesson ${w}`, scope: 'project', status: 'accepted' }, at(0.1 + 0.05 * i)));
-    hand(S, { type: 'act', class: 'worker-slots', what: 'made worker t1 in s:t1', refs: ['t1'], knowledge: ks.slice(0, 3) }, at(0.5));
-    const a = json(Fx.ok(Fx.old, ['dashboard-data'])).awareness;
     for (let k = 0; k < 11; k++) assert.deepEqual({ parts: a.weeks[k].parts, score: a.weeks[k].score }, { parts: { signals: NONE, incidents: NONE, lessons: NONE, starts: NONE }, score: null }, `week ${k}`);
     assert.deepEqual(a.weeks[11].parts.lessons, P(3, 4));
     assert.deepEqual(a.weeks[11].parts.starts, P(1, 1));
   } finally { Fx.done(); }
+});
+
+// A count of whole units (days, or hours then days) from `from` to the server's now, which lies
+// between the test's clock before and after the run; handFor's counter puts a line up to 999 ms late.
+const bounds = (from, unit, tBefore, tAfter) => [Math.floor((tBefore - from - 1000) / unit), Math.floor((tAfter - from) / unit)];
+const inBounds = (x, [lo, hi], what) => assert.ok(x >= lo && x <= hi, `${what}: ${x} not in [${lo}, ${hi}]`);
+const sid = (kind, subject) => idFns().suggestionId('aw', kind, subject);
+
+test('awareness: suggestions, in order and cut at five', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const A = awarenessFixture('aw-sugg');
+  try {
+    const { X, F } = A;
+    const tBefore = Date.now();
+    const s = A.data().awareness.suggestions;
+    const tAfter = Date.now();
+    assert.equal(s.length, 5);
+    const n = Number(/^Fixed (\d+) days ago/.exec(s[0].evidence)?.[1]);
+    inBounds(n, bounds(h(10, 2, 0), DAY, tBefore, tAfter), 'incF days');
+    const signal = (key, i) => {
+      // the first sighting, two hours before forming (plus the counter's milliseconds, same day)
+      const first = F[key] - 2 * HOUR;
+      const d = Number(/^First seen (\d+) days? ago/.exec(s[i].effect)?.[1]);
+      inBounds(d, bounds(first, DAY, tBefore, tAfter).map((x) => Math.max(1, x)), `${key} days`);
+      return { id: sid('signal', key), kind: 'signal', what: `Find out what keeps causing this: ${key} sighting 3`, evidence: `Seen 3 times since ${new Date(first).toISOString().slice(0, 10)}, unexplained`, effect: `First seen ${d} days ago; explaining it stops further sightings piling up` };
+    };
+    assert.deepEqual(s, [
+      { id: sid('incident', X.incF), kind: 'incident', what: 'Write down what the hub outage taught', evidence: `Fixed ${n} days ago and verified since; no lesson cites it`, effect: 'Fixed incidents that left a lesson: 0 of 1 → 1 of 1' },
+      { id: 'aw-lessons-unused', kind: 'lessons', what: 'Look at the 2 lessons no session was given in 4 weeks', evidence: '2 of 3 lessons in force reached no session start in the last 28 days', effect: 'Lessons sessions use: 1 of 3 → 1 of 1 once those are retired' },
+      signal('sig:g', 2), signal('sig:h', 3), signal('sig:h2', 4),
+    ]);
+  } finally { A.done(); }
+});
+
+test('awareness: exactly a quarter unused gets the lessons suggestion, in the singular', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { Fx, a } = youngFixture('aw-young-sugg');
+  try {
+    assert.deepEqual(a.suggestions, [{ id: 'aw-lessons-unused', kind: 'lessons', what: 'Look at the lesson no session was given in 4 weeks', evidence: '1 of 4 lessons in force reached no session start in the last 28 days', effect: 'Lessons sessions use: 3 of 4 → 3 of 3 once it is retired' }]);
+  } finally { Fx.done(); }
+});
+
+// The third fixture: dated from now, not from Monday, since "Fixed today" and "1 day ago" count from
+// now; nothing in it depends on which week a line falls in.
+let THIRD = null;
+const third = () => (THIRD ??= (() => {
+  const Fx = fleetFixture('aw-third');
+  const hand = handFor(Fx);
+  const now = Date.now();
+  const X = {};
+  const ks = ['one', 'two', 'three', 'four', 'five'].map((w, i) => hand(O, { type: 'knowledge', kind: 'lesson', statement: `Lesson ${w}`, scope: 'project', status: 'accepted' }, now - 3 * DAY + i * MIN));
+  hand(S, { type: 'act', class: 'worker-slots', what: 'made worker t1 in s:t1', refs: ['t1'], knowledge: ks.slice(0, 4) }, now - 2 * DAY);
+  const incident = (key, title, at) => hand(S, { type: 'problem', title, severity: 2, realized: true, status: 'open', fingerprints: [`fp-${key}`] }, at);
+  const resolve = (p, at) => hand(S, { type: 'problem', op: 'set', id: p, status: 'resolved' }, at);
+  const outcome = (p, at) => hand(S, { type: 'observation', kind: 'outcome', subject: 'app', detail: `the fix for ${p} held`, valence: 1, refs: [p] }, at);
+  X.incY = incident('incY', 'the queue backlog', now - 40 * HOUR); resolve(X.incY, now - 36 * HOUR); outcome(X.incY, now - 35 * HOUR);
+  X.incT = incident('incT', 'the cache miss storm', now - 2 * HOUR); resolve(X.incT, now - HOUR); outcome(X.incT, now - 0.5 * HOUR);
+  const obs = (key, detail) => ({ type: 'observation', kind: 'note', subject: 'app', source_key: key, detail, valence: -1 });
+  X.long = `dup:z sighting 3 ${'and then it stalled again '.repeat(8)}`;
+  for (const [i, by] of [S, S, O].entries()) hand(by, obs('dup:z', i === 2 ? X.long : `dup:z sighting ${i + 1}`), h(9, 1, 9) + i * 10 * MIN);
+  for (const [i, by] of [S, S, O].entries()) hand(by, obs('dup/z', `dup/z sighting ${i + 1}`), h(9, 1, 10) + i * 10 * MIN);
+  for (const [i, by] of [S, S, O].entries()) hand(by, obs('quiet:x', ''), now - (30 - i) * HOUR);
+  const tBefore = Date.now();
+  const d = json(Fx.ok(Fx.old, ['dashboard-data']));
+  return { Fx, X, d, now, tBefore, tAfter: Date.now() };
+})());
+process.on('exit', () => THIRD?.Fx.done());
+
+test('awareness: clashing ids, singular words, and no lessons suggestion under a quarter', () => {
+  const { X, d, now, tBefore, tAfter } = third();
+  const s = d.awareness.suggestions;
+  assert.equal(s.length, 5);
+  assert.ok(X.long.length > 120);
+  // dup:z's first sighting and dup/z's are in week 9: their days are counted from h(9,1,9) and h(9,1,10)
+  const days = (i, from) => { const n = Number(/^First seen (\d+) days? ago/.exec(s[i].effect)?.[1]); inBounds(n, bounds(from, DAY, tBefore, tAfter), `suggestion ${i} days`); return n; };
+  const dz = days(2, h(9, 1, 9)), dz2 = days(3, h(9, 1, 10));
+  const sig = (id, what, count, from, n) => ({ id, kind: 'signal', what, evidence: `Seen ${count} times since ${new Date(from).toISOString().slice(0, 10)}, unexplained`, effect: `First seen ${n} day${n === 1 ? '' : 's'} ago; explaining it stops further sightings piling up` });
+  assert.deepEqual(s, [
+    { id: sid('incident', X.incY), kind: 'incident', what: 'Write down what the queue backlog taught', evidence: 'Fixed 1 day ago and verified since; no lesson cites it', effect: 'Fixed incidents that left a lesson: 0 of 2 → 1 of 2' },
+    { id: sid('incident', X.incT), kind: 'incident', what: 'Write down what the cache miss storm taught', evidence: 'Fixed today and verified since; no lesson cites it', effect: 'Fixed incidents that left a lesson: 0 of 2 → 1 of 2' },
+    sig('aw-signal-dup-z', `Find out what keeps causing this: ${X.long.slice(0, 120)}`, 3, h(9, 1, 9), dz),
+    sig('aw-signal-dup-z-2', 'Find out what keeps causing this: dup/z sighting 3', 3, h(9, 1, 10), dz2),
+    sig('aw-signal-quiet-x', 'Find out why this keeps happening (3 times)', 3, now - 30 * HOUR, 1),
+  ]);
+  assert.equal(s[4].effect, 'First seen 1 day ago; explaining it stops further sightings piling up');
+  // 1 of 5 unused is under a quarter: no lessons suggestion
+  assert.deepEqual(d.awareness.parts.lessons, P(4, 5));
+});
+
+test('awareness: plain words', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const all = [...shared().d.awareness.suggestions, ...third().d.awareness.suggestions];
+  assert.ok(all.length >= 5);
+  for (const x of all) for (const f of ['what', 'evidence', 'effect']) assert.doesNotMatch(x[f], /informed|orient|debt|devteam|--/i, `${x.id} ${f}`);
 });

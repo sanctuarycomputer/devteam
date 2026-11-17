@@ -10906,7 +10906,27 @@ function awarenessData(now = Date.now()) {
   const firstMs = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
   const kept = awKeptNew();
   const weeks = efficiencyWeeks(now).map((w) => awarenessWeek(w.start, now, firstMs, kept)).map(({ E, ...w }) => w);
-  return { score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, weeks, suggestions: [] };
+  return { score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, weeks, suggestions: awarenessSuggestions(now, weeks[11].parts) };
+}
+// Up to five things to do this week, in a fixed order: learn from each fixed incident, retire the
+// lessons no session is given, then explain each signal that keeps happening. This week's E is now, so
+// the log is read as it is. The words are plain (strategy R2): no command, function or score name.
+function awarenessSuggestions(now, parts) {
+  const out = [];
+  const id = uniqueIds();
+  const add = (kind, subject, what, evidence, effect) => out.push({ id: id(suggestionId('aw', kind, subject)), kind, what, evidence, effect });
+  const plural = (n, word) => `${word}${n === 1 ? '' : 's'}`;
+  const { incidents: inc, lessons: les } = parts;
+  for (const r of incidentDebt(now)) add('incident', r.id, `Write down what ${r.title} taught`, `Fixed ${r.days === 0 ? 'today' : `${r.days} ${plural(r.days, 'day')} ago`} and verified since; no lesson cites it`, `Fixed incidents that left a lesson: ${inc.count} of ${inc.of} → ${inc.count + 1} of ${inc.of}`);
+  // a quarter or more of the lessons in force reached no session start (4 × unused ≥ of, without floats)
+  const n = les.of - les.count;
+  if (les.of > 0 && 4 * n >= les.of) add('lessons', 'unused', `Look at the ${n === 1 ? 'lesson' : `${n} lessons`} no session was given in 4 weeks`, `${n} of ${les.of} ${plural(les.of, 'lesson')} in force reached no session start in the last 28 days`, `Lessons sessions use: ${les.count} of ${les.of} → ${les.count} of ${les.count} once ${n === 1 ? 'it is' : 'those are'} retired`);
+  for (const r of orientationDebt(now)) {
+    // every row has waited a day (orientationDebt's filter), so at least 1
+    const d = Math.max(1, Math.floor(r.hours / 24));
+    add('signal', r.key, r.latest ? `Find out what keeps causing this: ${String(r.latest).slice(0, 120)}` : `Find out why this keeps happening (${r.count} times)`, `Seen ${r.count} times since ${r.first_at.slice(0, 10)}, unexplained`, `First seen ${d} ${plural(d, 'day')} ago; explaining it stops further sightings piling up`);
+  }
+  return out.slice(0, 5);
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });

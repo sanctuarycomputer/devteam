@@ -831,7 +831,15 @@ exit 0
         }
       }
     ],
-    "suggestions": []
+    "suggestions": [
+      {
+        "id": "aw-lessons-unused",
+        "kind": "lessons",
+        "what": "Look at the lesson no session was given in 4 weeks",
+        "evidence": "1 of 1 lesson in force reached no session start in the last 28 days",
+        "effect": "Lessons sessions use: 0 of 1 → 0 of 0 once it is retired"
+      }
+    ]
   },
   "progress": {
     "features": [
