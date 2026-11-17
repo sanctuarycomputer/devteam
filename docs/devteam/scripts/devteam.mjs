@@ -14390,7 +14390,7 @@ function recoverRefusal(rec) {
   if (rec.machine === machine && !(rec.kind === 'tmux' && rec.server && tmuxServerPid() !== rec.server)) return 'left stopped (this machine did not restart since it was up: it stopped or was closed; --force starts it)';
   return null;
 }
-const RECOVER_MESSAGE = 'This machine restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first, and start the dashboard first if its address does not answer (§11): the dashboard is what runs it. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: it answers, approves and decides nothing, so record nothing as theirs from it.';
+const RECOVER_MESSAGE = 'This machine restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first, and start the dashboard first if its address does not answer (§11): the dashboard is what runs it. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: it answers, approves and decides nothing, so record nothing as theirs from it. Then keep the loop, as before the restart: run the tick (§3) now, then wait with devteam.mjs wait and tick again when it returns, until the owner stops you. A summary to the owner doesn\'t end it.';
 const NO_EXACT_RESUME = '(only Claude Code can resume a conversation exactly: this one re-orients from the log and the files)';
 const NAME_FOR_TMUX = /^[\w.~-]+$/;
 // One line on what it did: what recover exists to report, and all that goes to stdout.
@@ -14655,7 +14655,7 @@ function recoverMachine() {
 // that repo's own kit says (its hold, its conversation, its commands, its prompt), so nothing of it
 // is read by this kit's rules. It writes only what that kit writes too: the pane it noted and the
 // prompt file. Delete this when no box has a repo on a kit before recover (machine status: behind=).
-const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it.';
+const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it. Then keep the loop, as before the restart: run the tick (§3) now, then wait with devteam.mjs wait and tick again when it returns, until the owner stops you. A summary to the owner doesn\'t end it.';
 function legacyRecover(root, name, { dry, force, session, window }) {
   const run = path.join(root, 'docs', 'devteam', 'run');
   const paneFile = supervisorPaneFile(run);
@@ -15722,6 +15722,20 @@ function machineLine(last) {
 const statusLastFile = () => path.join(os.homedir(), '.devteam', `status-last-${HUB_PORT}`);
 // box-status's fleet= when goals are mixed: (2 of 11 goals running), with draining ones named too
 const partlyHeld = (f) => { const c = f?.goals; if (!c) return ''; const all = c.run + c.drain + c.park; if (!all || c.run === all || c.park === all || (c.drain === all)) return ''; return `(${c.run} of ${all} goals running${c.drain ? `, ${c.drain} draining` : ''})`; };
+// How long a supervisor's loop has gone without a sign, in minutes, once that's SUPERVISOR_IDLE_MS or
+// more; else null, and null when its kit keeps no record. The sign is its host check (run/host-claim.json,
+// a plain file, so no network): every tick's observe-metrics makes one, and so does a wait every
+// HOST_REFRESH_MS however long it runs, even offline, so a supervisor waiting between ticks never goes this long.
+// One whose last check found another machine holding the repo was told to stop: never one to tick.
+const SUPERVISOR_IDLE_MS = 45 * 60000;
+function supervisorIdleMinutes(root) {
+  let h = null;
+  try { h = readJson(path.join(root, 'docs', 'devteam', 'run', 'host-claim.json')); } catch {}
+  if (!h || typeof h !== 'object' || h.refused === true) return null;
+  const seen = Math.max(Number(h.checked) || 0, Date.parse(h.at) || 0);
+  const age = Date.now() - seen;
+  return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
+}
 async function machineStatus() {
   const lastText = readText(statusLastFile()) ?? '';
   const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
@@ -15777,8 +15791,14 @@ async function machineStatus() {
     const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
     const ks = harvestOf(root, notes);
     if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    const state = p ? paneState(p) : null;
+    // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
+    // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
+    // only wrote the owner a summary), and nothing wakes it. Parked, it has nothing to start.
+    const idle = sup === 'up' && state === 'ready' && ['run', 'drain'].includes(hello.fleet?.mode) ? supervisorIdleMinutes(root) : null;
+    if (idle !== null) flagged.push(`attention: ${n} supervisor idle, not ticking for ${idle}m`);
     const sib = siblingOf(root, roots);
-    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'}${partlyHeld(hello.fleet)} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
+    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'}${partlyHeld(hello.fleet)} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${state}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
   }
   // every agent's pane (never the owner's shell, never read): those stuck, and those that moved since the last reading
   const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_current_command}\t#{session_name}']) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));

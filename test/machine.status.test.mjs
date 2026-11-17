@@ -67,7 +67,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
   const portUp = await new Promise((ok) => srv.stdout.once('data', (d) => ok(Number(String(d).trim()))));
   const worker = path.join(tmp, 'statused-wt');
   fs.mkdirSync(worker, { recursive: true });
-  const a = agent({ screens: [box(prompt)], cwd: r, window: 'sup-statused' });
+  const a = agent({ screens: [box(prompt), `✻ Ticking… (esc to interrupt)\n${box(prompt)}`], cwd: r, window: 'sup-statused' });
   const shell = agent({ screens: ['secret in the owner\'s shell'], cwd: home, window: 'shell' });
   const x = agent({ screens: [`line\n${box(prompt)}`, `other output now\n${box(prompt)}`], cwd: worker, window: 'worker-x' });
   const y = agent({ screens: [`You've hit your limit · resets 3pm\n${box(prompt)}`], cwd: worker, window: 'worker-y' });
@@ -125,6 +125,41 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.doesNotMatch(st3.stdout, /behind=/);
     assert.match(st3.stdout, /^machine: hub \d+ DOWN; alert: look at the disk$/m);
     machine(['machine', 'alert', '--', '--clear']);
+    // a supervisor up, idle at its prompt, its fleet running, and no tick or wait for 45 minutes: it
+    // stopped its loop, and the check-in says so; its host check is the sign, as each tick and wait make one
+    assert.doesNotMatch(st.stdout, /supervisor idle/, 'no record of its loop (a kit before it): nothing said');
+    const claim = path.join(r, 'docs/devteam/run/host-claim.json');
+    const beat = (checked, at = checked) => fs.writeFileSync(claim, JSON.stringify({ sha: 'x', at: new Date(Date.now() - at * 60000).toISOString(), machine: 'm', checked: Date.now() - checked * 60000 }));
+    beat(138, 140);
+    assert.match(status().stdout, /^attention: statused supervisor idle, not ticking for 138m$/m);
+    beat(5, 140);
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'a wait checks every 10 minutes however long it runs: waiting is not idle');
+    beat(30);
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'under 45 minutes: a tick can be that far apart');
+    fs.writeFileSync(claim, JSON.stringify({ checked: Date.now() - 138 * 60000, refused: true }));
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'another machine holds the repo: the kit told it to stop, so never told to tick');
+    fs.writeFileSync(claim, '{ not json');
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'a record it can\'t read says nothing');
+    beat(138);
+    // a parked fleet's supervisor has nothing to start, and isn't flagged
+    const sup2 = { ...sup, DEVTEAM_SUPERVISOR_UP: 'off' };
+    const parked = dtIn(r, ['fleet', 'park', '--reason', 'a quiet week'], sup2);
+    assert.equal(parked.status, 0, parked.stderr + parked.stdout);
+    beat(138);
+    assert.match(status().stdout, /^statused sup=up fleet=park /m);
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'parked: not flagged');
+    beat(138);
+    const unparked = dtIn(r, ['fleet', 'unpark'], sup2);
+    assert.equal(unparked.status, 0, unparked.stderr + unparked.stdout);
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'an unpark is a start: it checks the claim, a sign of its loop');
+    beat(138);
+    assert.match(status().stdout, /^attention: statused supervisor idle, not ticking for 138m$/m, 'running again, and still idle');
+    // busy in a turn (a long step of a tick): not idle, however old the sign
+    tmuxSh(['send-keys', '-t', a.pane, 'Enter']);
+    await shown(a.pane, 'Ticking');
+    const busy = status();
+    assert.match(busy.stdout, new RegExp(`^statused .* pane=${a.pane} state=busy `, 'm'));
+    assert.doesNotMatch(busy.stdout, /supervisor idle/, 'busy: not flagged');
     assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'reading a project writes nothing of its');
   } finally {
     srv.kill();

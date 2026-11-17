@@ -64,6 +64,7 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
     assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
+    assert.match(F.claudeCalls()[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\.$/, 'and it ends by keeping the loop, never at a summary');
     const again = recover(F, [], server.env);
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already running/);

@@ -56,6 +56,7 @@ test('a repo on a kit from before recover comes back from the box\'s list, the w
     for (const r of [...Object.values(old), fresh]) await until(() => claudeCalls(r).length === 1, `${path.basename(r)}'s supervisor ran`);
     for (const r of Object.values(old)) {
       assert.match(claudeCalls(r)[0], new RegExp(`^supervisor\\|--resume ${SID} --dangerously-skip-permissions The box restarted`), 'its own resume_command, on its own conversation, as the supervisor');
+      assert.match(claudeCalls(r)[0], /keep the loop, as before the restart: run the tick \(§3\) now, then wait with devteam\.mjs wait and tick again when it returns, until the owner stops you\. A summary to the owner doesn't end it\./, 'and it ends by keeping the loop');
       assert.match(claudeCalls(r)[0], /Nothing about this restart came from the owner/);
       assert.match(fs.readFileSync(path.join(r, 'docs/devteam/run/supervisor-pane'), 'utf8'), /^%\d+$/);
       assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane-role')), 'only what its own kit writes: a file it doesn\'t know would hold a move (fleet status)');
