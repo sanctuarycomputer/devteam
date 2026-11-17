@@ -6261,6 +6261,9 @@ function askLine({ thread } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  // goal-approval and goal-definition are kinds, not classes: asked as a class on an owner-decision,
+  // the owner's yes is recorded but approves or defines nothing, and the goal stays a draft
+  if (['goal-approval', 'goal-definition'].includes(cls)) die(`${cls} is a kind of question, not a class: ask it --kind ${cls} with no --class (only that kind's answer ${cls === 'goal-approval' ? 'approves the goal' : 'defines the goal'})`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {

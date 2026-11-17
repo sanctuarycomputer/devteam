@@ -3155,6 +3155,8 @@ http.createServer((req, res) => {
     must(['withdraw', r.out, '--reason', 'test'], sup);
     assert.match(dt(['ask', '--class', 'one-way-door', '--kind', 'owner-decision', '--goal', G, '--question', 'x?', '--recommendation', 'yes'], sup).err, /a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind owner-decision/);
     assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
+    assert.match(dt(['ask', '--class', 'goal-approval', '--goal', G, '--question', 'Approve the goal?'], sup).err, /goal-approval is a kind of question, not a class: ask it --kind goal-approval with no --class/, 'asked as a class, the yes would leave the goal a draft');
+    assert.match(dt(['ask', '--class', 'goal-definition', '--goal', G, '--question', 'What is the goal?'], sup).err, /goal-definition is a kind of question, not a class/);
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--recommendation', 'yes', '--default', 'yes'], sup).err, /a one-way door has no --default/);
     assert.match(dt(['ask', '--class', 'one-way-door', '--goal', G, '--question', 'Rename the shared package?'], sup).err, /a one-way door needs --recommendation/, 'its answer approves only as recommended');
   });
