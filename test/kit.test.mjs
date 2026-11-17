@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { steps, snapshot, useFixture, tmp } from './lib/chain.mjs';
-import { testDir, threadsFixture, hasTmux, until } from './lib/kit.mjs';
+import { testDir, threadsFixture, hasTmux, until, multiFixture, fleetFixture, write, review, json } from './lib/kit.mjs';
 
 // Steps that run in a fork of the fixture, beside the rest. A fork is copied at the step's place,
 // so it starts from what the in-line steps before it left, without what earlier forks did; the
@@ -774,6 +774,71 @@ setInterval(() => {}, 1e6);
   }
 });
 
+// No caps by default: what keeps parallel workers apart is touches. ready marks a ready ticket whose
+// touches overlap a running one's (build rows only), idle capacity leaves it out, and caps the owner
+// sets still hold.
+test('ready marks a touches overlap with a running ticket, idle capacity skips it, and set caps still hold', async () => {
+  const F = threadsFixture('overlap');
+  try {
+    const H = 3600000;
+    const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+    const phaseLine = (id, from, to, agoMs) => F.hand(id, { id: `h-${stamp(new Date(Date.now() - agoMs))}-${id}`, type: 'phase', from, to }, agoMs, `${id}.jsonl`);
+    F.sup(['feature', 'add', 'olap', '--json', JSON.stringify({ title: 'Overlap', goals: [F.goal], stories: [{ id: 'OL-S1', text: 'parallel workers stay apart', release: 'v1.0.0' }] })]);
+    const add = (id, touches, depends_on = []) => F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'olap', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['OL-S1'], depends_on, touches, done_when: ['its test passes in CI'] })]);
+    add('o-01-running', ['src/a/**']);
+    add('o-02-overlaps', ['src/a/x.js']);
+    add('o-03-apart', ['lib/**']);
+    add('o-04-after', ['src/a/y.js'], ['o-01-running']);
+    // o-01 is a running worker: a phase line and its worktree here
+    phaseLine('o-01-running', null, 'starting', 60000);
+    phaseLine('o-01-running', 'starting', 'build', 30000);
+    F.g(['worktree', 'add', '-q', '-b', 'ticket/o-01-running', path.join(F.old, '.worktrees', 'o-01-running'), 'origin/main'], F.old);
+    const r = JSON.parse(F.sup(['ready', '--json']));
+    assert.ok(r.active.includes('o-01-running'));
+    const row = (id) => r.ready.find((x) => x.id === id);
+    assert.deepEqual(row('o-02-overlaps').overlaps_active, ['o-01-running'], 'an overlapping ready ticket is marked');
+    assert.equal(row('o-03-apart').overlaps_active, undefined, 'a disjoint one is not');
+    assert.ok(!row('o-04-after'), 'a ticket behind an unmerged dependency is not ready');
+    const text = F.sup(['ready']);
+    assert.match(text, /o-02-overlaps .*touches overlap o-01-running: start it once that merges/);
+    assert.doesNotMatch(text.split('\n').find((l) => / o-03-apart /.test(l)) ?? '', /overlap/);
+    assert.match(text, /^active workers: 1\/no cap$/m);
+    // plan-ahead: o-04 specs and plans beside its running dependency, and is told nothing about overlap
+    const pa = JSON.parse(F.sup(['ready', '--plan-ahead', '--json']));
+    assert.equal(pa.ready.find((x) => x.id === 'o-04-after')?.mode, 'plan-ahead');
+    assert.equal(pa.ready.find((x) => x.id === 'o-04-after').overlaps_active, undefined, 'plan-ahead rows are not marked');
+    // idle capacity offers only what can start, and says how many wait
+    const findings = JSON.parse(F.sup(['metrics', '--json'])).findings;
+    if (!findings.some((f) => f.kind === 'memory-full')) {
+      const idle = findings.find((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject));
+      assert.ok(idle, 'idle capacity');
+      assert.match(idle.suggestion, /o-03-apart/);
+      assert.doesNotMatch(idle.suggestion, /o-02-overlaps/, 'never suggests a ticket ready says must wait');
+      assert.match(idle.detail, /1 more wait on a running ticket/);
+    }
+    // caps the owner sets still hold: N/M, the component at cap, and idle capacity stops at the cap
+    const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+    const was = fs.readFileSync(sf, 'utf8');
+    assert.ok(was.includes('"agent_command": "true"') && !was.includes('max_active_tickets'));
+    fs.writeFileSync(sf, was.replace('"agent_command": "true"', '"max_active_tickets": 1, "max_active_per_component": 1, "agent_command": "true"'));
+    F.g(['commit', '-qm', 'caps', '--', 'docs/devteam/project/settings.md'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    const capped = F.sup(['ready']);
+    assert.match(capped, /^active workers: 1\/1$/m);
+    assert.match(capped, /o-03-apart .*\(component at cap\)/);
+    const rc = JSON.parse(F.sup(['ready', '--json']));
+    assert.equal(rc.caps.max_active_tickets, 1);
+    assert.ok(!JSON.parse(F.sup(['metrics', '--json'])).findings.some((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject)), 'at the cap, no idle capacity');
+    // 0 reads as no cap for both settings
+    fs.writeFileSync(sf, was.replace('"agent_command": "true"', '"max_active_tickets": 0, "max_active_per_component": 0, "agent_command": "true"'));
+    F.g(['commit', '-qm', 'zero caps', '--', 'docs/devteam/project/settings.md'], F.old);
+    F.g(['push', '-q', 'origin', 'HEAD:main'], F.old);
+    const zero = F.sup(['ready']);
+    assert.match(zero, /^active workers: 1\/no cap$/m);
+    assert.doesNotMatch(zero, /component at cap/);
+  } finally { F.done(); }
+});
+
 // A stopped or held launch isn't a stuck session (kit-238): kit-211 was stopped a minute after launch
 // for the component cap (no window, no worktree), then held, and read as "starting, 109m STALE", a
 // high stale-worker on every sweep, and a worker toward the cap. Only a real stuck worker is stale.
@@ -786,7 +851,8 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     const phaseLine = (id, from, to, agoMs) => F.hand(id, { id: `h-${stamp(new Date(Date.now() - agoMs))}-${id}`, type: 'phase', from, to }, agoMs, `${id}.jsonl`);
     F.sup(['feature', 'add', 'stops', '--json', JSON.stringify({ title: 'Stops', goals: [F.goal], stories: [{ id: 'ST-S1', text: 'stopped launches read right', release: 'v1.0.0' }] })]);
     const ids = ['w-01-held', 'w-02-stopped', 'w-03-stuck', 'w-04-held-stopped'];
-    for (const id of ids) F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'stops', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['ST-S1'], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'] })]);
+    // w-02-stopped touches other files than the running w-03 and w-05: idle capacity offers only a ticket that can start
+    for (const id of ids) F.sup(['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'stops', component: 'web', kind: 'build', size: 'S', risk: 'normal', serves: ['ST-S1'], depends_on: [], touches: [id === 'w-02-stopped' ? 'lib/**' : 'src/**'], done_when: ['the src test passes in CI'] })]);
     for (const id of ['w-01-held', 'w-02-stopped', 'w-04-held-stopped']) phaseLine(id, null, 'starting', 2 * H);
     phaseLine('w-03-stuck', null, 'starting', 2 * H + 60000);
     phaseLine('w-03-stuck', 'starting', 'build', 2 * H);
@@ -824,7 +890,7 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
       if (!findings.some((f) => f.kind === 'memory-full')) {
         const idle = findings.find((f) => f.kind === 'idle-capacity' && /ready$/.test(f.subject));
         assert.ok(idle, 'idle capacity');
-        assert.match(idle.detail, /^2\/\d+ workers active/);
+        assert.match(idle.detail, /^2\/(\d+|no cap) workers active/);
         assert.match(idle.suggestion, /w-02-stopped/);
       }
     }
@@ -848,6 +914,8 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     const r = ready();
     assert.deepEqual(r.active.filter((id) => ids.includes(id)), ['w-03-stuck']);
     assert.equal(r.active_per_component.web, 1);
+    assert.equal(r.caps.max_active_per_component, null, 'no cap per component by default');
+    assert.ok(!/component at cap/.test(F.sup(['ready'])), 'and so none is ever at cap');
     assert.deepEqual(r.held.map((x) => x.id).filter((id) => ids.includes(id)).sort(), ['w-01-held', 'w-04-held-stopped']);
     assert.ok(r.ready.some((x) => x.id === 'w-02-stopped'));
     assert.match(F.sup(['ready']), /^active workers: 2\//m, 'w-03-stuck and w-05-worktree; neither held nor stopped');
@@ -866,4 +934,355 @@ test('a held ticket or a stopped launch is not a stuck worker; a real stuck one 
     spawnSync('tmux', ['kill-server'], { env: F.env() });
     F.done();
   }
+});
+
+// ===== covered_by: merge trusts a gate's green forge checks at the exact head (kit-205) =====
+// A console sibling ticket on a github forge, with a fake gh whose `pr view` answers come from
+// view-<n>.json by call order; the gate's command touches a marker, so "ran" is a file check.
+const COV_SUP = { DEVTEAM_ROLE: 'supervisor' };
+const covRun = (n) => ({ __typename: 'CheckRun', name: n, status: 'COMPLETED', conclusion: 'SUCCESS' });
+const covPending = (n) => ({ __typename: 'CheckRun', name: n, status: 'IN_PROGRESS', conclusion: null });
+const covFailed = (n) => ({ __typename: 'CheckRun', name: n, status: 'COMPLETED', conclusion: 'FAILURE' });
+const covSkipped = (n) => ({ __typename: 'CheckRun', name: n, status: 'COMPLETED', conclusion: 'SKIPPED' });
+const covNeutral = (n) => ({ __typename: 'CheckRun', name: n, status: 'COMPLETED', conclusion: 'NEUTRAL' });
+const covStatus = (n, state) => ({ __typename: 'StatusContext', context: n, state });
+
+function coveredFixture(name) {
+  const F = multiFixture(name);
+  const { old, g, okIn, runIn, ticket } = F;
+  g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/console.git'], F.console);
+  g(['config', `url.${F.consoleOrigin}.insteadOf`, 'https://github.com/usbclub/console.git'], F.console);
+  const links0 = json(okIn(old, ['settings'])).links;
+  const marker = path.join(F.base, 'ran-test');
+  const cmd = `touch '${marker}'`;
+  // settings land on home's main (committed and pushed); the same settings again change nothing
+  let last = null;
+  const setGate = (gate = { cmd, covered_by: 'ci' }, extra = {}) => { const k = JSON.stringify([gate, extra]); if (k === last) return; last = k; F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links0, console: { ...links0.console, remote: 'usbclub/console', forge: 'github', gates: { test: gate }, ...extra } } }); };
+  setGate();
+  const land = (id, files) => {
+    ticket(id, { touches: [...new Set(Object.keys(files).map((f) => `${f.split('/')[0]}/**`))] });
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    const tdir = path.join(w, `docs/devteam/project/tickets/${id}`);
+    write(path.join(tdir, 'spec.md'), '# spec\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
+    write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n');
+    for (const [f, text] of Object.entries(files)) write(path.join(w, f), text);
+    g(['add', '-A'], w); g(['commit', '-qm', `${id}: work`], w);
+    write(path.join(tdir, 'reviews/final-1.md'), review('reviewer-b', g(['rev-parse', 'HEAD'], w)));
+    g(['add', '-A'], w); g(['commit', '-qm', 'review'], w); g(['push', '-q', 'origin', `ticket/${id}`], w);
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'ok'], COV_SUP);
+    okIn(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], COV_SUP);
+    write(path.join(old, `docs/devteam/run/pr/ticket/${id}.md`), `# ${id}: work\n\n## One-way doors\n\nNone.\n`);
+    return g(['rev-parse', 'HEAD'], w);
+  };
+  const sha = land('console-01-a', { 'src/main.js': 'changed\n' });
+  const bin = path.join(F.base, 'fakegh');
+  const logf = path.join(F.base, 'gh.log');
+  const cnt = path.join(F.base, 'gh.count');
+  // views: [rollup | { rollup, head } | 'fail', …]; the last repeats. Resets the count, the log and the marker.
+  const gh = (views, { id = 'console-01-a', head = sha } = {}) => {
+    for (const f of [logf, cnt, marker]) fs.rmSync(f, { force: true });
+    views.forEach((v, i) => write(path.join(bin, `view-${i + 1}.json`), v === 'fail' ? 'fail' : JSON.stringify({ number: 7, headRefOid: Array.isArray(v) ? head : v.head, title: `${id}: work`, body: '## One-way doors\n\nNone.\n', isDraft: false, mergeStateStatus: 'CLEAN', url: 'https://example.test/pr/7', statusCheckRollup: Array.isArray(v) ? v : v.rollup })));
+    write(path.join(bin, 'gh'), `#!/bin/sh\necho "$@" >> '${logf}'\nif [ "$1 $2" = "pr view" ]; then\n  n=$(cat '${cnt}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '${cnt}'\n  [ $n -gt ${views.length} ] && n=${views.length}\n  f='${bin}'/view-$n.json\n  [ "$(cat "$f")" = fail ] && exit 1\n  exec cat "$f"\nfi\n[ "$1 $2" = "pr merge" ] && exit 0\nexit 1\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  };
+  const merge = (args = [], id = 'console-01-a') => { const r = runIn(old, ['merge', id, ...args], COV_SUP, { PATH: `${bin}${path.delimiter}${process.env.PATH}` }); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+  const calls = () => (fs.existsSync(logf) ? fs.readFileSync(logf, 'utf8').split('\n').filter(Boolean) : []);
+  const views = () => calls().filter((c) => c.startsWith('pr view '));
+  const gateLines = (at = sha) => json(okIn(old, ['log', '--type', 'gate', '--json'])).filter((x) => x.gate === 'test' && x.sha === at).length;
+  const act = (id = 'console-01-a') => json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && a.refs.includes(id));
+  return { F, sha, cmd, setGate, land, gh, merge, calls, views, gateLines, act, ran: () => fs.existsSync(marker) };
+}
+
+test('merge covered_by "ci": every check green at the head, the gate is not run, and merge says so in its output and act', () => {
+  const C = coveredFixture('cov-ci');
+  try {
+    C.gh([[covRun('test'), covRun('lint')]]);
+    const r = C.merge();
+    assert.equal(r.status, 0, r.text);
+    assert.equal(C.ran(), false, 'the gate did not run');
+    assert.equal(C.gateLines(), 0, 'no gate line for a gate that did not run');
+    assert.match(r.text, /gate test not run here: the forge's checks ran it green at \w{12} \(test, lint\)/);
+    assert.ok(C.act().what.includes(`gate test covered by the forge's checks at ${C.sha} (test, lint)`), C.act().what);
+    assert.match(C.views()[1] ?? '', /^pr view 7 --json headRefOid,statusCheckRollup/, 'the re-read names the PR by number');
+  } finally { C.F.done(); }
+});
+
+test('merge covered_by a list: the named checks green, the gate is not run, and the act names them', () => {
+  const C = coveredFixture('cov-list');
+  try {
+    C.setGate({ cmd: C.cmd, covered_by: ['test'] });
+    C.gh([[covRun('test'), covStatus('deploy', 'SUCCESS')]]);
+    const r = C.merge();
+    assert.equal(r.status, 0, r.text);
+    assert.equal(C.ran(), false);
+    assert.match(r.text, /gate test not run here: .* \(test\)/);
+    assert.ok(C.act().what.includes(`gate test covered by the forge's checks at ${C.sha} (test)`), C.act().what);
+  } finally { C.F.done(); }
+});
+
+test('merge covered_by: when coverage fails, the gate runs as today', async (t) => {
+  const C = coveredFixture('cov-runs');
+  const green = [covRun('test')];
+  // the gate ran here: its marker, one more gate line, and merge's reason
+  const runs = (why, args = ['--dry-run']) => {
+    const before = C.gateLines();
+    const r = C.merge(args);
+    assert.equal(r.status, 0, r.text);
+    assert.equal(C.ran(), true, `the gate ran: ${r.text}`);
+    assert.equal(C.gateLines(), before + 1, 'a gate line for the run');
+    assert.match(r.text, /gate test runs here: /);
+    assert.match(r.text, why);
+    return r;
+  };
+  try {
+    await t.test('covered_by: a pending, failed, missing, neutral or skipped check, or an ignored one failing', () => {
+      const rows = [
+        ['ci', green, [covRun('test'), covPending('lint')], /lint is pending/],
+        [['test'], green, [covFailed('test')], /test is failure/],
+        [['test', 'e2e'], green, green, /e2e is missing/],
+        ['ci', [], [], /the forge reports no checks/],
+        ['ci', [covRun('lint'), covSkipped('test')], [covRun('lint'), covSkipped('test')], /test is skipped/],
+        [['test'], [covNeutral('test')], [covNeutral('test')], /test is neutral/],
+        [['test'], green, [covRun('test'), covFailed('test')], /test is failure/],
+        // a re-run: the old failed attempt first, the new green one after; still not covered
+        [['test'], green, [covFailed('test'), covRun('test')], /test is failure/],
+        ['ci', green, [covFailed('test'), covRun('test')], /test is failure/],
+        [['test'], green, [{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: null }], /test is pending/],
+        [['test'], green, [{ __typename: 'CheckRun', name: 'test' }], /test is pending/],
+      ];
+      for (const [by, first, fresh, why] of rows) {
+        C.setGate({ cmd: C.cmd, covered_by: by });
+        C.gh([first, fresh]);
+        runs(why);
+      }
+      C.setGate({ cmd: C.cmd, covered_by: 'ci' }, { ignored_checks: ['flaky'] });
+      C.gh([[covRun('test'), covFailed('flaky')]]);
+      runs(/flaky is failure \(ignored_checks never counts as coverage\)/);
+      // a lowercase state is uppercased, as today: green
+      C.setGate({ cmd: C.cmd, covered_by: ['test'] });
+      C.gh([green, [covStatus('test', 'success')]]);
+      const r = C.merge(['--dry-run']);
+      assert.equal(r.status, 0, r.text);
+      assert.equal(C.ran(), false, r.text);
+      assert.match(r.text, /not run here/);
+    });
+    await t.test('covered_by: a PR that changes the forge\'s CI configuration runs the gate', () => {
+      C.setGate();
+      const sha2 = C.land('console-02-g', { 'src/main.js': 'again\n', '.github/workflows/test.yml': 'on: pull_request\n' });
+      C.gh([green], { id: 'console-02-g', head: sha2 });
+      const before = C.gateLines(sha2);
+      const r = C.merge(['--dry-run'], 'console-02-g');
+      assert.equal(r.status, 0, r.text);
+      assert.equal(C.ran(), true, r.text);
+      assert.equal(C.gateLines(sha2), before + 1);
+      assert.match(r.text, /gate test runs here: the PR changes the forge's CI configuration \(\.github\/workflows\/test\.yml\)/);
+      assert.equal(C.views().length, 1, 'no re-read needed');
+    });
+    await t.test('covered_by: the head moved since merge read the PR, so the gate runs', () => {
+      C.setGate();
+      C.gh([green, { rollup: green, head: 'f'.repeat(40) }]);
+      runs(/the head moved to f{12}/);
+    });
+    await t.test('covered_by: the PR can\'t be read again, so the gate runs', () => {
+      C.setGate();
+      C.gh([green, 'fail']);
+      runs(/could not read the PR's checks again/);
+    });
+    await t.test('covered_by on a forge "git" repo: no checks to read, the gate runs', () => {
+      C.setGate(undefined, { forge: 'git' });
+      C.gh([green]);
+      runs(/forge is git: no checks to read/);
+      assert.equal(C.views().length, 0, 'gh is never asked');
+    });
+    await t.test('covered_by absent: merge runs the gate though every check is green', () => {
+      C.setGate({ cmd: C.cmd });
+      C.gh([green]);
+      const r = C.merge(['--dry-run']);
+      assert.equal(r.status, 0, r.text);
+      assert.equal(C.ran(), true);
+      assert.equal(C.views().length, 1, 'no re-read when no gate declares covered_by');
+    });
+    await t.test('covered_by of a shape it doesn\'t know runs the gate and warns', () => {
+      for (const [by, extra] of [['yes', {}], [[], {}], ['yes', { forge: 'git' }]]) {
+        C.setGate({ cmd: C.cmd, covered_by: by }, extra);
+        C.gh([green]);
+        const r = C.merge(['--dry-run']);
+        assert.equal(r.status, 0, r.text);
+        assert.equal(C.ran(), true, r.text);
+        assert.match(r.text, /covered_by is not "ci" or a list of check names/);
+      }
+    });
+    await t.test('covered_by with paths that don\'t match: not applicable, never covered', () => {
+      C.setGate({ cmd: C.cmd, paths: ['web/**'], covered_by: 'ci' });
+      C.gh([green]);
+      const r = C.merge(['--dry-run']);
+      assert.match(r.text, /gates not applicable to this PR: test/);
+      assert.doesNotMatch(r.text, /not run here|runs here/);
+      assert.equal(C.views().length, 1);
+    });
+    await t.test('covered_by on a --dry-run with no PR yet: nothing to read, the gate runs', () => {
+      C.setGate();
+      C.gh(['fail']);
+      const body = path.join(C.F.base, 'no-pr-body.md');
+      write(body, '## One-way doors\n\nNone.\n');
+      runs(/gate test runs here: no PR to read/, ['--dry-run', '--title', 'console-01-a: work', '--body-file', body]);
+      assert.equal(C.views().length, 1, 'gh is asked once, for the PR that is not there');
+    });
+    await t.test('covered_by with --no-gates: no re-read of the PR', () => {
+      C.setGate();
+      C.gh([green]);
+      const r = C.merge(['--dry-run', '--no-gates']);
+      assert.equal(r.status, 0, r.text);
+      assert.equal(C.ran(), false);
+      assert.equal(C.views().length, 1);
+    });
+    await t.test('covered_by: the first read still refuses a failing or pending check, as today', () => {
+      C.setGate();
+      C.gh([[covFailed('test')]]);
+      let r = C.merge(['--dry-run']);
+      assert.notEqual(r.status, 0);
+      assert.match(r.text, /the forge's checks failed at \w{12}: test \(failure\)/);
+      assert.equal(C.views().length, 1); assert.equal(C.ran(), false);
+      C.gh([[covPending('test')]]);
+      r = C.merge(['--dry-run']);
+      assert.notEqual(r.status, 0);
+      assert.match(r.text, /still running at \w{12}: test; wait for them/);
+      assert.equal(C.views().length, 1); assert.equal(C.ran(), false);
+    });
+  } finally { C.F.done(); }
+});
+
+// covered_by is the owner's: a change to a gate is gate-change, and a gate the supervisor adds alone can't carry it
+function covChore(F, slug, gates) {
+  const { old, g } = F;
+  const w = path.join(old, '.worktrees', `chore-${slug}`);
+  g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+  const f = path.join(w, 'docs/devteam/project/settings.md');
+  const txt = fs.readFileSync(f, 'utf8');
+  const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const j = JSON.parse(m[1]);
+  j.gates = gates;
+  fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
+  g(['commit', '-qam', slug], w);
+  g(['push', '-q', 'origin', `chore-${slug}`], w);
+  g(['worktree', 'remove', '--force', w], old);
+  write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+}
+function covMainGates(F, gates) {
+  const { old, g } = F;
+  const f = path.join(old, 'docs/devteam/project/settings.md');
+  const txt = fs.readFileSync(f, 'utf8');
+  const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const j = JSON.parse(m[1]);
+  j.gates = gates;
+  fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
+  g(['commit', '-qam', 'gates'], old);
+  g(['push', '-q', 'origin', 'main'], old);
+}
+
+test('covered_by on an existing gate is the owner\'s gate-change', () => {
+  const F = fleetFixture('cov-owner');
+  const { old, ok, run } = F;
+  try {
+    // main's gate in object form, so only covered_by differs
+    covMainGates(F, { test: { cmd: 'true' } });
+    covChore(F, 'cover', { test: { cmd: 'true', covered_by: 'ci' } });
+    // and the same edit riding along with a gate the supervisor may add alone
+    covChore(F, 'ride', { test: { cmd: 'true', covered_by: 'ci' }, lint: 'true' });
+    const merge = (slug, ...extra) => { const r = run(old, ['merge', '--chore', slug, '--dry-run', ...extra], COV_SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+    for (const slug of ['cover', 'ride']) {
+      const none = merge(slug);
+      assert.notEqual(none.status, 0, none.text);
+      assert.match(none.text, /changes owner settings: gates \(gate-change\) \(gates: it changes test; only adding a gate is the supervisor's\)/, slug);
+    }
+    const q = ok(old, ['ask', '--question', 'Let merge trust CI for the test gate?', '--recommendation', 'yes', '--class', 'gate-change', '--reasons', 'owner-only'], COV_SUP);
+    ok(old, ['answer', q, 'yes']);
+    const r = merge('cover', '--approved', q);
+    assert.equal(r.status, 0, r.text);
+  } finally { F.done(); }
+});
+
+test('covered_by on a new gate is not the supervisor\'s to add', () => {
+  const F = fleetFixture('cov-add');
+  const { old, run } = F;
+  try {
+    covMainGates(F, { test: 'true' });
+    covChore(F, 'lint', { test: 'true', lint: { cmd: 'true', covered_by: 'ci' } });
+    const r = run(old, ['merge', '--chore', 'lint', '--dry-run'], COV_SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(`${r.out}\n${r.err}`, /it sets covered_by; a new gate the owner hasn't approved has only cmd, paths, junit, mode/);
+  } finally { F.done(); }
+});
+
+test('validate --strict on a re-plan branch checks its latest design and graph verdicts hold at the head, as a first plan\'s', () => {
+  const F = threadsFixture('replan');
+  try {
+    const { goal } = F.approval();
+    F.owner(['goal', 'decide', goal, 'approve']);
+    const PL = { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'cards' };
+    const at = (wt) => ({
+      ok: (args) => F.ok(wt, args, PL),
+      strict: () => { const r = F.run(wt, ['validate', '--strict'], PL); return { status: r.status, said: `${r.out}\n${r.err}` }; },
+      commit: (msg) => { F.g(['add', '-A'], wt); F.g(['commit', '-qm', msg], wt); return F.g(['rev-parse', 'HEAD'], wt); },
+      reviews: (n, sha) => {
+        write(path.join(wt, `docs/devteam/project/reviews/cards/graph-${n}.md`), review('reviewer-a', sha));
+        write(path.join(wt, `docs/devteam/project/reviews/self-serve-billing/design-${n}.md`), review('reviewer-a', sha));
+      },
+    });
+    const STALE = [/feature cards: graph review graph-\d\.md is at \w{12}, which does not hold at HEAD/, /feature cards: design review design-\d\.md is at \w{12}, which does not hold at HEAD; review again/];
+    const stale = (w, when) => { const r = w.strict(); assert.notEqual(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.match(r.said, re, when); };
+    const fresh = (w, when) => { const r = w.strict(); assert.equal(r.status, 0, `${when}: ${r.said}`); for (const re of STALE) assert.doesNotMatch(r.said, re, when); };
+    // check-pr, the merge gate, validates the pushed head detached, off any branch
+    const gate = (wt) => {
+      const sha = F.g(['rev-parse', 'HEAD'], wt);
+      F.g(['push', '-q', '-f', 'origin', 'plan/cards'], wt);
+      const r = F.run(F.old, ['check-pr', '--head-ref', 'plan/cards', '--sha', sha, '--title', 'plan-cards: cards'], F.SUP);
+      return { status: r.status, said: `${r.out}\n${r.err}` };
+    };
+
+    // a first plan: reviews at its head pass; a ticket changed after them is stale
+    const wt1 = path.join(F.base, 'plan-cards');
+    F.g(['worktree', 'add', '-q', '-b', 'plan/cards', wt1, 'origin/main'], F.old);
+    const w1 = at(wt1);
+    write(path.join(wt1, 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## TL;DR\n\n- cards first\n\n## Goals\n\nadmins pay alone\n');
+    w1.ok(['feature', 'add', 'cards', '--json', JSON.stringify({ title: 'Cards', goals: [goal], preconditions: [`${goal}#1`], design: 'project/designs/self-serve-billing.md', stories: [{ id: 'CARD-S1', text: 'admin adds a card', release: 'v0.2.0' }] })]);
+    w1.ok(['ticket', 'add', 'card-01-capture', '--json', JSON.stringify({ title: 'card capture', feature: 'cards', component: 'card', kind: 'build', size: 'S', risk: 'normal', serves: ['CARD-S1'], depends_on: [], touches: ['cards/**'], done_when: ['card test passes in CI'] })]);
+    w1.reviews(1, w1.commit('plan cards'));
+    const reviewed = w1.commit('reviews');
+    fresh(w1, 'a first plan reviewed at its head');
+    let g = gate(wt1);
+    assert.equal(g.status, 0, `check-pr on a first plan reviewed at its head: ${g.said}`);
+    w1.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
+    w1.commit('after review');
+    stale(w1, 'a first plan changed after its reviews');
+    g = gate(wt1);
+    assert.notEqual(g.status, 0, g.said);
+    for (const re of STALE) assert.match(g.said, re, 'check-pr on a first plan changed after its reviews');
+    F.g(['reset', '-q', '--hard', reviewed], wt1);
+
+    // it lands
+    F.g(['merge', '-q', '--no-ff', '-m', 'Merge pull request #1 from x/plan/cards', 'plan/cards'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.g(['worktree', 'remove', '--force', wt1], F.old);
+    F.g(['branch', '-q', '-D', 'plan/cards'], F.old);
+
+    // a re-plan: the same checks, though the feature's plan log is on main
+    const wt2 = path.join(F.base, 'replan-cards');
+    F.g(['worktree', 'add', '-q', '-b', 'plan/cards', wt2, 'origin/main'], F.old);
+    const w2 = at(wt2);
+    fresh(w2, 'a re-plan with nothing changed since its reviews');
+    w2.ok(['ticket', 'set', 'card-01-capture', '--json', '{"size":"M"}']);
+    w2.commit('re-plan cards');
+    stale(w2, 'a re-plan changed after its reviews');
+    g = gate(wt2);
+    assert.notEqual(g.status, 0, g.said);
+    for (const re of STALE) assert.match(g.said, re, 'check-pr on a re-plan changed after its reviews');
+    w2.reviews(2, F.g(['rev-parse', 'HEAD'], wt2));
+    w2.commit('re-plan reviews');
+    fresh(w2, 'a re-plan reviewed again at its head');
+    g = gate(wt2);
+    assert.equal(g.status, 0, `check-pr on a re-plan reviewed again at its head: ${g.said}`);
+  } finally { F.done(); }
 });

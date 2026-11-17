@@ -539,7 +539,7 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 
   await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
-    await p.ev(`document.querySelector('[data-tl-new]')?.click() ?? (document.getElementById('tl-pill').click(), document.querySelector('[data-tl-new]').click()); void 0`);
+    await p.ev(`document.querySelector('#threads [data-tl-new]').click(); void 0`);
     await soon(`document.activeElement?.id === 'tl-c-text'`, 'the composer');
     await hold();
     await p.type('first words');
@@ -815,6 +815,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
+      // its control is on Progress (one page at a time)
+      await p.ev(`location.hash = '#progress'`);
+      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
       await p.click('#left-only');
       const q = 'After the checkbox?';
       ask(q);
@@ -832,6 +835,9 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
       await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
+      // back to the Inbox, for the card
+      await p.ev(`location.hash = '#inbox'`);
+      await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     });
 
     await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
@@ -1470,7 +1476,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder, URL });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey, tGoRoute, parseSettingView };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
@@ -1593,6 +1599,22 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
   assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
   assert.equal(A.tWhere(null), 'no subject');
+  // a Settings row's thread is a page subject on #settings?key=<key> (spec §8): named from its quote,
+  // else its key; a key of its own, so each row has its own pin and draft
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }), 'Settings, Workers at once, in all');
+  assert.equal(A.tWhere({ kind: 'page', view: '#settings?key=max_active_tickets' }), 'Settings, max_active_tickets', 'the key, with no name to read');
+  assert.notEqual(A.tKey({ kind: 'page', view: '#settings?key=max_active_tickets' }), A.tKey({ kind: 'page', view: '#settings?key=max_active_per_component' }));
+  assert.equal(A.parseSettingView('#settings?key=max_active_tickets'), 'max_active_tickets');
+  for (const v of ['#settings?key=Bad Key', '#settings', '#settings?key=', `#settings?key=a${'b'.repeat(64)}`, '#goals?key=max_active_tickets', null]) assert.equal(A.parseSettingView(v), null, `${v} is no setting view`);
+  // a point on a Settings row: the row, with its plain name, not a spot in the section
+  const setRow = (key) => ({ dataset: { setting: key }, querySelector: (q) => (q === '.set-name' ? { textContent: ' Workers at once,\n in all ' } : null) });
+  const onSet = (row) => ({ closest: (q) => (q === '[data-setting]' ? row : null) });
+  const row1 = setRow('max_active_tickets');
+  const setHit = A.tSubjectAt(onSet(row1), 5, 5, () => sec);
+  assert.deepEqual(plain(setHit.subject), { kind: 'page', view: '#settings?key=max_active_tickets', quote: 'Workers at once, in all' }, 'no at: the row is the spot');
+  assert.equal(setHit.title, 'Setting · Workers at once, in all (max_active_tickets)');
+  assert.equal(setHit.el, row1, 'the row is what the layer outlines and places the card by');
+  assert.equal(A.tSubjectAt(onSet(setRow('Bad Key')), 200, 250, () => sec).subject.view, '#loop/observe', 'a key the page would not write is a spot in its section');
   // one pin per subject, numbered by when its first open thread began; resolved and no-subject threads get none
   const onGoal = { kind: 'item', ref: `goal:${G}` };
   const t = (id, created, subject, status = 'open') => ({ id, created_at: created, subject, status, turns: [] });
@@ -1893,9 +1915,11 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     await soon(`document.getElementById('av-title').textContent === 'Viewer mock' && document.getElementById('av-project').textContent === 'viewer-page'`, 'the bar');
     assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), '/artifact/main/viewer-mock/');
     assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
-    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 0 && r.width === innerWidth && r.height === innerHeight; })()`), true, 'the whole tab');
+    // the whole tab below a --bar-h band, where the Inbox button floats at the top right (kit-89 spec §2.8)
+    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 49 && r.width === innerWidth && r.height === innerHeight - 49; })()`), true, 'the whole tab below the band');
+    await soon(`(() => { const m = document.getElementById('tt-peek'), c = getComputedStyle(m), r = m.getBoundingClientRect(); return c.display !== 'none' && c.visibility === 'visible' && c.opacity === '1' && r.bottom <= 49 && Math.abs(innerWidth - r.right - 16) <= 1; })()`, '#tt-peek shown at the top right');
     assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.fp === TS.mainFp, /^[0-9a-f]{64}$/.test(TS.fp)].join()`), 'artifact,viewer-mock,main,true,true');
-    assert.equal(await p.ev(`getComputedStyle(document.getElementById('tl-pill')).display !== 'none'`), true, 'the dock');
+    assert.equal(await p.ev(`!document.getElementById('tl-pill') && !!document.getElementById('threads')`), true, 'no dock; the Threads panel');
   });
 
   await t.test('it polls the threads and hello, and never /api/data', async () => {
@@ -2561,7 +2585,10 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 
   await t.test('in pin mode the wheel scrolls the artifact, and the pin follows', async () => {
     await p.ev('document.activeElement?.blur()');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    // the panel's Pin, with the viewer up: #tt-peek above the viewer opens the panel, then Pin
+    await soon(`getComputedStyle(document.getElementById('tt-peek')).opacity === '1'`, '#tt-peek above the viewer');
+    await p.click('#tt-peek');
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel over the viewer');
     await p.click('#tl-pinbtn');
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay in pin mode');
     const at = await frameAt(300, 300);
@@ -2569,6 +2596,8 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
     await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && parseInt(b.style.top, 10) === 140 - 100 - 11; })()`, 'the pin, 100 px up');
     await p.key('Escape');
     await soon(`document.getElementById('av-over').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && !document.getElementById('artifact-view').hidden`, 'the panel closed, the viewer still up');
   });
 
   await t.test('the pin opens its card beside it, and the card says when the artifact changed since', async () => {
@@ -3134,6 +3163,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   const click = (sel) => still(async () => { await p.click(sel); await released(); });
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
+  // the peek slid in (kit-88): shown, and at rest, so a point read on it stays where it is
+  const slid = () => `${shown('drawer')} && getComputedStyle(document.getElementById('drawer')).transform === 'none'`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
   let T;
@@ -3172,6 +3203,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
+    // the field is on the Inbox page (one page at a time)
+    await p.ev(`location.hash = '#inbox'`);
+    await soon(`getComputedStyle(document.querySelector('#inbox')).display !== 'none'`, 'the Inbox page');
     await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
@@ -3179,11 +3213,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    await still(async () => { const g = await p.at(`${goalSel} h4`); await p.move(g.x, g.y, 8); });
+    await still(async () => { const g = await p.at('#inbox h2'); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+    await p.ev(`location.hash = '#goals'`);
+    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
@@ -3350,6 +3386,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon('TL.polling === null', 'no poll with no thread open');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');
+    // The link followed again before the Back's hashchange is handled (a loaded runner's pace, or an
+    // owner's quick click): history.go fires popstate at once and queues hashchange, so the new entry
+    // must be stamped from #goals, not from the card's entry Back left; else its × goes back two.
+    await p.ev(`addEventListener('popstate', () => { location.hash = '#talk/${T}'; }, { once: true }); void 0`);
+    await p.ev("document.getElementById('tl-c-text').focus()");
+    await p.key('Escape');
+    // (the subject's page head carries the card's t since kit-89, spec §2.5)
+    await soon(`${shown('tl-card')} && location.hash === '#talk/${T}' && history.state?.page === '#goals?t=${T}'`, 'the link followed again at once');
+    assert.equal(await p.ev('history.state.depth'), 1, 'one entry above #goals');
   });
 
   await t.test('a numbered pin on the goal, placed again after the 10 s rebuild, opening the thread without Shift', async () => {
@@ -3368,26 +3413,26 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
   });
 
-  await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
+  await t.test('the panel: the Inbox button counting a reply, where each subject is, New thread with no subject', async () => {
     await click('[data-tl-close]');
     F.sup(['thread', 'reply', T, 'Noted.']);
-    await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
-    await click('#tl-pill');
-    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
+    await soon(`document.querySelector('.pagebar .tt .n.th.you')?.textContent === '1'`, 'the count: one your move');
+    { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals') && !!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you')`, 'where its subject is, and its mark');
     await click('[data-tl-new]');
-    await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
+    await soon(`${shown('tl-card')} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'a card in the panel');
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('What about onboarding?');
     await p.key('Enter', 8);
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
-    await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
-    await click('[data-tl-close]');
+    await click('[data-tl-back]');
+    await soon(`/Open 2/.test(document.querySelector('#th-pane [data-thf="open"]')?.textContent)`, 'two open');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
     await click('#tl-pinbtn');
     assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
     await still(async () => { const at = await p.at(`${goalSel} h4`); await p.move(at.x, at.y, 0); });
@@ -3396,9 +3441,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
 
-  await t.test("a dock row keeps the keyboard's focus through reads that change the list", async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
+  await t.test("a panel row keeps the keyboard's focus through reads that change the list", async () => {
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    // the owner's word first, so the supervisor's reply below changes the row's mark
+    F.owner(['thread', 'say', T, 'Over to you.']);
+    await p.ev('tlRefresh()');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.wait')`, 'its row, waiting on the supervisor');
     await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
     F.sup(['thread', 'reply', T, 'One more thing.']);
     // a read begun now, and the polls beside it: waited on until one has brought the reply in
@@ -3407,12 +3455,13 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.ok(await p.ev('document.activeElement === window.__row && window.__row.isConnected'), 'focus still on the same row');
     await p.ev('window.__row.blur()');
     await p.ev('tlRefresh()');
-    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`, 'drawn once focus left, its dot named');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .th-st.you[role="img"][aria-label]')`, 'drawn once focus left, its mark named');
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
-    await click('#tl-pill');
-    await soon(`document.getElementById('tl-panel').hidden`, 'the panel closed');
+    await click('#th-close');
+    // closed, and the page back at rest (its margin slides over --dur), so the pin stays where it is found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed, the page at rest');
     // still from finding the pin to pressing it; the reads then land under the press
     const at = await still(async () => {
       const xy = await p.at('.tl-pin');
@@ -3543,10 +3592,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
     await soon(`!document.getElementById('t-q-${Q}')?.querySelector('textarea, button[data-answer]') && /ship it/.test(document.getElementById('tl-c-turns').textContent)`, 'answered in the thread too');
     const X = F.owner(['thread', 'new', 'hello', '--title', `${H} hello`]).split('\n')[0];
-    await p.ev(`tlOpen('${X}')`);
-    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)}`, 'the title as written');
-    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!window.__xss`), false, 'no element made from the title');
-    await click('[data-tl-close]');
+    // no subject: it opens in the panel, through the route
+    await p.ev(`location.hash = '#goals?th=open&t=${X}'`);
+    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)} && !!document.querySelector('#th-card-slot #tl-card.in-panel')`, 'the title as written');
+    assert.equal(await p.ev(`!!document.querySelector('#tl img, #threads img') || !!window.__xss`), false, 'no element made from the title');
+    await soon(`getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await click('[data-tl-back]');
+    // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+    await soon(`location.hash === '#goals?th=open' && !!document.querySelector('#tl-list')`, 'the list');
+    await click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && location.hash === '#goals'`, 'the panel closed');
     F.owner(['thread', 'resolve', X]);
     await p.ev('tlRefresh()');
     await click(`[data-tl-pin="${T}"]`);
@@ -3634,19 +3689,24 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-accept]');
     await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
     await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
-    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
+    if (!await p.ev(`document.body.classList.contains('threads-open')`)) { await click('.pagebar .tt'); await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest'); }
+    await click('#th-pane [data-thf="resolved"]');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'listed under Resolved');
     assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
     assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
   });
 
   await t.test('a resolved thread reopens from its card', async () => {
-    await p.ev(`document.querySelector('.tl-resolved').open = true`);
-    await click(`.tl-resolved [data-tl-open="${T}"]`);
+    await click(`#tl-list [data-tl-open="${T}"]`);
     await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
     await click('[data-tl-reopen]');
     await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
+    // the panel closed (by its ×, pressed in place: the card may sit over it)
+    await p.ev(`document.getElementById('th-close').click(); void 0`);
+    // and the page at rest after its slide back (the card on it placed again), so the next press lands where it was found
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'`, 'the panel closed');
+    await p.ev(FRAMES);
   });
 
   await t.test('a press on Resolve across a read still opens the form', async () => {
@@ -3713,7 +3773,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
     await p.ev(`location.hash = '#goal/${F.goal}'`);
-    await soon(shown('drawer'), 'the drawer');
+    await soon(slid(), 'the drawer');
     const at = await p.at('#drawer-close');
     await p.hold('Shift', true);
     await p.move(at.x, at.y, 8);
@@ -3743,6 +3803,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`location.hash = '#talk/${R}'`);
     // its own card: the card already open has a Resolve too, until the read of the new thread lands
     await soon(`document.getElementById('tl-card').dataset.key === '${R}' && !!document.querySelector('[data-tl-resolve]')`, 'its card');
+    // no subject: its card is in the Threads panel, which the link opened; pressed once it has slid in
+    await soon(`!!document.querySelector('#th-card-slot #tl-card.in-panel') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
     await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form');
     await p.ev(`document.getElementById('tl-outcome').focus()`);
@@ -4215,13 +4277,16 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   // a click anywhere on the card (here its detail, no link in it) opens it
   await click(`${card(O1)} > div`);
   await soon(`location.hash === '#observation/${O1}' && !document.getElementById('drawer').hidden`, 'the observation sidepeek');
-  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body [data-from]')?.textContent ?? '')`, 'where it came from, first');
-  // an attribute's value, by its label (the label's tooltip is in its text)
+  // where it came from, under its properties (kit-88: every peek opens with its properties)
+  await soon(`/From the supervisor/.test(document.querySelector('#drawer-body section.attrs + [data-from]')?.textContent ?? '')`, 'where it came from, under the properties');
+  // an attribute's value, by its label (its tooltip is the key's title)
   const attr = (label) => p.ev(`[...document.querySelectorAll('#drawer-body .attrs dt')].find((x) => x.textContent.startsWith(${JSON.stringify(label)}))?.nextElementSibling?.textContent ?? null`);
   assert.equal(await attr('Where it sits'), 'Part of a recurring signal (2 of 3)', 'two slow-test notes on app, of the three a signal takes');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Observation/);
   // a signal whose key holds a /: its card opens #signal/<key>
   await p.ev(`document.getElementById('drawer-close').click()`);
+  // closed once it has slid out (kit-88): until then it still covers the cards under it
+  await soon(`document.getElementById('drawer').hidden`, 'the peek closed');
   await click('[data-tab="orient"]');
   const sig = `#clusters [data-open="signal/${encodeURIComponent('metrics:flaky-gate:web/e2e')}"]`;
   await soon(`!!document.querySelector(${JSON.stringify(sig)})`, 'the signal card');
@@ -4229,7 +4294,7 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   assert.match(await p.ev(`document.getElementById('debt').textContent`), /Metrics flaky-gate:web\/e2e · seen 3 times · unexplained for 30 hours/);
   await click(`${sig} > div`);
   await soon(`decodeURIComponent(location.hash) === '#signal/metrics:flaky-gate:web/e2e' && !document.getElementById('drawer').hidden`, 'the signal sidepeek');
-  await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
+  await soon(`document.querySelectorAll('#drawer-body .psect-body > ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
   assert.equal(await attr('Unexplained for'), '30 hours');
   // the lineage: Mermaid blocked, the list stands in, every record in it a link
@@ -4248,6 +4313,8 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
   assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  // the peek at rest (kit-88: it reopened as the last one slid out), so the click lands where the node is
+  await soon(`getComputedStyle(document.getElementById('drawer')).transform === 'none'`, 'the peek at rest');
   await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });

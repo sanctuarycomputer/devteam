@@ -46,11 +46,11 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     // the old drain now asks which you mean; a worker can't park the fleet
     assert.match(run(old, ['drain', '--reason', 'x'], SUP).err, /fleet park stops every session .*fleet drain lets in-flight work finish/);
     assert.match(run(ww, ['fleet', 'park'], WRK).err, /fleet: the supervisor does this/);
-    const parked = ok(old, ['fleet', 'park', '--reason', 'new laptop'], SUP);
+    const parked = ok(old, ['fleet', 'park', '--move', '--reason', 'new laptop'], SUP);
     assert.match(parked, /parked the fleet \(f-\d{8}-\d{9}\): 1 goal\(s\) set to park, Upkeep included/);
     assert.match(parked, new RegExp(`told ${ID} to commit, push, write a handoff and park`));
     const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'fleet-park');
-    assert.match(act.what, /^parked the fleet on \S+ \(f-\d{8}-\d{9}\): new laptop$/);
+    assert.match(act.what, /^parked the fleet on \S+ \(f-\d{8}-\d{9}\) to move it: new laptop$/);
     const msg = json(ok(old, ['messages', '--to', ID, '--json'])).pop();
     assert.match(msg.text, /^Park: the fleet is parked \(new laptop\)\. .*devteam\.mjs handoff.*phase parked --note "parked"/);
     assert.equal(ok(old, ['fleet', 'park'], SUP), 'every goal is already parked; nothing to do');
