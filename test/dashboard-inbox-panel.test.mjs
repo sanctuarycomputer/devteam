@@ -731,9 +731,21 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     const gone = (id) => soon(`!document.querySelector(${JSON.stringify(IN(`[data-qcard="${id}"]`))})`, `${id}'s card left the Inbox`)
       .catch(async (e) => assert.fail(`${e.message}; its error line: ${JSON.stringify(await p.ev(`document.getElementById('e-${id}')?.textContent ?? null`))}; its posts: ${JSON.stringify(await p.ev(`window.__posts.filter((x) => x.body?.id === '${id}').map((x) => [x.url, x.status, x.out])`))}`));
     await p.send('Page.bringToFront');
+    // at 1440 (a peek opens beside the panel), whatever size an earlier subtest left
+    await size(1440, 900);
+    await soon('innerWidth === 1440', 'at 1440');
     await p.ev("location.hash = '#overview?th=inbox'");
     await soon(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && !!document.getElementById('q-${q1}')`, 'Overview, the panel on Inbox');
-    await p.ev(`(() => { window.__posts = []; const f = window.fetch; window.fetch = (u, o) => { const url = String(u && u.url ? u.url : u).split('?')[0];
+    // (while window.__stale is set, a GET of /api/data is answered with the last one read before it was set: a read begun
+    // before an answer, landing after it; window.__staleN counts them, window.__reading the real reads under way)
+    await p.ev(`(() => { window.__posts = []; window.__stale = false; window.__staleN = 0; window.__reading = 0; let last = null;
+      const f = window.fetch; window.fetch = (u, o) => { const url = String(u && u.url ? u.url : u).split('?')[0];
+      if (url === '/api/data' && String(o?.method || 'GET').toUpperCase() === 'GET') {
+        if (window.__stale && last) { window.__staleN++; return Promise.resolve(new Response(last.text, { status: 200, headers: last.headers })); }
+        window.__reading++;
+        return f(u, o).then(async (r) => { const text = r.ok ? await r.clone().text() : null; if (text !== null && !window.__stale) last = { text, headers: [...r.headers] }; window.__read = true; return r; })
+          .finally(() => setTimeout(() => { window.__reading--; }, 300));
+      }
       if (String(o?.method || 'GET').toUpperCase() !== 'POST' || !url.startsWith('/api/')) return f(u, o);
       const x = { url, body: JSON.parse(o.body || 'null') }; window.__posts.push(x);
       return f(u, o).then(async (r) => { x.status = r.status; x.out = await r.clone().text(); return r; }); }; })()`);
@@ -742,10 +754,22 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await press(IN(`[data-qcard="${q1}"] input[data-pick][value="Stripe"]`), "q1's Stripe");
     await press(IN(`input[data-rulebox="${q1}"]`), "q1's rule box");
     await soon(`document.querySelector(${JSON.stringify(IN(`input[data-rulebox="${q1}"]`))}).checked`, 'the rule box checked');
+    // the counts leave out a question answered on this page (inboxCount's ANSWERED, spec §2.2), even where the data read
+    // after the answer still has it open: the answer's read is the one from before it
+    await soon('window.__read === true', 'a read of the data through the wrap');
+    await p.ev('window.__stale = true; void 0');
+    // (no real read under way, none landed in the last 300 ms: none can land after the answer and drop it from ANSWERED)
+    await soon('window.__reading === 0', 'no read of the data under way');
     await press(IN(`[data-answer="${q1}"]`), "q1's Answer");
     const b1 = await posted('/api/answer', q1);
     assert.equal(b1.answer, 'Stripe');
     assert.equal(b1.rule, 'Stripe: the standing answer to questions like “Which processor?”', 'the rule box rides on the answer');
+    const COUNTS = `[${TAB('inbox')}.querySelector('.n')?.textContent, document.querySelector('.pagebar .tt .n.q')?.textContent, document.title.match(/^\\((\\d+)\\)/)?.[1]]`;
+    await soon(`window.__staleN > 0 && RAW.questions.some((q) => q.id === '${q1}') && !document.querySelector(${JSON.stringify(IN(`[data-qcard="${q1}"]`))})`, "a read with q1 still open, drawn")
+      .catch(async (e) => assert.fail(`${e.message}: ${JSON.stringify(await p.ev(`[window.__staleN, ${COUNTS}]`))}`));
+    await p.ev(FRAMES);
+    assert.deepEqual(await p.ev(COUNTS), ['8', '8', '8'], 'the tab, .tt and the title say 8');
+    await p.ev('window.__stale = false; void 0');
     await gone(q1);
     // one redraw after the data says q1 is answered: Q's subject is no longer in the Inbox, so no pin of Q's in the panel
     await soon(`!RAW.questions.some((q) => q.id === '${q1}')`, 'the data without q1');
