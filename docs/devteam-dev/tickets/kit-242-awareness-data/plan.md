@@ -9,9 +9,7 @@
 - **Task 2.** `awarenessData(now)` gives each of the 12 weeks its four parts and a score. Each week is computed inside `withLogAt(E)` (E = min(week end, now)), and weeks that end before the log's first line are skipped. Explanation times come from the citing records' first line that carries the item, and from noise rulings made at or after the first sighting.
 - **Task 3.** It adds up to five suggestions (incidents, then the lessons suggestion, then signals) with safe, de-duplicated `aw-` ids.
 - **Task 4.** It adds `autonomy_score`, the rounded mean of trust, efficiency and awareness, null if any is null. It re-records the G1 golden, checks the server path and that every block's `starts_at` lines up, and times one request on the home log.
-- **Tests and risks.**
-  - One hand-written fixture with every case and its hand-computed answers (the table below). Tests run one file at a time at `--test-concurrency=2`, and CI is the gate.
-  - Risks: ties in time order, a Monday-boundary run (the tests skip within 10 minutes of it), and cost (up to 11 folds per request).
+- **Tests and risks.** One hand-written fixture holds every case and its hand-computed answers (the table below). Tests run one file at a time at `--test-concurrency=2`, and CI is the gate. The risks are ties in time order, a Monday-boundary run (the tests skip within 10 minutes of it), and cost (up to 11 folds per request).
 
 **Goal:** `/api/data` carries `awareness` and `autonomy_score` exactly as `spec.md` defines them.
 
