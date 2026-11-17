@@ -89,3 +89,7 @@ Model: fast.
 - [ ] A10: `git diff --name-status --diff-filter=A origin/main...HEAD` lists only `test/` and this ticket's records folder.
 - [ ] Push; once GitHub CI (test.yml) has run on the head, record it with `node /data/home/code/devteam-dev/docs/devteam/scripts/devteam.mjs gate ci -- sh /data/home/code/devteam-dev/scripts/devteam-ci-green.sh <full head sha>` (never `-- true`, never piped) and confirm every job of that run succeeded.
 - [ ] `verification.md`: a row per done-when (4) with the command and result at a named commit.
+
+## Rulings after approval
+
+- m-20261117-044852436-supervisor: the 35 docs/superpowers files are on devteam-dev's main at 956dd43 under `docs/devteam/project/designs/superpowers/` (plans/ and specs/), copied verbatim from kit main ace3fb14; this replaces Q5's path. T4 checks against that path.
