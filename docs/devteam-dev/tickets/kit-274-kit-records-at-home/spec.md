@@ -15,7 +15,7 @@ item 1). Two gaps stop that:
    views (timeline, reviews) until someone copies them into home.
 2. **worker.md** still says a link ticket's records always go in that repo.
 
-And the kit carries docs/superpowers/ (20 plans and 13 specs of devteam-dev's own work), which the
+And the kit carries docs/superpowers/ (20 plans and 15 specs of devteam-dev's own work), which the
 owner wants out of the kit.
 
 ## Rulings (m-20261117-042330671-kit-274-kit-records-at-home, answered m-20261117-042417966-supervisor)
@@ -26,8 +26,9 @@ owner wants out of the kit.
 - Q3: no sweep command. The supervisor copies the kit's docs/devteam-dev/ records into devteam-dev
   and removes the folder from the kit in a one-off reviewed chore PR.
 - Q4: provenance only: the home commit names the kit main sha it copied from.
-- Q5: docs/superpowers/ goes to devteam-dev's docs/superpowers/ (same path), copied by the
-  supervisor before this merges. This PR only deletes it from the kit.
+- Q5: docs/superpowers/ goes to devteam-dev, copied by the supervisor before this merges; this PR
+  only deletes it from the kit. Path, as ruled later (m-20261117-044852436-supervisor):
+  `docs/devteam/project/designs/superpowers/` (plans/ and specs/), 35 files.
 - Q6: `test/multirepo-home.test.mjs` added to touches.
 
 ## The transition rule
@@ -173,8 +174,8 @@ Done-when 2 (the transition rule), all in `test/multirepo-home.test.mjs`, new te
 
 Done-when 3 (no docs/superpowers/):
 - A9. `git ls-tree -r --name-only HEAD -- docs/superpowers` is empty at the PR head; and before the
-  merge request, `git -C <devteam-dev main> ls-tree -r origin/main -- docs/superpowers` lists the
-  same 33 files (the supervisor's copy). Fails if any file remains in the kit, or the copy isn't on
+  merge request, every one of the kit's 35 `docs/superpowers/` files is byte-identical on
+  devteam-dev's `origin/main` under `docs/devteam/project/designs/superpowers/` (the supervisor's copy). Fails if any file remains in the kit, or the copy isn't on
   devteam-dev's main yet (then I hold the merge request).
 
 Done-when 4 (no new file or folder outside test/):

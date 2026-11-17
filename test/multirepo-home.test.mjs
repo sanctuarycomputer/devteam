@@ -474,6 +474,43 @@ test('records in home: a ticket whose records were left in the link merges from 
     });
     const d = leftInLink(F, 'console-04-d', { files: {}, final: false });
     assert.match(check('console-04-d', d.head).out, /no records for console-04-d in home/);
+    // home wins on home's main alone too (a records PR merged first, its branch deleted): the link's
+    // folder is refused, with no warning
+    const gg = leftInLink(F, 'console-07-g');
+    write(path.join(old, T('console-07-g'), 'spec.md'), '# spec on home main\n');
+    g(['add', T('console-07-g')], old); g(['commit', '-qm', 'console-07-g records on main'], old); g(['push', '-q', 'origin', 'main'], old);
+    const outsideG = new RegExp(`changes files outside touches: ${T('console-07-g')}/`);
+    const ck7 = check('console-07-g', gg.head);
+    assert.match(ck7.out, outsideG);
+    assert.equal(warnings(ck7.err, 'console-07-g'), 0, ck7.err);
+    assert.match(runIn(old, ['merge', 'console-07-g', '--dry-run'], SUP).out, outsideG);
+    // merge and check-pr decide at the PR head, not the link's local branch (here reset to trunk,
+    // where there is no records folder: the views form would route it home and find none)
+    const hh = leftInLink(F, 'console-08-h');
+    g(['checkout', '-q', '--detach'], hh.w); g(['branch', '-f', 'ticket/console-08-h', 'origin/trunk'], hh.w);
+    const dry8 = runIn(old, ['merge', 'console-08-h', '--dry-run'], SUP);
+    assert.match(dry8.out, /ok: ticket\/console-08-h at \w{12} would merge in console/, dry8.out);
+    assert.equal(warnings(dry8.err, 'console-08-h'), 1, dry8.err);
+    const pr8 = checkPr('console-08-h', hh.head);
+    assert.equal(pr8.status, 0, pr8.out);
+    assert.equal(warnings(pr8.err, 'console-08-h'), 1, pr8.err);
+  } finally { F.done(); }
+});
+
+test('records in home: a link left on records "repo" (the default) never reads as left in the link', () => {
+  const F = multiFixture('records-repo-default');
+  const { old, g, runIn, ticket } = F;
+  const id = 'console-01-a';
+  try {
+    ticket(id);
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/trunk'], F.console);
+    write(path.join(w, `docs/devteam/project/tickets/${id}/spec.md`), '# spec\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'records in the link'], w);
+    const ck = runIn(old, ['check-ticket', id, '--sha', g(['rev-parse', 'HEAD'], w)]);
+    assert.equal(warnings(ck.err, id), 0, ck.err);
+    assert.doesNotMatch(ck.err, /left from before/);
+    assert.doesNotMatch(ck.out, /no records for .* in home|changes files outside touches/, ck.out);
   } finally { F.done(); }
 });
 
