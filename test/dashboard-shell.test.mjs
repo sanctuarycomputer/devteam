@@ -128,8 +128,8 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   // the hub has no .shell until its own ticket (kit-94)
   const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
   assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
-  // Goals is ported (kit-90); Overview stays fenced until kit-90's Overview task ports it
-  for (const id of ['overview', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
+  // Goals and Overview are ported (kit-90), so neither is in the fenced list
+  for (const id of ['progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
     const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);

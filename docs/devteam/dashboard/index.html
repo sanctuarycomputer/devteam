@@ -945,6 +945,31 @@ try {
   #goals .card.goal { max-width: none; }
   #goals .goal-next { max-width: var(--measure); }
   #goals > #unassigned { margin-top: 12px; }
+  /* Overview (kit-90): a header with the status pill at its far right, then the shell's ruled sections */
+  #overview .ov-head { margin-bottom: 14px; }
+  #overview .ov-head .ov-pill { margin-left: auto; display: inline-flex; flex: none; }
+  #overview .sec-b { min-width: 0; }
+  #overview .rowline .r { margin-left: auto; flex: none; color: var(--fg-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #overview .rows > .rowline { padding: 2px 6px; border-radius: 6px; }
+  #overview a.rowline { color: inherit; text-decoration: none; }
+  #overview a.rowline:hover { background: var(--hover); }
+  #overview a.rowline:focus-visible, #overview a.ov-goal:focus-visible { outline: 2px solid var(--blue-fg); outline-offset: 1px; }
+  #overview .stats { row-gap: 14px; }
+  #overview .stats .stat { background: none; border: 0; box-shadow: none; padding: 0; border-radius: 0; min-width: 0; }
+  #overview .stats .stat[title] { cursor: help; }
+  #overview .stat .k { display: block; font-size: 12px; color: var(--fg-2); }
+  #overview .stat .k i { font-size: 12px; color: var(--muted); }
+  #overview .stat .sparkline { display: block; margin-top: 6px; }
+  #overview .ov-goals { align-items: stretch; }
+  .ov-goal { display: block; min-width: 0; box-sizing: border-box; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; color: inherit; text-decoration: none; }
+  .ov-goal:hover { background: var(--hover); }
+  .ov-goal .steps { margin: 6px 0 2px; }
+  .chip-next { display: inline-flex; align-items: center; height: 18px; padding: 0 7px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--fg); color: var(--bg); flex: none; }
+  /* Commit history: a column a week, a row a day, each cell 10px tall, the section's body wide */
+  #overview .mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 10px); gap: 3px; width: 100%; }
+  #overview .mosaic i { border-radius: 2px; background: var(--well); min-width: 0; }
+  #overview .mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); } #overview .mosaic i.l2 { background: color-mix(in srgb, var(--green) 55%, var(--well)); }
+  #overview .mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); } #overview .mosaic i.l4 { background: var(--green); }
   .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
 </style>
@@ -972,9 +997,10 @@ try {
   <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
   <div class="stale-note" id="stale" role="status" hidden></div>
   <p class="loading" id="loading">Loading…</p>
-  <section id="overview" class="no-shell" data-page="overview">
+  <section id="overview" data-page="overview">
+    <div id="ov-head" class="ov-head"></div>
     <div id="down-banner" class="down-banner" role="alert" hidden></div>
-    <div class="grid" id="stats"></div>
+    <div id="ov-secs"></div>
   </section>
 
   <section id="goals" data-page="goals">
@@ -5632,10 +5658,138 @@ function renderLibrary(lib) {
   if (AV?.slug) avHeader();
 }
 
+/* score-of start */
+// The Overview's Autonomy row (kit-90): each tile's label, the path of its score record in /api/data,
+// and where in that record its % sits. The place is named per tile, never guessed: autonomy_score
+// (kit-242) keeps it at this_week with no score object, while autonomy.decisions (kit-98), efficiency
+// (kit-173) and awareness (kit-242) keep it at score.this_week (autonomy.decisions' own this_week is a
+// week record). Uses nothing but its arguments.
+const SCORE_TILES = [['autonomy score', 'autonomy_score', 'this_week'], ['trust score', 'autonomy.decisions', 'score.this_week'], ['efficiency score', 'efficiency', 'score.this_week'], ['awareness score', 'awareness', 'score.this_week']];
+// A dotted path's value, through own properties only; undefined where any step is missing.
+function scoreAt(o, dotted) {
+  let v = o;
+  for (const k of String(dotted).split('.')) {
+    if (v === null || typeof v !== 'object' || !Object.prototype.hasOwnProperty.call(v, k)) return undefined;
+    v = v[k];
+  }
+  return v;
+}
+// A score record's % (rounded; null unless a finite number sits at its place) and its last 12 weeks'
+// scores, oldest first (a null week, or one with no score, stays null; no array, no weeks).
+function scoreOf(rec, at = 'score.this_week') {
+  const num = (x) => typeof x === 'number' && Number.isFinite(x);
+  const v = scoreAt(rec, at);
+  const weeks = rec && typeof rec === 'object' && Array.isArray(rec.weeks) ? rec.weeks.slice(-12).map((w) => (w && typeof w === 'object' && num(w.score) ? w.score : null)) : [];
+  return { pct: num(v) ? Math.round(v) : null, weeks };
+}
+/* score-of end */
+// The open question devteam.mjs next names: the first in /api/data's order. Its row and card carry the Next chip.
+const NEXT_ID = () => DATA?.questions?.[0]?.id ?? null;
+// /api/hello, as the hub reads it (pulse: state, last_activity, activity): asked on load and with each
+// redraw; a failed ask keeps the last answer (or none, and the pill says unknown).
+let HELLO = null;
+async function helloLoad() {
+  try {
+    const r = await fetch('/api/hello', { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return;
+    HELLO = await r.json();
+  } catch { return; }
+  if (DATA) renderOverview();
+}
+// "2 min ago", as the hub says it
+function ovAgo(iso) {
+  const t = Date.parse(iso ?? '');
+  if (!(t > 0)) return 'never';
+  const m = Math.max(0, Math.round((Date.now() - t) / 60000));
+  return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+}
+const BUGS_MERGED_TIP = 'A production error traced to a merged change, or one you reported. Shown once the project has a production sensor.';
+const AUTONOMY_SCORE_TIP = 'The mean of the Trust, Efficiency and Awareness Scores, weighted equally; – until all three exist';
+// Commit history: hello's commits a day, oldest first, as a column a week and a row a day
+function ovMosaic(activity) {
+  const xs = Array.isArray(activity) ? activity.map((x) => (Number.isFinite(x) && x > 0 ? x : 0)) : [];
+  const max = Math.max(0, ...xs), n = xs.length;
+  const cells = xs.map((x, i) => {
+    const day = new Date(Date.now() - (n - 1 - i) * 864e5).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `<i${x ? ` class="l${Math.max(1, Math.ceil((4 * x) / max))}"` : ''} title="${esc(`${day}: ${x} commit${x === 1 ? '' : 's'}`)}"></i>`;
+  }).join('');
+  return `<div class="mosaic" role="img" aria-label="Commits a day, the last ${Math.ceil(n / 7)} weeks" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(n / 7))}, minmax(0, 1fr))">${cells}</div>`;
+}
+// Overview: the header (name, summary, status pill), then the ruled sections: Status, Numbers,
+// Autonomy, Goals, Needs you, Commit history. Each part is written only when it changed.
+const OV_DRAWN = new WeakMap();
+const ovSet = (el, html) => { if (el && OV_DRAWN.get(el) !== html) { OV_DRAWN.set(el, html); el.innerHTML = html; } };
+const ovSec = (label, body) => `<section class="sec"><div class="lbl">${esc(label)}</div><div class="sec-b">${body}</div></section>`;
+const ovTile = (span, label, value, tip = '', extra = '') => `<div class="${span} stat"${tip ? ` title="${esc(tip)}"` : ''}><span class="k">${esc(label)}${tip ? ' <i class="icon-info" aria-hidden="true"></i>' : ''}</span><b>${esc(value)}</b>${extra}</div>`;
+const ovRow = (dot, t, r) => `<div class="rowline"><span class="dot${dot ? ` ${dot}` : ''}"></span><span class="t">${esc(t)}</span><span class="r">${esc(r)}</span></div>`;
+function renderOverview() {
+  const d = DATA;
+  if (!d) return;
+  const m = d.metrics, p = d.progress, o = d.ooda, R = o.roadmap;
+  const now = Date.parse(p.now);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  // a worker is active until its ticket merges, as the kit counts slots (activeWorker)
+  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
+  const qs = (d.questions || []).filter((q) => !ANSWERED.has(q.id));
+  const name = d.project && !String(d.project).startsWith('<') ? String(d.project) : HELLO?.name ?? 'devteam';
+  ovSet($('ov-head'), `<h2>${esc(name)}</h2><span class="sum">${esc(`${plural(qs.length, 'question')} · ${plural(active, 'ticket')} in flight`)}</span><span class="ov-pill">${statusPill(HELLO?.pulse?.state ?? 'unknown')}</span>`);
+
+  // Status: the supervisor as /api/threads has its terminal (askSet keeps it), else hello's last move
+  const ask = ASK.q;
+  const last = HELLO?.pulse?.last_activity;
+  const sup = ask ? (ask.kind === 'limit' ? ['amber', 'at a usage limit'] : ['red', 'stopped at a prompt']) : last ? ['green', `last moved ${ovAgo(last)}`] : ['', '–'];
+  const cap = d.caps?.max_active_tickets;
+  const pl = d.planners || [], stopped = pl.filter((x) => x.waiting).length;
+  const sn = d.sensors || [], up = sn.filter((x) => ['up', 'ok'].includes(x.state)).length, down = sn.filter((x) => x.state === 'down').length;
+  const status = `<div class="rows">${[
+    ovRow(sup[0], 'Supervisor', sup[1]),
+    ovRow(active ? 'green' : '', 'Workers', typeof cap === 'number' ? `${active} of ${cap}` : `${active} active, no cap`),
+    ovRow(stopped ? 'red' : pl.length ? 'blue' : '', 'Planners', pl.length ? `${pl.length} planning${stopped ? `, ${stopped} stopped` : ''}` : 'none'),
+    ovRow(down ? 'red' : sn.length && up === sn.length ? 'green' : sn.length ? 'amber' : '', 'Sensors', sn.length ? `${up} of ${sn.length} up` : 'none'),
+  ].join('')}</div>`;
+
+  // Numbers: the ten tiles in the mock's order; bugs merged only once there is a production sensor
+  const fcAll = forecast(p.tickets, now);
+  const stats = [
+    ['done', `${pct(fcAll.done, fcAll.scope)}%`],
+    ['forecast finish', fcAll.finished ? 'done' : fcAll.eta ? fmtDate(fcAll.eta) : '–'],
+    ['workers active', `${active}/${cap ?? 'no cap'}`],
+    ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
+    ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
+    ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
+    ['spend', !m.cost.usd_all && !m.cost.usd_total ? 'none recorded' : `$${Math.round(m.cost.usd_all ?? m.cost.usd_total)}`],
+    ['open questions', d.questions.length],
+    ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
+    ...(sn.length ? [['bugs merged', m.escaped_defects ?? '–', BUGS_MERGED_TIP]] : []),
+  ];
+  const numbers = `<div class="g12 stats">${stats.map(([k, v, tip]) => ovTile('c2', k, String(v), tip)).join('')}</div>`;
+
+  // Autonomy: the four scores as served (the page computes none), each with its 12 weeks when two are scored
+  const autonomy = `<div class="g12 stats">${SCORE_TILES.map(([label, path, at], i) => {
+    const { pct: n, weeks } = scoreOf(scoreAt(d, path), at);
+    return ovTile('c3', label, n == null ? '–' : `${n}%`, i === 0 ? AUTONOMY_SCORE_TIP : '', weeks.filter(effNum).length >= 2 ? spark(weeks, label) : '');
+  }).join('')}</div>`;
+
+  // Goals: every active goal (not Upkeep, met or let go) in priority order, the step bar Goals draws
+  const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
+  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+  const goals = live.length ? `<div class="g12 ov-goals">${live.map((g) => {
+    const s = goalState(g, R, d.questions || []);
+    const blk = goalBlock(g, d);
+    return `<a class="c6 ov-goal${blk ? ` blk-${blk}` : ''}" href="#goal/${esc(encodeURIComponent(g.id))}" data-goal="${esc(g.id)}"><span class="rowline"><span class="badge ${s.tone}">${esc(s.label)}</span><span class="t">${esc(g.title)}</span></span>${goalStepsOf(g, s, R)}</a>`;
+  }).join('')}</div>` : '<p class="empty">None</p>';
+
+  // Needs you: the open questions in rank order; the one next names carries the chip; a row opens it in the Inbox
+  const next = NEXT_ID();
+  const needs = qs.length ? `<div class="rows">${qs.map((q) => `<a class="rowline" href="#q/${esc(encodeURIComponent(q.id))}"><span class="dot ${q.kind === 'one-way-door' ? 'red' : 'amber'}"></span>${q.id === next ? '<span class="chip-next">Next</span>' : ''}<span class="t">${esc(q.question)}</span><span class="r">${esc(q.kind ? KIND_WORDS[q.kind] || words(q.kind) : 'Question')}</span></a>`).join('')}</div>` : '<p class="empty">None</p>';
+
+  ovSet($('ov-secs'), ovSec('Status', status) + ovSec('Numbers', numbers) + ovSec('Autonomy', autonomy) + ovSec('Goals', goals) + ovSec('Needs you', needs) + ovSec('Commit history', ovMosaic(HELLO?.pulse?.activity)));
+}
+
 function render(d) {
   DATA = d;
   const focus = focusMark();
-  const m = d.metrics, p = d.progress, now = Date.parse(p.now);
+  const m = d.metrics;
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
   kit.hidden = !d.kit;
@@ -5668,20 +5822,7 @@ function render(d) {
   $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
   count('n-trust', o.trust.filter((t) => t.can_ask).length);
   $('n-act').textContent = o.acts.length || '';
-  const fcAll = forecast(p.tickets, now);
-  const stats = [
-    ['done', `${pct(fcAll.done, fcAll.scope)}%`],
-    ['forecast finish', fcAll.finished ? 'done' : fcAll.eta ? fmtDate(fcAll.eta) : '–'],
-    ['workers active', `${active}/${d.caps.max_active_tickets ?? 'no cap'}`],
-    ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
-    ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
-    ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
-    ['spend', !m.cost.usd_all && !m.cost.usd_total ? 'none recorded' : `$${Math.round(m.cost.usd_all ?? m.cost.usd_total)}`],
-    ['open questions', d.questions.length],
-    ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
-    ['escaped defects', m.escaped_defects],
-  ];
-  $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
+  renderOverview();
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!layerField(t)) drafts[t.dataset.q] = t.value; });
@@ -7674,6 +7815,7 @@ async function load({ force = false } = {}) {
 // one-at-a-time guard: the next poll tries again. The first read waits as long as the server does.
 const READ_GIVE_UP_MS = 30000;
 async function loadNow() {
+  helloLoad();
   let d;
   const stop = new AbortController();
   const late = DATA ? setTimeout(() => stop.abort(), READ_GIVE_UP_MS) : null;

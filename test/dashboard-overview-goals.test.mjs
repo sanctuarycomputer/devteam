@@ -101,6 +101,93 @@ test('heartbeatDays: kit-84\'s days in the heartbeat\'s shape', () => {
   assert.deepEqual(hd(undefined), []);
 });
 
+// The score-of block alone: SCORE_TILES (label → path → the place of its %), scoreAt and scoreOf
+const scoreCtx = () => {
+  const ctx = vm.createContext({});
+  vm.runInContext(`${block(INDEX, 'score-of')}\nthis.SCORE_TILES = SCORE_TILES; this.scoreOf = scoreOf; this.scoreAt = scoreAt;`, ctx);
+  return { tiles: JSON.parse(JSON.stringify(ctx.SCORE_TILES)), of: (...a) => JSON.parse(JSON.stringify(ctx.scoreOf(...a))), at: (...a) => ctx.scoreAt(...a) };
+};
+const weeksOf = (xs) => xs.map((score) => ({ starts_at: '2026-01-05T00:00:00Z', score }));
+const W12 = [50, 52, 55, 54, 58, 60, 61, 63, 65, 66, 70, 71.6];
+
+test('scoreOf and SCORE_TILES: the four tiles, their places, the % and the weeks', () => {
+  const S = scoreCtx();
+  assert.deepEqual(S.tiles, [['autonomy score', 'autonomy_score', 'this_week'], ['trust score', 'autonomy.decisions', 'score.this_week'], ['efficiency score', 'efficiency', 'score.this_week'], ['awareness score', 'awareness', 'score.this_week']]);
+  // the data tickets' shape: { score: { this_week, last_week }, weeks: [12 × { score, … }] }
+  assert.deepEqual(S.of({ score: { this_week: 71.6, last_week: 70 }, weeks: weeksOf(W12) }), { pct: 72, weeks: W12 });
+  // autonomy_score's: { this_week, last_week, weeks }, its % at this_week
+  assert.equal(S.of({ this_week: 71.6, last_week: 70, weeks: weeksOf(W12) }, 'this_week').pct, 72);
+  // autonomy.decisions has a top-level this_week that is a week record: read there, no %, never NaN
+  const dec = { score: { this_week: 64, last_week: 60 }, this_week: { score: 64, decisions: 3 }, weeks: weeksOf(W12) };
+  assert.equal(S.of(dec, 'this_week').pct, null);
+  assert.equal(S.of(dec).pct, 64);
+  // a null week, and a week record with no score, stay null
+  const gappy = weeksOf(W12); gappy[3] = { starts_at: 'x', score: null }; gappy[4] = { starts_at: 'x' }; gappy[5] = null;
+  assert.deepEqual(S.of({ score: { this_week: 50 }, weeks: gappy }).weeks, W12.map((x, i) => ([3, 4, 5].includes(i) ? null : x)));
+  // nothing there: no %
+  for (const r of [undefined, null, {}, { score: { this_week: null } }, { score: null }, { score: { this_week: '50' } }, { score: { this_week: NaN } }]) assert.equal(S.of(r).pct, null, JSON.stringify(r));
+  assert.deepEqual(S.of(undefined), { pct: null, weeks: [] });
+  // a % with no weeks, or weeks that are not an array: the % and no weeks
+  assert.deepEqual(S.of({ score: { this_week: 50 } }), { pct: 50, weeks: [] });
+  assert.deepEqual(S.of({ score: { this_week: 50 }, weeks: 'x' }), { pct: 50, weeks: [] });
+  // more than 12 weeks: the last 12
+  assert.deepEqual(S.of({ score: { this_week: 1 }, weeks: weeksOf([1, 2, ...W12]) }).weeks, W12);
+  // the paths on an /api/data-shaped object: autonomy.decisions (not autonomy), autonomy_score's this_week
+  const d = { autonomy: { score: { this_week: 11 }, decisions: { score: { this_week: 22 }, weeks: [] } }, autonomy_score: { this_week: 33, weeks: [] }, efficiency: { score: { this_week: 44 } }, awareness: { score: { this_week: 55 } } };
+  assert.deepEqual(S.tiles.map(([, p, at]) => S.of(S.at(d, p), at).pct), [33, 22, 44, 55]);
+  assert.equal(S.at(d, 'autonomy.nothing.here'), undefined);
+  assert.equal(S.at(null, 'autonomy'), undefined);
+  // only own properties: nothing up the prototype chain
+  assert.equal(S.at({}, 'constructor'), undefined);
+  assert.equal(S.of({ score: { this_week: 5 }, weeks: [] }, 'score.toString').pct, null);
+});
+
+// The G1 golden of /api/data: at each of the four paths, scored or not, the shape the tiles read. A
+// renamed, moved or reshaped field fails here even while it serves no score.
+const G1_DATA = () => {
+  const t = fs.readFileSync(path.join(here, 'fixtures', 'g1', 'dashboard-data.txt'), 'utf8');
+  const a = t.indexOf('--- stdout\n') + '--- stdout\n'.length, b = t.indexOf('\n--- stderr', a);
+  return JSON.parse(t.slice(a, b < 0 ? undefined : b));
+};
+function checkScoreShapes(d, S = scoreCtx()) {
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  for (const [label, p, at] of S.tiles) {
+    const rec = p.split('.').reduce((o, k) => (o && typeof o === 'object' && own(o, k) ? o[k] : undefined), d);
+    assert.ok(rec && typeof rec === 'object' && !Array.isArray(rec), `${label}: ${p} is an object`);
+    const parts = at.split('.');
+    const holder = parts.slice(0, -1).reduce((o, k) => (o && typeof o === 'object' && own(o, k) ? o[k] : undefined), rec);
+    assert.ok(holder && typeof holder === 'object' && own(holder, parts[parts.length - 1]), `${label}: ${p}.${at} is there`);
+    const v = holder[parts[parts.length - 1]];
+    assert.ok(v === null || (typeof v === 'number' && Number.isFinite(v)), `${label}: ${p}.${at} is a number or null: ${JSON.stringify(v)}`);
+    assert.ok(Array.isArray(rec.weeks) && rec.weeks.length === 12, `${label}: ${p}.weeks is 12 weeks`);
+    for (const w of rec.weeks) assert.ok(w && typeof w === 'object' && own(w, 'score'), `${label}: each week has its score`);
+    const got = S.of(rec, at);
+    assert.deepEqual(got.weeks, rec.weeks.map((w) => w.score), `${label}: the weeks`);
+    assert.equal(got.pct, v === null ? null : Math.round(v), `${label}: the %`);
+  }
+}
+test('SCORE_TILES on the G1 golden of /api/data: each path in the shape the tiles read', () => {
+  const S = scoreCtx();
+  checkScoreShapes(G1_DATA(), S);
+  // and it fails on a renamed, moved or reshaped field (a scratch copy each)
+  const broken = [
+    ['autonomy_score renamed', (d) => { d.autonomy_score_v2 = d.autonomy_score; delete d.autonomy_score; }],
+    ['decisions moved up', (d) => { d.decisions = d.autonomy.decisions; delete d.autonomy.decisions; }],
+    ['efficiency\'s score an object no more', (d) => { d.efficiency.score = d.efficiency.score.this_week; }],
+    ['awareness\'s % renamed', (d) => { d.awareness.score = { now: d.awareness.score.this_week }; }],
+    ['autonomy_score\'s % moved under score', (d) => { d.autonomy_score.score = { this_week: d.autonomy_score.this_week }; delete d.autonomy_score.this_week; }],
+    ['a week without its score', (d) => { delete d.efficiency.weeks[4].score; }],
+    ['eleven weeks', (d) => { d.awareness.weeks.pop(); }],
+    ['weeks renamed', (d) => { d.autonomy.decisions.history = d.autonomy.decisions.weeks; delete d.autonomy.decisions.weeks; }],
+    ['a % that is a string', (d) => { d.autonomy.decisions.score.this_week = '100'; }],
+  ];
+  for (const [what, mutate] of broken) {
+    const d = G1_DATA();
+    mutate(d);
+    assert.throws(() => checkScoreShapes(d, S), assert.AssertionError, what);
+  }
+});
+
 // ---- the shared Chrome setup (Tasks 2–4) ----
 
 // 14 days in kit-84's shape, oldest first, today (UTC) last: a busy day (index 5, five items), a failed
@@ -383,6 +470,209 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   assert.match(await p.ev(`${card('g5')}.textContent`), /Let go/);
   assert.equal(await p.ev(`${card('g5')}.querySelector('.card-head .grow').textContent.trim()`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${JSON.stringify(ids.g5)}); return 'let go ' + when([...g.updates].reverse().find((u) => u.status === 'abandoned').at); })()`));
   assert.match(await p.ev(`${card('g5')}.textContent`), /processor’s page covers it|processor's page covers it/);
+});
+
+// Overview's ten tiles, in the mock's STATS order; bugs merged only with a production sensor
+const NUMBERS = ['done', 'forecast finish', 'workers active', 'blocked', 'median cycle', 'cost per ticket', 'spend', 'open questions', 'answer rate (14d)', 'bugs merged'];
+const BUGS_TIP = 'A production error traced to a merged change, or one you reported. Shown once the project has a production sensor.';
+const AUTONOMY_TIP = 'The mean of the Trust, Efficiency and Awareness Scores, weighted equally; – until all three exist';
+// the four score fields as a test reads them, on its own (not the page's table): [label, path, place of its %]
+const SCORES = [['autonomy score', ['autonomy_score'], ['this_week']], ['trust score', ['autonomy', 'decisions'], ['score', 'this_week']], ['efficiency score', ['efficiency'], ['score', 'this_week']], ['awareness score', ['awareness'], ['score', 'this_week']]];
+const dig = (o, ks) => ks.reduce((a, k) => (a && typeof a === 'object' ? a[k] : undefined), o);
+// a patch of /api/data that sets the four fields, as merged by the init script: { autonomy_score, autonomy: { decisions }, efficiency, awareness }
+const scorePatch = (recs) => ({ autonomy_score: recs[0], autonomy: { decisions: recs[1] }, efficiency: recs[2], awareness: recs[3] });
+
+test('overview: header, sections, numbers, autonomy, goals, needs you, commit history', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-overview-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids } = goalsFixture(base, 'overview-page');
+  // hello fails until the test lets it answer (P11); a worker cap so Workers reads "n of cap"
+  const { p, soon, port, go } = await openOn(later, root, env, { init: { data: { ...DATA_PATCH(), caps: { max_active_tickets: 3 } }, hello: { pulse: pulseFixture() }, failHello: true } });
+  const served = await checkSeeded(port, ids);
+  await go('#overview');
+  const OV = "document.querySelector('#overview')";
+  await soon(`!!${OV}.querySelector('.ov-head h2') && !!${OV}.querySelector('.sec')`, 'the Overview header and sections');
+  assert.equal(await p.ev(`${OV}.classList.contains('no-shell')`), false, 'Overview is on the shell');
+
+  // the header: name, summary, the status pill at the far right; unknown until hello answers
+  const head = `${OV}.querySelector('.ov-head')`;
+  assert.equal(await p.ev(`${head}.querySelector('h2').textContent`), 'overview-page');
+  assert.equal(await p.ev(`${head}.lastElementChild.innerHTML`), await p.ev(`statusPill('unknown')`), 'unknown while hello fails');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(`${head}.lastElementChild.innerHTML`), await p.ev(`statusPill('unknown')`), 'still unknown through polls while hello fails');
+  await p.ev('window.__failHello = false');
+  await soon(`${head}.lastElementChild.innerHTML === statusPill('waiting')`, 'the pill once hello answers');
+  assert.ok(await p.ev(`${head}.lastElementChild.classList.contains('ov-pill')`));
+  const sum = await p.ev(`${head}.querySelector('.sum').textContent`);
+  assert.match(sum, /^\d+ questions? · \d+ tickets? in flight$/);
+  assert.match(sum, /^3 questions · 2 tickets in flight$/, 'three open questions; t1a and t2a are in flight');
+  const edge = await p.ev(`(() => { const h = ${head}, pill = h.lastElementChild.firstElementChild; return { h: h.getBoundingClientRect().right, p: pill.getBoundingClientRect().right }; })()`);
+  assert.ok(Math.abs(edge.h - edge.p) < 1, `the pill's right edge meets the header's: ${JSON.stringify(edge)}`);
+
+  // the sections, in order, each label monospace
+  const labels = await p.ev(`[...${OV}.querySelectorAll('.sec > .lbl')].map((l) => ({ t: l.textContent, f: getComputedStyle(l).fontFamily }))`);
+  assert.deepEqual(labels.map((l) => l.t), ['Status', 'Numbers', 'Autonomy', 'Goals', 'Needs you', 'Commit history']);
+  for (const l of labels) assert.match(l.f, /monospace/, `${l.t} is monospace`);
+  // the down banner stays, above the sections
+  assert.ok(await p.ev(`(() => { const b = document.getElementById('down-banner'); return ${OV}.contains(b) && !!(b.compareDocumentPosition(${OV}.querySelector('.sec')) & Node.DOCUMENT_POSITION_FOLLOWING); })()`), 'the down banner above the sections');
+  const secOf = (name) => `[...${OV}.querySelectorAll('.sec')].find((s) => s.querySelector('.lbl').textContent === ${JSON.stringify(name)})`;
+
+  // Status: Supervisor from /api/threads' question as askSet keeps it (P12), else hello's last activity
+  const row = (name) => p.ev(`(() => { const r = [...${secOf('Status')}.querySelectorAll('.rowline')].find((x) => x.querySelector('.t').textContent === ${JSON.stringify(name)}); return r ? { r: r.querySelector('.r').textContent, dot: r.querySelector('.dot').className } : null; })()`);
+  assert.deepEqual(await p.ev(`[...${secOf('Status')}.querySelectorAll('.rowline .t')].map((x) => x.textContent)`), ['Supervisor', 'Workers', 'Planners', 'Sensors']);
+  // hello's last activity two minutes before now (the fixture's was set before the project was seeded)
+  await p.ev(`window.__patchHello.pulse.last_activity = new Date(Date.now() - 120000).toISOString(); void 0`);
+  await soon(`/^last moved 2 min ago$/.test(${secOf('Status')}.querySelector('.rowline .r').textContent)`, 'the green last-moved line');
+  assert.equal((await row('Supervisor')).dot, 'dot green');
+  await p.ev(`window.__patchThreads = { supervisor: { question: { kind: 'dialog', digest: 'dg-1', text: 'Allow this command?' } } }`);
+  await soon(`ASK.q?.digest === 'dg-1' && ${secOf('Status')}.querySelector('.rowline .r').textContent === 'stopped at a prompt'`, 'a dialog: stopped at a prompt');
+  assert.equal((await row('Supervisor')).dot, 'dot red');
+  await p.ev(`window.__patchThreads = { supervisor: { question: { kind: 'limit', digest: 'dg-2', text: 'Usage limit reached' } } }`);
+  await soon(`${secOf('Status')}.querySelector('.rowline .r').textContent === 'at a usage limit'`, 'a usage limit');
+  assert.equal((await row('Supervisor')).dot, 'dot amber');
+  await p.ev(`window.__patchThreads = { supervisor: { question: null } }`);
+  await soon(`/^last moved /.test(${secOf('Status')}.querySelector('.rowline .r').textContent)`, 'none: the green line again');
+  assert.equal((await row('Supervisor')).r, 'last moved 2 min ago');
+  assert.equal((await row('Workers')).r, '2 of 3');
+  const planners = await p.ev('DATA.planners.length');
+  assert.equal((await row('Planners')).r, planners ? `${planners} planning` : 'none');
+  assert.equal((await row('Sensors')).r, 'none');
+
+  // Numbers: the mock's order, nine without a production sensor; no score among them
+  const tiles = () => p.ev(`[...${secOf('Numbers')}.querySelectorAll('.stats > .stat')].map((s) => ({ k: s.querySelector('.k').textContent.trim(), v: s.querySelector('b').textContent, title: s.getAttribute('title'), c2: s.classList.contains('c2'), info: !!s.querySelector('.k .icon-info') }))`);
+  let ts = await tiles();
+  assert.deepEqual(ts.map((x) => x.k), NUMBERS.slice(0, 9));
+  for (const x of ts) assert.ok(x.c2, `${x.k} is .c2`);
+  assert.equal(ts.find((x) => x.k === 'open questions').v, '3');
+  assert.equal(ts.find((x) => x.k === 'workers active').v, '2/3');
+  await p.ev(`window.__patchData.sensors = [{ name: 'web', kind: 'http', url: 'https://example.test', state: 'up', today: { events: 0, qualified: 0 }, fingerprints: 0 }]`);
+  await soon(`${secOf('Numbers')}.querySelectorAll('.stats > .stat').length === 10`, 'ten tiles with a production sensor');
+  ts = await tiles();
+  assert.deepEqual(ts.map((x) => x.k), NUMBERS);
+  assert.equal(ts[9].title, BUGS_TIP, 'bugs merged carries the hover');
+  assert.ok(ts[9].info, 'and an info icon');
+  assert.equal(ts[9].v, String(served.metrics.escaped_defects));
+  assert.ok(!ts.some((x) => /score/i.test(x.k)), 'no score in Numbers');
+  assert.equal((await row('Sensors')).r, '1 of 1 up');
+
+  // Autonomy, unpatched: each tile reads exactly what /api/data serves at its path
+  const auto = () => p.ev(`[...${secOf('Autonomy')}.querySelectorAll('.stats > .stat')].map((s) => ({ k: s.querySelector('.k').textContent.trim(), v: s.querySelector('b').textContent, title: s.getAttribute('title'), c3: s.classList.contains('c3'), info: !!s.querySelector('.k .icon-info'), svg: s.querySelector('svg.sparkline') ? { d: s.querySelector('svg.sparkline path').getAttribute('d'), aria: s.querySelector('svg.sparkline').getAttribute('aria-label'), n: s.querySelectorAll('svg.sparkline').length } : null }))`);
+  let as = await auto();
+  assert.deepEqual(as.map((x) => x.k), SCORES.map(([l]) => l));
+  for (const x of as) assert.ok(x.c3, `${x.k} is .c3`);
+  for (const [i, [label, at, place]] of SCORES.entries()) {
+    const v = dig(dig(served, at), place);
+    assert.equal(as[i].v, typeof v === 'number' ? `${Math.round(v)}%` : '–', `${label} reads ${at.join('.')}.${place.join('.')}: ${JSON.stringify(v)}`);
+  }
+  assert.equal(as[0].title, AUTONOMY_TIP, 'Autonomy Score carries the mean hover');
+  assert.ok(as[0].info, 'and an info icon');
+  // all four null: – and no line
+  await p.ev(`Object.assign(window.__patchData, ${JSON.stringify(scorePatch([null, null, null, null]))})`);
+  await soon(`[...${secOf('Autonomy')}.querySelectorAll('.stats > .stat b')].every((b) => b.textContent === '–') && !${secOf('Autonomy')}.querySelector('svg.sparkline')`, 'four dashes, no lines');
+  // the four records in the data tickets' shapes, the served week records with their scores set: distinct weeks per field
+  const scores = [70, 81, 62, 55].map((tw, f) => Array.from({ length: 12 }, (_, i) => (i === 11 ? tw : 20 + f * 10 + ((i * (f + 3)) % 17))));
+  const rec = (f, xs) => {
+    const s = dig(served, SCORES[f][1]) || {};
+    const weeks = (s.weeks || Array.from({ length: 12 }, () => ({}))).map((w, i) => ({ ...w, score: xs[i] }));
+    return f === 0 ? { this_week: xs[11], last_week: xs[10], weeks } : { ...s, score: { this_week: xs[11], last_week: xs[10] }, weeks };
+  };
+  await p.ev(`Object.assign(window.__patchData, ${JSON.stringify(scorePatch(scores.map((xs, f) => rec(f, xs))))})`);
+  await soon(`[...${secOf('Autonomy')}.querySelectorAll('.stats > .stat b')].map((b) => b.textContent).join() === '70%,81%,62%,55%'`, 'each its own %');
+  as = await auto();
+  for (const [i, x] of as.entries()) {
+    assert.ok(x.svg, `${x.k} has a line`);
+    assert.equal(x.svg.n, 1);
+    const want = await p.ev(`(() => { const d = document.createElement('div'); d.innerHTML = spark(${JSON.stringify(scores[i])}, ${JSON.stringify(x.k)}); return d.querySelector('path').getAttribute('d'); })()`);
+    assert.equal(x.svg.d, want, `${x.k}'s line is spark of its own weeks`);
+    assert.equal((x.svg.d.match(/M/g) || []).length, 1, 'one run of 12');
+    assert.equal(x.svg.aria, `${x.k}, the last 12 weeks`);
+  }
+  // weeks 3–8 null: the % and two runs at their own weeks' x, not spread, not bridged
+  const gap = scores[2].map((x, i) => (i >= 3 && i <= 8 ? null : x));
+  await p.ev(`window.__patchData.efficiency = ${JSON.stringify(rec(2, gap))}`);
+  await soon(`(() => { const s = ${secOf('Autonomy')}.querySelectorAll('.stats > .stat')[2]; return s.querySelector('b').textContent === '62%' && (s.querySelector('svg.sparkline path')?.getAttribute('d').match(/M/g) || []).length === 2; })()`, 'the gap breaks the line');
+  const runs = (await auto())[2].svg.d.split('M').filter(Boolean).map((r) => r.split('L').map((pt) => +pt.split(',')[0]));
+  const X = (i) => +(1 + (i * 78) / 11).toFixed(1);
+  assert.deepEqual([...new Set(runs[0])], [0, 1, 2].map(X), 'the first run at weeks 0–2');
+  assert.deepEqual([...new Set(runs[1])], [9, 10, 11].map(X), 'the second at weeks 9–11');
+  // one scored week: the %, no line
+  const one = Array.from({ length: 12 }, (_, i) => (i === 11 ? 55 : null));
+  await p.ev(`window.__patchData.awareness = ${JSON.stringify(rec(3, one))}`);
+  await soon(`(() => { const s = ${secOf('Autonomy')}.querySelectorAll('.stats > .stat')[3]; return s.querySelector('b').textContent === '55%' && !s.querySelector('svg.sparkline'); })()`, 'one scored week: no line');
+  // only autonomy.decisions: Trust shows its %, the others –
+  await p.ev(`Object.assign(window.__patchData, ${JSON.stringify(scorePatch([null, rec(1, scores[1]), null, null]))})`);
+  await soon(`[...${secOf('Autonomy')}.querySelectorAll('.stats > .stat b')].map((b) => b.textContent).join() === '–,81%,–,–'`, 'only Trust');
+
+  // Goals: every active goal in priority order, the step bar Goals' cards draw, outlined when blocked
+  const grows = await p.ev(`[...${secOf('Goals')}.querySelectorAll('a.ov-goal')].map((a) => ({ id: a.dataset.goal, href: a.getAttribute('href'), c6: a.classList.contains('c6'), steps: a.querySelector('ol.steps')?.outerHTML ?? null, bw: getComputedStyle(a).borderTopWidth, bc: getComputedStyle(a).borderTopColor, h: a.offsetHeight, top: a.offsetTop, cls: [...a.classList] }))`);
+  assert.deepEqual(grows.map((g) => g.id), ['g1', 'g2', 'g3', 'g6', 'g0'].map((k) => ids[k]));
+  for (const g of grows) {
+    assert.ok(g.c6, 'a row is .c6');
+    assert.equal(g.href, `#goal/${encodeURIComponent(g.id)}`);
+    assert.equal(g.bw, '1px', 'a 1px border');
+    assert.equal(g.steps, await p.ev(`document.querySelector('#goals .card.goal[data-subject="goal:${g.id}"] ol.steps').outerHTML`), 'the same step bar as Goals\' card');
+  }
+  const probe = (css) => p.ev(`(() => { const e = document.createElement('div'); e.style.cssText = 'border:1px solid ' + ${JSON.stringify(css)}; document.body.append(e); const c = getComputedStyle(e).borderTopColor; e.remove(); return c; })()`);
+  const by = (k) => grows.find((g) => g.id === ids[k]);
+  assert.equal(by('g3').bc, await probe('var(--line)'), 'an unblocked row is --line');
+  assert.equal(by('g1').bc, await probe('color-mix(in srgb, var(--red) 45%, var(--line))'), 'fully blocked: the muted red');
+  assert.equal(by('g2').bc, await probe('color-mix(in srgb, var(--amber) 55%, var(--line))'), 'partly blocked: the muted amber');
+  assert.notEqual(by('g1').bc, by('g3').bc);
+  assert.ok(by('g1').cls.includes('blk-full') && by('g2').cls.includes('blk-partial'));
+  const gr = new Map();
+  for (const g of grows) gr.set(g.top, [...(gr.get(g.top) || []), g]);
+  for (const r of gr.values()) if (r.length === 2) assert.equal(r[0].h, r[1].h, 'rows side by side are the same height');
+  assert.equal([...gr.values()].filter((r) => r.length === 2).length, 2, 'two across');
+
+  // Needs you: the open questions in /api/data's order (P14: three), the Next chip on the first only
+  const qs = await p.ev(`[...${secOf('Needs you')}.querySelectorAll('.rowline')].map((r) => ({ href: r.getAttribute('href'), chip: r.querySelectorAll('.chip-next').length, t: r.querySelector('.t').textContent }))`);
+  const order = await p.ev('DATA.questions.map((q) => q.id)');
+  assert.equal(order.length, 3);
+  assert.deepEqual(qs.map((q) => q.href), order.map((id) => `#q/${encodeURIComponent(id)}`));
+  assert.deepEqual(qs.map((q) => q.chip), [1, 0, 0]);
+  assert.equal(await p.ev(`${OV}.querySelectorAll('.chip-next').length`), 1, 'one Next chip on Overview');
+  assert.equal(await p.ev('NEXT_ID()'), order[0]);
+  assert.equal(await p.ev(`${OV}.querySelector('.chip-next').textContent`), 'Next');
+
+  // Commit history: no caption, the section's body wide, a column a week (12 for hello's 84 days)
+  const mo = await p.ev(`(() => { const s = ${secOf('Commit history')}, b = s.querySelector('.lbl').nextElementSibling, m = b.querySelector('.mosaic'); return m ? { cols: getComputedStyle(m).gridTemplateColumns.split(' ').length, rows: getComputedStyle(m).gridTemplateRows.split(' ').length, cells: m.children.length, w: m.getBoundingClientRect().width, bw: b.getBoundingClientRect().width, kids: b.children.length, text: b.textContent.trim() } : null; })()`);
+  assert.ok(mo, 'a mosaic');
+  assert.deepEqual([mo.cols, mo.rows, mo.cells], [12, 7, 84]);
+  assert.ok(Math.abs(mo.w - mo.bw) < 1, `the body's width: ${mo.w} of ${mo.bw}`);
+  assert.equal(mo.kids, 1, 'nothing but the mosaic');
+  assert.equal(mo.text, '', 'no caption');
+
+  // at 390px the tiles, the Autonomy row and the goal rows reflow; nothing sticks out
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await soon(`window.innerWidth === 390`, '390px');
+  await new Promise((r) => setTimeout(r, 400));
+  const over = await p.ev(`(() => { const out = []; const root = ${OV}.getBoundingClientRect(); for (const e of ${OV}.querySelectorAll('.stat, .ov-goal, .rowline, .mosaic, .sec, .ov-head')) { const r = e.getBoundingClientRect(); if (r.right > root.right + 0.5 || r.left < root.left - 0.5) out.push(e.className + ' ' + r.left + '..' + r.right); if (e.scrollWidth > e.clientWidth + 1 && !e.matches('.rowline')) out.push('scrolls: ' + e.className); } return { out, page: document.documentElement.scrollWidth }; })()`);
+  assert.deepEqual(over.out, [], 'nothing wider than the page');
+  assert.ok(over.page <= 390, `no sideways scroll: ${over.page}`);
+});
+
+test('overview: no goals and no questions say None, and no Next chip', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-overview-none-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const root = bareProject(base, 'overview-empty');
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 48), DEVTEAM_PORT_BASE: String(PORTS + 49), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE'].includes(k)) delete env[k];
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  // whatever init asks is patched away: no open questions
+  const { p, soon, port, go } = await openOn(later, root, env, { init: { data: { questions: [] } } });
+  const d = await (await fetch(`http://127.0.0.1:${port}/api/data`)).json();
+  assert.equal(d.ooda.goals.length, 0, 'no goals');
+  await go('#overview');
+  const OV = "document.querySelector('#overview')";
+  await soon(`!!${OV}.querySelector('.sec')`, 'the sections');
+  const body = (name) => p.ev(`[...${OV}.querySelectorAll('.sec')].find((s) => s.querySelector('.lbl').textContent === ${JSON.stringify(name)}).querySelector('.lbl').nextElementSibling.textContent.trim()`);
+  assert.equal(await body('Goals'), 'None');
+  assert.equal(await body('Needs you'), 'None');
+  assert.equal(await p.ev(`document.querySelectorAll('.chip-next').length`), 0, 'no Next chip in the page');
+  assert.equal(await p.ev('NEXT_ID()'), null);
+  assert.match(await p.ev(`${OV}.querySelector('.ov-head .sum').textContent`), /^0 questions · 0 tickets in flight$/);
 });
 
 test('the shell blocks are untouched', () => {
