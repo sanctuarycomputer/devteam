@@ -737,7 +737,8 @@ EOF
 ENV DEVTEAM_IMAGE_HUB=4320
 # The platform stops this container when its memory reaches the cap, counting the page cache the
 # kernel could still drop (2026-11-17: five restarts in an hour at 31 of 32 GB, 11 GB of it cache,
-# while the kit counted 17). So the kit's memory ceiling, and machine status, count it too. ENV, like
+# while the kit counted 17). So the kit's memory ceiling, and machine status, count it too, all but
+# the inactive cache the kernel drops first (the working set; devteam.mjs machineMemory). ENV, like
 # the hub's port: the boot, dev's sessions and every dashboard get it (as_dev keeps the environment).
 ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 

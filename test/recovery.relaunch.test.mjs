@@ -27,7 +27,9 @@ test('a machine that died: the tmux session gone, a worker and a planner come ba
     F.worker('demo-01-a');
     F.planner('plan1');
     // at the memory ceiling, as a new start would: both wait, and the tick says why
-    assert.match(F.tick(FULL(F)), /^left 2 gone sessions down for now: the machine's memory is at 7\.5 of 8\.0 GB \(94%\), at or over its 80% ceiling$/m);
+    assert.match(F.tick(FULL(F)), /^2 gone sessions wait for room to relaunch: the machine's memory is at 7\.5 of 8\.0 GB \(94%\), at or over its 80% ceiling$/m);
+    assert.equal(F.state().memory_held, 2);
+    assert.equal(F.tick(FULL(F)), '', 'said when the number changes, not every minute');
     assert.deepEqual(F.state().relaunched, []);
     assert.deepEqual(F.relaunched(), []);
     assert.equal(F.state().restart_gave_up.length, 0, 'waiting spends no attempt');
@@ -310,17 +312,20 @@ test('a box that counts the page cache: the cache counts toward the ceiling, rea
     for (const id of ['demo-95-a', 'demo-96-b', 'demo-97-c']) F.worker(id);
     // 27 of 32 GB: 16 GB without the cache, under the ceiling; with it, over, so nothing comes back
     use(27 * G);
-    assert.match(F.tick(box), /^left 3 gone sessions down for now: the machine's memory is at 27\.0 of 32\.0 GB \(84%, 11\.0 GB of it page cache\), at or over its 80% ceiling$/m);
+    assert.match(F.tick(box), /^3 gone sessions wait for room to relaunch: the machine's memory is at 27\.0 of 32\.0 GB \(84%, 11\.0 GB of it page cache\), at or over its 80% ceiling$/m);
     assert.deepEqual(F.relaunched(), []);
     // 20 GB: the first comes back, its resume takes the box to 27, and the next waits
     use(20 * G);
     const out = F.tick(box);
     assert.deepEqual(F.state().relaunched, ['demo-95-a'], out);
-    assert.match(out, /^left 2 gone sessions down for now: the machine's memory is at 27\.0 of 32\.0 GB/m);
-    // where the platform's cap leaves the cache out (no DEVTEAM_MEMORY_COUNTS_CACHE): 16 GB, so both come back
+    assert.match(out, /^2 gone sessions wait for room to relaunch: the machine's memory is at 27\.0 of 32\.0 GB/m);
+    // where the platform's cap leaves the cache out (no DEVTEAM_MEMORY_COUNTS_CACHE): 16 GB, so both
+    // come back (in two ticks if the first one's worktree_setup leaves under 100 s for the second)
     const { DEVTEAM_MEMORY_COUNTS_CACHE: _, ...laptop } = box;
-    F.tick(laptop);
-    assert.deepEqual(F.state().relaunched, ['demo-96-b', 'demo-97-c']);
+    const back = [];
+    for (let i = 0; i < 2 && back.length < 2; i++) { F.tick(laptop); back.push(...F.state().relaunched); }
+    assert.deepEqual(back, ['demo-96-b', 'demo-97-c']);
+    assert.equal(F.state().memory_held, 0);
     await until(() => F.relaunched().length === 3, 'all three resumed');
   } finally { F.done(); }
 });

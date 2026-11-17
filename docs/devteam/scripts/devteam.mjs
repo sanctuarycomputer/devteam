@@ -15668,10 +15668,14 @@ const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test
 // in use is what the kernel can't drop, memory.current less the page cache it can (memory.stat's
 // file, less its shmem, which lives in tmpfs and /dev/shm and can't be dropped). With no cap (no
 // cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
-// Some platforms stop the container at its cap by memory.current, page cache and all, long before
-// the kernel would drop that cache (a Render box, 2026-11-17: killed five times in an hour at 31 of
-// 32 GB, 11 GB of it cache, while this read 17): where DEVTEAM_MEMORY_COUNTS_CACHE is 1 (the box
-// image sets it), in use is memory.current in full, and cache says how much of it is page cache.
+// Some platforms stop the container at its cap by memory.current, page cache and all, before the
+// kernel drops that cache (a Render box, 2026-11-17: restarted five times in an hour at 31 of 32 GB,
+// 11 GB of it cache, while this read 17). Where DEVTEAM_MEMORY_COUNTS_CACHE is 1 (the box image sets
+// it), in use is the working set, the measure container platforms evict on: memory.current less
+// only memory.stat's inactive_file, the cache the kernel drops first and cheaply; cache says how
+// much page cache that counts, idle how much it leaves out. Not memory.current in full: the kernel
+// trims the cache only at the cap, so on a box doing disk work memory.current sits near it for good,
+// and a gate on it would never open again. A cgroup with no inactive_file counts memory.current in full.
 // DEVTEAM_CGROUP and DEVTEAM_MEMINFO point both elsewhere (tests).
 const memoryCountsCache = () => process.env.DEVTEAM_MEMORY_COUNTS_CACHE === '1';
 function machineMemory() {
@@ -15683,8 +15687,9 @@ function machineMemory() {
       const stat = readText(path.join(cg, 'memory.stat')) ?? '';
       const field = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1] ?? 0);
       const cache = Math.min(current, Math.max(0, field('file') - field('shmem')));
-      if (memoryCountsCache()) return { inUse: current, max, source: 'cgroup', cache };
-      return { inUse: current - cache, max, source: 'cgroup' };
+      if (!memoryCountsCache()) return { inUse: current - cache, max, source: 'cgroup' };
+      const inUse = Math.max(0, current - Math.min(cache, field('inactive_file')));
+      return { inUse, max, source: 'cgroup', cache: Math.max(0, cache - (current - inUse)), idle: current - inUse };
     }
     const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
     const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
@@ -15721,7 +15726,7 @@ function machineLine(last) {
   const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
   const m = machineMemory();
   // the number memoryFull reads: with the page cache where the platform counts it
-  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB${m.cache !== undefined ? ` (${GiB(m.cache)} GB of it page cache)` : ''}` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
+  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB${m.cache !== undefined ? ` (${GiB(m.cache)} GB of it page cache, and ${GiB(m.idle)} GB of inactive cache left out)` : ''}` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
   // the CPUs it may use, and how much of the last minute every task stood waiting for one
   const [quota, period] = (readText(path.join(cg, 'cpu.max')) ?? '').trim().split(/\s+/);
   const cpus = quota && quota !== 'max' && Number(period) > 0 ? String(Number((Number(quota) / Number(period)).toPrecision(6))) : String(os.cpus().length || '?');
@@ -15912,22 +15917,29 @@ function cmdAccountsTick() {
   // would only stop again, and it is still there for a later tick.
   // Up to 3 a tick while the machine's memory is under its ceiling (or unread), and none at or over
   // it: memory is read again before each one, as a new start reads it, so a box near its cap waits
-  // for room instead of coming back all at once (every fleet on a restarted box relaunches together,
-  // and one a tick each took a 32 GB box from 1 to 18 GB in three minutes, then past its cap). A
+  // for room instead of coming back all at once (every fleet on a restarted box relaunches together:
+  // up to 3 a tick each took a 32 GB box from 1 to 18 GB in three minutes, then past its cap). One
+  // held for memory is still looked at with a budget of 0, so one past its caps is still said
+  // (restart-gave-up); how many wait (memory_held) is said when it changes, not every minute. A
   // resume runs its repo's worktree_setup before its window exists, and that can take most of the
   // 100 s: a later relaunch whose repo has one starts only with the full 100 s left, so it is never
   // cut short into a spent attempt; it waits for the next tick instead.
+  state.memory_held = 0;
   if (!state.active_no_room) {
     const gone = sessionsToRelaunch(launchOf, held);
     const settings = gone.length ? loadSettings() : null;
-    for (const [i, { name, launch }] of gone.entries()) {
+    let said = null;
+    for (const { name, launch } of gone) {
       const full = memoryFull(settings);
-      if (full) { out(`left ${plural(gone.length - i, 'gone session')} down for now: ${full.words}`); break; }
-      const did = relaunchGone(name, launch, budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
+      const could = full ? budget(3) : 0;
+      if (full) said = full;
+      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
       else if (did) tries += 1;
+      else if (could) state.memory_held += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
+    if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();

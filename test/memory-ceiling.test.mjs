@@ -76,13 +76,24 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     assert.match(run(old, ['worker', 'ch-02-b'], M).err, /at 26\.0 of 32\.0 GB \(81%\), at or over its 80% ceiling/);
 
     // a platform that stops the box at its cap by memory.current, page cache and all
-    // (DEVTEAM_MEMORY_COUNTS_CACHE=1, from the box image): the cache counts, and the words say how much
+    // (DEVTEAM_MEMORY_COUNTS_CACHE=1, from the box image): the cache counts, all but its inactive
+    // part (the working set), and the words say how much. The 2026-11-17 box: 31 GB, 11 of it cache
     fs.writeFileSync(path.join(cg, 'memory.current'), `${31 * G}\n`);
-    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${17 * G}\nfile ${11 * G}\nshmem ${G}\n`);
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${17 * G}\nfile ${11 * G}\nshmem ${G}\ninactive_file ${2 * G}\n`);
     const counts = { ...M, DEVTEAM_MEMORY_COUNTS_CACHE: '1' };
-    assert.match(run(old, ['worker', 'ch-02-b'], counts).err, /at 31\.0 of 32\.0 GB \(97%, 10\.0 GB of it page cache\), at or over its 80% ceiling: start this worker/);
-    assert.match(findings(counts).find((f) => f.kind === 'memory-full')?.detail ?? '', /^the machine's memory is at 31\.0 of 32\.0 GB \(97%, 10\.0 GB of it page cache\)/);
+    assert.match(run(old, ['worker', 'ch-02-b'], counts).err, /at 29\.0 of 32\.0 GB \(91%, 8\.0 GB of it page cache\), at or over its 80% ceiling: start this worker/);
+    assert.match(findings(counts).find((f) => f.kind === 'memory-full')?.detail ?? '', /^the machine's memory is at 29\.0 of 32\.0 GB \(91%, 8\.0 GB of it page cache\)/);
     assert.equal(starts().length, 3, 'nothing started');
+    // a quiet box whose cache has filled it (30 GB, 26 of it cache, half gone inactive): 17 GB, under,
+    // so a cache the kernel would drop never holds the gate shut
+    fs.writeFileSync(path.join(cg, 'memory.current'), `${30 * G}\n`);
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${4 * G}\nfile ${26 * G}\ninactive_file ${13 * G}\n`);
+    assert.ok(!findings(counts).some((f) => f.kind === 'memory-full'), 'under');
+    // no inactive_file to go by: memory.current in full
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${4 * G}\nfile ${26 * G}\n`);
+    assert.match(findings(counts).find((f) => f.kind === 'memory-full')?.detail ?? '', /^the machine's memory is at 30\.0 of 32\.0 GB \(94%, 26\.0 GB of it page cache\)/);
+    fs.writeFileSync(path.join(cg, 'memory.current'), `${31 * G}\n`);
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${17 * G}\nfile ${11 * G}\nshmem ${G}\ninactive_file ${2 * G}\n`);
     // unset, or any value but 1: the cache the kernel can drop is left out (21 of 32 GB, under)
     for (const v of [undefined, '0', '', 'yes']) assert.ok(!findings({ ...M, ...(v === undefined ? {} : { DEVTEAM_MEMORY_COUNTS_CACHE: v }) }).some((f) => f.kind === 'memory-full'), `${JSON.stringify(v)}: under`);
 
