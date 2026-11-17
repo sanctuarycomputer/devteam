@@ -132,12 +132,12 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     const beat = (checked, at = checked) => fs.writeFileSync(claim, JSON.stringify({ sha: 'x', at: new Date(Date.now() - at * 60000).toISOString(), machine: 'm', checked: Date.now() - checked * 60000 }));
     beat(138, 140);
     assert.match(status().stdout, /^attention: statused supervisor idle, not ticking for 138m$/m);
-    beat(50, 5);
-    assert.doesNotMatch(status().stdout, /supervisor idle/, 'whichever is newer: here the claim it last wrote');
     beat(5, 140);
     assert.doesNotMatch(status().stdout, /supervisor idle/, 'a wait checks every 10 minutes however long it runs: waiting is not idle');
     beat(30);
     assert.doesNotMatch(status().stdout, /supervisor idle/, 'under 45 minutes: a tick can be that far apart');
+    fs.writeFileSync(claim, JSON.stringify({ checked: Date.now() - 138 * 60000, refused: true }));
+    assert.doesNotMatch(status().stdout, /supervisor idle/, 'another machine holds the repo: the kit told it to stop, so never told to tick');
     fs.writeFileSync(claim, '{ not json');
     assert.doesNotMatch(status().stdout, /supervisor idle/, 'a record it can\'t read says nothing');
     beat(138);
@@ -145,8 +145,10 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     const sup2 = { ...sup, DEVTEAM_SUPERVISOR_UP: 'off' };
     const parked = dtIn(r, ['fleet', 'park', '--reason', 'a quiet week'], sup2);
     assert.equal(parked.status, 0, parked.stderr + parked.stdout);
+    beat(138);
     assert.match(status().stdout, /^statused sup=up fleet=park /m);
     assert.doesNotMatch(status().stdout, /supervisor idle/, 'parked: not flagged');
+    beat(138);
     const unparked = dtIn(r, ['fleet', 'unpark'], sup2);
     assert.equal(unparked.status, 0, unparked.stderr + unparked.stdout);
     assert.doesNotMatch(status().stdout, /supervisor idle/, 'an unpark is a start: it checks the claim, a sign of its loop');

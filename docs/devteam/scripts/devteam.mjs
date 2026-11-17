@@ -15726,11 +15726,12 @@ const partlyHeld = (f) => { const c = f?.goals; if (!c) return ''; const all = c
 // more; else null, and null when its kit keeps no record. The sign is its host check (run/host-claim.json,
 // a plain file, so no network): every tick's observe-metrics makes one, and so does a wait every
 // HOST_REFRESH_MS however long it runs, even offline, so a supervisor waiting between ticks never goes this long.
+// One whose last check found another machine holding the repo was told to stop: never one to tick.
 const SUPERVISOR_IDLE_MS = 45 * 60000;
 function supervisorIdleMinutes(root) {
   let h = null;
   try { h = readJson(path.join(root, 'docs', 'devteam', 'run', 'host-claim.json')); } catch {}
-  if (!h || typeof h !== 'object') return null;
+  if (!h || typeof h !== 'object' || h.refused === true) return null;
   const seen = Math.max(Number(h.checked) || 0, Date.parse(h.at) || 0);
   const age = Date.now() - seen;
   return seen > 0 && age >= SUPERVISOR_IDLE_MS ? Math.floor(age / 60000) : null;
@@ -15791,9 +15792,10 @@ async function machineStatus() {
     const ks = harvestOf(root, notes);
     if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
     const state = p ? paneState(p) : null;
-    // up, idle at its prompt, its fleet running, and no sign of its loop for 45 minutes: it ended its
-    // turn and stopped ticking (a resume that only wrote the owner a summary), and nothing wakes it
-    const idle = sup === 'up' && state === 'ready' && hello.fleet?.mode === 'run' ? supervisorIdleMinutes(root) : null;
+    // up, idle at its prompt, its fleet running or draining (a drain still merges what is in flight),
+    // and no sign of its loop for 45 minutes: it ended its turn and stopped ticking (a resume that
+    // only wrote the owner a summary), and nothing wakes it. Parked, it has nothing to start.
+    const idle = sup === 'up' && state === 'ready' && ['run', 'drain'].includes(hello.fleet?.mode) ? supervisorIdleMinutes(root) : null;
     if (idle !== null) flagged.push(`attention: ${n} supervisor idle, not ticking for ${idle}m`);
     const sib = siblingOf(root, roots);
     out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'}${partlyHeld(hello.fleet)} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${state}` : ''} dash=${dash} wt=${wt} new-questions=${q} new-knowledge=${ks ? ks.length : '?'}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
