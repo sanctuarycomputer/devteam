@@ -877,6 +877,10 @@ try {
   /* a closed ⋯ menu's pop out of layout: Chrome keeps a closed <details>' content boxed at the summary's width
      (26px), so its 70px key column would stick out of it (the measure, kit-100 spec AC6; kit-90's goal cards) */
   #th-inbox details.menu:not([open]) > .pop, #goals details.menu:not([open]) > .pop { display: none; }
+  /* at 900px and below the open panel is the whole window (--threads-w: 100vw): the page under it doesn't
+     scroll, so a page taller than the window (Overview) draws no scrollbar that would push the panel's
+     100vw 15px past the window's left edge */
+  @media (max-width: 900px) { html:has(> body.threads-open) { overflow: hidden; } }
   .threads-head .end .icon-btn { margin: 0; }
   .th-filter { margin: 0 0 6px; }
   .th-filter .seg { display: flex; width: 100%; }
