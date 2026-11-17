@@ -21,4 +21,4 @@ Notes:
 
 ## After final review pass 1
 
-final-1 (CHANGES) F1-F3 and final-1b (APPROVE) F1-F4 fixed, F5 wont-fix (dispositions in the records). New cases' mutations, each run alone (`--test-name-pattern 'left in the link|records "repo"'`): home's-main check removed, red; merge deciding by the views form, red; check-pr deciding by the views form, red; `recordsHomeSetting` always true, red. The whole file and CI at the new head: PASS2_PLACEHOLDER
+final-1 (CHANGES) F1-F3 and final-1b (APPROVE) F1-F4 fixed, F5 wont-fix (dispositions in the records). New cases' mutations, each run alone (`--test-name-pattern 'left in the link|records "repo"'`): home's-main check removed, red; merge deciding by the views form, red; check-pr deciding by the views form, red; `recordsHomeSetting` always true, red. The whole file and CI at the new head: code head `f896eb38cc4f3e3812b06192837bb037be6e2d09` (main merged); test/multirepo-home.test.mjs 15/15 locally; CI test.yml run 44034160823, all 17 jobs succeeded (`gate ci` logged at that sha). Later commits change only this records folder.
