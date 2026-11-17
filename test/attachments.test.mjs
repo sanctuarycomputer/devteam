@@ -158,6 +158,8 @@ test('laptop upload: each refusal comes before a byte of the body is read, with 
     if (what !== 'Host evil.example') assert.match(r.json?.error ?? '', /dropped files only from this dashboard's own page/, what);
   }
   assert.deepEqual(ourFolders(L.folder()), []);
+  // every check runs before the root is made: not even the project's folder exists
+  assert.ok(!fs.existsSync(L.folder()), 'the root was made before the checks');
 });
 
 test('laptop upload: on a box (DEVTEAM_GATEWAY set) the route is off (A6)', LAPTOP, async (t) => {
@@ -243,14 +245,16 @@ test('laptop upload: the sweep removes old, empty and cut-off folders of ours, a
   };
   const old = seed(newFolderName('2026-01-01'), ['x.txt'], R.keepMs / 1000 + 60);
   const stalePart = seed(newFolderName(), [R.part], R.stallMs / 1000 + 1);
-  const empty = seed(newFolderName(), [], 0);
+  // an empty folder goes once it has been empty for UPLOAD_STALL_MS; a fresh one may be another dashboard's, about to take its .part
+  const empty = seed(newFolderName(), [], R.stallMs / 1000 + 1);
+  const freshEmpty = seed(newFolderName(), [], 0);
   const fresh = seed(newFolderName(), ['y.txt'], 60);
   const freshPart = seed(newFolderName(), [R.part], 0);
   const notOurs = seed('not-ours', ['z.txt'], R.keepMs / 1000 + 60);
   const r = await L.post('next.txt', Buffer.from('next'));
   assert.equal(r.status, 200, r.text);
   const made = path.basename(path.dirname(r.json.path));
-  assert.deepEqual(fs.readdirSync(root).sort(), [first, fresh, freshPart, made, notOurs].sort());
+  assert.deepEqual(fs.readdirSync(root).sort(), [first, fresh, freshPart, freshEmpty, made, notOurs].sort());
   for (const gone of [old, stalePart, empty]) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
 });
 
@@ -265,4 +269,28 @@ test('laptop upload: past the total kept, the next upload is 507 (A10)', LAPTOP,
   const r = await L.post('a.txt', Buffer.from('x'));
   assert.equal(r.status, 507, r.text);
   assert.match(r.json?.error ?? '', /already holds/);
+});
+
+test('laptop upload: a failure after the body is read is still answered, 500, and stores nothing (A7, step 8)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  assert.equal((await L.post('first.txt', Buffer.from('x'))).status, 200);
+  const before = ourFolders(L.folder());
+  // A real failure after the read: while the body streams, the new folder is made read-only, so the
+  // .part (already open) takes the bytes but the rename into the stored name is refused (EACCES).
+  const p = L.post('a.txt', null, {}, { chunks: [Buffer.from('first half '), Buffer.from('second half')], gapMs: 800, within: 10000 });
+  let made = null;
+  for (let i = 0; i < 100 && !made; i++) { made = ourFolders(L.folder()).find((n) => !before.includes(n)) ?? null; if (!made) await new Promise((w) => setTimeout(w, 10)); }
+  assert.ok(made, 'the upload\'s folder appeared');
+  const dir = path.join(L.folder(), made);
+  // wait for the .part, then lock the folder before the second chunk and the end
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(dir, R.part)); i++) await new Promise((w) => setTimeout(w, 10));
+  fs.chmodSync(dir, 0o500);
+  // given back here, not in an after hook: the fixture's own hook (first) removes the base
+  let r;
+  try { r = await p; } finally { fs.chmodSync(dir, 0o700); }
+  assert.ok(!r.timedOut, 'no answer: a failure after the read went unanswered');
+  assert.equal(r.status, 500, JSON.stringify(r));
+  assert.match(r.json?.error ?? '', /could not store this file/);
+  // the stored name never appeared
+  assert.ok(!fs.existsSync(path.join(dir, 'a.txt')));
 });

@@ -14656,9 +14656,10 @@ function uploadRootOk(root, { make = false } = {}) {
 }
 // From the disk on every upload, never a list in memory, so a restart forgets nothing. Removes only a
 // folder named as ours, made by this user, that this process isn't receiving into: one past
-// keepMs, one with no file, and one whose .part has had nothing for stallMs (an upload cut off). A
-// fresh .part stays: another dashboard for the project (a worktree's) may be receiving into it.
-// Returns the bytes the folders left hold.
+// keepMs, and one empty, or whose .part has had nothing, for stallMs (an upload cut off). A fresh
+// .part or empty folder stays: another dashboard for the project (a worktree's) may be receiving
+// into it. `receiving` is the live map, asked again just before each removal, since an upload this
+// process starts during the scan is new to it. Returns the bytes the folders left hold.
 async function sweepLaptopUploads(root, receiving, limits, now = Date.now()) {
   let kept = 0;
   for (const e of await fs.promises.readdir(root, { withFileTypes: true })) {
@@ -14669,8 +14670,9 @@ async function sweepLaptopUploads(root, receiving, limits, now = Date.now()) {
       const st = await fs.promises.lstat(folder);
       if (!st.isDirectory() || st.uid !== process.getuid()) continue;
       const names = await fs.promises.readdir(folder);
-      let gone = !names.length || now - st.mtimeMs > limits.keepMs;
+      let gone = now - st.mtimeMs > (names.length ? limits.keepMs : limits.stallMs);
       if (names.includes(UPLOAD_PART)) gone = now - (await fs.promises.lstat(path.join(folder, UPLOAD_PART))).mtimeMs > limits.stallMs;
+      if (gone && receiving.has(e.name)) continue;
       if (gone) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
       for (const n of names) kept += (await fs.promises.lstat(path.join(folder, n))).size;
     } catch {}
@@ -14698,7 +14700,7 @@ async function receiveLaptopUpload(req, res, rawName, send) {
   if (why) return refuse(503, `this machine has no folder for dropped files: ${why}`);
   const pending = [...uploadsReceiving.values()].reduce((a, b) => a + b, 0);
   let kept;
-  try { kept = await sweepLaptopUploads(root, new Set(uploadsReceiving.keys()), lim); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  try { kept = await sweepLaptopUploads(root, uploadsReceiving, lim); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
   if (kept + pending + want > lim.total) return refuse(507, `this machine already holds as many dropped files as it keeps (${Math.floor(lim.total / 1048576)} MB); they go after ${Math.round(lim.keepMs / 86400000)} days`);
   const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
   const folder = path.join(root, id);
@@ -14729,7 +14731,9 @@ async function receiveLaptopUpload(req, res, rawName, send) {
     await fh?.close().catch(() => {});
     await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
     if (e.tooBig) return tooBig();
-    if (req.destroyed || res.destroyed) return;
+    // gone with the connection (a stall, a page closed): nobody to answer. Not req.destroyed alone,
+    // which Node 18 sets once the body has been read whole, before the rename that can still fail.
+    if (res.destroyed || req.socket?.destroyed) return;
     if (e.code === 'ENOSPC') return refuse(507, 'this machine\'s disk is too full for this file');
     process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
     return refuse(500, 'this machine could not store this file');
