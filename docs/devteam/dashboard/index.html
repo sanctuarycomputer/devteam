@@ -946,7 +946,8 @@ try {
   #goals-list > .tabbar:first-child { margin-top: -8px; }
   #goals .goal-grid { margin-top: 14px; }
   /* a long state badge (a held goal's "Draining… (1 still running) · Milestone 2 of 2: being built") ends in
-     an ellipsis inside its head or row, not past it, at 720px and below; Overview's goal title keeps 40% */
+     an ellipsis inside its head or row, not past it, at 720px and below (its title the whole label); Overview's
+     goal title keeps 40% */
   #goals .card.goal > .card-head > .badge, #overview .ov-goal > .rowline > .badge { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #overview .ov-goal > .rowline > .t { min-width: 40%; }
   #goals .card.goal { max-width: none; }
@@ -3446,7 +3447,7 @@ function goalCardHtml(g, R, openQs) {
   // the card opens its peek (a click on it, Enter on it, its title, Open in side peek in its ⋯); no Open link
   const meta = [design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : '', planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')].filter(Boolean).join(' · ');
   return `<div class="c6 card goal goal-${s.key}${blk ? ` blk-${blk}` : ''}"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
-    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}` })}
+    ${cardHead('target', `<span class="badge ${s.tone}" title="${esc(s.label)}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}` })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${goalStepsOf(g, s, R)}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
@@ -5867,7 +5868,7 @@ function renderOverview() {
   const goals = live.length ? `<div class="g12 ov-goals">${live.map((g) => {
     const s = goalState(g, R, d.questions || []);
     const blk = goalBlock(g, d);
-    return `<a class="c6 ov-goal${blk ? ` blk-${blk}` : ''}" href="#goal/${esc(encodeURIComponent(g.id))}" data-goal="${esc(g.id)}"><span class="rowline"><span class="badge ${s.tone}">${esc(s.label)}</span><span class="t">${esc(g.title)}</span></span>${goalStepsOf(g, s, R)}</a>`;
+    return `<a class="c6 ov-goal${blk ? ` blk-${blk}` : ''}" href="#goal/${esc(encodeURIComponent(g.id))}" data-goal="${esc(g.id)}"><span class="rowline"><span class="badge ${s.tone}" title="${esc(s.label)}">${esc(s.label)}</span><span class="t">${esc(g.title)}</span></span>${goalStepsOf(g, s, R)}</a>`;
   }).join('')}</div>` : '<p class="empty">None</p>';
 
   // Needs you: the open questions in rank order; the one next names carries the chip; a row opens it in the Inbox

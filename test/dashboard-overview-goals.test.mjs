@@ -398,6 +398,10 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   const cls = (k) => p.ev(`[...${card(k)}.classList]`);
   assert.ok((await cls('g1')).includes('blk-full'), 'g1 fully blocked');
   assert.ok((await cls('g2')).includes('blk-partial'), 'g2 partly blocked');
+  // a state badge ends in an ellipsis when it is too long for its head; its title is the whole label
+  const badges = await p.ev(`[...document.querySelectorAll('#goals .card.goal:not(.upkeep) > .card-head > .badge')].map((b) => [b.title, b.textContent])`);
+  assert.equal(badges.length, 5, 'a badge on each goal card');
+  for (const [title, text] of badges) assert.ok(text && title === text, `the badge's title is its full label: ${JSON.stringify([title, text])}`);
   for (const k of ['g0', 'g3', 'g6', 'upkeep']) assert.ok(!(await cls(k)).some((c) => c.startsWith('blk-')), `${k} not blocked`);
   // today's head: priority first, then the impact's words
   assert.equal(await p.ev(`${card('g1')}.querySelector('.card-head .grow').textContent.trim()`), 'priority 1 · moves a number the project watches');
@@ -614,6 +618,10 @@ test('overview: header, sections, numbers, autonomy, goals, needs you, commit hi
   // Goals: every active goal in priority order, the step bar Goals' cards draw, outlined when blocked
   const grows = await p.ev(`[...${secOf('Goals')}.querySelectorAll('a.ov-goal')].map((a) => ({ id: a.dataset.goal, href: a.getAttribute('href'), c6: a.classList.contains('c6'), steps: a.querySelector('ol.steps')?.outerHTML ?? null, bw: getComputedStyle(a).borderTopWidth, bc: getComputedStyle(a).borderTopColor, h: a.offsetHeight, top: a.offsetTop, cls: [...a.classList] }))`);
   assert.deepEqual(grows.map((g) => g.id), ['g1', 'g2', 'g3', 'g6', 'g0'].map((k) => ids[k]));
+  // each row's state badge carries its full label as its title (the ellipsis can cut it at 720px and below)
+  const rowBadges = await p.ev(`[...${secOf('Goals')}.querySelectorAll('a.ov-goal > .rowline > .badge')].map((b) => [b.title, b.textContent])`);
+  assert.equal(rowBadges.length, 5, 'a badge on each row');
+  for (const [title, text] of rowBadges) assert.ok(text && title === text, `the row badge's title is its full label: ${JSON.stringify([title, text])}`);
   for (const g of grows) {
     assert.ok(g.c6, 'a row is .c6');
     assert.equal(g.href, `#goal/${encodeURIComponent(g.id)}`);

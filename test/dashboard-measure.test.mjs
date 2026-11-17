@@ -22,16 +22,21 @@ const READY = "!document.querySelector('main.waiting')";
 // only (narrow: its view a selector no element has), as for the Inbox entry below: on a load at scrollY 0
 // at 720x800 and 390x844 every shell page starts 104px below the bar (kit-87's nav row,
 // o-20261116-110914358); every other check runs at all three sizes.
-const OV_READY = "!!document.querySelector('#overview .ov-head h2') && !!document.querySelector('#overview .sec')";
+// Overview waits for /api/hello too (the status pill and Commit history's mosaic draw when it lands), so its
+// entry is judged whole wherever it sits in the list
+const OV_READY = "!!document.querySelector('#overview .ov-head h2') && !!document.querySelector('#overview .sec') && !!document.querySelector('#overview .mosaic > i')";
 const GOALS_READY = (tab) => `document.querySelector('#goals .tabbar [aria-selected="true"]')?.dataset.tab === '${tab}' && !!document.querySelector('#goals .card${tab === 'active' ? '.goal' : ''}, #goals .empty')`;
-const GOAL_PEEK_READY = (title) => `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-bar-title .dtitle')?.textContent === ${JSON.stringify(title)}`;
+// a peek waits for its record: no loading marker and its key row (a goal's Opened, from the record; Upkeep's
+// What it covers), the wait dashboard-overview-goals.test.mjs uses, so its stored rows and History are judged
+const PEEK_DTS = "[...(document.querySelector('#drawer-body section.attrs > dl.props')?.children ?? [])].filter((x) => x.tagName === 'DT').map((x) => x.textContent.trim())";
+const GOAL_PEEK_READY = (title, key) => `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-bar-title .dtitle')?.textContent === ${JSON.stringify(title)} && !document.querySelector('#drawer-body .loading') && ${PEEK_DTS}.includes(${JSON.stringify(key)})`;
 const OVERVIEW_GOALS = [
   { hash: '#overview', ready: OV_READY },
   { hash: '#goals', ready: GOALS_READY('active') },
   { hash: '#goals?gt=met', ready: GOALS_READY('met') },
   { hash: '#goals?gt=letgo', ready: GOALS_READY('letgo') },
-  { hash: '#goal/<seeded>', ready: GOAL_PEEK_READY('Self-serve billing'), opts: { inbox: '#no-such-inbox' } },
-  { hash: '#goal/upkeep', ready: GOAL_PEEK_READY('Upkeep'), opts: { inbox: '#no-such-inbox' } },
+  { hash: '#goal/<seeded>', ready: GOAL_PEEK_READY('Self-serve billing', 'Opened'), opts: { inbox: '#no-such-inbox' } },
+  { hash: '#goal/upkeep', ready: GOAL_PEEK_READY('Upkeep', 'What it covers'), opts: { inbox: '#no-such-inbox' } },
 ].map((pg) => ({ ...pg, narrow: { view: '#no-such-view' } }));
 const PAGES = [
   // kit-87: Settings, on the shell, whole
