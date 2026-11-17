@@ -5229,7 +5229,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on a property's key closes its tooltip, not the drawer
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
-  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer();
+  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
@@ -6859,9 +6859,9 @@ function thButton() {
     if (n.className !== cls) n.className = cls;
     if (n.textContent !== String(b.n)) n.textContent = String(b.n);
   }
-  // the open questions alone (the red count also holds the lessons sent to the owner): the label says questions
-  // (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
-  const q = DATA ? (DATA.questions || []).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
+  // the red count's number (inboxTitle's: the open questions and the lessons sent to the owner), so the name says what
+  // the button shows (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
+  const q = DATA ? (DATA.questions || []).length + (DATA.ooda?.knowledge ?? []).filter(ownerLesson).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
   const parts = [...(q ? [`${q} open question${q === 1 ? '' : 's'}`] : []), ...(b.label ? [b.label] : [])];
   const label = parts.length ? `Inbox: ${parts.join(', ')}` : 'Inbox';
   const title = b.title || 'Open questions';
@@ -7080,6 +7080,16 @@ function thFocus(kind) {
   if (kind === 'composer') return void tlEl('tl-c-text')?.focus();
   if (kind === 'row' || kind === 'current') { const r = rowOf(kind === 'row' ? TH.focusRow : TL.open); return void (r ? r.focus() : tab()); }
   thFocusBack();
+}
+// Escape with the focus on the page (outside the panel and the card), after the viewer, a review and a peek
+// (kit-89 spec §2.9): a floating card closed first (as its ×), then the panel, the focus to the Inbox button.
+// Escape typed in a field on the page is the field's.
+function thEscapePage() {
+  const ae = document.activeElement;
+  if (typingIn(ae) || tlOwn(ae)) return;
+  const card = tlEl('tl-card');
+  if (card && !card.hidden && card.parentElement?.id === 'tl') return void tlClose();
+  if (TH.th) thGo({ focus: true });
 }
 // The focus back from the panel: the Inbox button the owner can see (#tt-peek over a peek or the viewer, else .tt),
 // else the peek's or the viewer's close (spec §2.9).

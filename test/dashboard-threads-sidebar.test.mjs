@@ -76,7 +76,7 @@ async function open(t, F, hash) {
 test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   const F = threadsFixture('threads-sidebar');
   F.sup(goalArgs('Self-serve billing', 2));
-  F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  const Q1 = idOf(F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']));
   // A: no subject, the supervisor spoke last and asked a question in it (your move)
   const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', A, 'Here, I think.']);
@@ -215,6 +215,11 @@ test('the panel and its button', { skip: SKIP, timeout: 300000 }, async (t) => {
   await soon("document.querySelector('#th-tabs [data-tab=\"threads\"] .n')?.textContent === '3'", 'drawn once the focus left');
   await p.click('#th-close');
   await soon(`!${isOpen}`, 'closed');
+
+  // a lesson sent to the owner: the red count holds it, and the button's name says the same number (final-1 F3)
+  F.sup(['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'ask before changing the processor', '--for-owner', '--plain', 'Ask the owner before the checkout changes processor.', '--evidence', Q1]);
+  await soon(`${tt}.querySelector('.n.q')?.textContent === '3'`, 'the red count with the lesson');
+  await soon(`/^Inbox: 3 open questions, /.test(${tt}.getAttribute('aria-label') || '')`, "the button's name counts what the red number counts");
 });
 
 test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
@@ -433,8 +438,38 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon('!TL.pin', 'pin mode off');
   await p.ev(FRAMES);
   assert.equal(await p.ev(`${isOpen} && location.hash === '#overview?th=open'`), true, 'the panel still open');
-  await p.click('#th-close');
-  await soon(`!${isOpen}`, 'closed');
+
+  // Escape with the focus on the page, nothing else open (spec §2.9; final-1 F1)
+  const blur = async () => { await p.ev('document.activeElement?.blur(); void 0'); await soon('document.activeElement === document.body', 'the focus on the page'); };
+  // typed in a field on the page (outside the panel and the card): the field's, the panel stays open
+  await p.ev("(() => { const i = document.createElement('input'); i.id = 'esc-probe'; document.querySelector('main').prepend(i); i.focus(); })(); void 0");
+  await soon("document.activeElement?.id === 'esc-probe'", 'the focus in a page field');
+  await p.key('Escape');
+  await p.ev(FRAMES);
+  assert.equal(await p.ev(`${isOpen} && location.hash === '#overview?th=open'`), true, 'Escape in a page field leaves the panel open');
+  await p.ev("document.getElementById('esc-probe').remove(); void 0");
+  // on the page: the panel closes, the focus to the Inbox button
+  await blur();
+  await p.key('Escape');
+  await soon(`!${isOpen} && location.hash === '#overview' && document.activeElement === document.querySelector('.pagebar .tt')`, 'Escape from the page closed the panel, the focus on the Inbox button');
+  // a floating card open, the focus on the page: the card closes, t gone, a new entry
+  await go(`#goals?t=${G}`, 'G on Goals');
+  await soon(`!${isOpen} && ${floating(G)}`, "G's card beside its pin");
+  await blur();
+  await p.key('Escape');
+  await soon(`location.hash === '#goals' && ${card}.hidden`, 'Escape from the page closed the card, t gone');
+  // a new entry, as its ×: Back is the card again
+  await p.ev('history.back(); void 0');
+  await soon(`location.hash === '#goals?t=${G}' && ${floating(G)}`, 'Back: the card again');
+  // the card first, then the panel: both open, two presses
+  await go(`#goals?th=open&t=${G}`, 'G on Goals, the panel open');
+  await soon(`${atRest} && ${floating(G)}`, 'the panel and the card');
+  await blur();
+  await p.key('Escape');
+  await soon(`location.hash === '#goals?th=open' && ${card}.hidden && ${isOpen}`, 'the card first');
+  await blur();
+  await p.key('Escape');
+  await soon(`location.hash === '#goals' && !${isOpen}`, 'then the panel');
 });
 
 test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) => {
