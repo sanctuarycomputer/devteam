@@ -1,10 +1,14 @@
 # kit-242 verification
 
-Ticket `kit-242-awareness-data`, PR sanctuarycomputer/devteam#326. Every row is at **2b77e34fffb3f9b7b30284236a95dd99c0d38928**: the PR head with all four tasks and their review records. It is up to date with origin/main (main has not moved since 817db2b).
+Ticket `kit-242-awareness-data`, PR sanctuarycomputer/devteam#326. Every row is at **3c973ae1b8136cb562b2277282d800b33f41b91e**: the PR head after final-1's fixes (4c17125, one test) and their dispositions. It is up to date with origin/main (main has not moved since 817db2b).
 
-**CI at 2b77e34:** test.yml run **44100735741** (pull_request), conclusion `success`, all 17 jobs `success`. `DEVTEAM_HOME=/data/home/code/devteam-dev node …/devteam.mjs gate ci -- sh /data/home/code/devteam-dev/scripts/devteam-ci-green.sh 2b77e34fffb3f9b7b30284236a95dd99c0d38928` exited 0: `ci-green: test.yml run 44100735741 for 2b77e34…: all 17 jobs succeeded`.
+**Final-1 (CHANGES at 792ab5b) fixes.** One test was added, "awareness: this week is read as of now, and the score uses unrounded shares". In it, a signal formed under a day before now is left out of this week's signals part (F1-1). The score is 44 from the unrounded shares (2/3, 2/3 and 0), where rounded shares would give 45 (F1-2). Both mutations were made, seen to fail that test, and restored.
 
-**Local runs at 2b77e34.** Each file ran on its own at `--test-concurrency=2` with Node 22 (`/usr/local/bin/node`), every `DEVTEAM_*` variable unset, a throwaway HOME, `DEVTEAM_HUB_PORT=4378` and `env -u TMUX`. Nothing ran the full suite.
+**CI at 3c973ae:** test.yml run **44103283384** (pull_request), conclusion `success`, all 17 jobs. `gate ci -- sh /data/home/code/devteam-dev/scripts/devteam-ci-green.sh 3c973ae…` exited 0: `ci-green: test.yml run 44103283384 for 3c973ae…: all 17 jobs succeeded`. Local Node 22 run at 3c973ae: `test/awareness-data.test.mjs` 16 pass, 0 fail, 0 skipped.
+
+**Earlier CI at 2b77e34** (before final-1): test.yml run **44100735741** (pull_request), conclusion `success`, all 17 jobs `success`. `DEVTEAM_HOME=/data/home/code/devteam-dev node …/devteam.mjs gate ci -- sh /data/home/code/devteam-dev/scripts/devteam-ci-green.sh 2b77e34fffb3f9b7b30284236a95dd99c0d38928` exited 0: `ci-green: test.yml run 44100735741 for 2b77e34…: all 17 jobs succeeded`.
+
+**Local runs at 2b77e34** (the code is unchanged since; only the test file grew). Each file ran on its own at `--test-concurrency=2` with Node 22 (`/usr/local/bin/node`), every `DEVTEAM_*` variable unset, a throwaway HOME, `DEVTEAM_HUB_PORT=4378` and `env -u TMUX`. Nothing ran the full suite.
 - `test/awareness-data.test.mjs`: 15 pass, 0 fail, 0 skipped.
 - `test/components.test.mjs`: 7 pass, 0 fail, 0 skipped. This includes G1 against the re-recorded golden.
 - During the build, Task 1 also ran `ooda-learning` (5/5), `efficiency-data` (18/18), `autonomy-data` (10/10), `ooda-lineage` (10/10) and `ooda-knowledge` (5/5) at 5e478b9, all passing.
