@@ -689,7 +689,6 @@ try {
   .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
   .holdbar .seg2 button.confirm { color: var(--red); }
   .holdbar button[data-met-id].confirm { color: var(--green-fg); }
-  .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
   /* --measure is in ch, so it would grow with .md's larger type: --body-measure is it resolved once, at
      the body's 13px (a registered length inherits as px), so rendered markdown keeps the body's measure.
      Where @property is unsupported, --body-measure inherits unresolved and .md takes the older width (its
@@ -948,6 +947,12 @@ try {
   .tl-card .ask, #ask-threads .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
   .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
+  /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
+     running text keeps the measure */
+  #goals .goal-grid { margin-top: 14px; }
+  #goals .card.goal { max-width: none; }
+  #goals .goal-next { max-width: var(--measure); }
+  #goals > #unassigned { margin-top: 12px; }
   .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
 </style>
@@ -980,8 +985,7 @@ try {
     <div class="grid" id="stats"></div>
   </section>
 
-  <section id="goals" class="no-shell" data-page="goals">
-    <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
+  <section id="goals" data-page="goals">
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
   </section>
@@ -3020,7 +3024,6 @@ async function reviewDecline(id, note, errId, btn) {
   clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1));
 }
 
-const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
 // A hold's state in words. Parking and draining are transitions, shown as such everywhere until they
 // finish; a goal the fleet op holds finishes only when the fleet is ready to move (fleet status).
 const HOLD_STATE_WORDS = { running: 'Running', draining: 'Draining…', drained: 'Drained', parking: 'Parking…', parked: 'Parked', 'let go': 'Let go' };
@@ -3052,6 +3055,11 @@ function goalBlock(goal, data) {
   const total = live.length + planners.length;
   const n = stuck.size + waiting;
   return !total || !n ? null : n === total ? 'full' : 'partial';
+}
+// Upkeep's days (kit-84: { starts_at, items: [{ kind, ref, words, at }], failed }) as the shell's
+// heartbeat takes them: { day: 'YYYY-MM-DD', items: [words], failed }.
+function heartbeatDays(days) {
+  return (Array.isArray(days) ? days : []).map((d) => ({ day: String(d?.starts_at ?? '').slice(0, 10), items: (Array.isArray(d?.items) ? d.items : []).map((i) => String(i?.words ?? '')), failed: !!d?.failed }));
 }
 /* goal-block end */
 // A held goal keeps its step; its label says the hold first.
@@ -3124,19 +3132,14 @@ function goalProgress(g, R) {
   }
   return out;
 }
-// The stepper, with Built and Met as bars of their own progress and a line under each.
-function goalStepper(g, s, R) {
-  if (s.key === 'let-go') return '';
+// The shell's step bar's data for a goal (goalSteps): its step, the work merged (Built) and the outcome
+// reached (Met); null for a let-go goal, which has no bar. Overview, Goals and the goal peek all draw it.
+function goalStepData(g, s, R) {
+  if (s.key === 'let-go' || g.status === 'abandoned') return null;
   const p = goalProgress(g, R);
-  // no-shell: the page's step bar, fenced from the block's .steps where it is drawn in a ported region (a peek)
-  return `<ol class="steps no-shell" aria-label="Progress">${GOAL_STEPS.map((x, i) => {
-    const cls = i < s.step ? 'done' : i === s.step ? 'now' : '';
-    const fill = x === 'Built' && p.work && i >= s.step ? p.work.frac : x === 'Met' && p.outcome && i >= s.step ? p.outcome.frac : null;
-    const sub = x === 'Built' && p.work ? p.work.text : x === 'Met' && p.outcome ? p.outcome.text : '';
-    const tip = x === 'Met' && p.outcome ? p.outcome.title : x === 'Built' && p.work ? `Work: ${p.work.text}` : '';
-    return `<li class="${cls}${fill != null && !cls ? ' part' : ''}"${fill != null ? ` style="--fill:${Math.round(fill * 100)}%"` : ''}${tip ? ` title="${esc(tip)}"` : ''}>${x}${sub ? `<span class="step-sub">${esc(sub)}</span>` : ''}</li>`;
-  }).join('')}</ol>`;
+  return { step: s.step, built: p.work, met: p.outcome };
 }
+const goalStepsOf = (g, s, R) => { const d = goalStepData(g, s, R); return d ? goalSteps(d) : ''; };
 // The toggle: Run, Drain, Park, and Let go (Restore once let go). Let go asks to confirm in place.
 function holdControl(id, h, { letGo = true, status = null, restoring = false } = {}) {
   if (status === 'met') return '';
@@ -3147,14 +3150,17 @@ function holdControl(id, h, { letGo = true, status = null, restoring = false } =
   const btn = (m, label) => `<button type="button" data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
   return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
 }
-function upkeepCard(u) {
+// Upkeep's card on Goals: its hold word, always on (or held), the last days' heartbeat, the chores in
+// flight; its hold control is in its peek.
+function upkeepCardHtml(u, days) {
   const words = HOLD_STATE_WORDS[holdState(u)] || u.state;
+  const held = u.mode === 'park' ? 'parked' : u.mode === 'drain' ? 'draining' : null;
   const chores = u.chores || [];
-  return `<div class="card goal upkeep"${subj('goal', 'upkeep', 'Upkeep')}>
-    ${cardHead('wrench', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: 'always on: observing and keeping the record' })}
-    <h4>Upkeep</h4>
-    <p class="ctx">Chores, CI fixes, research, retros, kit syncs and the improvement loop's trials and proposals.${chores.length ? ` In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}.` : ''}${u.reason ? ` <span class="muted">(${esc(u.reason)})</span>` : ''}</p>
-    ${holdControl('upkeep', u, { letGo: false })}
+  return `<div class="c6 card goal upkeep"${subj('goal', 'upkeep', 'Upkeep')} role="button" tabindex="0" data-open="goal/upkeep">
+    ${cardHead('repeat', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: held ? (u.fleet ? `the fleet is ${held}` : held) : 'always on' })}
+    <h4><a class="title-link" href="#goal/upkeep">Upkeep</a></h4>
+    ${Array.isArray(days) && days.length ? heartbeat(heartbeatDays(days)) : ''}
+    ${chores.length ? `<p class="goal-next">In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}</p>` : ''}
   </div>`;
 }
 // Can the fleet move? The mode is in the data; readiness comes from fleet status, asked for apart.
@@ -3396,24 +3402,72 @@ $('settings').addEventListener('click', (e) => {
   else u.pending = Math.min(20, Math.max(1, (limitShown(key) ?? 0) + Number(b.dataset.limitStep)));
   drawSettings();
 });
-function goalCard(g, R, openQs, week) {
+// A goal's card on Goals' Active tab: its head, title, step bar, next line, attestation, Mark met and
+// links; outlined when its work waits (goalBlock). Its hold control is in its peek.
+function goalCardHtml(g, R, openQs) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
-  const steps = goalStepper(g, s, R);
+  const blk = goalBlock(g, DATA);
   // the card opens its peek (a click on it, Enter on it, its title, Open in side peek in its ⋯); no Open link
   const meta = [design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : '', planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')].filter(Boolean).join(' · ');
-  return `<div class="card goal goal-${s.key}"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
-    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}` })}
+  return `<div class="c6 card goal goal-${s.key}${blk ? ` blk-${blk}` : ''}"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
+    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.impact ? esc(g.impact.words) : '', g.priority ? `priority ${esc(g.priority)}` : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}` })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
-    ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
-    ${steps}
+    ${goalStepsOf(g, s, R)}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
     ${registryAttestLine(g)}
-    ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
     ${g.status === 'ready' && g.at_target ? `<div class="holdbar"><button type="button" data-met-id="${esc(g.id)}">Mark met</button><span class="muted small">${['repo', 'prod'].includes(g.measure?.source) ? 'its check runs again first' : 'your yes marks it met'}</span><span class="err" id="e-met-${esc(g.id)}"></span></div>` : ''}
     ${meta ? `<div class="meta">${meta}</div>` : ''}
   </div>`;
 }
+// A met or let-go goal's card: its badge, title, when, and the reason (let go) or the measure (met).
+function closedGoalCardHtml(g, R, openQs) {
+  const s = goalStateOf(g, R, openQs);
+  const met = g.status === 'met';
+  const at = g.updated_at || g.created_at;
+  const rs = g.readings || [], m = g.measure || {};
+  const measure = met && rs.length && typeof m.target === 'number' ? ` ${cap(m.description || 'the measure')}: ${esc(rs[rs.length - 1].value)}${esc(m.unit ? ` ${m.unit}` : '')}, target ${esc(m.target)}${esc(m.unit ? ` ${m.unit}` : '')}.` : '';
+  return `<div class="c6 card goal goal-closed"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
+    ${cardHead('target', `<span class="badge ${met ? 'good' : ''}">${met ? 'Met' : 'Let go'}</span>`, { extra: at ? `${met ? 'met' : 'let go'} ${esc(when(at))}` : '', id: g.id, open: `goal/${g.id}` })}
+    <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
+    <p class="goal-next">${s.next}${measure}</p>
+  </div>`;
+}
+// Goals: the tab bar (Active, Met, Let go; the gt key), then the tab's cards two across. Drawn only when
+// it changed, so a redraw keeps focus and an in-place confirm.
+const GOALS_TABS = ['active', 'met', 'letgo'];
+let GOALS_TAB = 'active';
+let GOALS_HTML = '';
+function renderGoals() {
+  if (!DATA) return;
+  const o = DATA.ooda, R = o.roadmap, openQs = DATA.questions || [];
+  const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
+  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+  const met = o.goals.filter((g) => g.status === 'met'), gone = o.goals.filter((g) => g.status === 'abandoned');
+  const tabs = tabBar({ tabs: [{ id: 'active', label: 'Active', count: live.length + (DATA.upkeep ? 1 : 0) }, { id: 'met', label: 'Met', count: met.length }, { id: 'letgo', label: 'Let go', count: gone.length }], selected: GOALS_TAB });
+  const grid = (cards) => `<div class="g12 goal-grid">${cards.join('')}</div>`;
+  let body;
+  if (GOALS_TAB === 'active') {
+    const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g) => goalCardHtml(g, R, openQs))].filter(Boolean);
+    const ask = openQs.find((q) => q.kind === 'goal-definition');
+    body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).'));
+  } else {
+    const list = GOALS_TAB === 'met' ? met : gone;
+    body = list.length ? grid(list.map((g) => closedGoalCardHtml(g, R, openQs))) : '<p class="empty">None</p>';
+  }
+  const html = tabs + body;
+  if (html !== GOALS_HTML) { $('goals-list').innerHTML = html; GOALS_HTML = html; }
+}
+// Selecting a tab is a new entry (#goals, #goals?gt=met), so Back restores the tab before and a reload keeps it.
+bindTabBar($('goals'), { onSelect: (id) => {
+  if (!GOALS_TABS.includes(id)) return;
+  const cur = parseHead(location.hash, SHELL_ROUTES);
+  const state = cur.link === undefined && cur.page === 'goals' ? { ...cur.state } : {};
+  if (id === 'active') delete state.gt; else state.gt = id;
+  GOALS_TAB = id;
+  renderGoals();
+  location.hash = headFor({ page: 'goals', state });
+} });
 // The goal's registry attestation (planning.md §7), when it marks a precondition as the registry being complete.
 const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<div class="meta">Registry attestation: precondition ${esc(r.precondition)}, ${esc(r.status)}${r.question ? ` (${qlink(r.question, r.answer ? `answered “${r.answer}”` : 'the question')})` : ''}</div>` : ''; };
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
@@ -3430,8 +3484,6 @@ function renderOoda(o) {
   // Retro and roadmap
   const R = o.roadmap;
   const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
-  const rt = o.retro;
-  $('retro').innerHTML = `${rt.last ? `<a class="linkish" href="#retro/${encodeURIComponent(rt.last.id)}">retro ${esc(retroDate(rt.last))}</a>: ${esc(rt.last.summary)}` : 'no retro yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
   $('unassigned').innerHTML = o.goals.length || R.unassigned.length ? `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day` : '';
   const roadmapOf = (gid) => {
     const r = R.goals.find((x) => x.id === gid);
@@ -3444,13 +3496,7 @@ function renderOoda(o) {
   };
 
   // Goals: where each stands, how the work and the measure are trending, what it waits on
-  const openQs = DATA.questions || [];
-  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status));
-  const doneGoals = o.goals.filter((g) => ['met', 'abandoned'].includes(g.status));
-  $('goals-list').innerHTML = (DATA.upkeep ? upkeepCard(DATA.upkeep) : '') + (o.goals.length ? live.map((g) => goalCard(g, R, openQs, week)).join('') + (doneGoals.length ? `<details><summary>Met and let go (${doneGoals.length})</summary>${doneGoals.map((g) => goalCard(g, R, openQs, week)).join('')}</details>` : '') : (() => {
-    const ask = (DATA.questions || []).find((q) => q.kind === 'goal-definition');
-    return empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).');
-  })());
+  renderGoals();
 
   // Is it learning: the chart above the tabs
   $('learning').innerHTML = learningSection(o);
@@ -4396,7 +4442,7 @@ function openGoal(id) {
       ['Your verdicts', verdicts.length ? `<ul>${verdicts.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on its design, oldest first.'],
       ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
     ] })}
-    ${goalStepper(g, s, R)}
+    ${goalStepsOf(g, s, R)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
     ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
     ${psect('Readings', readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')}
@@ -5208,6 +5254,7 @@ const LOOP_TABS = ['observe', 'orient', 'decide', 'act'];
 function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
+  if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
 // whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
