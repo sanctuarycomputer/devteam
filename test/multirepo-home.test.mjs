@@ -201,6 +201,7 @@ test('records in home: the setting (repo by default, home or refused), and appro
     F.g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
     write(path.join(w, 'docs/devteam/project/tickets/console-01-a/plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
     F.g(['add', '-A'], w); F.g(['commit', '-qm', 'plan in the link'], w);
+    homeRecords(F, 'console-01-a', { 'spec.md': '# spec\n' }, { push: false });
     assert.match(runIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP).err, /no plan\.md for console-01-a on ticket\/console-01-a/, "a plan in the link doesn't count");
     homeRecords(F, 'console-01-a', { 'plan.md': '# plan\n\n## TL;DR\n\n- x\n' }, { push: false });
     assert.match(okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP), /^a-/, "the plan on home's ticket/<id>");
@@ -385,7 +386,7 @@ function leftInLink(F, id, { files = { 'spec.md': '# spec\n', 'plan.md': '# plan
   return { w, code, head: g(['rev-parse', 'HEAD'], w) };
 }
 // the left-in-the-link warning lines for a ticket in a command's stderr
-const warnings = (text, id) => text.split('\n').filter((l) => new RegExp(`${id}: records read from console \\(docs/devteam/project/tickets/${id}/\\), left from before links\\.console\\.records was "home"`).test(l)).length;
+const warnings = (text, id) => text.split('\n').filter((l) => new RegExp(`^devteam: warning: ${id}: records read from console \\(docs/devteam/project/tickets/${id}/\\), left from before links\\.console\\.records was "home"; move them to home's docs/devteam/project/tickets/${id}/ once merged$`).test(l)).length;
 
 test('records in home: a ticket whose records were left in the link merges from there until home has some', () => {
   const F = recordsFixture('records-left');
@@ -419,6 +420,21 @@ test('records in home: a ticket whose records were left in the link merges from 
     assert.ok(!rv.some((l) => /^records: /.test(l)), rv.join('\n'));
     okIn(old, ['review-worktree', '--remove', rv[0]], SUP);
     g(['checkout', '-q', '-B', `ticket/${id}`, a.head], a.w); g(['fetch', '-q', 'origin'], F.console);
+    // A7: the views read the link: the default records line in the worker's prompt
+    const wp = okIn(old, ['prompt', 'worker', id], SUP);
+    assert.match(wp, /keep this ticket's records under docs\/devteam\/project\/tickets\/console-01-a\/ in this repo\./);
+    assert.doesNotMatch(wp, /Keep its records/);
+    // approve-plan reads the link's plan (leftInLink's act succeeds), until home has a folder without one
+    leftInLink(F, 'console-06-f', { files: { 'spec.md': '# spec\n', 'plan.md': '# plan\n\n## TL;DR\n\n- x\n' }, final: false });
+    homeRecords(F, 'console-06-f', { 'spec.md': '# spec\n' }, { push: false });
+    assert.match(runIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-06-f', '--', 'ok'], SUP).err, /no plan\.md for console-06-f on ticket\/console-06-f/);
+    // merge lands the code and the link's records in console, nothing in home
+    okIn(old, ['merge', id], SUP);
+    g(['fetch', '-q', 'origin'], F.console); g(['fetch', '-q', 'origin'], old);
+    const trunk = g(['ls-tree', '-r', '--name-only', 'origin/trunk'], F.console).split('\n');
+    assert.ok(trunk.includes(`src/${id}.js`) && trunk.includes(`${T(id)}/spec.md`), trunk.join('\n'));
+    assert.equal(g(['ls-tree', '-r', '--name-only', 'origin/main', '--', T(id)], old), '', 'nothing in home');
+    assert.equal(json(okIn(old, ['timeline', id, '--json'])).files.find((f) => f.title === 'spec')?.repo, 'console');
     // A2c: home records pushed from another clone: merge and check-pr fetch them before deciding
     const e = leftInLink(F, 'console-05-e');
     const other = path.join(F.base, 'home-other');

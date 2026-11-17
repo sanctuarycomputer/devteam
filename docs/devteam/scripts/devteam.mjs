@@ -4685,6 +4685,8 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     const rows = verText.split('\n').filter((l) => /^\|/.test(l.trim()) && !/^\|\s*-/.test(l.trim())).length - 1;
     if (rows < (t.done_when ?? []).length) fails.push(`verification has ${Math.max(rows, 0)} row(s) for ${t.done_when.length} done-when(s)`);
   }
+  // A WORKTREE src goes on without H: a link ticket never reaches it (linkRepo always has commonDir
+  // and projectInRepo), and a home ticket's records setting is false, so the views form agrees.
   const reviews = ticketReviews(id, src === WORKTREE ? src : { ...src, inHome: H });
   // An unnamed record counts for nothing; it fails the ticket only while it is the latest in its
   // track (a later, named pass in the same track supersedes it).
