@@ -2,21 +2,13 @@
 
 ## TL;DR
 
-- Add `artifactVersions(slug)` and the `artifact versions <slug> [--json]` subcommand to `docs/devteam/scripts/devteam.mjs`, next to `artifact describe`. It lists:
-  - the drafts, from `draftArtifacts()` filtered to the slug, newest first;
-  - then main's version and the earlier ones, from one first-parent `git log --raw -t` over the artifact's folder.
-
-  Trees without `artifact.json` are dropped, and so are repeated trees. The list is capped at 200 versions, and exit 3 means there is nothing.
-- Add `GET /api/artifact-versions?slug=` to the dashboard server, next to `/api/view`. It runs that subcommand in a child process, with one shared job per slug. It answers 403 to a `sec-fetch-site` header that is present and not `same-origin`, 400 to a bad slug, 404 when the subcommand exits 3, and 500 on any other failure.
-- Nothing changes in how artifacts are served. Every listed tree is one `/artifact/tree/<id>/<slug>/` already serves, under the same sandbox.
-- Test first, in the new `test/artifact-versions.test.mjs`. It uses a `threadsFixture` with real git history and a real dashboard.
-  - T1 checks the subcommand's JSON (spec A1, A2, A5, A7, and A6's exit 3).
-  - T2 adds the route, and checks that the endpoint's answer equals the CLI's and that every listed url is served under the sandbox (A3, A4, A6).
-- Then mutations M1–M6 in verification, and CI `test.yml` green at the head as the gate.
-- Risks:
-  - a draft folder without its own `.git` reporting main's HEAD (guarded by `--show-toplevel`, A2);
-  - a cap on commits instead of on versions (A7);
-  - an unservable tree listed (A5).
+- T1 adds `artifactVersions(slug)` and `artifact versions <slug> [--json]` to `docs/devteam/scripts/devteam.mjs`, next to `artifact describe`: the slug's drafts from `draftArtifacts()`, newest first, then main's version and earlier ones from one first-parent `git log --raw -t` over its folder.
+- That list drops trees without `artifact.json` and repeated trees, is capped at 200 versions counted after those filters, and exits 3 when there is nothing.
+- T2 adds `GET /api/artifact-versions?slug=` next to `/api/view`: it runs that subcommand in a child process (one shared job per slug) and answers 403 (cross-site header), 400 (bad slug), 404 (exit 3) or 500 (other failure).
+- Serving doesn't change: every listed tree is one `/artifact/tree/<id>/<slug>/` already serves, under the same sandbox.
+- Test first, in the new `test/artifact-versions.test.mjs` on a `threadsFixture` with real git history and a real dashboard: T1 checks the CLI's JSON (A1, A2, A5, A7, A6's exit 3); T2 checks the endpoint equals the CLI and every listed url is served under the sandbox (A3, A4, A6).
+- Verification runs mutations M1–M6, each turning its named check red, and CI `test.yml` green at the head is the gate.
+- Risks: a plain draft folder reporting main's HEAD (guarded by `--show-toplevel`, A2); a cap on commits instead of versions (A7); an unservable tree listed (A5).
 
 > For agentic workers: use superpowers:subagent-driven-development (or executing-plans). Steps are checkboxes.
 
