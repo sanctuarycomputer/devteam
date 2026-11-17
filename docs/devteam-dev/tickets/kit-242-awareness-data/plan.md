@@ -35,7 +35,7 @@
 ## Review Focus
 
 1. **Equal timestamps.** Two items or two signals can share an `at`. Sort by `at` and then by `id`, so forming and the "oldest first" order are deterministic. Task 2 and Task 3 build their fixtures with the per-signal minute offsets below, and the order test pins the order.
-2. **A hand line the fold ignored** (a `set` from a writer below the field's rank). Read citation times from the object's `updates`, which hold applied changes only, never from raw lines. Task 2's dropped-citation cases use applied sets.
+2. **A hand line the fold ignored** (a `set` from a writer below the field's rank). Read later citation times from the object's `updates`, which hold applied changes only, never from raw `set` lines. The one raw line read is the `new` line the fold kept (P1-6, P2-3). Task 2's dropped-citation cases use applied sets.
 3. **A run within 10 minutes after Monday 00:00 UTC.** This week's lines need room. The tests that read week 11 skip with `TOO_SOON`, as `test/autonomy-data.test.mjs` does (Task 2).
 4. **A stored learning record for a week.** Awareness ignores it, because it needs times the record doesn't hold. A test writes a record with different `informed` figures for week 7 and shows awareness still reads the log (Task 2).
 5. **A big log.** One `/api/data` request on home's log (about 15k lines) is timed before and after the change, and both numbers go in verification.md (Task 4). A rise of more than 3 s goes to the supervisor before the merge-request.
@@ -44,7 +44,7 @@
 
 Clock: `M` = this Monday 00:00 UTC; `W(k)` = M − (11 − k) × WEEK; `h(k, d, hh)` = W(k) + d days + hh hours; `E(k)` = W(k + 1) − 1 ms for k < 11. Lines are written with `handFor` as in `test/autonomy-data.test.mjs` (copy it), with two changes. Its prefix map gains `problem: 'p'`: without it a problem's id reads `undefined-…` and `readLog` drops the line (P1-4). And `hand(by, o, ms, { exact: true })` writes at exactly `ms`, with no counter milliseconds, for the edge-time lines `sA`, `sB` and `sC`: the counter's up to 999 ms would push `sA` past E(2) (P1-3). `S` = `supervisor`, `O` = `owner`. Observations are `{ type: 'observation', kind: 'note', subject: 'app', source_key: <key>, detail: '<key> sighting <n>', valence: -1 }`.
 
-**Efficiency weeks** (for Task 4; copy `effFixture`'s `shipped` and `land` from `test/efficiency-data.test.mjs`): three tickets shipped in week 0 and three in week 7. Each ticket is size S, `hours: 1`, with one build spend of $1 (input 100, output 50). Weeks 0 and 7 then both score 100 for efficiency, and every other week is null.
+**Efficiency weeks** (for Task 4). Copy `effFixture`'s `shipped` and `land` from `test/efficiency-data.test.mjs` together with what they use: its own `hand` (prefixes `phase: 'h'` and `spend: 's'`), `addTicket`, `phase`, `spend`, `merge`, `mergeAt` and the `eff` feature line. Never wire them to `handFor`, whose prefix map has no `phase` or `spend`, so their ids would read `undefined-…` and be dropped (P2-1). three tickets shipped in week 0 and three in week 7. Each ticket is size S, `hours: 1`, with one build spend of $1 (input 100, output 50). Weeks 0 and 7 then both score 100 for efficiency, and every other week is null.
 
 **Signals.** Each signal j has items at F_j − 2 h (S), F_j − 1 h (S) and F_j (O), with F_j = h(8, 1, 11) + j minutes, so its group forms at F_j. `oX` is one observation on key `other:x` at h(8, 0, 1). Every noise ruling is `{ type: 'decision', class: 'orient-noise', authority: 'constitution', what: 'noise', refs: [<key>, oX] }`, except `sig:k`'s. `orient-noise` is constitutional, so only `constitution` is live (P1-1). Knowledge's `evidence` can't be set after its new line (`x-authority`), so every case that changes a citation later uses a problem with no fingerprints, `{ type: 'problem', title, severity: 1, realized: true, status: 'open', refs }` by S, whose `refs` the supervisor may set (P1-2). "k-cand" means knowledge `{ kind: 'lesson', status: 'candidate', statement: '…', scope: 'project' }` by S, which is not in force.
 
@@ -188,7 +188,7 @@ The algorithm for one week:
   - `awareness: a stored learning record doesn't stand in for the log`: week 7 still reads as in the table despite the record's 9s (Review Focus 4).
   - `awareness: a week before the log is not folded`: a second fixture whose lines are all in week 11, at `M + span × f`, so the test skips under `TOO_SOON` (P1-10). It has four accepted lessons by O, and one start by S that gives three of them. Weeks 0 to 10 are all `{ count: 0, of: 0, share: null }` with score null. Week 11's lessons read `3/4` and its starts `1/1`. Task 3 adds this fixture's suggestion.
 - [ ] **Step 2: Run** `env -u TMUX node --test --test-concurrency=2 test/awareness-data.test.mjs`. Expected: FAIL, because `awareness` is undefined.
-- [ ] **Step 3: Implement** `awarenessWeek` and `awarenessData`. Sort ties by `at`, then `id` (Review Focus 1). Take the citation walk from `updates`, never from raw lines (Review Focus 2).
+- [ ] **Step 3: Implement** `awarenessWeek` and `awarenessData`. Sort ties by `at`, then `id` (Review Focus 1). Take the later citations from `updates`, never from raw `set` lines; read only the kept `new` line raw (Review Focus 2).
 - [ ] **Step 4: Run** the new file, then `test/components.test.mjs`. Expected: the new file passes. G1 fails only on `dashboard-data.txt`, for the new `awareness` block: re-record it with `DEVTEAM_G1_RECORD=1`, check that `git diff test/fixtures` shows only that block, and rerun the file.
 - [ ] **Step 5: Commit** `kit-242: task 2, awareness parts and score`. Task review: `reviews/task-2.md`.
 
@@ -212,6 +212,8 @@ Model: strong
     - incident `incY`, resolved at now − 36 h and verified at now − 35 h ("Fixed 1 day ago"), and incident `incT`, resolved at now − 1 h and verified at now − 0.5 h ("Fixed today");
     - signals on `dup:z` (first sighting at h(9,1,9), its last detail over 120 characters) and `dup/z` (h(9,1,10)), each formed by three items from S and O and unexplained;
     - a signal on `quiet:x` with empty details, its items at now − 30 h (S), −29 h (S) and −28 h (O).
+
+    This fixture's lines are dated from now, not from Monday: "Fixed today" and "1 day ago" depend on the time since now, and dating them from Monday would break them on a Monday run. This is the one exception to the spec's Monday dating, and it is safe because nothing in this fixture depends on which week a line falls in (P2-2).
 
     Expected, in order: `aw-incident-<incY>`, `aw-incident-<incT>`, `aw-signal-dup-z` (its `what` cut to 120 characters of detail), `aw-signal-dup-z-2`, and `aw-signal-quiet-x`, whose `what` is "Find out why this keeps happening (3 times)" and whose `effect` is "First seen 1 day ago; explaining it stops further sightings piling up" (P1-8).
   - `awareness: plain words`: no suggestion's text matches `/informed|orient|debt|devteam|--/i` (R2).
