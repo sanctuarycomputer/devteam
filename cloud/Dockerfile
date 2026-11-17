@@ -115,9 +115,9 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
-ARG UV_VERSION=0.13.8
-ARG UV_SHA256_X86_64=5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91
-ARG UV_SHA256_AARCH64=74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585
+ARG UV_VERSION=0.13.9
+ARG UV_SHA256_X86_64=a7fbaff2b9a271d85c1bdb540941090fd1ce011797b4abeb48e4dcd39c2471d5
+ARG UV_SHA256_AARCH64=0797542018e541a9288855df555c8077eed06f7a47d206362030480e8ecc9f3d
 RUN case "$(uname -m)" in \
       x86_64) sum=$UV_SHA256_X86_64 ;; \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
@@ -739,7 +739,7 @@ ENV DEVTEAM_IMAGE_HUB=4320
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.64.2
+ARG DEVTEAM_RELEASE=v0.64.3
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 
