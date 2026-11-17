@@ -6956,8 +6956,9 @@ function thListHtml() {
   return `<div id="ask-threads"></div>${seg}${body}`;
 }
 // The Inbox tab (kit-100 spec §2.2), first: its count is the Inbox's (red, by a page rule: not `waiting`); its pane
-// is empty, since #th-inbox, which render() fills, is shown by thDraw, so a throw here can't hide the Inbox.
-threadsTabs.register({ id: 'inbox', label: 'Inbox', count: () => inboxCount() || null, render: (el) => { el.innerHTML = ''; } });
+// is empty, since #th-inbox, which render() fills, is shown by thDraw, so a throw here can't hide the Inbox. In the
+// /view/ tab (no Inbox data, no render()) the pane is one line to the dashboard's Inbox; the count is hello's (kit-100 spec §2.8).
+threadsTabs.register({ id: 'inbox', label: 'Inbox', count: () => inboxCount() || null, render: (el) => { el.innerHTML = VIEWER ? '<p><a class="linkish" href="/#overview?th=inbox">Answer questions on the dashboard.</a></p>' : ''; } });
 threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.threads).you || null, render: (el) => { el.innerHTML = thListHtml(); } });
 threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: true });
 threadsTabs.register({ id: 'shell', label: 'Shell', disabled: true });
@@ -7003,7 +7004,7 @@ function thDraw({ view = false } = {}) {
   const key = `${sel}:${html}`;
   if (key !== TH.pane && (view || !tlHeld(pane))) { TH.pane = key; threadsTabs.render(sel, pane); askDraw(); }
   // the Inbox: shown only while the panel is open on its tab (a closed panel keeps its boxes, kit-100 spec §2.2)
-  const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox';
+  const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox' || !!VIEWER; // never in /view/: no data, its tab's pane says where to go
   // shown or hidden, the pins and a floating card on its cards placed again (kit-100 spec §2.6)
   if (inbox && inbox.hidden !== off) { inbox.hidden = off; tlReplace(); }
   // and no in-panel card beside it: a + draft left on Threads waits there, hidden

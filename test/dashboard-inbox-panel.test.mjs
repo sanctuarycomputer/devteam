@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import { PORTS, bareProject, dashboardOnFreePort, inboxFixture } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, inboxFixture, threadsFixture, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
@@ -459,6 +459,49 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`!${IS_OPEN}`, 'the panel closed');
     await size(1440, 900);
     await soon('innerWidth === 1440', 'at 1440');
+  });
+
+  // AC9 (done-when 9): the artifact viewer, /view/artifact/<slug>, has no Inbox data and no render(): its panel registers
+  // the same tabs, the Inbox tab shows hello's count and one line to the dashboard's Inbox; its button opens Threads
+  // (ruling m-20261115-230458641-supervisor). A fixture and a tab of its own.
+  await t.test('/view/', async () => {
+    const F = threadsFixture('inbox-view-tab');
+    const dir = path.join(F.old, 'docs/devteam/project/artifacts/viewer-mock');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'artifact.json'), JSON.stringify({ v: 1, title: 'Viewer mock', summary: 'A page to point at', by: 'supervisor', for: [] }));
+    fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><body><p id="art">the mock</p></body></html>');
+    F.g(['add', '-A', dir], F.old);
+    F.g(['commit', '-qm', 'artifact: viewer-mock'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const later = cleanup(t);
+    later(() => F.done());
+    const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+    later(() => dash.stop());
+    await until(async () => { try { return (await (await fetch(`http://127.0.0.1:${port}/api/hello`)).json()).inbox === 1; } catch { return false; } }, "hello's inbox");
+    const v = await chrome.newPage();
+    later(() => v.close());
+    await v.send('Page.enable');
+    await v.send('Runtime.enable');
+    await v.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await v.send('Page.addScriptToEvaluateOnNewDocument', { source: "window.__asked = []; { const rf = window.fetch; window.fetch = (u, o) => { window.__asked.push(String(u)); return rf(u, o); }; }" });
+    await v.send('Page.navigate', { url: `http://127.0.0.1:${port}/view/artifact/viewer-mock` });
+    const vs = soonIn(v, 30000, () => dash.out());
+    await vs("document.documentElement.classList.contains('viewer') && typeof TL === 'object' && TL.have > 0 && document.querySelector('#tt-peek .n.q')?.textContent === '1'", 'the viewer, its threads and hello read');
+
+    // the button opens the panel on Threads (kit-89), not Inbox
+    await v.click('#tt-peek');
+    await vs(`${AT_REST} && document.querySelector('#th-tabs [role="tab"][aria-selected="true"]')?.dataset.tab === 'threads'`, 'the panel open on Threads');
+    assert.deepEqual(await v.ev('threadsTabs.list().map((t) => t.id)'), ['inbox', 'threads', 'supervisor', 'shell']);
+    await vs("document.querySelector('#th-tabs [data-tab=\"inbox\"] .n')?.textContent === '1'", "the Inbox tab's count is hello's inbox");
+    // the tab: one line to the dashboard's Inbox; #th-inbox stays hidden (no data here)
+    await v.click('#th-tabs [data-tab="inbox"]');
+    await vs(`document.querySelector('#th-tabs [data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !!document.querySelector('#th-pane a')`, 'the Inbox tab chosen');
+    const pane = await v.ev(`(() => { const as = [...document.querySelectorAll('#th-pane a')]; return { n: as.length, text: as[0]?.textContent, href: as[0]?.getAttribute('href'), cls: as[0]?.className, inbox: !!document.getElementById('th-inbox') && !document.getElementById('th-inbox').hidden && document.getElementById('th-inbox').getClientRects().length > 0 }; })()`);
+    assert.deepEqual(pane, { n: 1, text: 'Answer questions on the dashboard.', href: '/#overview?th=inbox', cls: 'linkish', inbox: false });
+    assert.equal(await v.ev("document.querySelector('#th-tabs [data-tab=\"inbox\"] .n')?.textContent"), '1', 'the count stays');
+    assert.equal(await v.ev("location.pathname + location.hash"), '/view/artifact/viewer-mock', 'no route');
+    assert.deepEqual(await v.ev("window.__asked.filter((u) => u.startsWith('/api/data'))"), [], '/api/data never asked');
   });
 
   // AC5 (done-when 5), last: it answers questions and changes the counts. Each control on its own fixture question,
