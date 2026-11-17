@@ -476,3 +476,31 @@ test('the server serves the same awareness and autonomy_score', async (t) => {
     assert.deepEqual(api.autonomy_score, d.autonomy_score);
   } finally { await dash?.stop(); }
 });
+
+// autonomyScore on its own, with synthetic inputs: the fixture's week 7 is 83.33 and its last two
+// weeks are both null, so it can't tell round from floor or this_week from last_week.
+test("autonomy score: rounds to nearest, and this week and last week are weeks 11 and 10", () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* autonomy score start */'), j = src.indexOf('/* autonomy score end */');
+  assert.ok(i >= 0 && j > i, 'the autonomy score block in devteam.mjs');
+  const { autonomyScore } = vm.runInContext(`${src.slice(i, j)}\n;({ autonomyScore })`, vm.createContext({}));
+  const trio = (t, e, a) => [t, e, a];
+  const run = (rows) => autonomyScore(
+    { decisions: { weeks: rows.map(([t]) => ({ score: t })) } },
+    { weeks: rows.map(([, e]) => ({ score: e })) },
+    { weeks: rows.map(([, , a], k) => ({ starts_at: `w${k}`, score: a })) });
+  const rows = Array.from({ length: 12 }, () => trio(null, null, null));
+  rows[0] = trio(100, 100, 51);
+  rows[1] = trio(0, 50, 51);
+  rows[2] = trio(100, null, 51);
+  rows[10] = trio(30, 30, 30);
+  rows[11] = trio(90, 90, 90);
+  const s = run(rows);
+  assert.equal(s.weeks[0].score, 84);
+  assert.equal(s.weeks[1].score, 34);
+  assert.equal(s.weeks[2].score, null);
+  assert.equal(s.weeks[5].score, null);
+  assert.equal(s.weeks[3].starts_at, 'w3');
+  assert.equal(s.this_week, 90);
+  assert.equal(s.last_week, 30);
+});

@@ -13289,6 +13289,7 @@ function dashboardData() {
   reviewMemo = new Map();
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
 }
+/* autonomy score start */
 // The Autonomy Score: the mean of the Trust, Efficiency and Awareness scores for each of the 12 weeks,
 // null when any of the three is (a week with no tickets shipped says nothing about autonomy).
 function autonomyScore(autonomy, efficiency, awareness) {
@@ -13298,6 +13299,7 @@ function autonomyScore(autonomy, efficiency, awareness) {
   });
   return { this_week: weeks[11].score, last_week: weeks[10].score, weeks };
 }
+/* autonomy score end */
 function dashboardDataRead() {
   // one clock for the parts that read the 12 weeks, so they agree on which week is this one
   const now = Date.now();
