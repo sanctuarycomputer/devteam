@@ -504,6 +504,13 @@ test('overview: header, sections, numbers, autonomy, goals, needs you, commit hi
   await p.ev('window.__failHello = false');
   await soon(`${head}.lastElementChild.innerHTML === statusPill('waiting')`, 'the pill once hello answers');
   assert.ok(await p.ev(`${head}.lastElementChild.classList.contains('ov-pill')`));
+  // a failed hello after an answer: unknown again (spec §1), then waiting once it answers again
+  await p.ev('window.__failHello = true');
+  await soon(`${head}.lastElementChild.innerHTML === statusPill('unknown')`, 'the pill once hello fails again');
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(`${head}.lastElementChild.innerHTML`), await p.ev(`statusPill('unknown')`), 'still unknown through polls while hello fails');
+  await p.ev('window.__failHello = false');
+  await soon(`${head}.lastElementChild.innerHTML === statusPill('waiting')`, 'waiting once hello answers again');
   const sum = await p.ev(`${head}.querySelector('.sum').textContent`);
   assert.match(sum, /^\d+ questions? · \d+ tickets? in flight$/);
   assert.match(sum, /^3 questions · 2 tickets in flight$/, 'three open questions; t1a and t2a are in flight');

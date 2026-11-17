@@ -5686,14 +5686,15 @@ function scoreOf(rec, at = 'score.this_week') {
 // The open question devteam.mjs next names: the first in /api/data's order. Its row and card carry the Next chip.
 const NEXT_ID = () => DATA?.questions?.[0]?.id ?? null;
 // /api/hello, as the hub reads it (pulse: state, last_activity, activity): asked on load and with each
-// redraw; a failed ask keeps the last answer (or none, and the pill says unknown).
+// redraw; a failed ask leaves none, so the pill says unknown (spec §1) and the mosaic is empty.
 let HELLO = null;
 async function helloLoad() {
+  let h = null;
   try {
     const r = await fetch('/api/hello', { signal: AbortSignal.timeout(10000) });
-    if (!r.ok) return;
-    HELLO = await r.json();
-  } catch { return; }
+    if (r.ok) h = await r.json();
+  } catch {}
+  HELLO = h && typeof h === 'object' ? h : null;
   if (DATA) renderOverview();
 }
 // "2 min ago", as the hub says it
