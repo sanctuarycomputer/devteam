@@ -1483,6 +1483,8 @@ function checkLine(o, file) {
   // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
   // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
   if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  // dropped files go with the owner's own answer, never words the supervisor recorded for them
+  if (o.type === 'question' && ['chat', 'thread'].includes(o.channel) && o.files !== undefined) errs.push(`files are on the owner's own answer, never one recorded from ${o.channel}`);
   if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
@@ -3459,13 +3461,13 @@ const heldClaims = (key) => {
   });
 };
 let heldSeq = 0;
-function holdLine(key, target, line) {
+function holdLine(key, target, line, paste = null) {
   const dir = heldDir(key);
   const name = `${String(Date.now()).padStart(15, '0')}-${String(process.pid).padStart(8, '0')}-${String(++heldSeq).padStart(5, '0')}`;
   try {
     fs.mkdirSync(dir, { recursive: true });
     // written whole, then named: a flush never reads half a line
-    fs.writeFileSync(path.join(dir, `${name}.tmp`), JSON.stringify({ line, target, at: nowIso() }));
+    fs.writeFileSync(path.join(dir, `${name}.tmp`), JSON.stringify({ line, target, at: nowIso(), ...(paste ? { paste } : {}) }));
     fs.renameSync(path.join(dir, `${name}.tmp`), path.join(dir, `${name}.json`));
     return path.join(dir, `${name}.json`);
   } catch { return null; }
@@ -3524,7 +3526,9 @@ function flushHeld(key) {
       if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
       const screen = paneScreen(pane.target);
       const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
-      if (!ready || !typeNow(pane.target, rec.line)) { stopped = true; break; }
+      // a paste only as typeNow takes one, paths as text: anything else in the file is typed as a line alone
+      const paste = Array.isArray(rec.paste) && rec.paste.length && rec.paste.every((p) => typeof p === 'string') ? rec.paste : null;
+      if (!ready || !typeNow(pane.target, rec.line, paste)) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
@@ -6653,7 +6657,7 @@ function cmdAnswer() {
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
   const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
-  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}`);
+  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}${droppedWords(files)}`, droppedPaths(files));
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
   if (metNote) out(metNote);
   if (settledNote && (fromChat || turn)) out(settledNote);
@@ -6820,6 +6824,7 @@ function threadLineProblems(o) {
     if (typeof o.text === 'string' && encodedBytes(o.text) > TURN_ENCODED_MAX) errs.push(`turn.text is ${encodedBytes(o.text)} bytes as the log holds it; at most ${TURN_ENCODED_MAX}`);
     for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
     if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
+    if (o.by !== 'owner' && o.files !== undefined) errs.push("files are on the owner's own turns");
   }
   return errs;
 }
@@ -6886,12 +6891,12 @@ const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.tes
 // An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text) {
+function deliverOwnerTurn(t, text, files) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
-  return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}`);
+  return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}${droppedWords(files)}`, droppedPaths(files));
 }
 const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
@@ -6955,12 +6960,14 @@ function cmdThread() {
     const t = appendLog({ type: 'thread', title, subject }, by);
     appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
-    return out(deliveredWords(deliverOwnerTurn(t, words)));
+    return out(deliveredWords(deliverOwnerTurn(t, words, files)));
   }
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
   if (sub === 'say' || sub === 'reply') {
     const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), 'supervisor');
+    // refused before its value is read: a reply's --files is wrong whatever it holds
+    if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
@@ -6968,7 +6975,6 @@ function cmdThread() {
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     const files = filesFlag();
-    if (files && by !== 'owner') die("--files go with the owner's own turn");
     // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
     // as appendLog will build it, checked here so the refusal says what to do about it
     const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
@@ -6976,7 +6982,7 @@ function cmdThread() {
     if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
     const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words)));
+    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words, files)));
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -7031,6 +7037,8 @@ function cmdThread() {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     if (t.status !== 'resolved') die(`${t.id} is open`);
+    // reopening takes words, never files: said so, not dropped without a word
+    if (flags.files !== undefined) die("--files go with the owner's own turn");
     const words = wordsFrom(2);
     if (words) turnText(words);
     const n = openThreadCount();
@@ -14674,12 +14682,12 @@ const FILES_MAX = 10;
 const FILES_PATH_MAX = 1024; // bytes
 const FILES_TOO_LONG = 'That is too long with its files; shorten it or attach fewer.';
 function attachedFiles(json) {
-  const shape = `--files is a JSON array of 1 to ${FILES_MAX} dropped files, each exactly {"name", "path", "bytes"}: a name of 1 to ${UPLOAD_NAME} characters with no control characters, a path of at most ${FILES_PATH_MAX} bytes, and bytes a whole number from 0`;
+  const shape = `--files is a JSON array of 1 to ${FILES_MAX} dropped files, each exactly {"name", "path", "bytes"}: a name of 1 to ${UPLOAD_NAME} characters with no control or bidi characters, a path of at most ${FILES_PATH_MAX} bytes, and bytes a whole number from 0`;
   let list = null;
   // a bare --files has no JSON at all
   if (typeof json === 'string') try { list = JSON.parse(json); } catch {}
   if (!Array.isArray(list) || list.length < 1 || list.length > FILES_MAX) die(shape);
-  for (const f of list) if (!isObj(f) || Object.keys(f).sort().join(',') !== 'bytes,name,path' || typeof f.name !== 'string' || f.name.length < 1 || f.name.length > UPLOAD_NAME || /\p{Cc}/u.test(f.name) || typeof f.path !== 'string' || Buffer.byteLength(f.path) > FILES_PATH_MAX || !Number.isInteger(f.bytes) || f.bytes < 0) die(shape);
+  for (const f of list) if (!isObj(f) || Object.keys(f).sort().join(',') !== 'bytes,name,path' || typeof f.name !== 'string' || f.name.length < 1 || f.name.length > UPLOAD_NAME || /\p{Cc}/u.test(f.name) || UNSAFE_TEXT.test(f.name) || typeof f.path !== 'string' || Buffer.byteLength(f.path) > FILES_PATH_MAX || !Number.isInteger(f.bytes) || f.bytes < 0) die(shape);
   for (const f of list) if (!path.isAbsolute(f.path)) die(`refused: ${f.path} is not an absolute path`);
   const root = uploadsRoot();
   let realRoot;
@@ -17125,20 +17133,39 @@ function resolvePane(target) {
 // passes that, so the shell refuses the line and no agent starts. Plain words, for any agent_command.
 const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now, every part (a long file takes more than one read), and follow it.`;
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
-const typeNow = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
+// With paste (files the owner dropped, their paths), the line and a space, then the paths as one
+// bracketed paste, as a drop on the terminal's page sends them (spec §7): tmux wraps it in ESC[200~ …
+// ESC[201~ when the agent asked for that, so Claude Code takes an image path as an attachment. The
+// text goes in on stdin, never as an argument, under a name of this process's own; -d drops it
+// once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
+// is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
+let dropSeq = 0;
+function typeNow(target, line, paste = null) {
+  const files = Array.isArray(paste) && paste.length ? paste : null;
+  let ok;
+  if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+  else {
+    const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
+    ok = tmux(['send-keys', '-t', target, '-l', `${line} `]) && sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+    if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+    ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
+  }
+  if (ok) recordSent(target, line);
+  return ok;
+}
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
 // typed; while it waits, why: 'held-card' (a menu the owner answers on the dashboard), 'held-terminal'
 // (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
 // asked now, but lines held earlier go first and the pane is not ready for them); false when it
 // could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
-function typeInto(target, line) {
+function typeInto(target, line, paste = null) {
   const key = paneKey(target);
-  if (!key) return typeNow(target, line);
+  if (!key) return typeNow(target, line, paste);
   const asking = paneAsking(target);
-  if (!asking && !heldPending(key)) return typeNow(target, line);
-  const file = holdLine(key, target, line);
-  if (!file) return asking ? false : typeNow(target, line);
+  if (!asking && !heldPending(key)) return typeNow(target, line, paste);
+  const file = holdLine(key, target, line, paste);
+  if (!file) return asking ? false : typeNow(target, line, paste);
   if (!asking) flushHeld(key);
   if (!fs.existsSync(file)) return true;
   return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
@@ -17150,16 +17177,20 @@ const heldWords = (why, whose) => `recorded and held: ${{
   'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
   'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
 }[why]}`;
-function nudgeSupervisor(line) {
-  if (REPLY_FD !== null) return void queuedNudges.push(line);
-  typeNudge(line);
+// paste: the paths of files the owner dropped with it, pasted after the line (typeNow)
+function nudgeSupervisor(line, paste = null) {
+  if (REPLY_FD !== null) return void queuedNudges.push({ line, paste });
+  typeNudge(line, paste);
 }
-function deliverNudges() { for (const line of queuedNudges.splice(0)) typeNudge(line); }
-function typeNudge(line) {
+function deliverNudges() { for (const { line, paste } of queuedNudges.splice(0)) typeNudge(line, paste); }
+function typeNudge(line, paste = null) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}; the line stays unread until it acks it (unread)`);
-  typeInto(target, line);
+  typeInto(target, line, paste);
 }
+// The words before a paste of dropped files, and the paths pasted: none for a line with no files.
+const droppedWords = (files) => (files?.length ? ` (${plural(files.length, 'file')} dropped)` : '');
+const droppedPaths = (files) => (files?.length ? files.map((f) => f.path) : null);
 const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'supervisor' : w; };
 
 // pane question [--json]: what the supervisor's terminal is asking, if anything. Reading is all a

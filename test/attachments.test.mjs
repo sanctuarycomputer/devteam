@@ -11,7 +11,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 // the suite's shared env scrub, tmux shim and stand-ins (before anything that reads the environment)
-import { bareProject, dashboardOnFreePort } from './lib/kit.mjs';
+import { bareProject, dashboardOnFreePort, hasTmux, threadsFixture, until } from './lib/kit.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kit = path.resolve(here, '..', 'docs', 'devteam');
@@ -765,6 +765,9 @@ test('files: the shape is checked, by the action and by the command, with nothin
     ['an extra key', [{ ...one, extra: 1 }]],
     ['a key missing', [{ name: 'a.png', path: stored }]],
     ['a name with a newline', [{ ...one, name: 'a\n.png' }]],
+    // a bidi override would have the owner's card read the name reversed (task review T5-2)
+    ['a name with a bidi override', [{ ...one, name: 'a\u202egnp.txt' }]],
+    ['a name with a zero-width mark', [{ ...one, name: 'a\u200e.png' }]],
     ['an empty name', [{ ...one, name: '' }]],
     ['a name of 201 characters', [{ ...one, name: 'n'.repeat(201) }]],
     ['bytes -1', [{ ...one, bytes: -1 }]],
@@ -811,7 +814,18 @@ test('files: the shape is checked, by the action and by the command, with nothin
   const reply = L.dt(['thread', 'reply', tid, '--files', json, '--', 'ok'], SUP);
   assert.notEqual(reply.status, 0);
   assert.match(reply.stderr, /--files go with the owner's own turn/);
+  // refused before its value is read: a bare --files on a reply names the owner's turn, not the shape (task review T5-3)
+  const bareReply = L.dt(['thread', 'reply', tid, '--files', '--', 'ok'], SUP);
+  assert.notEqual(bareReply.status, 0);
+  assert.match(bareReply.stderr, /--files go with the owner's own turn/);
   assert.equal(logLineCount(L), before, 'nothing written');
+  // reopen carries none, and says so rather than dropping them (task review T5-4)
+  assert.equal(L.dt(['thread', 'resolve', tid, '--outcome', 'done']).status, 0);
+  const resolved = logLineCount(L);
+  const reopen = L.dt(['thread', 'reopen', tid, '--files', json, '--', 'again']);
+  assert.notEqual(reopen.status, 0, 'reopen took --files');
+  assert.match(reopen.stderr, /--files go with the owner's own turn/);
+  assert.equal(logLineCount(L), resolved, 'reopen wrote nothing');
 });
 
 test('files: on a box the dropped files are the gateway\'s folder, never the laptop\'s (B5)', LAPTOP, async (t) => {
@@ -880,4 +894,145 @@ test('files: a line its files make too long is refused before anything is writte
   const last = fs.readFileSync(ownerLogFile(L), 'utf8').split('\n').filter(Boolean).pop();
   assert.equal(Buffer.byteLength(`${last}\n`), 4096, 'the line written is exactly LINE_MAX');
   assert.equal(JSON.parse(last).id, q2);
+});
+
+// --- the supervisor's pane gets the files as a pane drop does (spec §7) ------------------------------
+// A stand-in for the supervisor's agent: in raw mode, with bracketed paste asked for (as Claude Code
+// asks), so tmux wraps a paste in ESC[200~ … ESC[201~; every byte it gets is written down. It draws
+// an input box, or first (menu) a numbered menu until it gets a 1, as Claude Code draws them.
+const DROP_AGENT = `import fs from 'node:fs';
+const [keys, first] = process.argv.slice(2);
+const RULE = '─'.repeat(100);
+let menu = first === 'menu', draft = '';
+const shown = (s) => s.replace(/\\x1b\\[20[01]~/g, '').replace(/[\\x00-\\x1f\\x7f]/g, '');
+const draw = () => process.stdout.write('\\x1b[2J\\x1b[H' + ['stand-in supervisor', ...(menu ? [RULE, ' Bash command', '', '   rm -rf  build', '', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'] : [RULE, '❯ ' + shown(draft), RULE, '  ? for shortcuts'])].join('\\n') + '\\n');
+process.stdin.setRawMode(true);
+process.stdout.write('\\x1b[?2004h');
+process.stdin.on('data', (d) => {
+  fs.appendFileSync(keys, d);
+  const s = String(d);
+  if (menu) { if (s.includes('1')) menu = false; } else draft = (draft + s).split('\\r').pop();
+  draw();
+});
+draw();
+`;
+const napMs = (ms) => new Promise((r) => setTimeout(r, ms));
+function dropPane(F, first = 'input') {
+  const dir = fs.mkdtempSync(path.join(F.base, 'drop-'));
+  const keys = path.join(dir, 'keys.txt');
+  fs.writeFileSync(path.join(dir, 'agent.mjs'), DROP_AGENT);
+  const s = `drop-${path.basename(dir).slice(5)}`;
+  // the fixture's own tmux (its TMUX_TMPDIR), never the session running the tests
+  const e = F.env();
+  delete e.TMUX;
+  delete e.TMUX_PANE;
+  spawnSync('tmux', ['new-session', '-d', '-x', '200', '-y', '40', '-s', s, '-n', 'main', '-c', F.old, `${process.execPath} ${path.join(dir, 'agent.mjs')} ${keys} ${first}`], { env: e });
+  const shows = () => spawnSync('tmux', ['-u', 'capture-pane', '-p', '-t', `=${s}:main`], { env: e, encoding: 'utf8' }).stdout ?? '';
+  return {
+    target: `${s}:main`,
+    key: `${s}:main`,
+    shows,
+    ready: () => until(() => (first === 'menu' ? /Esc to cancel/ : /\? for shortcuts/).test(shows()), 'the stand-in'),
+    typed: () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8') : ''),
+    press: (k) => spawnSync('tmux', ['send-keys', '-t', `=${s}:main`, k], { env: e }),
+  };
+}
+// The box's folder, seeded by hand as the gateway would fill it: under the fixture, never the real
+// HOME or /data/uploads.
+function dropFixture(name) {
+  const F = threadsFixture(name);
+  const root = path.join(F.base, 'uploads');
+  const folder = path.join(root, newFolderName());
+  fs.mkdirSync(folder, { recursive: true });
+  for (const n of ['shot.png', 'notes.pdf']) fs.writeFileSync(path.join(folder, n), `${n} bytes`);
+  const file = (n) => ({ name: n, path: fs.realpathSync(path.join(folder, n)), bytes: `${n} bytes`.length });
+  return { F, BOX: { DEVTEAM_GATEWAY: '1', DEVTEAM_UPLOADS_DIR: root }, png: file('shot.png'), pdf: file('notes.pdf') };
+}
+// What the pane got since `from` bytes, once `enters` more Enters have come and nothing more follows.
+async function newBytes(pane, from, enters) {
+  await until(() => (pane.typed().slice(from).match(/\r/g) ?? []).length >= enters, `${enters} Enter(s) in the pane`);
+  await napMs(300);
+  return pane.typed().slice(from);
+}
+const PANE = { skip: hasTmux ? false : 'no tmux', timeout: 240000 };
+
+test('the supervisor\'s pane gets a turn\'s or an answer\'s files as a bracketed paste, and a line with none as today (B8)', PANE, async (t) => {
+  const { F, BOX, png, pdf } = dropFixture('drop-pane');
+  t.after(() => F.done());
+  const pane = dropPane(F);
+  await pane.ready();
+  const S = { ...BOX, DEVTEAM_SUPERVISOR: pane.target };
+  // a turn with no files: exactly the line and Enter
+  const tid = F.owner(['thread', 'new', '--title', 'Shots', '--', 'first words'], S).split('\n')[0];
+  const turnLine = (words) => `[devteam thread ${tid} from owner] ${words} — devteam.mjs thread show ${tid}`;
+  let at = 0;
+  let got = await newBytes(pane, at, 1);
+  assert.equal(got, `${turnLine('first words')}\r`, 'no files: no space, no paste');
+  at += got.length;
+  // a .png and a .pdf: the line, a space, the paste, a space (a non-image is there), Enter
+  assert.match(F.owner(['thread', 'say', tid, '--files', JSON.stringify([png, pdf]), '--', 'look at these'], S), /sent to the supervisor's pane/);
+  got = await newBytes(pane, at, 1);
+  assert.equal(got, `${turnLine('look at these')} (2 files dropped) \x1b[200~${png.path} ${pdf.path}\x1b[201~ \r`);
+  at += got.length;
+  // only the .png: no space after the paste
+  F.owner(['thread', 'say', tid, '--files', JSON.stringify([png]), '--', 'just this'], S);
+  got = await newBytes(pane, at, 1);
+  assert.equal(got, `${turnLine('just this')} (1 file dropped) \x1b[200~${png.path}\x1b[201~\r`);
+  at += got.length;
+  // an answer: its nudge line, then the same paste
+  const qid = F.sup(['ask', '--kind', 'owner-decision', '--question', 'Which one?']).split('\n')[0];
+  F.owner(['answer', qid, 'This one', '--files', JSON.stringify([png, pdf])], S);
+  got = await newBytes(pane, at, 1);
+  assert.equal(got, `[devteam answer ${qid} from owner] read it with: devteam.mjs questions --id ${qid} (2 files dropped) \x1b[200~${png.path} ${pdf.path}\x1b[201~ \r`);
+  // the tmux buffer went with the paste: nothing is left on the server
+  const e = F.env();
+  delete e.TMUX;
+  assert.equal(spawnSync('tmux', ['list-buffers', '-F', '#{buffer_name}'], { env: e, encoding: 'utf8' }).stdout.split('\n').filter((n) => n.startsWith('devteam-drop-')).length, 0, 'no devteam-drop buffer left');
+});
+
+test('a turn with files held while the pane shows a menu keeps its paste, and is typed with it once the menu is answered (B9)', PANE, async (t) => {
+  const { F, BOX, png, pdf } = dropFixture('drop-held');
+  t.after(() => F.done());
+  const pane = dropPane(F, 'menu');
+  await pane.ready();
+  const S = { ...BOX, DEVTEAM_SUPERVISOR: pane.target };
+  // the thread, started with no pane named: recorded, typed nowhere
+  const tid = F.owner(['thread', 'new', '--title', 'Shots', '--', 'first words'], BOX).split('\n')[0];
+  assert.match(F.owner(['thread', 'say', tid, '--files', JSON.stringify([png, pdf]), '--', 'look at these'], S), /recorded and held/);
+  await napMs(300);
+  assert.equal(pane.typed(), '', 'not a byte reached the menu');
+  const dir = path.join(F.old, 'docs/devteam/run/held', encodeURIComponent(pane.key));
+  const held = fs.readdirSync(dir).filter((n) => n.endsWith('.json'));
+  assert.equal(held.length, 1);
+  const rec = JSON.parse(fs.readFileSync(path.join(dir, held[0]), 'utf8'));
+  assert.deepEqual(rec.paste, [png.path, pdf.path], 'the held record has the paste');
+  // answered at the terminal; the next line flushes the held one first, with its paste
+  pane.press('1');
+  await until(() => /\? for shortcuts/.test(pane.shows()), 'the input box');
+  F.owner(['thread', 'say', tid, '--', 'and this'], S);
+  const got = await newBytes(pane, 0, 2);
+  const turnLine = (words) => `[devteam thread ${tid} from owner] ${words} — devteam.mjs thread show ${tid}`;
+  assert.equal(got, `1${turnLine('look at these')} (2 files dropped) \x1b[200~${png.path} ${pdf.path}\x1b[201~ \r${turnLine('and this')}\r`);
+});
+
+test('log-check: files are on the owner\'s own turn and answer, never a supervisor\'s turn or an answer recorded from chat or a thread (task review T5-1)', { timeout: 240000 }, (t) => {
+  const { F, png } = dropFixture('drop-log');
+  t.after(() => F.done());
+  const tid = F.owner(['thread', 'new', '--title', 'Shots', '--', 'first words']).split('\n')[0];
+  const qid = F.sup(['ask', '--kind', 'owner-decision', '--question', 'Which one?']).split('\n')[0];
+  const files = [png];
+  // each line as it may be, then with files: only the files are refused
+  for (const [what, by, o] of [
+    ['a supervisor turn', 'supervisor', { type: 'turn', thread: tid, text: 'here' }],
+    ['an answer from chat', 'owner', { type: 'question', op: 'set', id: qid, answer: 'Yes', channel: 'chat', said: 'yes' }],
+  ]) {
+    const plain = F.checkWith([by, o]);
+    assert.equal(plain.status, 0, `${what} without files: ${plain.said}`);
+    const r = F.checkWith([by, { ...o, files }]);
+    assert.notEqual(r.status, 0, `${what} with files: log-check passed`);
+    assert.match(r.said, /files/, `${what}: names files`);
+  }
+  // the owner's own turn with files passes
+  const own = F.checkWith(['owner', { type: 'turn', thread: tid, text: 'mine', files }]);
+  assert.equal(own.status, 0, own.said);
 });
