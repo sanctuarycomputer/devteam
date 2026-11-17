@@ -3149,7 +3149,7 @@ function upkeepCardHtml(u, days) {
   const held = u.mode === 'park' ? 'parked' : u.mode === 'drain' ? 'draining' : null;
   const chores = u.chores || [];
   return `<div class="c6 card goal upkeep"${subj('goal', 'upkeep', 'Upkeep')} role="button" tabindex="0" data-open="goal/upkeep">
-    ${cardHead('repeat', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: held ? (u.fleet ? `the fleet is ${held}` : held) : 'always on' })}
+    ${cardHead('repeat', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: held ? (u.fleet ? `the fleet is ${held}` : held) : 'always on', id: u.id || 'upkeep', open: 'goal/upkeep' })}
     <h4><a class="title-link" href="#goal/upkeep">Upkeep</a></h4>
     ${Array.isArray(days) && days.length ? heartbeat(heartbeatDays(days)) : ''}
     ${chores.length ? `<p class="goal-next">In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}</p>` : ''}
