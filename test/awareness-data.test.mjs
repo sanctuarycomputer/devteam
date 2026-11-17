@@ -416,3 +416,19 @@ test('awareness: plain words', (t) => {
   assert.ok(all.length >= 5);
   for (const x of all) for (const f of ['what', 'evidence', 'effect']) assert.doesNotMatch(x[f], /informed|orient|debt|devteam|--/i, `${x.id} ${f}`);
 });
+
+// No lessons in force this week (of = 0): 0 of 0 unused is not "a quarter", so no lessons
+// suggestion, while the fixed incident still gets its own. Dated from now, as the third fixture is.
+test('awareness: no lessons in force, no lessons suggestion', () => {
+  const Fx = fleetFixture('aw-no-lessons');
+  try {
+    const hand = handFor(Fx);
+    const now = Date.now();
+    const p = hand(S, { type: 'problem', title: 'the mail bounce', severity: 2, realized: true, status: 'open', fingerprints: ['fp-mail'] }, now - 60 * HOUR);
+    hand(S, { type: 'problem', op: 'set', id: p, status: 'resolved' }, now - 54 * HOUR);
+    hand(S, { type: 'observation', kind: 'outcome', subject: 'app', detail: `the fix for ${p} held`, valence: 1, refs: [p] }, now - 53 * HOUR);
+    const a = json(Fx.ok(Fx.old, ['dashboard-data'])).awareness;
+    assert.deepEqual(a.parts.lessons, NONE);
+    assert.deepEqual(a.suggestions, [{ id: sid('incident', p), kind: 'incident', what: 'Write down what the mail bounce taught', evidence: 'Fixed 2 days ago and verified since; no lesson cites it', effect: 'Fixed incidents that left a lesson: 0 of 1 → 1 of 1' }]);
+  } finally { Fx.done(); }
+});
