@@ -665,6 +665,67 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon('innerWidth === 1440', 'at 1440');
   });
 
+  // An Inbox road from a peek on top of the panel, at 900px and below (final-2 F2-1): it is the last thing opened, so the
+  // panel comes on top, the peek staying under it (kit-88: a peek the link is in stays open). kit-88's How it changes on
+  // a defaulted question's peek opened from the Answered list: the owner sees the focused Overrule box, nothing over it;
+  // × on the panel gives the peek back on top. The lesson peek's Inbox link, the same.
+  await t.test('an Inbox road from a peek over the panel, at 900px and below', async () => {
+    await p.send('Page.bringToFront');
+    const D = fx.defaulted;
+    const TOP = (sel, box = sel) => `(() => { const b = document.querySelector(${JSON.stringify(box)})?.getBoundingClientRect(); if (!b || !b.width) return false; return !!document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)?.closest(${JSON.stringify(sel)}); })()`;
+    const PEEK_AT_REST = "(!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none')";
+    const OVR = `#th-inbox #a-${D} input[data-overrule="${D}"]`;
+    // where things are, for a message
+    const where = () => p.ev(`(() => { const i = document.querySelector(${JSON.stringify(OVR)}), r = i?.getBoundingClientRect(), e = r && document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return { hash: location.hash, body: document.body.className, active: document.activeElement?.outerHTML.slice(0, 80), atInput: e ? (e.id || e.className || e.tagName) + ' in ' + (e.closest('#threads,#drawer')?.id ?? '-') : null }; })()`);
+    await size(720, 800);
+    await soon('innerWidth === 720', 'at 720');
+    await p.ev("location.hash = '#goals?th=inbox'");
+    await soon(`location.hash === '#goals?th=inbox' && ${ON_PAGE('goals')} && ${ON_INBOX}`, 'Goals, the panel on Inbox');
+    // the Answered list open, the defaulted question's #q/ link: its peek, on top of the panel
+    await p.ev("document.getElementById('answered-wrap').open = true; void 0");
+    const QL = `#th-inbox #a-${D} a[href="#q/${D}"]`;
+    await soon(`!!document.querySelector(${JSON.stringify(QL)})`, "the defaulted card's #q/ link");
+    await p.ev(`document.querySelector(${JSON.stringify(QL)}).scrollIntoView({ block: 'center' }); void 0`);
+    await soon(STEADY(QL), 'the link at rest');
+    await p.click(QL);
+    await soon(`location.hash === '#q/${D}' && ${PEEK_AT_REST} && !!document.querySelector('#drawer-body [data-answered-go]')`, "the defaulted question's peek, its How it changes link");
+    assert.equal(await p.ev(TOP('#drawer')), true, 'the peek is on top of the panel');
+    await soon(STEADY('#drawer-body [data-answered-go]'), 'the How it changes link at rest');
+    await p.click('#drawer-body [data-answered-go]');
+    // the panel on Inbox and on top, its Overrule box focused and the element at its centre (nothing over it)
+    const SEEN_FOCUSED = `${ON_INBOX} && document.activeElement === document.querySelector(${JSON.stringify(OVR)}) && ${TOP(`#a-${D}`, OVR)} && ${TOP('#threads', '#th-tabs')}`;
+    await soon(SEEN_FOCUSED, 'How it changes: the panel on Inbox on top, the focused Overrule box seen')
+      .catch(async (e) => { e.message += `; ${JSON.stringify(await where())}`; throw e; });
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(SEEN_FOCUSED), true, `still, a frame later: ${JSON.stringify(await where())}`);
+    // × on the panel: the peek it was opened from, on top again
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN} && location.hash === '#q/${D}' && ${PEEK_AT_REST} && ${TOP('#drawer')}`, '× on the panel: the peek on top again');
+    await p.ev("location.hash = '#overview'");
+    await soon("location.hash === '#overview' && document.getElementById('drawer').hidden", 'Overview, the peek closed');
+    // the lesson peek's Inbox link, from a lesson peek opened over the panel
+    await p.ev("location.hash = '#goals?th=inbox'");
+    await soon(`location.hash === '#goals?th=inbox' && ${ON_INBOX}`, 'Goals, the panel on Inbox again');
+    const LL = `#th-inbox a[href="#lesson/${fx.L1}"]`;
+    await p.ev(`(() => { if (document.querySelector(${JSON.stringify(LL)})) return; const a = document.createElement('a'); a.id = 'probe-lesson'; a.href = '#lesson/${fx.L1}'; a.textContent = 'the lesson'; document.getElementById('th-inbox').prepend(a); })()`);
+    await p.ev(`document.querySelector(${JSON.stringify(LL)}).scrollIntoView({ block: 'center' }); void 0`);
+    await soon(STEADY(LL), 'the lesson link at rest');
+    await p.click(LL);
+    await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && ${PEEK_AT_REST} && !!document.querySelector('#drawer-body a[href="#inbox"]')`, "the lesson's peek, its Inbox link");
+    assert.equal(await p.ev(TOP('#drawer')), true, 'the lesson peek is on top of the panel');
+    await soon(STEADY('#drawer-body a[href="#inbox"]'), 'the Inbox link at rest');
+    await p.click('#drawer-body a[href="#inbox"]');
+    await soon(`${ON_INBOX} && ${TOP('#threads')} && ${TOP('#threads', '#th-tabs')}`, "the lesson peek's Inbox link: the panel on Inbox, on top")
+      .catch(async (e) => { e.message += `; ${JSON.stringify(await where())}`; throw e; });
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN} && ${PEEK_AT_REST} && ${TOP('#drawer')}`, '× on the panel: the lesson peek on top again');
+    await p.ev("document.getElementById('probe-lesson')?.remove(); document.getElementById('answered-wrap').open = false; location.hash = '#overview'");
+    await soon("location.hash === '#overview' && document.getElementById('drawer').hidden", 'Overview, the peek closed');
+    await size(1440, 900);
+    await soon('innerWidth === 1440', 'at 1440');
+  });
+
   // AC9 (done-when 9): the artifact viewer, /view/artifact/<slug>, has no Inbox data and no render(): its panel registers
   // the same tabs, the Inbox tab shows hello's count and one line to the dashboard's Inbox; its button opens Threads
   // (ruling m-20261115-230458641-supervisor). A fixture and a tab of its own.

@@ -923,7 +923,8 @@ try {
   /* at 900px and below the panel and a peek or the viewer each take the full width, so the one opened last is on top
      (kit-100 final-1 F1): a peek or the viewer opened over the open panel marks it (th-under-peek, th-under-av), and
      while that one is up the panel goes under the scrim, its fixed pins and floating card with it. The panel opening
-     clears both marks. Above 900px nothing changes: the peek sits beside the panel, and the rule above stands */
+     clears both marks, and so does an Inbox road taken from the peek (final-2 F2-1). Above 900px nothing changes: the
+     peek sits beside the panel, and the rule above stands */
   @media (max-width: 900px) {
     .shell.th-under-peek.peek-open .threads, .shell.th-under-av.av-open .threads { z-index: 19; }
     .shell.th-under-peek.peek-open .tl-pin.in-threads, .shell.th-under-av.av-open .tl-pin.in-threads,
@@ -6158,6 +6159,8 @@ document.addEventListener('click', (e) => {
 // target never found can't scroll a later visit to the Inbox.
 let INBOX_AT = null;
 function inboxGo({ scrollTo = null, then = null } = {}) {
+  // taken from a peek or the viewer over the open panel (900px and below), the panel comes on top: thShow (final-2 F2-1)
+  TH.front = true;
   thGo({ th: 'inbox' });
   // set after thGo, which drops any target; its route, if a hashchange, comes later and finds this one
   INBOX_AT = scrollTo ? { sel: scrollTo, then } : null;
@@ -6912,9 +6915,9 @@ function tlPinsInto(box, pins, held) {
 // TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | 'inbox' | null, t: a thread id or
 // null), what was last drawn (tabs, pane), and where a press in the panel or on the Inbox button asked the
 // focus to go once the route has drawn (focus: 'tab' | 'thf' | 'inbox' | 'back' | 'row' | 'composer' | null; focusRow: the
-// thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), and a + draft's
-// thread waiting for its id in the threads (adopt).
-const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null };
+// thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), a + draft's
+// thread waiting for its id in the threads (adopt), and an Inbox road's ask that the panel come on top once drawn (front).
+const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null, front: false };
 const TH_LISTS = ['open', 'resolved', 'inbox'];
 const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
 // An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
@@ -7206,8 +7209,9 @@ function thShow() {
   const moved = document.body.classList.contains('threads-open') !== !!TH.th;
   const wasIn = $('threads').contains(document.activeElement);
   document.body.classList.toggle('threads-open', !!TH.th);
-  // opened, it is over a peek or the viewer already up (final-1 F1)
-  if (moved && TH.th) document.body.classList.remove('th-under-peek', 'th-under-av');
+  // opened, or an Inbox road taken (inboxGo: TH.front), it is over a peek or the viewer already up (final-1 F1, final-2 F2-1)
+  if (TH.th && (moved || TH.front)) document.body.classList.remove('th-under-peek', 'th-under-av');
+  TH.front = false;
   thDraw({ view: true });
   // the page moved over (at once with no motion): its pins and a floating card placed again; again when its slide ends
   if (moved) { tlPins(); tlCard(); }
