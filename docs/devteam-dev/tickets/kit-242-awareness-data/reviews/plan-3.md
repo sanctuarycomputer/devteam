@@ -12,6 +12,6 @@ The fixes add no blocking defect.
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| P3-1 | Nit | worker.md §4 (clear as written) | Fixture › Efficiency weeks, "…dropped (P2-1). three tickets shipped…" | The fix left the sentence after it starting with a lowercase "three". Also, the awareness fixture's own `hand` (from `handFor`) and effFixture's `hand` share a name, so the copy needs one of them renamed (for example `effHand`). A worker will see the clash, so this doesn't block. | |
+| P3-1 | Nit | worker.md §4 (clear as written) | Fixture › Efficiency weeks, "…dropped (P2-1). three tickets shipped…" | The fix left the sentence after it starting with a lowercase "three". Also, the awareness fixture's own `hand` (from `handFor`) and effFixture's `hand` share a name, so the copy needs one of them renamed (for example `effHand`). A worker will see the clash, so this doesn't block. | wont-fix a nit; the build names the effFixture writer effHand when it copies it |
 
 Verdict: APPROVE 3048703438ae7e26109d08b38130e5c7d2a0ea47
