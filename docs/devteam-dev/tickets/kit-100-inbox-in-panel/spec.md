@@ -132,7 +132,16 @@ kit-89 makes the panel the layer's own for three things that are wrong for the I
 
 A review card's Open the review opens `#review/<qid>`, as today. The review shows in `#review-view`, over the page and the panel, at its full size, never squeezed into the panel. The page head in force under it keeps `th=inbox`. Leaving the review (its close, or `leaveReview`) returns to the page with the panel on the Inbox tab.
 
-### 2.9 What doesn't change
+### 2.9 Esc on the terminal's card (ruling `m-20261116-041710126-supervisor`)
+
+kit-241 (merged) lets `/api/pane-answer` take exactly `{ digest, escape: true, token }` and sends the Escape key only where the menu's hint says Esc cancels. The page draws the button for it:
+
+- **Shown only where Esc cancels.** The card's numbered menu gets one more button, "Esc", after the options, only when `askEscCancels(q.hint)` is true. That function mirrors kit-241's `paneEscCancels` exactly: the hint says `Esc to cancel` (any case), and nowhere `Esc to exit` or `Esc to quit`. The served question carries `hint` and no Esc flag, and `devteam.mjs` doesn't change.
+- **The same walls as an option.** It waits the same second after the card appears, is disabled while a press is on its way or with no token, and sends only the shown question's digest.
+- **The body is exactly `{ digest, escape: true, token }`.** A taken Esc is said in the card's place as today ("Sent to the supervisor's terminal: Esc"). A refusal (400, 409) shows its reason in the card's error line, as an option's does.
+- **Copy.** The card's last line reads "Your click sends that option's number, or Esc, to the terminal and nothing else." when the button shows. Otherwise it stays as today.
+
+### 2.10 What doesn't change
 
 - The cards, their contents, their handlers, the `/api/*` calls and answers, `questionCard`, `reviewCard`, the lesson cards, the secrets forms, `answeredCard`, `askHtml`/`askDraw` (targets `ask-inbox`, `ask-threads`, `tl-c-ask`, as kit-89 left them).
 - kit-89's Threads tab, its list, the counts on the button and the panel's frame.
@@ -198,7 +207,8 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
    - Keep it on `L1`, then Retire it on `L2` (each `POST /api/knowledge`);
    - the standing-rule box, checked, rides on the answer;
    - the lesson's note box rides on Keep it;
-   - the terminal card's numbered option sends.
+   - the terminal card's numbered option sends;
+   - Esc (§2.9). With the faked prompt's hint `Esc to cancel`, the card shows the Esc button and its click posts exactly `{ digest, escape: true, token }`. With kit-241's other hints (`Enter to confirm · Esc to exit`, `Esc to cancel · Esc to quit`, `Enter to confirm`), no Esc button is drawn. `askEscCancels` is also checked in `vm` against all four hints, giving kit-241's answers.
    - Words typed into a note box survive a 10-second redraw and a threads poll, with the focus kept and the caret position kept. The test waits for a redraw to arrive and be held (`HELD` set), not for `render()`, which a working hold never runs. After blur, the held draw lands, and the words are kept in the drafts.
    - Escape with the focus in that note box leaves the panel open.
    - Open the review shows `#review-view` wider than the panel, with the hash `#review/<qid>`. Closing it returns to the page with the panel on Inbox.
@@ -236,7 +246,7 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
 ## 4. Edge cases
 
 - **No questions at all.** The tab shows no count, the button shows no red count, and `#questions` shows today's empty line. The panel still opens on Inbox.
-- **A question answered in another tab** while this one shows it. The 10-second redraw removes the card from `#questions`, as today. Its thread is no longer Inbox-home: its subject is found where `main` draws the question (a Decide row, so the thread floats there), or nowhere, which makes it kit-89's " · subject gone", in-panel. No pin is left in the panel (§2.6, AC4).
+- **A question answered in another tab** while this one shows it. The 10-second redraw removes the card from `#questions`, as today. Its thread is no longer Inbox-home: its subject is found where `main` draws the question (a Decide row, so the thread floats there), or nowhere, which makes it kit-89's " · subject gone", in-panel. No pin is left in the panel (§2.6, AC5).
 - **The panel open on Inbox, then a nav click.** kit-89's remembered store carries `th=inbox` to the next page.
 - **A cold load of `#overview?th=inbox` before `/api/data` answers.** The panel opens on Inbox, and `#th-inbox` shows today's loading state (`main.waiting` doesn't cover the panel). The cards come with the first `render()`. Neither `#q/<id>` nor `#talk/<Q>` scrolls until the card exists: the scroll waits for the first render, at most one redraw.
 - **A `#q/<id>` link for an open question not yet loaded** (cold). It waits for the first `/api/data`, as today, to know the status: open opens the Inbox tab, anything else opens the peek.
@@ -264,6 +274,8 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
 2. **The `/view/` tab's Inbox tab** (§4), asked in `m-20261115-230453850-kit-100-inbox-in-panel`, ruled `m-20261115-230458641-supervisor`: as recommended. The tab shows there with hello's count and one line linking to the dashboard's Inbox, and the `/view/` button opens the panel on Threads.
 
 ## 7. Names this builds on (from kit-87, kit-88, kit-89's approved records)
+
+Reconciled at T0 against merged main (kit-89 in at 0a32c9ce, merged into this branch at fdfa606): every name below is in the merged `index.html` under the same name.
 
 - **kit-87:**
   - `SHELL_ROUTES` in `shell-routes`, with `questions → inbox` and the `<page>?th=inbox` entries;
@@ -297,4 +309,7 @@ The Inbox's count with this fixture is 6 + 1 + 2 = 9 (`d.questions` includes the
 ## 8. Rulings
 
 - `m-20261115-230458641-supervisor` (on `m-20261115-230453850`): in `/view/` keep the Inbox tab with hello's count and "Answer questions on the dashboard." linking to `/#overview?th=inbox`; the button opens the panel on Threads. In the spec, and tested (AC9).
+- `m-20261115-231008572-supervisor`: approve-spec and approve-plan recorded (records 178d10d). Esc on the prompt card needs `pane answered` to take Escape, which kit-241 lands first. Build waits for kit-89 and kit-241.
+- `m-20261115-232722714-supervisor` and `m-20261116-024532478-supervisor`: this ticket follows kit-241 and kit-94 too (each touches a test this one touches); merged in at T0.
+- `m-20261116-041710126-supervisor`: Esc on the prompt card mirrors kit-241's `paneEscCancels` in the page, tested with the same hint fixtures as kit-241's; `devteam.mjs` stays out of touches (§2.9, AC5).
 - `m-20261115-225154606-supervisor` (on `m-20261115-225124449`): all nine files in `touches-request.md` are in touches (the seven, plus `test/dashboard-answers.test.mjs` and `test/dashboard-owner-action.test.mjs` for navigation only). Change only the interim-Inbox assertions in them.

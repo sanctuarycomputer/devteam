@@ -202,20 +202,20 @@
 ### Task 5: Typing kept, every control, reviews
 
 **Files:**
-- Modify: `index.html`: `holding()`, `render()`'s draft-keeping filters, the `TL.pressed` / `PRESSED` split (kit-89's `#threads` exceptions narrowed to exclude `#th-inbox`).
+- Modify: `index.html`: `holding()`, `render()`'s draft-keeping filters, the `TL.pressed` / `PRESSED` split (kit-89's `#threads` exceptions narrowed to exclude `#th-inbox`); `askHtml` and the `[data-ask-option]` click handler, for the Esc button (spec §2.9).
 - Test: `test/dashboard-inbox-panel.test.mjs` (AC5).
 
 **Interfaces:**
 - Consumes: T4's `inInbox`.
-- Produces: `layerField(el)`, which is `!!el?.closest('#tl, #threads') && !inInbox(el)`. It is used by `holding()` and by the draft filters (`!layerField(el)`, replacing kit-89's `!el.closest('#tl, #threads')`).
+- Produces: `askEscCancels(hint: string): boolean`, kit-241's `paneEscCancels` mirrored (`/\bEsc to cancel\b/i` and not `/\bEsc to (?:exit|quit)\b/i`); and `layerField(el)`, which is `!!el?.closest('#tl, #threads') && !inInbox(el)`. It is used by `holding()` and by the draft filters (`!layerField(el)`, replacing kit-89's `!el.closest('#tl, #threads')`).
 
 - [ ] **Step 1: Failing subtest** "every control from the panel": AC5 in full, each control on its own fixture question.
-  - Its controls are, in order: `q1` choice + rule box + Answer, then (after one redraw) no pin inside `#th-inbox` and `tlInboxHome(Q) === false`; `q2` note Send; `q3` Done; `q4` Post; `q5` Reply; `q6` Can't right now; the defaulted question's Overrule; `L1` with a note, Keep it; `L2` Retire it; the terminal card's option 1.
+  - Its controls are, in order: `q1` choice + rule box + Answer, then (after one redraw) no pin inside `#th-inbox` and `tlInboxHome(Q) === false`; `q2` note Send; `q3` Done; `q4` Post; `q5` Reply; `q6` Can't right now; the defaulted question's Overrule; `L1` with a note, Keep it; `L2` Retire it; the terminal card's option 1; then the Esc button (spec §2.9): with the faked hint `Esc to cancel` it shows and its click posts exactly `{ digest, escape: true, token }`; with each of kit-241's other three hints it is absent. A `vm` check gives `askEscCancels` kit-241's answers for all four hints.
   - It intercepts `/api/answer`, `/api/knowledge` and the secrets post as `dashboard-owner-action.test.mjs` does (`Fetch.enable` or the server's log), and asserts each request's body: the rule box `rule: true` and the note text.
   - The typing check: type "half a thought" into `q2`'s `textarea[data-q]`, place the caret at 4, then wait until a redraw has arrived and been held (`HELD !== null`, up to 15 s) and one threads poll has landed. Assert `document.activeElement` is the same textarea, its value is unchanged and `selectionStart === 4`. Escape there leaves the panel open. Then blur, wait for `HELD === null`, and assert the redrawn textarea still holds "half a thought".
   - The review: click `[data-open-review]`; the hash is `#review/<id>`; `#review-view`'s width is greater than `#threads`' width; then close it, and the panel is on Inbox.
 - [ ] **Step 2:** Run. Expected: FAIL at least on typing (kit-89's `#threads` exception drops the hold).
-- [ ] **Step 3: Implement** spec §2.7 with `layerField`. In kit-89's Escape handler, a focus on a `textarea` or text `input` inside `#th-inbox` returns before closing anything. Make `#review-view` sit above `.threads` (a page z-index rule) if the merged z-order puts it under.
+- [ ] **Step 3: Implement** spec §2.7 with `layerField`. Add the Esc button: in `askHtml`'s menu branch, `<button type="button" class="ghost" data-ask-esc>Esc</button>` after the options when `askEscCancels(q.hint)`, disabled as the options are; the click handler takes `[data-ask-option], [data-ask-esc]` and sends `{ digest, escape: true, token }` for Esc. In kit-89's Escape handler, a focus on a `textarea` or text `input` inside `#th-inbox` returns before closing anything. Make `#review-view` sit above `.threads` (a page z-index rule) if the merged z-order puts it under.
 - [ ] **Step 4:** Run the new test and `test/dashboard-answers.test.mjs`. Expected: PASS.
 - [ ] **Step 5:** Commit `kit-100 T5: the Inbox's fields hold redraws in the panel; reviews open full size`. Write `reviews/task-5.md`.
 
