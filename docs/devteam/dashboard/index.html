@@ -609,6 +609,10 @@ try {
   :where(.shell).overlay-open .scrim { opacity: 1; pointer-events: auto; }
   /* a closing peek lets clicks through, as the scrim does: the block holds it visible while it slides out */
   :where(.shell):not(.peek-open) .drawer { pointer-events: none; }
+  /* the peek's head (its ×) holds still when the peek grows taller than the window, as its read lands after the first
+     draw: the drawer keeps its scrollbar's gutter whether it scrolls or not, so a classic scrollbar showing up doesn't
+     narrow the head and move × 15px from under the pointer */
+  .drawer { scrollbar-gutter: stable; }
   /* the top-right button beside an open peek: a mirror of .pagebar .tt on <body>, above the scrim (20) and the
      drawer (21), --header-pad left of the peek, its top set from .tt's (ttPeekPlace); it fades. Where there is
      no room for it beside the peek (840px and below), it isn't shown and .tt stays as it is */
@@ -7354,13 +7358,22 @@ function thDraw({ view = false } = {}) {
 }
 // Choosing a tab is a Threads change (kit-100 spec §2.2): Inbox gives th=inbox, Threads th=open; an in-panel t is
 // dropped either way (thGo keeps a floating one).
-bindTabBar($('th-tabs'), { onSelect: (id) => { if (id !== (TH.th === 'inbox' ? 'inbox' : 'threads')) thGo({ th: id === 'inbox' ? 'inbox' : 'open', focus: 'tab' }); } });
+bindTabBar($('th-tabs'), { onSelect: (id) => { thSync(); if (id !== (TH.th === 'inbox' ? 'inbox' : 'threads')) thGo({ th: id === 'inbox' ? 'inbox' : 'open', focus: 'tab' }); } });
 // The page head in force: the entry's own, or under a link head (a peek, the viewer, a preview, a review,
 // talk/) the page head under it, history.state.page.
 function thHead() {
   const p = parseHead(location.hash, SHELL_ROUTES);
   if (p.link === undefined) return headFor(p);
   return typeof history.state?.page === 'string' ? history.state.page : '#overview';
+}
+// TH as the page head in force has it. A head written (a card's ×: thGo's own new entry) or moved to (Back) is in force
+// at once, but routed only when its hashchange runs, a task later: a press in between (input comes first under load)
+// would act on the entry before it, keeping, say, the t of a floating card just closed. Routed now, if so; the
+// hashchange's route then finds it done.
+function thSync() {
+  if (VIEWER) return;
+  const s = parseHead(thHead(), SHELL_ROUTES).state ?? {};
+  if ((TH_LISTS.includes(s.th) ? s.th : null) !== TH.th || (typeof s.t === 'string' ? s.t : null) !== TH.t) thRoute();
 }
 // A Threads change: the page head in force with th and t set (none: closed). On a page head a new entry
 // (the router draws it); under a link head the stamp's page changed in place (withPage), the link left open,
@@ -7370,6 +7383,7 @@ function thHead() {
 function thGo({ th = null, t, focus = false } = {}) {
   // a pending Inbox road's target is inboxGo's own: any Threads change drops it (inboxGo sets its own after)
   INBOX_AT = null;
+  thSync();
   if (t === undefined) t = TH.t && !thInPanelId(TH.t) ? TH.t : null;
   const leaving = !t && !!TH.t && thInPanelId(TH.t);
   TH.focus = typeof focus === 'string' ? focus : !focus ? null : !th ? 'inbox' : t && thInPanelId(t) ? 'back' : leaving ? 'row' : TH.th ? 'thf' : 'tab';
