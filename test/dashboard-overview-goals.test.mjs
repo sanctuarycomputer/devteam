@@ -280,7 +280,8 @@ function goalsFixture(base, name = 'overview-goals') {
   ids.g1 = mk(full('Admins pay alone', 1));
   ids.g2 = mk(full('Receipts for every payment', 2));
   ids.g3 = mk(full('Invoices in one click', 3, `cat ${reading}`));
-  ids.g6 = mk(full('Refunds without support', 4));
+  // g6: its first precondition is "the registry is complete", so its card carries the registry attestation line
+  ids.g6 = mk([...full('Refunds without support', 4), '--registry-precondition', '1']);
   // g4's measure is markup, as log text can be: the page shows it as text (never an element)
   ids.g4 = mk(full('Cards on file', 5, 'echo 5', XSS_MEASURE));
   ids.g5 = mk(full('A hosted billing page', 6));
@@ -374,7 +375,9 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const { root, env, ids } = goalsFixture(base);
-  const { p, soon, port, go, reload } = await openOn(later, root, env, { init: { data: DATA_PATCH(), hello: { pulse: pulseFixture() } } });
+  // a planner on g1's feature, stopped at a prompt (its waiting is read from a tmux pane, so it is given here)
+  const planner = { feature: 'pay', title: 'Pay by card', goals: [ids.g1], tickets: 0, branch: 'plan/pay', window: true, problem: null, waiting: { kind: 'prompt', line: 'Do you want to proceed?' }, parked: false, last_seen: new Date().toISOString(), minutes_silent: 0, waiting_on_supervisor: [], waiting_on_owner: [], held_by: null };
+  const { p, soon, port, go, reload } = await openOn(later, root, env, { init: { data: { ...DATA_PATCH(), planners: [planner] }, hello: { pulse: pulseFixture() } } });
   await checkSeeded(port, ids);
   await go('#goals');
   const card = (k) => `document.querySelector('#goals .card.goal[data-subject="goal:${k === 'upkeep' ? 'upkeep' : ids[k]}"]')`;
@@ -413,6 +416,12 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   for (const k of ['g0', 'g3', 'g6']) assert.ok(await p.ev(`!!${card(k)}.querySelector('.goal-next')`), `${k} has a next line`);
   for (const k of ['g1', 'g2', 'g3', 'g6']) assert.ok(await p.ev(`[...${card(k)}.querySelectorAll('a')].some((a) => a.textContent.trim() === 'Read the design')`), `${k} links its design`);
   assert.deepEqual(await p.ev(`[...document.querySelectorAll('#goals [data-met-id]')].map((b) => b.dataset.metId)`), [ids.g3], 'Mark met only on the goal at its target');
+  // its links: the planner on its feature, stuck on a prompt; and the registry attestation line
+  assert.deepEqual(await p.ev(`[...${card('g1')}.querySelectorAll('.meta a[href^="#planner/"]')].map((a) => [a.getAttribute('href'), a.textContent.trim()])`), [['#planner/pay', 'planner on Pay by card']], 'g1 links its planner');
+  assert.deepEqual(await p.ev(`[...${card('g1')}.querySelectorAll('.meta .badge')].map((b) => b.textContent.trim())`), ['stuck on a prompt'], 'the planner is stuck on a prompt');
+  for (const k of ['g0', 'g2', 'g3', 'g6']) assert.equal(await p.ev(`${card(k)}.querySelectorAll('a[href^="#planner/"]').length`), 0, `no planner link on ${k}`);
+  assert.deepEqual(await p.ev(`[...${card('g6')}.querySelectorAll('.meta')].map((m) => m.textContent.trim()).filter((t) => t.startsWith('Registry attestation'))`), ['Registry attestation: precondition 1, not asked'], 'g6 says where its registry attestation stands');
+  for (const k of ['g0', 'g1', 'g2', 'g3']) assert.ok(!(await p.ev(`${card(k)}.textContent`)).includes('Registry attestation'), `no registry attestation line on ${k}`);
   // gone: hold controls (Upkeep's too), Open and Strategy links, the retro badge, the heading's sub-line
   assert.equal(await p.ev(`document.querySelectorAll('#goals [data-hold-id]').length`), 0, 'no hold control on Goals');
   assert.equal(await p.ev(`[...document.querySelectorAll('#goals a')].filter((a) => ['Open', 'Strategy'].includes(a.textContent.trim())).length`), 0, 'no Open or Strategy link');
