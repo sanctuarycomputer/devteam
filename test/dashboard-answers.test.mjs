@@ -78,6 +78,8 @@ test('answers: a refusal stays on its card, and a moved link disables Answer', {
   const refusedLine = (q) => `${card(q)}?.querySelector('[data-refused]')?.textContent ?? ''`;
   const answerPosts = (q) => p.ev(`window.__posts.filter((x) => x.url === '/api/answer' && JSON.parse(x.body).id === ${JSON.stringify(q)}).length`);
   await soon(`!!${card(Q1)} && !!${card(Q2)}`, 'the question cards');
+  // #questions opens the panel's Inbox tab (kit-100): a click takes a box's centre once, so the panel's slide ends first
+  await soon("document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'", 'the panel on Inbox, at rest');
 
   await t.test('refused: the reason stays on the card across redraws, with the pick and the note, until dismissed', async () => {
     await p.click(`#questions [data-qcard="${Q1}"] input[data-pick][value="No"]`);

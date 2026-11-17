@@ -1,0 +1,11 @@
+# kit-275 spec review 2
+
+- Reviewer: fresh subagent (opus), not the author
+
+Read the spec at 605a3836, `reviews/spec-1.md`, the spec diff `f15f7310..605a3836`, the ticket (`ticket show`: done_when, touches, notes) and `quality.md` §3. For S1-1, read `test/dashboard-shell.test.mjs` (lines 1-30, 85-110) and grepped `docs/devteam/dashboard/shell.md` for `bindFleetSwitch` and `fleetSwitch`: the only `bindFleetSwitch` is at shell.md:97, and the test checks the bare name with `SHELL_MD.includes('bindFleetSwitch')` at :98, so renaming it to `bindFleetX` removes the substring and that assertion fails with `shell.md defines bindFleetSwitch`; the separate `fleetSwitch` check still passes on shell.md:96, so only the intended assertion goes red. M2 bites. Ran `git grep -n 'shell\.md' -- docs/devteam test` to check S1-4's expected-hit list against the current file. S1-2: the spec states the ruling asked, records it as pending under Rulings, and gives a fallback (leave the four block comments, exempt them from done-when 2's grep); acceptable for spec approval. S1-3: the Migration line is in Edge cases. Re-read the whole spec for anything new. Ran no tests.
+
+| ID | Severity | Rule/spec cited | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| S2-1 | Minor | done-when 2; spec acceptance row 2 (S1-4's fix) | spec, acceptance row 2, second grep | The expected output lists "three expected bare hits" in `test/dashboard-shell.test.mjs`: the reader line and the `shell.md defines …` / `shell.md says @1` labels. The grep prints lines, and after the change it prints five there: the reader line (now :21), `shell.md says @1` (:92), `shell.md defines ${t}` (:95), `shell.md defines ${n}` (:98), and `shell.md names the state key ${k}` (:99), which the list leaves out. An implementer checking mechanically sees an unlisted hit. Fix: say five lines and add the `shell.md names the state key …` label, or describe the expected set as "the reader line and the test's own `shell.md …` assertion labels". | wont-fix the executable check is plan.md T1 step 5, which names the expected hits without a count (the reader line and the test's own shell.md labels); editing the approved spec would void spec-2 |
+
+Verdict: APPROVE 605a383613cacd444f75454e95b85da0160645b9

@@ -1,4 +1,4 @@
-// The hub's pages under the measure check (dashboard-shell@1, docs/devteam/dashboard/shell.md §9):
+// The hub's pages under the measure check (dashboard-shell@1, test/contracts/shell.md §9):
 // each page in PAGES must measure clean at 1440x900, 720x800 and 390x844. The list is added to only
 // by the hub's tickets. The hub is the one a dashboard starts on its DEVTEAM_HUB_PORT.
 import { test } from 'node:test';

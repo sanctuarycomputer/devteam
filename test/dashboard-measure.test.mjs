@@ -1,13 +1,14 @@
-// The dashboard's pages under the measure check (dashboard-shell@1, docs/devteam/dashboard/shell.md §9):
+// The dashboard's pages under the measure check (dashboard-shell@1, test/contracts/shell.md §9):
 // each page in PAGES must measure clean at 1440x900, 720x800 and 390x844. The list is added to only
 // by the index.html tickets, each with its own pages, peeks and threads; until the first adds one, a
 // smoke run proves the plumbing on today's Overview without judging it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, peekFixture } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, dataRewriteInit, efficiencyFixture, inboxFixture, peekFixture, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
@@ -20,8 +21,9 @@ const PAGES = [
   { hash: '#settings', ready: READY },
   // kit-87: every other page's frame (the sidebar, the page bar). Its old section is .no-shell, which the
   // other checks ignore; with the default view it would be taken for the page's first content, whose
-  // page-top is its page ticket's, so the view is a selector no element has.
-  ...['overview', 'inbox', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  // page-top is its page ticket's, so the view is a selector no element has. (kit-100 moved the interim
+  // Inbox page into the Threads panel: its entry is the panel's, below.)
+  ...['overview', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
   // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
   // line exist only with it)
   { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
@@ -126,5 +128,114 @@ test('the dashboard measure: one peek of each kind at three sizes', { skip: canD
     const res = await measureAt(p, url(pk.hash), { ready: pk.ready, ...pk.opts });
     for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`${pk.hash} at ${at}`] = fails;
   }
+  assert.deepEqual(failed, {});
+});
+
+// kit-89: the Threads panel and a floating card (spec AC8), on a third project with a few threads
+// (threadsFixture, as dashboard-threads-sidebar.test.mjs seeds it), so the pages above keep their own
+// data. The panel and the card are overlays the measure leaves out by design (the panel is fixed to the
+// window and scrolls; the card floats at its pin), and the top-right button hides while the panel is
+// open: inbox matches nothing; view matches nothing, as for the pages above. What is judged is the page
+// under them and the panel's own text, in each of the three sizes. localStorage is cleared by a script
+// every load runs first, so no entry inherits another's open panel.
+const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
+const idOf = (out) => out.split('\n')[0].trim();
+const THREADS_OPTS = { view: '#no-such-view', inbox: '#no-such-inbox' };
+const PANEL_AT_REST = "document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'";
+const THREADS_PAGES = (A, G) => [
+  { hash: '#overview?th=open', ready: `${PANEL_AT_REST} && !!document.querySelector('#tl-list .th-row')` },
+  { hash: `#overview?th=open&t=${A}`, ready: `${PANEL_AT_REST} && !!document.querySelector('#th-card-slot > #tl-card.in-panel') && !document.getElementById('tl-card').hidden` },
+  { hash: `#goals?t=${G}`, ready: `!document.getElementById('tl-card').hidden && document.getElementById('tl-card').parentElement.id === 'tl' && !document.body.classList.contains('threads-open')` },
+].map((pg) => ({ ...pg, opts: THREADS_OPTS }));
+
+test('the dashboard measure: the Threads panel and a card at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 600000 }, async (t) => {
+  const F = threadsFixture('measure-threads');
+  const later = cleanup(t);
+  later(() => F.done());
+  F.sup(goalArgs('Self-serve billing', 2));
+  const A = idOf(F.owner(['thread', 'new', 'Where do we start?']));
+  F.sup(['thread', 'reply', A, 'Here, I think.']);
+  F.owner(['thread', 'new', 'Is the build green?']);
+  const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
+  F.sup(['thread', 'reply', G, 'On it.']);
+  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: "try { localStorage.removeItem('devteam.threads.open'); } catch {}" });
+  const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
+  const failed = {};
+  for (const pg of THREADS_PAGES(A, G)) {
+    await p.send('Page.navigate', { url: 'about:blank' });
+    for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+    const res = await measureAt(p, url(pg.hash), { ready: pg.ready, ...pg.opts });
+    for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`${pg.hash} at ${at}`] = fails;
+  }
+  assert.deepEqual(failed, {});
+});
+
+// kit-100: the Inbox in the panel (spec AC6), on a fourth project seeded with test/lib/kit.mjs's
+// inboxFixture (as dashboard-inbox-panel.test.mjs seeds it), so the pages above keep their own data, plus
+// one question whose choice's detail is a 120-character unbroken link (a long string at 390 wide, Review
+// Focus 5). Over Settings, which is on the shell, so page-top and header-pad judge the page under the
+// panel; the Inbox button hides while the panel is open, so inbox matches nothing. #th-body scrolls, and
+// measure.mjs skips what a scrolling container holds, so ready fixes #th-body's width at its own (the
+// scrollbar's loss included) and makes it overflow visible: the Inbox's boxes are then judged at their real
+// width (prose, overflow, head-h, head-end; tab-motion the panel's tab bar). The width is reset before it is
+// read, since the three sizes are one document. #answered-wrap is opened, so its cards are judged too. The
+// page under the panel is measured at rest: a resize from 1440 slides .main's margin-right (the panel's room)
+// to 0 below 900px, and a box read mid-slide is narrower than its page lays it out.
+// page-top runs at 1440x900 only. At 720x800 and 390x844 every shell page starts 104px below the bar on a
+// load at scrollY 0 (kit-87's nav row sits between the bar and the page at 900px and below:
+// o-20261116-110914358), and #settings?th=inbox names no element, so nothing scrolls it past the check as
+// #settings's own fragment does for the Settings entry above. There the view is a selector no element has,
+// as for the other entries facing that gap; every other check runs at all three sizes.
+const LONG_LINK = `https://example.com/${'a'.repeat(100)}`;
+const INBOX_READY = `(() => {
+  if (!(${PANEL_AT_REST}) || !document.querySelector('#th-inbox [data-qcard]') || document.getElementById('th-inbox').hidden) return false;
+  getComputedStyle(document.querySelector('.main')).marginRight;
+  if (document.getAnimations().some((a) => a.transitionProperty === 'margin-right')) return false;
+  if (!document.getElementById('th-inbox').textContent.includes(${JSON.stringify(LONG_LINK)})) return false;
+  document.getElementById('answered-wrap').open = true;
+  const b = document.getElementById('th-body');
+  b.style.width = ''; b.style.overflowY = '';
+  b.style.width = getComputedStyle(b).width; b.style.overflowY = 'visible';
+  return true;
+})()`;
+
+test('the dashboard measure: the Inbox in the panel at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-inbox-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'measure-inbox');
+  inboxFixture(root, env);
+  const choices = [{ label: 'Keep the link', detail: LONG_LINK }, { label: 'Drop it' }];
+  const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', 'Keep the long link?', '--choices', JSON.stringify(choices), '--stake', '1', '--urgency', '1'], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: "try { localStorage.removeItem('devteam.threads.open'); } catch {}" });
+  await p.send('Page.navigate', { url: 'about:blank' });
+  for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
+  const url = `http://127.0.0.1:${port}/#settings?th=inbox`;
+  const res = {
+    ...(await measureAt(p, url, { sizes: SIZES.slice(0, 1), ready: INBOX_READY, inbox: '#no-such-button' })),
+    ...(await measureAt(p, url, { sizes: SIZES.slice(1), ready: INBOX_READY, inbox: '#no-such-button', view: '#no-such-view' })),
+  };
+  assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
+  const failed = {};
+  for (const [at, fails] of Object.entries(res)) if (fails.length) failed[`#settings?th=inbox at ${at}`] = fails;
   assert.deepEqual(failed, {});
 });

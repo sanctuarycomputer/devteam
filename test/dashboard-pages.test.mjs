@@ -10,7 +10,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { PORTS, bareProject, dashboardOnFreePort, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
-const NAV = [['Project', ['Overview', 'Inbox', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Sensors', 'Health', 'Retros', 'Self Improvement']]];
+const NAV = [['Project', ['Overview', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Sensors', 'Health', 'Retros', 'Self Improvement']]];
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 
 // One project, its dashboard and a Chrome tab on it. With records, the project has what the
@@ -19,6 +19,12 @@ const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 // ticket (links in its peek), and an open review question whose page is committed on main.
 // Gives the tab (p), the port, the ids, and helpers: dt (the kit CLI; role null is the owner), load
 // (a fresh visit), shown, onPage, size.
+// True once an element's box reads the same twice running (until polls 100 ms apart): the page slides back over --dur
+// after the panel closes, and a click at a box read a moment before lands beside the button.
+const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
+// the panel open and at rest, and the Threads tab still (a click takes its centre once: kit-100)
+const THREADS_TAB = '#th-tabs [role="tab"][data-tab="threads"]';
+const PANEL_STILL = `document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && ${STEADY(THREADS_TAB)}`;
 async function pagesFixture(t, name, { records = true } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-dash-${name}-`));
   const later = cleanup(t);
@@ -122,8 +128,8 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev('scrollY'), 0, 'Library opens at the top');
   await p.ev("document.querySelector('#board').style.minHeight = ''; document.querySelector('#library').style.minHeight = ''");
 
-  // the Inbox button's count is the nav's
-  assert.equal(await p.ev("document.querySelector('#inbox-btn-n').textContent"), await p.ev("document.querySelector('#n-questions').textContent"));
+  // the Inbox button's count is the Inbox's (kit-100: inboxCount(), the panel tab's, since the nav item went)
+  assert.equal(await p.ev("document.querySelector('#inbox-btn-n').textContent"), await p.ev("String(inboxCount() || '')"));
 
   // a cold load of an unknown head: Overview, in the address bar too
   await load('#nonsense');
@@ -151,8 +157,14 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
     await p.ev("location.hash = '#overview'");
     await onPage('overview');
+    // the Inbox button opens the panel over the page on its Inbox tab (kit-100), and its Threads tab is a click away (kit-89)
     await p.click('#inbox-btn');
-    await onPage('inbox');
+    await until(() => p.ev(`location.hash === '#overview?th=inbox' && ${PANEL_STILL}`), 'the panel over Overview on Inbox, at rest');
+    await p.click(THREADS_TAB);
+    await until(() => p.ev("location.hash === '#overview?th=open' && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'"), 'the Threads panel over Overview, at rest');
+    assert.deepEqual(await shown(), ['overview'], 'Overview still shown under the panel');
+    await p.click('#th-close');
+    await until(() => p.ev("!document.body.classList.contains('threads-open') && getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, the page at rest');
   }
 });
 
@@ -187,9 +199,11 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   const redirects = JSON.parse(await p.ev('JSON.stringify(SHELL_ROUTES.redirects)'));
   const mon = Object.keys(redirects).find((k) => k === 'monitoring');
   assert.equal(redirects[mon], 'sensors', 'the table sends monitoring to sensors');
-  assert.equal(redirects['overview?th=inbox'], 'inbox', 'the table sends overview?th=inbox to inbox');
-  assert.equal(redirects['board?th=inbox'], 'inbox', 'the table has the board?th=inbox entry');
-  for (const [head, page] of [[`#${mon}`, redirects[mon]], ['#overview?th=inbox', redirects['overview?th=inbox']], ['#board?goal=g&th=inbox', redirects['board?th=inbox']]]) {
+  assert.equal(redirects.inbox, 'overview?th=inbox', 'the table sends #inbox to the Inbox tab over Overview');
+  assert.equal(redirects.questions, 'overview?th=inbox', 'the table sends #questions likewise');
+  assert.ok(!Object.keys(redirects).some((k) => k.endsWith('?th=inbox')), 'no <page>?th=inbox entry: that is the page with the panel on Inbox');
+  // (the redirect's click-through to the panel is exercised once the panel draws the Inbox, kit-100 T2 and on)
+  for (const [head, page] of [[`#${mon}`, redirects[mon]]]) {
     // Overview the newest entry (none ahead of it), so the click's one entry shows in history.length
     await go('#goals');
     await onPage('goals');
@@ -300,36 +314,42 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('loop');
   assert.equal(await tab(), 'observe', 'a fresh #loop opens on Observe: the tab is not remembered');
 
-  // 2e: an open question's link on Goals: the Inbox with its card in view; Back returns to Goals
+  // 2e: an open question's link on Goals: Goals with the panel on its Inbox tab (kit-100), the card in view;
+  // Back returns to Goals
+  const onInbox = (page) => until(async () => JSON.stringify(await shown()) === JSON.stringify([page]) && await p.ev(`location.hash === ${JSON.stringify(`#${page}?th=inbox`)} && document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !document.getElementById('th-inbox').hidden && getComputedStyle(document.getElementById('threads')).transform === 'none'`), `${page} with the panel on Inbox, at rest`);
   await go('#goals');
   await onPage('goals');
   n = await len();
   await p.click(`#goals a[href="#q/${ids.goalQ}"]`);
-  await onPage('inbox');
+  await onInbox('goals');
   await until(() => p.ev(`(() => { const r = document.getElementById(${JSON.stringify(`q-${ids.goalQ}`)})?.getBoundingClientRect(); return !!r && r.height > 0 && r.top < innerHeight && r.bottom > 0; })()`), 'its card in view');
-  assert.equal(await len(), n + 1, 'the q/ entry is replaced by #inbox');
+  assert.equal(await len(), n + 1, 'the q/ entry is replaced by #goals?th=inbox');
   assert.equal(await peekOpen(), false);
   await back();
   await onPage('goals');
 
-  // a review: over the Inbox it was opened on, × goes Back; cold, it closes to #inbox
+  // a review: over the Inbox tab it was opened from (over Overview), × goes Back; cold, it closes to
+  // #overview?th=inbox (kit-100)
   const reviewing = (page) => until(async () => await p.ev("!document.querySelector('#review-view').hidden && document.querySelector('main').classList.contains('reviewing')") && JSON.stringify(await shown()) === JSON.stringify([page]), `the review over ${page}`);
-  await go('#inbox');
-  await onPage('inbox');
+  await go('#overview?th=inbox');
+  await onInbox('overview');
   await p.click(`[data-open-review="${ids.review}"]`);
-  await reviewing('inbox');
+  await reviewing('overview');
   assert.equal(await p.ev('location.hash'), `#review/${ids.review}`);
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
   const nRv = await len();
   await p.click('#review-view [data-rv-close]');
-  await onPage('inbox');
+  await onInbox('overview');
   assert.equal(await p.ev("document.querySelector('#review-view').hidden"), true);
   assert.equal(await len(), nRv, '× closes the review by Back: no entry added');
   await load(`#review/${ids.review}`);
   await until(() => p.ev("!document.querySelector('#review-view').hidden"), 'cold: the review');
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
   await p.click('#review-view [data-rv-close]');
-  await onPage('inbox');
+  await onInbox('overview');
+  // the panel closed, so the remembered panel (kit-89) doesn't open over the visits below
+  await p.click('#th-close');
+  await until(() => p.ev("location.hash === '#overview' && !document.body.classList.contains('threads-open')"), 'the panel closed');
 
   // the viewer, each case in a visit of its own (see the note below): opened on Overview, closed
   // back to it; cold, over Library and closed to #library
@@ -351,7 +371,7 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
 
 // The thread layer on pages (spec §5, done-when 2f, the Edge cases): a thread's subject has a page
 // head; a #talk/ link opens its card over that page (its entry's stamp changed in place, no entry
-// added), closing follows closeTarget; the dock's list goes to the page; a pin keeps it; pins are
+// added), closing follows closeTarget; the Threads panel's row goes to the page; a pin keeps it; pins are
 // drawn for the page shown.
 test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   const { p, ids, dt, size, load, reload, shown, onPage } = await pagesFixture(t, 'threads');
@@ -392,7 +412,8 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await linkOn('goals', `#talk/${TT}`);
   await cardOver(TT, 'board', 'the card over Board');
   assert.equal(await len(), n + 1, 'the talk/ link adds one entry');
-  assert.deepEqual(await state(), { page: '#board', depth: 1, openedHere: true }, "its stamp's page is the subject's");
+  // since kit-89 (spec §2.5) the subject's page head carries the card's thread (t)
+  assert.deepEqual(await state(), { page: `#board?t=${TT}`, depth: 1, openedHere: true }, "its stamp's page is the subject's");
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   // a reload reopens it over Board
   await reload();
@@ -411,7 +432,7 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   // cold: over Board, × in place to #board
   await load(`#talk/${TT}`);
   await cardOver(TT, 'board', 'cold: the card over Board');
-  assert.deepEqual(await state(), { page: '#board', depth: 1, openedHere: false });
+  assert.deepEqual(await state(), { page: `#board?t=${TT}`, depth: 1, openedHere: false });
   n = await len();
   await p.click('[data-tl-close]');
   await shut('board', 'cold ×: #board');
@@ -422,39 +443,51 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('overview');
   await linkOn('overview', `#talk/${TO}`);
   await cardOver(TO, 'loop', 'the Orient thread over the Loop');
-  assert.equal((await state()).page, '#loop?lt=orient');
+  assert.equal((await state()).page, `#loop?lt=orient&t=${TO}`);
   assert.equal(await p.ev("document.querySelector('#loop-tabs [aria-selected=\"true\"]')?.dataset.tab"), 'orient', 'on Orient');
   await p.click('[data-tl-close]');
   await shut('overview', '× back to Overview');
   await linkOn('overview', `#talk/${TM}`);
   await cardOver(TM, 'sensors', 'the Sensors thread over Sensors');
-  assert.equal((await state()).page, '#sensors');
+  assert.equal((await state()).page, `#sensors?t=${TM}`);
   await p.click('[data-tl-close]');
   await shut('overview', '× back to Overview');
-  // a subject not drawn: over its kind's home page
+  // a subject not drawn: since kit-89 (spec §2.4, §2.5) an in-panel thread, so the link opens the Threads panel
+  // on it over the page it was clicked on, the recorded page head given th and t
   await linkOn('overview', `#talk/${TG}`);
-  await cardOver(TG, 'board', 'a thread on a ticket not drawn, over Board');
-  await p.click('[data-tl-close]');
-  await shut('overview', '× back to Overview');
+  await until(async () => await cardOn(TG) && await p.ev(`location.hash === ${JSON.stringify(`#talk/${TG}`)} && history.state?.page === ${JSON.stringify(`#overview?th=open&t=${TG}`)} && !!document.querySelector('#th-card-slot > #tl-card.in-panel')`) && JSON.stringify(await shown()) === '["overview"]', 'a thread on a ticket not drawn, in the panel over Overview');
+  // closed by the panel's × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+  await until(() => p.ev("getComputedStyle(document.getElementById('threads')).transform === 'none'"), 'the panel at rest');
+  await p.click('#th-close');
+  await until(async () => await cardShut() && await hash() === '#overview' && !(await p.ev("document.body.classList.contains('threads-open')")), 'the panel and the card closed, on Overview');
 
-  // the dock's list on Overview: one entry, Board shown; × closes the card in place
+  // the Threads panel's list on Overview: the row is one entry to Board's head with the thread (t) and the panel kept (th)
   // (Overview made the newest entry, none ahead of it, so the one entry shows in history.length)
   await go('#goals');
   await onPage('goals');
   await go('#overview');
   await onPage('overview');
+  await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
+  await p.click('#inbox-btn');
+  // the button opens the panel on its Inbox tab (kit-100): the Threads tab lists it
+  await until(() => p.ev(`location.hash.endsWith('th=inbox') && ${PANEL_STILL}`), 'the panel on Inbox, at rest');
+  await p.click(THREADS_TAB);
+  await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the Threads panel, at rest, lists it');
   n = await len();
-  await p.click('#tl-pill');
-  await until(() => p.ev(`!!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the dock lists it');
   await p.click(`#tl-list [data-tl-open="${TT}"]`);
-  await until(async () => await cardOn(TT) && await hash() === '#board' && JSON.stringify(await shown()) === '["board"]', 'the dock opens it over Board');
-  assert.equal(await len(), n + 1, 'the dock adds one entry');
+  // since kit-89 (spec §2.4, §2.5) the row's entry is Board's head with the thread (t) and, above 900px, the
+  // panel kept open (th); its × takes t away, a new entry, the panel staying on the list
+  await until(async () => await cardOn(TT) && await hash() === `#board?th=open&t=${TT}` && JSON.stringify(await shown()) === '["board"]', 'the panel row opens it over Board');
+  assert.equal(await len(), n + 1, 'the row adds one entry');
   await until(async () => await gap() <= 400, 'the card beside the ticket');
   n = await len();
   await p.click('[data-tl-close]');
   await until(() => cardShut(), 'closed');
-  assert.equal(await hash(), '#board', 'closed in place');
-  assert.equal(await len(), n, 'no history move');
+  assert.equal(await hash(), '#board?th=open', 'closed on Board, t gone');
+  assert.equal(await len(), n + 1, 'one entry: t taken away');
+  // closed by its × (kit-89 T3: a nav to a head without keys would carry the remembered panel)
+  await p.click('#th-close');
+  await until(async () => await hash() === '#board' && !(await p.ev("document.body.classList.contains('threads-open')")) && await p.ev("getComputedStyle(document.querySelector('.main')).marginRight === '0px'"), 'the panel closed, Board at rest');
 
   // pins: the ticket thread's on Board; a pin keeps the page and opens the card; none on Overview
   await until(() => pinned(TT), "the ticket thread's pin on Board");
@@ -941,11 +974,16 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   await p.click('[data-tl-close]');
   await until(async () => await cardKey() === null, 'closed');
 
-  // the dock's list names the setting
-  await p.click('#tl-pill');
-  await until(() => p.ev(`!!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the dock lists it');
-  assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .tl-r .small').textContent`), `Settings, ${name}`);
-  await p.click('#tl-pill');
+  // the Threads panel's row names the setting
+  await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
+  await p.click('#inbox-btn');
+  // the button opens the panel on its Inbox tab (kit-100): the Threads tab lists it
+  await until(() => p.ev(`location.hash.endsWith('th=inbox') && ${PANEL_STILL}`), 'the panel on Inbox, at rest');
+  await p.click(THREADS_TAB);
+  await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the Threads panel, at rest, lists it');
+  assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .th-where').textContent`), `Settings, ${name}`);
+  await p.click('#th-close');
+  await until(() => p.ev("!document.body.classList.contains('threads-open')"), 'the panel closed');
 
   // a thread on the other limit's row has its own pin, on its own row
   const TB = dt(['thread', 'new', 'Per component too', '--subject', JSON.stringify({ kind: 'page', view: view(K2), quote: name2 })], null).split('\n')[0];

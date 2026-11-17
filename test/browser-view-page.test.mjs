@@ -179,7 +179,7 @@ test('the address bar shows the url exactly as sent, masked', { skip, timeout: 6
 });
 
 test('the address bar shows only a masked url: the page holds the contract\'s mask', { skip, timeout: 60000 }, async () => {
-  const schema = JSON.parse(fs.readFileSync(new URL('../docs/devteam/schema/browser.schema.json', import.meta.url), 'utf8'));
+  const schema = JSON.parse(fs.readFileSync(new URL('./contracts/browser.schema.json', import.meta.url), 'utf8'));
   const html = fs.readFileSync(PAGE, 'utf8');
   const src = /const MASKED = new RegExp\(String\.raw`(.*)`\);\n/.exec(html);
   assert.ok(src, 'the page has its MASKED pattern');

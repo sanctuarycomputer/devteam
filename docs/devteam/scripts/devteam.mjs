@@ -1483,6 +1483,8 @@ function checkLine(o, file) {
   // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
   // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
   if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  // dropped files go with the owner's own answer, never words the supervisor recorded for them
+  if (o.type === 'question' && ['chat', 'thread'].includes(o.channel) && o.files !== undefined) errs.push(`files are on the owner's own answer, never one recorded from ${o.channel}`);
   if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
@@ -1897,6 +1899,24 @@ function durableText(file) {
   return local;
 }
 
+// The line appendLog writes for these fields, with every field it adds: the envelope (id, op, at,
+// by, the owner's channel) and, on the owner's answer, the hash of the question as it stands
+// (questionView). A command checking a line's size before it writes builds it here too (lineFits),
+// so the check and the write never disagree.
+function logLineFor(fields, by, id, at = nowIso()) {
+  const type = fields.type;
+  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
+    const q = logGet(fields.id);
+    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
+  }
+  const line = { v: 1, id: fields.id ?? id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
+  for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+  return line;
+}
+// Whether these fields' line fits LINE_MAX, built as appendLog will, with a placeholder id of the
+// real shape (u-00000000-000000000-owner) where the log would mint one.
+const lineFits = (fields, by) => Buffer.byteLength(`${JSON.stringify(logLineFor(fields, by, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${by}`))}\n`) <= LINE_MAX;
+
 // Append one object. Under the file's lock: catch a live file up with the durable copy if that is
 // ahead, drop a half-written last line, stamp a time after the file's last line (ids unique, lines
 // ordered even if the clock steps back), validate exactly what will be read back, write one line.
@@ -1911,17 +1931,11 @@ function appendLog(fields, by = logWriter()) {
     const cur = logGet(fields.id);
     if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
   }
-  // The owner's answer binds to the question as it stands (questionView).
-  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
-    const q = logGet(fields.id);
-    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
-  }
   const file = logFileFor(by, type);
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
-    const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
-    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
-    for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+    // the owner's answer binds to the question as it stands (logLineFor adds its hash)
+    const line = logLineFor(fields, by, `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, at);
     const text = `${JSON.stringify(line)}\n`;
     const parsed = JSON.parse(text);
     const errs = checkLine(parsed, file);
@@ -2029,7 +2043,7 @@ function ratingHistory(q) {
   const has = (e) => e.stake || e.urgency || e.settles !== undefined;
   return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
 }
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2760,18 +2774,53 @@ const repoReadable = (name) => { if (name === 'home') return true; const l = own
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
-// Whether a ticket keeps its records in home (its repo link's records is "home"): spec, plan,
-// verification and reviews on home's ticket/<id>, in home's project folder, while its code is on
-// its repo's ticket/<id>. Read from main's committed settings, like the routing above, so a
-// working tree's edit changes nothing until it lands. A view: never touches a checkout.
-function recordsInHome(t) {
+// Whether a ticket's repo link says records "home". Read from main's committed settings, like the
+// routing above, so a working tree's edit changes nothing until it lands.
+function recordsHomeSetting(t) {
   const name = t ? repoOfTicketLink(t) : 'home';
   if (name === 'home') return false;
   const s = committedComponents();
   const l = ownEntry(s.links, name);
   return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.records === 'home';
 }
-const recordsInHomeId = (id) => recordsInHome(tickets().get(id));
+// The ticket folders in a project's tickets/ at a ref: one ls-tree per log read, not one cat-file
+// per ticket (a dashboard asks for every ticket).
+const ticketFoldersAt = (ref, rel, g) => new Set(ref ? (g(['ls-tree', '--name-only', `${ref}:${rel}/tickets`]) ?? '').split('\n').filter(Boolean) : []);
+const homeTicketFolders = (ref) => memo(`homeTicketFolders:${ref}`, () => ticketFoldersAt(ref, projectRel, git));
+const linkTicketFolders = (R) => memo(`linkTicketFolders:${R.name}`, () => ticketFoldersAt(R.mainRef(), R.projectRel, R.git));
+// A ticket of a records-"home" link whose records were left in the link, written before the link
+// said "home": home has no folder for it (main, local or origin ticket/<id>; a records branch with
+// no commit yet has none), and the link has <project>/tickets/<id>/ at `at` (the commit judged),
+// else its ticket branch, else its main. Such a ticket is read as records "repo" until home has
+// some; then home wins. A link this machine can't read has none left in it. Refs only, memoized
+// per log read, so a dashboard re-decides on its next read.
+function recordsLeftInRepo(t, at) {
+  if (!t || !recordsHomeSetting(t)) return false;
+  const name = repoOfTicketLink(t);
+  if (!repoReadable(name)) return false;
+  return memo(`leftInRepo:${t.id}:${at ?? ''}`, () => {
+    if (homeTicketFolders(mainRef()).has(t.id)) return false;
+    const own = `${projectRel}/tickets/${t.id}`;
+    if ([`refs/heads/ticket/${t.id}`, `refs/remotes/origin/ticket/${t.id}`].some((r) => resolveCommit(r) && git(['cat-file', '-e', `${r}:${own}`]) !== null)) return false;
+    const R = repo(name);
+    const ref = at ?? R.ticketBranchRef(t.id) ?? R.mainRef();
+    if (!ref) return false;
+    return ref === R.mainRef() ? linkTicketFolders(R).has(t.id) : R.git(['cat-file', '-e', `${ref}:${R.projectRel}/tickets/${t.id}`]) !== null;
+  });
+}
+// Whether a ticket keeps its records in home (its repo link's records is "home", and none were left
+// in the link): spec, plan, verification and reviews on home's ticket/<id>, in home's project
+// folder, while its code is on its repo's ticket/<id>. Reads refs, never a working tree. `at` is
+// the link commit a command judges; views pass none (the link's ticket branch, else its main).
+function recordsInHome(t, { at } = {}) { return recordsHomeSetting(t) && !recordsLeftInRepo(t, at); }
+const recordsInHomeId = (id, opts) => recordsInHome(tickets().get(id), opts);
+// Said once per process per ticket (merge and check-pr run checkTicket inside them).
+const leftWarned = new Set();
+function warnLeftInRepo(t, R) {
+  if (leftWarned.has(t.id)) return;
+  leftWarned.add(t.id);
+  warn(`${t.id}: records read from ${R.name} (${R.projectRel}/tickets/${t.id}/), left from before links.${R.name}.records was "home"; move them to home's ${projectRel}/tickets/${t.id}/ once merged`);
+}
 // The repo that holds a ticket's records: home for records in home, else the ticket's own (an act).
 const recordsRepo = (id) => (recordsInHomeId(id) ? repo('home') : repoOfTicketId(id));
 // Home's ticket/<id>, where a records-in-home ticket's records are: the local branch (the worker's
@@ -3447,13 +3496,13 @@ const heldClaims = (key) => {
   });
 };
 let heldSeq = 0;
-function holdLine(key, target, line) {
+function holdLine(key, target, line, paste = null) {
   const dir = heldDir(key);
   const name = `${String(Date.now()).padStart(15, '0')}-${String(process.pid).padStart(8, '0')}-${String(++heldSeq).padStart(5, '0')}`;
   try {
     fs.mkdirSync(dir, { recursive: true });
     // written whole, then named: a flush never reads half a line
-    fs.writeFileSync(path.join(dir, `${name}.tmp`), JSON.stringify({ line, target, at: nowIso() }));
+    fs.writeFileSync(path.join(dir, `${name}.tmp`), JSON.stringify({ line, target, at: nowIso(), ...(paste ? { paste } : {}) }));
     fs.renameSync(path.join(dir, `${name}.tmp`), path.join(dir, `${name}.json`));
     return path.join(dir, `${name}.json`);
   } catch { return null; }
@@ -3512,7 +3561,9 @@ function flushHeld(key) {
       if (pane.problem) { if (heldAge(n) > HELD_GONE_MS && dropHeld(key, f, `its pane is gone: ${pane.problem}`)) continue; stopped = true; break; }
       const screen = paneScreen(pane.target);
       const ready = paneReadyIn(screen) || (!paneAskingIn(screen) && heldAge(live[0]) > HELD_NO_INPUT_MS);
-      if (!ready || !typeNow(pane.target, rec.line)) { stopped = true; break; }
+      // a paste only as typeNow takes one, paths as text: anything else in the file is typed as a line alone
+      const paste = Array.isArray(rec.paste) && rec.paste.length && rec.paste.every((p) => typeof p === 'string') ? rec.paste : null;
+      if (!ready || !typeNow(pane.target, rec.line, paste)) { stopped = true; break; }
       try { fs.unlinkSync(f); } catch {}
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
@@ -4296,6 +4347,8 @@ const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.en
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
 // A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
 // branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+// A command that judged a commit passes its decision (src.inHome), so the reviews come from where
+// the rest of its records did; else the views form decides.
 // A dashboard request reads every ticket's records several times (deriveStatus and collectMetrics
 // each run more than once, and metrics reads them for reviewStats and reviewPasses): while one runs,
 // each ticket's folder is read once (reviewMemo, set by dashboardData) and reviewReads counts reads.
@@ -4303,12 +4356,12 @@ let reviewMemo = null;
 let reviewReads = 0;
 const ticketReviews = (id, src) => {
   if (!reviewMemo) return ticketReviewsRead(id, src);
-  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}`}`;
+  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}\0${src.inHome ?? ''}`}`;
   if (!reviewMemo.has(k)) { reviewReads++; reviewMemo.set(k, ticketReviewsRead(id, src)); }
   return reviewMemo.get(k);
 };
 const ticketReviewsRead = (id, src) => {
-  if (recordsInHomeId(id)) {
+  if (src.inHome ?? recordsInHomeId(id)) {
     const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
     return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
   }
@@ -4589,7 +4642,7 @@ function recordsBranchFails(id, recSha) {
 }
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
-function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg }) {
+function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg, inHome }) {
   const t = tickets().get(id);
   if (!t) return [`no ticket ${id}`];
   const fails = [];
@@ -4600,11 +4653,16 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
   let src = WORKTREE;
   // Records in home: the records are home's at recSha (merge pins it; else home's ticket/<id>, the
   // local branch, else origin's), the code the link's at sha. Never home's working tree.
-  const H = recordsInHome(t);
   let recSha = null;
   if (R.commonDir) {
     sha = headIn(R, shaArg);
     if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
+  }
+  // Decided once, at the head judged (or as merge and check-pr decided it), and used for every
+  // records read below: records left in the link are read there, as under records "repo".
+  const H = inHome ?? recordsInHome(t, { at: sha });
+  if (recordsHomeSetting(t) && !H) warnLeftInRepo(t, R);
+  if (R.commonDir) {
     if (H) {
       // records: undefined reads home's ticket/<id>; null is merge's "none pinned" (it says why)
       const ref = recordsArg === undefined ? homeRecordsRef(id) : recordsArg;
@@ -4627,7 +4685,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     const rows = verText.split('\n').filter((l) => /^\|/.test(l.trim()) && !/^\|\s*-/.test(l.trim())).length - 1;
     if (rows < (t.done_when ?? []).length) fails.push(`verification has ${Math.max(rows, 0)} row(s) for ${t.done_when.length} done-when(s)`);
   }
-  const reviews = ticketReviews(id, src);
+  // A WORKTREE src goes on without H: a link ticket never reaches it (linkRepo always has commonDir
+  // and projectInRepo), and a home ticket's records setting is false, so the views form agrees.
+  const reviews = ticketReviews(id, src === WORKTREE ? src : { ...src, inHome: H });
   // An unnamed record counts for nothing; it fails the ticket only while it is the latest in its
   // track (a later, named pass in the same track supersedes it).
   const superseded = (r) => reviews.some((o) => o !== r && o.stage === r.stage && o.variant === r.variant && o.pass > r.pass);
@@ -4896,7 +4956,7 @@ function artifactRule(sha) {
   }
   return fails;
 }
-function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records, inHome }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   // A ticket's PR is in its own repo; plan and chore PRs are always home's.
   if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
@@ -4925,7 +4985,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
   }
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records }), ...depsFails(branch.slice('ticket/'.length), R)];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -5109,8 +5169,8 @@ function cmdReviewWorktree() {
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
-  // reviewer writes in its record's "- Records:" line
-  if (recordsInHomeId(id)) {
+  // reviewer writes in its record's "- Records:" line; decided at the sha reviewed
+  if (recordsInHomeId(id, { at: sha })) {
     const ref = homeRecordsRef(id);
     const rsha = ref ? resolveCommit(ref) : null;
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
@@ -5130,9 +5190,14 @@ function cmdCheckPr() {
   fetchMain(R);
   // a records-in-home ticket's records are on home's ticket/<id>: as origin has it now
   const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
-  // judged as origin has them (never a local branch that may not be pushed); none there: none
-  const records = R.name !== 'home' && tid && recordsInHomeId(tid) ? (gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0 ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
-  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) });
+  // judged as origin has them (never a local branch that may not be pushed); none there: none.
+  // Fetched before deciding, so home records pushed from another clone count (home wins); decided
+  // once, at the head.
+  const homeSet = R.name !== 'home' && !!tid && tickets().has(tid) && recordsHomeSetting(tickets().get(tid));
+  const fetched = homeSet && gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0;
+  const inHome = homeSet ? recordsInHomeId(tid, { at: sha }) : undefined;
+  const records = inHome ? (fetched ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
+  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, inHome, ...(records !== undefined ? { records } : {}) });
   // none on origin: say so (checkTicket leaves the why to its caller when told none is pinned)
   if (records === null) fails.push(`no records for ${tid} in home: home's ticket/${tid} is not on origin; push it`);
   report(fails, `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
@@ -5591,10 +5656,12 @@ function cmdMerge() {
   const mainBranch0 = S.main_branch;
   R.git(['fetch', '--quiet', 'origin', mainBranch0]);
   if (R.resolveCommit(`origin/${mainBranch0}`) && R.git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
-  // records in home: one pinned home commit, checked here and landed below
-  const inHome = !!id && tickets().has(id) && recordsInHomeId(id);
+  // records in home: one pinned home commit, checked here and landed below. Decided once, at the
+  // head, after fetching home's ticket/<id>, so records pushed from another clone count (home wins)
+  if (id && tickets().has(id) && recordsHomeSetting(tickets().get(id))) gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${id}:refs/remotes/origin/ticket/${id}`]);
+  const inHome = !!id && tickets().has(id) && recordsInHomeId(id, { at: sha });
   const rec = inHome ? pinRecords(id) : null;
-  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(inHome ? { records: rec.sha ?? null } : {}) });
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(id && tickets().has(id) ? { inHome } : {}), ...(inHome ? { records: rec.sha ?? null } : {}) });
   if (rec?.problems) fails.push(...rec.problems);
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
@@ -6567,7 +6634,9 @@ function cmdAnswer() {
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
+  if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -6593,6 +6662,7 @@ function cmdAnswer() {
   if (fromChat) chatAnswer('answer');
   const fromTurn = flags['from-turn'] !== undefined;
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
+  const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
@@ -6624,9 +6694,11 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
+  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}), files };
+  if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
-  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}) }, by);
+  appendLog(setLine, by);
   const metNote = metPlan ? goalMetApply(v, metPlan, by, fromChat ? { channel: 'chat' } : turn ? { channel: 'thread' } : {}) : null;
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
@@ -6636,7 +6708,7 @@ function cmdAnswer() {
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
   const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
-  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}`);
+  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}${droppedWords(files)}`, droppedPaths(files));
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
   if (metNote) out(metNote);
   if (settledNote && (fromChat || turn)) out(settledNote);
@@ -6803,6 +6875,7 @@ function threadLineProblems(o) {
     if (typeof o.text === 'string' && encodedBytes(o.text) > TURN_ENCODED_MAX) errs.push(`turn.text is ${encodedBytes(o.text)} bytes as the log holds it; at most ${TURN_ENCODED_MAX}`);
     for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
     if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
+    if (o.by !== 'owner' && o.files !== undefined) errs.push("files are on the owner's own turns");
   }
   return errs;
 }
@@ -6869,12 +6942,12 @@ const subjectIds = (s) => (!isObj(s) ? [] : s.kind === 'item' && SUBJECT_REF.tes
 // An owner turn, typed into the supervisor's pane when it has one (as nudgeSupervisor does), as one
 // line: a newline typed with send-keys -l would press Enter mid-message, and a control character
 // would reach the agent's terminal. The first 300 bytes of the words, then …. True once typed.
-function deliverOwnerTurn(t, text) {
+function deliverOwnerTurn(t, text, files) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return false;
   const flat = text.replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
   const said = Buffer.byteLength(flat) > 300 ? `${capBytes(flat, 300)}…` : flat;
-  return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}`);
+  return typeInto(target, `[devteam thread ${t.id} from owner${subjectWords(t.subject)}] ${said} — devteam.mjs thread show ${t.id}${droppedWords(files)}`, droppedPaths(files));
 }
 const deliveredWords = (typed) => (typed === true ? "sent to the supervisor's pane" : typed ? heldWords(typed, "the supervisor's") : 'recorded; the supervisor reads it when it next checks (thread list --waiting)');
 // The title and subject as the supervisor reads them: inside a frame that says they are data, every
@@ -6930,30 +7003,37 @@ function cmdThread() {
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
     const title = threadTitle(given ?? words);
     if (!title) die('--title: the thread needs a name');
+    const files = filesFlag();
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
+    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
-    return out(deliveredWords(deliverOwnerTurn(t, words)));
+    return out(deliveredWords(deliverOwnerTurn(t, words, files)));
   }
   // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
   // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
   if (sub === 'say' || sub === 'reply') {
     const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), 'supervisor');
+    // refused before its value is read: a reply's --files is wrong whatever it holds
+    if (flags.files !== undefined && by !== 'owner') die("--files go with the owner's own turn");
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
     if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
-    // words at the encoded cap fit a line alone, not always with eight links: the supervisor's line
-    // as appendLog will build it, checked here so the refusal says what to do about a reply
-    const line = { v: 1, id: `u-00000000-000000000-${by}`, type: 'turn', op: 'new', at: nowIso(), by, thread: t.id, text: words, refs };
-    if (refs.length && Buffer.byteLength(`${JSON.stringify(line)}\n`) > LINE_MAX) die('That reply is too long with its links; shorten it.');
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined }, by);
+    const files = filesFlag();
+    // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
+    // as appendLog will build it, checked here so the refusal says what to do about it
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
+    if (refs.length && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    const u = appendLog(line, by);
     out(u.id);
-    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words)));
+    if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words, files)));
     return;
   }
   // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
@@ -7008,6 +7088,8 @@ function cmdThread() {
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     if (t.status !== 'resolved') die(`${t.id} is open`);
+    // reopening takes words, never files: said so, not dropped without a word
+    if (flags.files !== undefined) die("--files go with the owner's own turn");
     const words = wordsFrom(2);
     if (words) turnText(words);
     const n = openThreadCount();
@@ -7049,7 +7131,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -8215,6 +8297,63 @@ function artifactTreeOkSync(id, slug) {
   if (ok) artifactTrees.add(key);
   return ok;
 }
+// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
+// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
+// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
+// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
+// when there is nothing at all.
+const ARTIFACT_VERSIONS_MAX = 200;
+function artifactVersions(slug) {
+  const drafts = draftArtifacts().filter((a) => a.slug === slug)
+    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    .map((a) => {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    });
+  const ref = mainRef();
+  let main = [];
+  let truncated = false;
+  if (ref) {
+    const folder = `${ARTIFACTS_REL}/${slug}`;
+    const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
+    // a failed read is a failure (exit 1), never an empty history (exit 3)
+    if (raw === null) die(`${slug}: could not read main's history`);
+    const seen = new Set();
+    for (const chunk of raw.split('\x01').slice(1)) {
+      const [head, ...lines] = chunk.split('\n');
+      const [commit, time] = head.split(' ');
+      let tree = null;
+      for (const l of lines) {
+        const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+        if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
+      }
+      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
+      seen.add(tree);
+      main.push({ tree, commit, time });
+    }
+    // only servable: a tree without artifact.json at its top (from before the manifest) is left out
+    if (main.length) {
+      const r = spawnSync('git', ['cat-file', '--batch-check'], { cwd: mainRoot, encoding: 'utf8', input: `${main.map((e) => `${e.tree}:artifact.json`).join('\n')}\n`, maxBuffer: 64 * 1024 * 1024 });
+      // a failed check is a failure (exit 1), never "nothing there" (exit 3)
+      if (r.status !== 0) die(`${slug}: its versions could not be checked (git cat-file)`);
+      const lines = r.stdout.split('\n');
+      main = main.filter((_, i) => lines[i] !== undefined && !lines[i].endsWith(' missing'));
+    }
+    const nowLs = git(treeFolderArgs(ref, slug).now, mainRoot);
+    // a folder missing on main is an empty answer (""), not a failure: only null is
+    if (nowLs === null) die(`${slug}: could not read main's history`);
+    const nowTree = treeNow(nowLs);
+    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
+    truncated = main.length > ARTIFACT_VERSIONS_MAX;
+    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+  }
+  if (!drafts.length && !main.length) return null;
+  return { slug, versions: [...drafts, ...main], truncated };
+}
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -8267,7 +8406,7 @@ function draftArtifacts(landed = landedArtifacts()) {
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
-// main has, and records the owner's word as an owner act (docs/superpowers/specs/2026-11-09-public-artifacts-design.md).
+// main has, and records the owner's word as an owner act (the public-artifacts design).
 // The project's name is part of every public URL, so it is set explicitly: the folder-name fallback
 // helloBody uses would move every link on a re-clone.
 const PUBLIC_PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -8412,7 +8551,16 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact versions <slug>: its drafts, main's version, then earlier ones by date; the dashboard's
+  // /api/artifact-versions runs it. Exit 3: nothing there, which the route tells apart from a failure
+  if (sub === 'versions') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die('usage: artifact versions <slug> [--json]');
+    const r = artifactVersions(slugName) ?? die(`${slugName}: no versions`, 3);
+    if (flags.json) return json(r);
+    return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -10405,32 +10553,36 @@ function orientClusters() {
   return res.sort((a, b) => b.count - a.count);
 }
 // Recurring signals left unexplained for more than a day, oldest first: what Orient owes.
-function orientationDebt() {
-  const now = Date.now();
+function orientationDebt(now = Date.now()) {
   return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
     .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
 }
-// Resolved incidents nobody learned from, oldest first: fixed and verified (an outcome cites the
-// incident) in the last 30 days, with no knowledge citing it in its evidence and no live noise
-// ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is nothing to
-// keep (a corrected ruling owes it again). Resolved when the last change setting its status said so.
-// One whose status the owner set is the owner's call, and owes nothing.
-function incidentDebt() {
-  const now = Date.now();
-  // a lesson the owner retired taught nothing, so the incident is owed one again
-  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
-  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+// Incidents fixed in the last 30 days, oldest first: resolved (the last change setting its status
+// said so), verified (an outcome cites the incident) and resolved within 30 days of now. One whose
+// status the owner set is the owner's call, and owes nothing. What incidentDebt and the Awareness
+// Score's incidents part (kit-242) both count from.
+function fixedIncidents(now = Date.now()) {
   const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
-  return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
+  return incidentList().filter((p) => p.status === 'resolved' && !ownerHolds(p, 'status')).flatMap((p) => {
     const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
     // verified only: an unverified resolution (valence 0, seen too few times) proved nothing to learn from
     const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id) && (o.valence ?? 0) > 0).pop();
-    if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
+    return !outcome || now - Date.parse(at) > 30 * DAY ? [] : [{ p, resolved_at: at, outcome }];
+  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
+// Fixed incidents nobody learned from, oldest first: no knowledge citing it in its evidence and no
+// live noise ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is
+// nothing to keep (a corrected ruling owes it again).
+function incidentDebt(now = Date.now()) {
+  // a lesson the owner retired taught nothing, so the incident is owed one again
+  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
+  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+  return fixedIncidents(now).filter(({ p }) => !taught.has(p.id)).map(({ p, resolved_at: at, outcome }) => {
     const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
     const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
     const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
-    return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
-  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+    return { id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] };
+  });
 }
 // ===== the weekly learning record (the OODA spec §6) =====
 
@@ -10463,6 +10615,24 @@ function withLogAt(cut, fn) {
 // can do, a review, and defining or approving a goal).
 const DECISION_KINDS = ['owner-decision', 'one-way-door', 'proposal', 'trust', 'clarification'];
 const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthority(c));
+// Every group a signal recurs on, before what explains it is taken out (signalGroups takes it out
+// first): the observations bar a few kinds, and the corrections, each item { id, at, who }, sorted by
+// at and then id so equal times order the same on every read. formed_at: the at of the item that
+// first made it recurring, the first from the third on where the items so far come from two writers
+// or fall on two days; null when it never did. learningFigures counts the formed ones; the Awareness
+// Score (kit-242) times them from formed_at.
+function recurringGroups() {
+  const groups = new Map();
+  const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [], formed_at: null }).get(key)).items.push(item);
+  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+  for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
+  for (const g of groups.values()) {
+    g.items.sort((a, b) => a.at.localeCompare(b.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const who = new Set(), days = new Set();
+    for (const [j, i] of g.items.entries()) { who.add(i.who); days.add(dateOnly(i.at)); if (j >= 2 && (who.size >= 2 || days.size >= 2)) { g.formed_at = i.at; break; } }
+  }
+  return groups;
+}
 // One week's figures (counts, never shares) and the records each counts, from the log as it stood
 // at the week's end. "In the week" is the named time falling in it.
 function learningFigures(week, merges = mergeTimes()) {
@@ -10474,12 +10644,13 @@ function learningFigures(week, merges = mergeTimes()) {
     const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').sort(byTime).map((k) => k.id);
     // recurring signals as Orient forms them, before what explains them is taken out
     const { ids, keys } = explained();
-    const groups = new Map();
-    const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
-    for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
-    for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
-    const signals = [...groups.values()].filter((g) => g.items.length >= 3 && (new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2))
-      .map((g) => { const by = g.items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id); return { key: g.key, ids: g.items.map((i) => i.id), explained: by.length > 0, by }; });
+    // listed in the fold's order (observations, then corrections), as the records written so far list them
+    const pos = new Map([...logObjects('observation'), ...calls()].map((o, i) => [o.id, i]));
+    const signals = [...recurringGroups().values()].filter((g) => g.formed_at).map((g) => {
+      const items = [...g.items].sort((a, b) => pos.get(a.id) - pos.get(b.id));
+      const by = items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id);
+      return { key: g.key, ids: items.map((i) => i.id), explained: by.length > 0, by };
+    });
     const starts = logObjects('act').filter((a) => a.class === 'worker-slots' && inW(a.created_at) && String(a.what).startsWith('made ')).sort(byTime).map((a) => ({ id: a.id, given: Array.isArray(a.knowledge) ? a.knowledge : [] }));
     const all = calls().sort(byTime);
     const weekCalls = all.filter((c) => inW(c.created_at));
@@ -10657,6 +10828,105 @@ function autonomyData(now = Date.now()) {
   const x = autonomyContext(now);
   const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
   return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: autonomySenses() };
+}
+// ===== the Awareness Score (kit-242) =====
+// One week of it (start: its Monday 00:00 UTC, ms), read at E, the week's last millisecond or now:
+// four parts, each { count, of, share }, and the score. Counted from the log as it stood at E, never
+// from a stored learning record (the record holds no times). E is returned for the suggestions, and
+// dropped before serving. kept: each id's new line as the fold keeps it (the first, in fold order).
+const AW_NONE = () => ({ count: 0, of: 0, share: null });
+const awPart = (count, of, share = of ? round2(count / of) : null) => ({ count, of, share });
+function awarenessWeek(start, now, firstMs, kept = awKeptNew()) {
+  const E = Math.min(start + WEEK - 1, now);
+  const starts_at = new Date(start).toISOString();
+  // a week before the log's first line has nothing to read: no refold for it
+  if (E < firstMs) return { starts_at, score: null, parts: { signals: AW_NONE(), incidents: AW_NONE(), lessons: AW_NONE(), starts: AW_NONE() }, E };
+  const fromIso = starts_at, cut = new Date(E).toISOString(), dayBefore = new Date(E - DAY).toISOString();
+  return withLogAt(cut, () => {
+    // when each item was first cited by a record still citing it at E: its new line (as kept), then its
+    // applied updates in order. A raw set line the fold ignored never counts (it isn't in updates).
+    const cited = new Map();
+    const walk = (o) => {
+      const has = new Set([...(o.evidence ?? []), ...(o.refs ?? [])]);
+      const born = kept.get(o.id);
+      const steps = [{ at: o.created_at, ids: [...(born?.evidence ?? []), ...(born?.refs ?? [])] }, ...(o.updates ?? []).filter((u) => u.evidence || u.refs).map((u) => ({ at: u.at, ids: [...(u.evidence ?? []), ...(u.refs ?? [])] }))];
+      const first = new Map();
+      for (const s of steps) for (const r of s.ids) if (!first.has(r)) first.set(r, s.at);
+      for (const [r, at] of first) if (has.has(r) && !(cited.get(r) <= at)) cited.set(r, at);
+    };
+    for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) walk(o);
+    // a live decision that cites an observation explains what it cites, as explained() reads it; an
+    // orient-noise one also rules on each key it names
+    const rulings = new Map();
+    for (const d of logObjects('decision')) {
+      if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
+      walk(d);
+      if (d.class === 'orient-noise') for (const r of d.refs) if (!logGet(r)) (rulings.get(r) ?? rulings.set(r, []).get(r)).push(d.created_at);
+    }
+    let sOf = 0, sCount = 0;
+    for (const g of recurringGroups().values()) {
+      if (!g.formed_at || g.formed_at < fromIso || g.formed_at > cut) continue;
+      // a ruling covers the sightings at or before it, so one before the first sighting covers none
+      const xs = [...g.items.map((i) => cited.get(i.id)), ...(rulings.get(g.key) ?? []).filter((at) => at >= g.items[0].at)].filter(Boolean).sort();
+      const x = xs[0];
+      // formed in E's last day and not yet explained: it hasn't had its day
+      if (!x && g.formed_at > dayBefore) continue;
+      sOf++;
+      // an explanation from before forming counts as 0 hours
+      if (x && Date.parse(x) - Date.parse(g.formed_at) <= DAY) sCount++;
+    }
+    const incOf = fixedIncidents(E).length;
+    const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').map((k) => k.id);
+    const allStarts = logObjects('act').filter((a) => a.class === 'worker-slots' && String(a.what).startsWith('made '));
+    const given = (a) => (Array.isArray(a.knowledge) ? a.knowledge : []);
+    const used = new Set(allStarts.filter((a) => a.created_at > new Date(E - 28 * DAY).toISOString() && a.created_at <= cut).flatMap(given));
+    const starts = allStarts.filter((a) => a.created_at >= fromIso && a.created_at <= cut);
+    const startsGiven = starts.filter((a) => given(a).length).length;
+    const parts = {
+      signals: awPart(sCount, sOf),
+      incidents: awPart(incOf - incidentDebt(E).length, incOf),
+      lessons: awPart(knowledge.filter((k) => used.has(k)).length, knowledge.length),
+      // with no knowledge in force there was nothing to give
+      starts: awPart(startsGiven, starts.length, starts.length && knowledge.length ? round2(startsGiven / starts.length) : null),
+    };
+    // the mean of the unrounded shares
+    const shares = [[sCount, sOf], [parts.incidents.count, incOf], [parts.lessons.count, knowledge.length], [startsGiven, knowledge.length ? starts.length : 0]].filter(([, of]) => of).map(([c, of]) => c / of);
+    return { starts_at, score: shares.length ? Math.round((100 * shares.reduce((s, v) => s + v, 0)) / shares.length) : null, parts, E };
+  });
+}
+// Each id's new line as the fold keeps it: the first in the fold's order (at, file, line). The folded
+// object holds only current values, so the citations a record was made with are read from here.
+function awKeptNew() {
+  const kept = new Map();
+  const before = (a, b) => a.at < b.at || (a.at === b.at && (a.__file.localeCompare(b.__file) || a.__line - b.__line) < 0);
+  for (const l of readLog().lines) if (l.op === 'new' && (!kept.has(l.id) || before(l, kept.get(l.id)))) kept.set(l.id, l);
+  return kept;
+}
+function awarenessData(now = Date.now()) {
+  const firstMs = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
+  const kept = awKeptNew();
+  const weeks = efficiencyWeeks(now).map((w) => awarenessWeek(w.start, now, firstMs, kept)).map(({ E, ...w }) => w);
+  return { score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, weeks, suggestions: awarenessSuggestions(now, weeks[11].parts) };
+}
+// Up to five things to do this week, in a fixed order: learn from each fixed incident, retire the
+// lessons no session is given, then explain each signal that keeps happening. This week's E is now, so
+// the log is read as it is. The words are plain (strategy R2): no command, function or score name.
+function awarenessSuggestions(now, parts) {
+  const out = [];
+  const id = uniqueIds();
+  const add = (kind, subject, what, evidence, effect) => out.push({ id: id(suggestionId('aw', kind, subject)), kind, what, evidence, effect });
+  const plural = (n, word) => `${word}${n === 1 ? '' : 's'}`;
+  const { incidents: inc, lessons: les } = parts;
+  for (const r of incidentDebt(now)) add('incident', r.id, `Write down what ${r.title} taught`, `Fixed ${r.days === 0 ? 'today' : `${r.days} ${plural(r.days, 'day')} ago`} and verified since; no lesson cites it`, `Fixed incidents that left a lesson: ${inc.count} of ${inc.of} → ${inc.count + 1} of ${inc.of}`);
+  // a quarter or more of the lessons in force reached no session start (4 × unused ≥ of, without floats)
+  const n = les.of - les.count;
+  if (les.of > 0 && 4 * n >= les.of) add('lessons', 'unused', `Look at the ${n === 1 ? 'lesson' : `${n} lessons`} no session was given in 4 weeks`, `${n} of ${les.of} ${plural(les.of, 'lesson')} in force reached no session start in the last 28 days`, `Lessons sessions use: ${les.count} of ${les.of} → ${les.count} of ${les.count} once ${n === 1 ? 'it is' : 'those are'} retired`);
+  for (const r of orientationDebt(now)) {
+    // every row has waited a day (orientationDebt's filter), so at least 1
+    const d = Math.max(1, Math.floor(r.hours / 24));
+    add('signal', r.key, r.latest ? `Find out what keeps causing this: ${String(r.latest).slice(0, 120)}` : `Find out why this keeps happening (${r.count} times)`, `Seen ${r.count} times since ${r.first_at.slice(0, 10)}, unexplained`, `First seen ${d} ${plural(d, 'day')} ago; explaining it stops further sightings piling up`);
+  }
+  return out.slice(0, 5);
 }
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });
@@ -12150,8 +12420,22 @@ function smallerModel(key, priced) {
 const modelWords = (key) => { const m = parseModelKey(key); return m ? `${m.family[0].toUpperCase()}${m.family.slice(1)} ${m.version.replace(/-/g, '.')}` : 'that model'; };
 /* model families end */
 // A suggestion's id: stable while its condition holds, never from a rank or a date, and safe as a
-// thread subject (suggestion:<id>).
-const effId = (kind, subject) => `eff-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+// thread subject (suggestion:<id>). Two subjects can make one id (a:b and a/b, or a cut at 110), and
+// the id names a thread, so a list's later clash takes -2, -3 and so on, cut to stay within 110; a
+// suffixed id can itself be taken (x-2 as a subject), so each is checked against every id so far.
+/* suggestion ids start */
+const suggestionId = (prefix, kind, subject) => `${prefix}-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+function uniqueIds() {
+  const taken = new Set();
+  return (id) => {
+    let out = id;
+    for (let n = 2; taken.has(out); n++) out = id.slice(0, 110 - `-${n}`.length) + `-${n}`;
+    taken.add(out);
+    return out;
+  };
+}
+const effId = (k, s) => suggestionId('eff', k, s);
+/* suggestion ids end */
 const dollars = (x) => `$${Number.isInteger(x) ? x : x.toFixed(2)}`;
 // Decide: up to five suggestions whose condition holds this week, by estimated dollars (the design's
 // five kinds). ids are this week's tickets, ids12 the 12 weeks', [start, end) this week.
@@ -12217,13 +12501,14 @@ function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS 
   }
   return out.sort((a, b) => b.usd - a.usd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 5);
 }
-function efficiencyData(m) {
+function efficiencyData(m, now = Date.now()) {
   const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];
   const weekIds = [];
   const walk = ticketReviewWalk();
   const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
   const r2 = (x) => +x.toFixed(2);
-  const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
+  const W12 = efficiencyWeeks(now);
+  const weeks = W12.map(({ start, end }) => {
     // the week's tickets: merged in it with spend recorded, the set perPoint counts
     const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
     weekIds.push(done.map((c) => c.id));
@@ -12249,7 +12534,7 @@ function efficiencyData(m) {
   return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
     observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
     waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint),
-    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: Date.parse(weeks[11].starts_at), end: Date.parse(weeks[11].starts_at) + WEEK, POINTS }) };
+    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
 function collectMetrics(since) {
@@ -13004,13 +13289,27 @@ function dashboardData() {
   reviewMemo = new Map();
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
 }
+/* autonomy score start */
+// The Autonomy Score: the mean of the Trust, Efficiency and Awareness scores for each of the 12 weeks,
+// null when any of the three is (a week with no tickets shipped says nothing about autonomy).
+function autonomyScore(autonomy, efficiency, awareness) {
+  const weeks = awareness.weeks.map((w, i) => {
+    const x = [autonomy.decisions.weeks[i].score, efficiency.weeks[i].score, w.score];
+    return { starts_at: w.starts_at, score: x.every((v) => typeof v === 'number') ? Math.round((x[0] + x[1] + x[2]) / 3) : null };
+  });
+  return { this_week: weeks[11].score, last_week: weeks[10].score, weeks };
+}
+/* autonomy score end */
 function dashboardDataRead() {
+  // one clock for the parts that read the 12 weeks, so they agree on which week is this one
+  const now = Date.now();
   const settings = loadSettings();
   const metrics = collectMetrics(0);
   const sub = activeTickets();
   const msgs = logObjects('message');
   const replied = handledMessages();
   const H = heldByMap();
+  const efficiency = efficiencyData(metrics, now), awareness = awarenessData(now), autonomy = autonomyData(now);
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
@@ -13024,11 +13323,13 @@ function dashboardDataRead() {
     questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics,
-    efficiency: efficiencyData(metrics),
+    efficiency,
+    awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
-    autonomy: autonomyData(),
+    autonomy,
+    autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
     // every kit setting, in words; never a credential (settingsAll)
@@ -14578,6 +14879,255 @@ function gatewayThreadKey() {
   return key;
 }
 /* box end */
+/* upload rules start */
+// Copied from cloud/gateway.mjs (files dropped on the terminal), which the kit can't import; test/attachments.test.mjs holds the two equal.
+const UPLOAD_MAX = 512 * 1024 * 1024; // a file, and so a request: each file is a request of its own
+const UPLOAD_TOTAL = 4 * 1024 * 1024 * 1024;
+const UPLOAD_FREE = 1024 * 1024 * 1024; // left on the disk for the agents, whatever is dropped
+const UPLOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
+const UPLOAD_STALL_MS = 60 * 1000;
+const UPLOAD_NAME = 200;
+const UPLOAD_PART = '.part';
+const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
+const UPLOAD_RULES = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, keepMs: UPLOAD_KEEP_MS, stallMs: UPLOAD_STALL_MS, name: UPLOAD_NAME, part: UPLOAD_PART, folder: UPLOAD_FOLDER };
+// The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
+// so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
+// path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
+function safeUploadName(raw) {
+  const base = String(raw ?? '').split(/[/\\]/).pop().normalize('NFD').replace(/[\p{M}\p{Cc}\p{Cf}]/gu, '');
+  const plain = base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+|[.-]+$/g, '');
+  const dot = plain.lastIndexOf('.');
+  const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
+  // the extension first: a name that's all replaced characters still comes out an image
+  const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
+  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+}
+// These run in the terminal's page too (TERM_DROP has their source), and are tested here.
+// A stored path never needs the quotes; they're for whatever else this is ever handed.
+function shellQuote(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+function dropPaste(paths) {
+  return paths.map(shellQuote).join(' ');
+}
+// What follows the paste: a space, so what the owner types next doesn't run into a path. Not after
+// images alone: Claude Code turns those into attachments, and it has no path left to separate.
+function isDropImage(p) {
+  return /\.(png|jpe?g|gif|webp)$/i.test(p);
+}
+function dropSpace(paths) {
+  return paths.some((p) => !isDropImage(p));
+}
+/* upload rules end */
+// --- files dropped on a laptop's dashboard: streamed to a folder of the project's own ---------
+// A box is the gateway's: it takes the drops there, and the dashboard only reads its folder.
+const uploadsOnBox = () => !!process.env.DEVTEAM_GATEWAY || onBox();
+// ~/.devteam/uploads/<slug>-<hash8>, from the main checkout's real path: a worktree's dashboard maps
+// to the same folder, and two checkouts that share a name never share one.
+function laptopUploadsDir() {
+  const real = fs.realpathSync(mainRoot);
+  return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
+}
+const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR ?? '/data/uploads' : laptopUploadsDir());
+// Why a path is not a dropped file (null when it is): exactly <root>/<folder>/<name>, a folder named
+// as ours and a name as one is stored, never a .part, and a regular file. A check of shape only, on a
+// path already resolved (realpath) against the root's real path: it never follows a link itself. A
+// caller holding a requested path compares that with its real path itself, as the GET below does (a
+// link in one folder to another's file names a file never dropped there); attachedFiles records the
+// real path, so a link stands for the file it names. Equal, not merely inside: <root>-evil/… is out.
+function droppedFileProblem(realPath, realRoot) {
+  const folder = path.basename(path.dirname(realPath));
+  const name = path.basename(realPath);
+  if (realPath !== path.join(realRoot, folder, name)) return 'not in a folder at the top of the root';
+  if (!UPLOAD_FOLDER.test(folder)) return 'not in a folder named as ours';
+  if (name === UPLOAD_PART || name !== safeUploadName(name)) return 'not a name a dropped file is stored under';
+  try { if (!fs.lstatSync(realPath).isFile()) return 'not a file'; } catch (e) { return e.code ?? e.message; }
+  return null;
+}
+// The files an owner's answer or turn carries (--files <json>, spec §6), or die with why, before
+// anything is written: 1 to 10 of {name, path, bytes}, each path a dropped file in this machine's
+// folder (a box's, which the gateway writes, or this project's on a laptop). Recorded as the name
+// given, the real path and the file's real size, never the size a page claimed.
+const FILES_MAX = 10;
+const FILES_PATH_MAX = 1024; // bytes
+const FILES_TOO_LONG = 'That is too long with its files; shorten it or attach fewer.';
+function attachedFiles(json) {
+  const shape = `--files is a JSON array of 1 to ${FILES_MAX} dropped files, each exactly {"name", "path", "bytes"}: a name of 1 to ${UPLOAD_NAME} characters with no control or bidi characters, a path of at most ${FILES_PATH_MAX} bytes, and bytes a whole number from 0`;
+  let list = null;
+  // a bare --files has no JSON at all
+  if (typeof json === 'string') try { list = JSON.parse(json); } catch {}
+  if (!Array.isArray(list) || list.length < 1 || list.length > FILES_MAX) die(shape);
+  for (const f of list) if (!isObj(f) || Object.keys(f).sort().join(',') !== 'bytes,name,path' || typeof f.name !== 'string' || f.name.length < 1 || f.name.length > UPLOAD_NAME || /\p{Cc}/u.test(f.name) || UNSAFE_TEXT.test(f.name) || typeof f.path !== 'string' || Buffer.byteLength(f.path) > FILES_PATH_MAX || !Number.isInteger(f.bytes) || f.bytes < 0) die(shape);
+  for (const f of list) if (!path.isAbsolute(f.path)) die(`refused: ${f.path} is not an absolute path`);
+  const root = uploadsRoot();
+  let realRoot;
+  try { realRoot = fs.realpathSync(root); } catch { die(`refused: this machine has no dropped-files folder (${root})`); }
+  return list.map((f) => {
+    let real = null;
+    try { real = fs.realpathSync(f.path); } catch {}
+    if (real === null || droppedFileProblem(real, realRoot)) die(`refused: ${f.path} is not a dropped file in this machine's folder (${root})`);
+    return { name: f.name, path: real, bytes: fs.statSync(real).size };
+  });
+}
+const filesFlag = () => (flags.files === undefined ? undefined : attachedFiles(flagStr('files')));
+// How a stored file is served back, as the gateway serves it (its uploadType, copied): these four as
+// images, every other file (HTML and SVG among them) as bytes to save, never to render.
+const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function uploadType(name) {
+  const ext = path.extname(name);
+  return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
+}
+// GET /upload/<folder>/<name> (HEAD too) on the laptop's dashboard, after its Host check and relay
+// refusal: a dropped file, back to the dashboard's own page (spec §5). Matched on the raw path, so
+// nothing URL parsing folds (.., %2e, %2F) can name another file. A page on another site can't read
+// it: its browser says so in Sec-Fetch-Site. A request with none (curl, the owner's own tools) is served.
+async function serveLaptopUpload(req, res, rawPath, send) {
+  const none = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
+  if (uploadsOnBox()) return send(res, 404, 'text/plain; charset=utf-8', 'on a box the gateway serves dropped files');
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'dropped files only to this dashboard\'s own page');
+  const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
+  if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
+  let fh = null;
+  try {
+    const root = await fs.promises.realpath(uploadsRoot());
+    const real = await fs.promises.realpath(path.join(root, m[1], m[2]));
+    // the very file named, not one a link inside the folder points at
+    if (real !== path.join(root, m[1], m[2]) || droppedFileProblem(real, root)) return none();
+    fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile()) { await fh.close(); return none(); }
+    const { type, attachment } = uploadType(m[2]);
+    res.writeHead(200, { 'content-type': type, ...(attachment ? { 'content-disposition': `attachment; filename="${m[2]}"` } : {}), 'content-length': st.size, 'x-content-type-options': 'nosniff', 'content-security-policy': 'sandbox', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+    if (req.method === 'HEAD') { await fh.close(); return res.end(); }
+    // pipeline: a reader who goes mid-file closes the file too
+    pipeline(fh.createReadStream(), res, () => {});
+  } catch {
+    await fh?.close().catch(() => {});
+    return res.headersSent ? res.destroy() : none();
+  }
+}
+// As the gateway: Node's limit on a whole request is five minutes, too short for a big file on a slow
+// line, and it is one setting for the server. So the dashboard's is the upload's (UPLOAD_REQUEST_MS),
+// and every other body keeps those five minutes by a timer of its own (UPLOAD_BODY_MS). A stalled
+// upload goes sooner (UPLOAD_STALL_MS).
+const UPLOAD_REQUEST_MS = 3600 * 1000;
+const UPLOAD_BODY_MS = 5 * 60 * 1000;
+// The limits, which a test may lower (and the floor of free disk raise) only while boxFilesOff()
+// holds: a test's throwaway HOME. Nowhere else does the environment change them, nor ever loosen one.
+function uploadLimits() {
+  const lim = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, stallMs: UPLOAD_STALL_MS, keepMs: UPLOAD_KEEP_MS, bodyMs: UPLOAD_BODY_MS };
+  if (!boxFilesOff()) return lim;
+  const n = (k) => { const v = process.env[k]; return typeof v === 'string' && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : null; };
+  for (const [key, env] of [['max', 'DEVTEAM_UPLOAD_MAX'], ['total', 'DEVTEAM_UPLOAD_TOTAL'], ['stallMs', 'DEVTEAM_UPLOAD_STALL_MS'], ['bodyMs', 'DEVTEAM_UPLOAD_BODY_MS']]) if (n(env) !== null) lim[key] = Math.min(lim[key], n(env));
+  if (n('DEVTEAM_UPLOAD_FREE') !== null) lim.free = Math.max(lim.free, n('DEVTEAM_UPLOAD_FREE'));
+  return lim;
+}
+// Why the root can't take a file (null when it can): checked as the gateway checks its own, so
+// nothing is ever written through a link, or into a folder someone else made or can write to.
+function uploadRootOk(root, { make = false } = {}) {
+  try {
+    if (make) {
+      const top = path.join(os.homedir(), '.devteam');
+      for (const d of [top, path.join(top, 'uploads'), root]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    }
+    const st = fs.lstatSync(root);
+    if (st.isSymbolicLink()) return `${root} is a link, not a folder`;
+    if (!st.isDirectory()) return `${root} is not a folder`;
+    if (st.uid !== process.getuid()) return `${root} is not this user's`;
+    if (st.mode & 0o022) return `others can write to ${root}`;
+    return null;
+  } catch (e) { return `${root}: ${e.code ?? e.message}`; }
+}
+// From the disk on every upload, never a list in memory, so a restart forgets nothing. Removes only a
+// folder named as ours, made by this user, that this process isn't receiving into: one past
+// keepMs, and one empty, or whose .part has had nothing, for stallMs (an upload cut off). A fresh
+// .part or empty folder stays: another dashboard for the project (a worktree's) may be receiving
+// into it. `receiving` is the live map, asked again just before each removal, since an upload this
+// process starts during the scan is new to it. Returns the bytes the folders left hold.
+async function sweepLaptopUploads(root, receiving, limits, now = Date.now()) {
+  let kept = 0;
+  for (const e of await fs.promises.readdir(root, { withFileTypes: true })) {
+    if (!e.isDirectory() || !UPLOAD_FOLDER.test(e.name) || receiving.has(e.name)) continue;
+    const folder = path.join(root, e.name);
+    // one that can't be read or removed costs only itself
+    try {
+      const st = await fs.promises.lstat(folder);
+      if (!st.isDirectory() || st.uid !== process.getuid()) continue;
+      const names = await fs.promises.readdir(folder);
+      let gone = now - st.mtimeMs > (names.length ? limits.keepMs : limits.stallMs);
+      if (names.includes(UPLOAD_PART)) gone = now - (await fs.promises.lstat(path.join(folder, UPLOAD_PART))).mtimeMs > limits.stallMs;
+      if (gone && receiving.has(e.name)) continue;
+      if (gone) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
+      for (const n of names) kept += (await fs.promises.lstat(path.join(folder, n))).size;
+    } catch {}
+  }
+  return kept;
+}
+// What each folder this process is receiving into may yet take (folder -> bytes).
+const uploadsReceiving = new Map();
+// POST /upload?name= on the laptop's dashboard, after its Host check and relay refusal. Every refusal
+// before the body is answered without reading a byte of it, and closes: what's still coming goes with
+// the socket. `send` is the dashboard's own.
+async function receiveLaptopUpload(req, res, rawName, send) {
+  const refuse = (code, error) => send(res, code, 'application/json', JSON.stringify({ error }), { connection: 'close' });
+  if (uploadsOnBox()) return refuse(404, 'on a box the gateway takes dropped files');
+  // only the dashboard's own page: a page elsewhere can't send its Origin as ours, nor the browser's Sec-Fetch-Site
+  if (req.headers.origin !== `http://${req.headers.host}` || req.headers['sec-fetch-site'] !== 'same-origin') return refuse(403, 'dropped files only from this dashboard\'s own page');
+  const lim = uploadLimits();
+  const tooBig = () => refuse(413, `over the ${Math.floor(lim.max / 1048576)} MB limit for a file`);
+  const declared = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
+  if (declared !== null && !(declared <= lim.max)) return tooBig();
+  const want = declared ?? lim.max;
+  let root;
+  try { root = laptopUploadsDir(); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  const why = uploadRootOk(root, { make: true });
+  if (why) return refuse(503, `this machine has no folder for dropped files: ${why}`);
+  let kept;
+  try { kept = await sweepLaptopUploads(root, uploadsReceiving, lim); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  // after the sweep, and with no await between this sum and the set below: uploads at once each count the others
+  const pending = [...uploadsReceiving.values()].reduce((a, b) => a + b, 0);
+  if (kept + pending + want > lim.total) return refuse(507, `this machine already holds as many dropped files as it keeps (${Math.floor(lim.total / 1048576)} MB); they go after ${Math.round(lim.keepMs / 86400000)} days`);
+  const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
+  const folder = path.join(root, id);
+  const part = path.join(folder, UPLOAD_PART);
+  const stored = path.join(folder, safeUploadName(rawName));
+  uploadsReceiving.set(id, want);
+  let fh = null;
+  let size = 0;
+  const stall = setTimeout(() => req.destroy(new Error('stalled')), lim.stallMs);
+  try {
+    const { bavail, bsize } = await fs.promises.statfs(root);
+    if (bavail * bsize - pending - want < lim.free) throw Object.assign(new Error('full'), { code: 'ENOSPC' });
+    // a new folder of a random name, then a new file in it: neither can be anything already there
+    await fs.promises.mkdir(folder, { mode: 0o700 });
+    fh = await fs.promises.open(part, 'wx', 0o600);
+    // one chunk at a time, each written before the next is read: a big body waits, in the socket
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      size += chunk.length;
+      if (size > lim.max) throw Object.assign(new Error('too big'), { tooBig: true });
+      await fh.writeFile(chunk);
+      stall.refresh();
+    }
+    await fh.close();
+    fh = null;
+    await fs.promises.rename(part, stored);
+    return send(res, 200, 'application/json', JSON.stringify({ path: stored, size }));
+  } catch (e) {
+    await fh?.close().catch(() => {});
+    await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
+    if (e.tooBig) return tooBig();
+    // gone with the connection (a stall, a page closed): nobody to answer. Not req.destroyed alone,
+    // which Node 18 sets once the body has been read whole, before the rename that can still fail.
+    if (res.destroyed || req.socket?.destroyed) return;
+    if (e.code === 'ENOSPC') return refuse(507, 'this machine\'s disk is too full for this file');
+    process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
+    return refuse(500, 'this machine could not store this file');
+  } finally {
+    clearTimeout(stall);
+    uploadsReceiving.delete(id);
+  }
+}
 // What the gateway signs (gateway.mjs, hubSignature): the route, when, a nonce, and the body's hash.
 const gatewaySigned = (p, ts, nonce, body) => Buffer.from(`devteam-operator-post-v1\n${p}\n${ts}\n${nonce}\n${sha256(body)}`);
 // Why a press's proof isn't the gateway's (null when it is): { path, ts, nonce, sig, body (base64) },
@@ -15735,6 +16285,8 @@ async function cmdDashboard() {
   });
   // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
   const describing = new Map();
+  // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
+  const versioning = new Map();
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
@@ -15742,11 +16294,17 @@ async function cmdDashboard() {
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
   const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
+  // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
+  // here, the command checks everything (attachedFiles). None, or an empty list, is no files; any
+  // other value is no action (null).
+  const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
   const ACTIONS = {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : [])];
+      const files = filesArgs(b);
+      if (!files) return null;
+      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
       // "Send it back" on a review: the owner's reason, no result
       if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
@@ -15775,10 +16333,10 @@ async function cmdDashboard() {
     // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
     // A capability is cut from the title and subject first, so not even the argv holds one.
     'thread-new': (b) => {
-      const [title, subject] = [uncapped(b.title), uncapped(b.subject)];
-      return lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), '--', b.text.trim()] : null;
+      const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
+      return files && lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, '--', b.text.trim()] : null;
     },
-    'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
+    'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, ...files, '--', b.text.trim()] : null; },
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
@@ -15786,7 +16344,7 @@ async function cmdDashboard() {
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
-  const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
+  const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
@@ -16212,13 +16770,29 @@ async function cmdDashboard() {
     const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
     return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
+  const bodyMs = uploadLimits().bodyMs;
   const server = http.createServer(async (req, res) => {
+    // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+    bodyTimer.unref();
+    req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
     if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // a file dropped on the page: before every other route, and before a byte of its body is read
+    if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
+      clearTimeout(bodyTimer);
+      try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), send); } catch (e) {
+        process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
+        if (!res.headersSent && !res.destroyed) return send(res, 500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
+        return void req.destroy();
+      }
+    }
+    // a dropped file, back to this page: before the routes below, which parse the URL
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
@@ -16291,6 +16865,19 @@ async function cmdDashboard() {
       const r = await job;
       if (r.ok) return send(res, 200, 'application/json', r.stdout);
       return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+    }
+    // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
+    // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
+    if (req.method === 'GET' && u.pathname === '/api/artifact-versions') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      if (!LINK_ID.test(slug)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad slug' }));
+      let job = versioning.get(slug);
+      if (!job) { job = run(['artifact', 'versions', slug, '--json'], { timeout: 12000 }).finally(() => versioning.delete(slug)); versioning.set(slug, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no versions of ${slug}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the versions could not be read' }));
     }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
@@ -16624,6 +17211,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
+  server.requestTimeout = UPLOAD_REQUEST_MS;
   server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
@@ -16844,20 +17432,42 @@ function resolvePane(target) {
 // passes that, so the shell refuses the line and no agent starts. Plain words, for any agent_command.
 const promptPointer = (file) => `Your prompt for this session is in the file ${path.resolve(file)}. Read all of it now, every part (a long file takes more than one read), and follow it.`;
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
-const typeNow = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
+// With paste (files the owner dropped, their paths), the line and a space, then the paths as one
+// bracketed paste, as a drop on the terminal's page sends them (spec §7): tmux wraps it in ESC[200~ …
+// ESC[201~ when the agent asked for that, so Claude Code takes an image path as an attachment. The
+// text goes in on stdin, never as an argument, under a name of this process's own; -d drops it
+// once pasted, and a paste that fails drops it too, so nothing is left on the server. Only the line
+// is recorded: the lost-Enter rescue matches the line's tail, and a pasted image shows as [Image #n].
+let dropSeq = 0;
+function typeNow(target, line, paste = null) {
+  const files = Array.isArray(paste) && paste.length ? paste : null;
+  let ok;
+  if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+  else {
+    const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
+    // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
+    // box, so a held line typed again later isn't typed after a copy of itself
+    ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+    if (ok && !tmux(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+    if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
+    ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
+  }
+  if (ok) recordSent(target, line);
+  return ok;
+}
 // A message for an agent: typed now, or held while its pane asks (flushHeld types it once the pane
 // is ready again) and behind any line already held for it, so they arrive in order. True once
 // typed; while it waits, why: 'held-card' (a menu the owner answers on the dashboard), 'held-terminal'
 // (a dialog answered in the terminal), 'held-limit' (the usage-limit menu), 'held-queued' (nothing
 // asked now, but lines held earlier go first and the pane is not ready for them); false when it
 // could be neither. A launch command typed into a fresh window is typeNow's: it must not wait.
-function typeInto(target, line) {
+function typeInto(target, line, paste = null) {
   const key = paneKey(target);
-  if (!key) return typeNow(target, line);
+  if (!key) return typeNow(target, line, paste);
   const asking = paneAsking(target);
-  if (!asking && !heldPending(key)) return typeNow(target, line);
-  const file = holdLine(key, target, line);
-  if (!file) return asking ? false : typeNow(target, line);
+  if (!asking && !heldPending(key)) return typeNow(target, line, paste);
+  const file = holdLine(key, target, line, paste);
+  if (!file) return asking ? false : typeNow(target, line, paste);
   if (!asking) flushHeld(key);
   if (!fs.existsSync(file)) return true;
   return !asking ? 'held-queued' : asking.kind === 'menu' ? 'held-card' : asking.kind === 'limit' ? 'held-limit' : 'held-terminal';
@@ -16869,16 +17479,20 @@ const heldWords = (why, whose) => `recorded and held: ${{
   'held-limit': `${whose} terminal is stopped at a usage-limit menu, and typing now would answer it. It is typed once the session is running again`,
   'held-queued': `${whose} terminal asks nothing now, but lines held for it earlier go first and it is not showing its input box yet. It is typed, in order, at the next look`,
 }[why]}`;
-function nudgeSupervisor(line) {
-  if (REPLY_FD !== null) return void queuedNudges.push(line);
-  typeNudge(line);
+// paste: the paths of files the owner dropped with it, pasted after the line (typeNow)
+function nudgeSupervisor(line, paste = null) {
+  if (REPLY_FD !== null) return void queuedNudges.push({ line, paste });
+  typeNudge(line, paste);
 }
-function deliverNudges() { for (const line of queuedNudges.splice(0)) typeNudge(line); }
-function typeNudge(line) {
+function deliverNudges() { for (const { line, paste } of queuedNudges.splice(0)) typeNudge(line, paste); }
+function typeNudge(line, paste = null) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}; the line stays unread until it acks it (unread)`);
-  typeInto(target, line);
+  typeInto(target, line, paste);
 }
+// The words before a paste of dropped files, and the paths pasted: none for a line with no files.
+const droppedWords = (files) => (files?.length ? ` (${plural(files.length, 'file')} dropped)` : '');
+const droppedPaths = (files) => (files?.length ? files.map((f) => f.path) : null);
 const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'supervisor' : w; };
 
 // pane question [--json]: what the supervisor's terminal is asking, if anything. Reading is all a
@@ -21319,6 +21933,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
+  artifact versions <slug> [--json]   an artifact's versions: its drafts, main's, then earlier ones by date (the dashboard's /api/artifact-versions reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
