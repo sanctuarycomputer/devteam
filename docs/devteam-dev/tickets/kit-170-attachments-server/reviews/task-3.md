@@ -14,6 +14,6 @@ What I checked (named risks):
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| T3-1 | Suggestion | | cloud/gateway.mjs:1970 (`serveUpload` containment) | Containment allows any regular file under the root (for example a link to `<root>/not-ours/x` or to another folder's `.part`). §6's `attachedFiles` requires the realpath to be exactly `realpath(root)/<folder>/<n>`. Holding the GET to that same equality (`real === path.join(root, m[1], m[2])`) would make the two rules one, and would close the gw-planted-link case at no cost. It is optional: §5 as written is met. | |
+| T3-1 | Suggestion | | cloud/gateway.mjs:1970 (`serveUpload` containment) | Containment allows any regular file under the root (for example a link to `<root>/not-ours/x` or to another folder's `.part`). §6's `attachedFiles` requires the realpath to be exactly `realpath(root)/<folder>/<n>`. Holding the GET to that same equality (`real === path.join(root, m[1], m[2])`) would make the two rules one, and would close the gw-planted-link case at no cost. It is optional: §5 as written is met. | fixed in T4: both servers' GET require the exact realpath(root)/<folder>/<name> |
 
 Verdict: APPROVE a17f6959d214f6afce2362ad24f2ee2c3742cff6
