@@ -1897,6 +1897,24 @@ function durableText(file) {
   return local;
 }
 
+// The line appendLog writes for these fields, with every field it adds: the envelope (id, op, at,
+// by, the owner's channel) and, on the owner's answer, the hash of the question as it stands
+// (questionView). A command checking a line's size before it writes builds it here too (lineFits),
+// so the check and the write never disagree.
+function logLineFor(fields, by, id, at = nowIso()) {
+  const type = fields.type;
+  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
+    const q = logGet(fields.id);
+    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
+  }
+  const line = { v: 1, id: fields.id ?? id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
+  for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+  return line;
+}
+// Whether these fields' line fits LINE_MAX, built as appendLog will, with a placeholder id of the
+// real shape (u-00000000-000000000-owner) where the log would mint one.
+const lineFits = (fields, by) => Buffer.byteLength(`${JSON.stringify(logLineFor(fields, by, `${SCHEMA['x-id'].prefix[fields.type]}-00000000-000000000-${by}`))}\n`) <= LINE_MAX;
+
 // Append one object. Under the file's lock: catch a live file up with the durable copy if that is
 // ahead, drop a half-written last line, stamp a time after the file's last line (ids unique, lines
 // ordered even if the clock steps back), validate exactly what will be read back, write one line.
@@ -1911,17 +1929,11 @@ function appendLog(fields, by = logWriter()) {
     const cur = logGet(fields.id);
     if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
   }
-  // The owner's answer binds to the question as it stands (questionView).
-  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
-    const q = logGet(fields.id);
-    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
-  }
   const file = logFileFor(by, type);
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
-    const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
-    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
-    for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
+    // the owner's answer binds to the question as it stands (logLineFor adds its hash)
+    const line = logLineFor(fields, by, `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, at);
     const text = `${JSON.stringify(line)}\n`;
     const parsed = JSON.parse(text);
     const errs = checkLine(parsed, file);
@@ -2029,7 +2041,7 @@ function ratingHistory(q) {
   const has = (e) => e.stake || e.urgency || e.settles !== undefined;
   return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
 }
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -6567,7 +6579,9 @@ function cmdAnswer() {
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
+  if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -6593,6 +6607,7 @@ function cmdAnswer() {
   if (fromChat) chatAnswer('answer');
   const fromTurn = flags['from-turn'] !== undefined;
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
+  const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
   const turn = fromTurn ? turnAnswer('answer', v) : null;
@@ -6624,9 +6639,11 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
+  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}), files };
+  if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
-  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}) }, by);
+  appendLog(setLine, by);
   const metNote = metPlan ? goalMetApply(v, metPlan, by, fromChat ? { channel: 'chat' } : turn ? { channel: 'thread' } : {}) : null;
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
@@ -6930,10 +6947,13 @@ function cmdThread() {
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
     const title = threadTitle(given ?? words);
     if (!title) die('--title: the thread needs a name');
+    const files = filesFlag();
     const n = openThreadCount();
     if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    // both lines checked before the thread's is written: a refused first turn leaves no thread with none
+    if (files && !(lineFits({ type: 'thread', title, subject }, by) && lineFits({ type: 'turn', thread: `t-00000000-000000000-${by}`, text: words, files }, by))) die(FILES_TOO_LONG);
     const t = appendLog({ type: 'thread', title, subject }, by);
-    appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    appendLog({ type: 'turn', thread: t.id, text: words, files }, by);
     out(t.id);
     return out(deliveredWords(deliverOwnerTurn(t, words)));
   }
@@ -6947,11 +6967,14 @@ function cmdThread() {
     if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
-    // words at the encoded cap fit a line alone, not always with eight links: the supervisor's line
-    // as appendLog will build it, checked here so the refusal says what to do about a reply
-    const line = { v: 1, id: `u-00000000-000000000-${by}`, type: 'turn', op: 'new', at: nowIso(), by, thread: t.id, text: words, refs };
-    if (refs.length && Buffer.byteLength(`${JSON.stringify(line)}\n`) > LINE_MAX) die('That reply is too long with its links; shorten it.');
-    const u = appendLog({ type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined }, by);
+    const files = filesFlag();
+    if (files && by !== 'owner') die("--files go with the owner's own turn");
+    // words at the encoded cap fit a line alone, not always with eight links or ten files: the line
+    // as appendLog will build it, checked here so the refusal says what to do about it
+    const line = { type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined, files };
+    if (refs.length && !lineFits(line, by)) die('That reply is too long with its links; shorten it.');
+    if (files && !lineFits(line, by)) die(FILES_TOO_LONG);
+    const u = appendLog(line, by);
     out(u.id);
     if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words)));
     return;
@@ -7049,7 +7072,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -14628,10 +14651,12 @@ function laptopUploadsDir() {
   return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
 }
 const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR || '/data/uploads' : laptopUploadsDir());
-// Why a real path is not a dropped file (null when it is): exactly <root>/<folder>/<name>, a folder
-// named as ours and a name as one is stored, never a .part, and a regular file. Equal, not merely
-// inside the root: a link from one folder to another stored file names a file that was never dropped
-// there. The GET below serves only what this passes, and an answer's or a turn's files are held to it.
+// Why a path is not a dropped file (null when it is): exactly <root>/<folder>/<name>, a folder named
+// as ours and a name as one is stored, never a .part, and a regular file. A check of shape only, on a
+// path already resolved (realpath) against the root's real path: it never follows a link itself. A
+// caller holding a requested path compares that with its real path itself, as the GET below does (a
+// link in one folder to another's file names a file never dropped there); attachedFiles records the
+// real path, so a link stands for the file it names. Equal, not merely inside: <root>-evil/… is out.
 function droppedFileProblem(realPath, realRoot) {
   const folder = path.basename(path.dirname(realPath));
   const name = path.basename(realPath);
@@ -14641,6 +14666,32 @@ function droppedFileProblem(realPath, realRoot) {
   try { if (!fs.lstatSync(realPath).isFile()) return 'not a file'; } catch (e) { return e.code ?? e.message; }
   return null;
 }
+// The files an owner's answer or turn carries (--files <json>, spec §6), or die with why, before
+// anything is written: 1 to 10 of {name, path, bytes}, each path a dropped file in this machine's
+// folder (a box's, which the gateway writes, or this project's on a laptop). Recorded as the name
+// given, the real path and the file's real size, never the size a page claimed.
+const FILES_MAX = 10;
+const FILES_PATH_MAX = 1024; // bytes
+const FILES_TOO_LONG = 'That is too long with its files; shorten it or attach fewer.';
+function attachedFiles(json) {
+  const shape = `--files is a JSON array of 1 to ${FILES_MAX} dropped files, each exactly {"name", "path", "bytes"}: a name of 1 to ${UPLOAD_NAME} characters with no control characters, a path of at most ${FILES_PATH_MAX} bytes, and bytes a whole number from 0`;
+  let list = null;
+  // a bare --files has no JSON at all
+  if (typeof json === 'string') try { list = JSON.parse(json); } catch {}
+  if (!Array.isArray(list) || list.length < 1 || list.length > FILES_MAX) die(shape);
+  for (const f of list) if (!isObj(f) || Object.keys(f).sort().join(',') !== 'bytes,name,path' || typeof f.name !== 'string' || f.name.length < 1 || f.name.length > UPLOAD_NAME || /\p{Cc}/u.test(f.name) || typeof f.path !== 'string' || Buffer.byteLength(f.path) > FILES_PATH_MAX || !Number.isInteger(f.bytes) || f.bytes < 0) die(shape);
+  for (const f of list) if (!path.isAbsolute(f.path)) die(`refused: ${f.path} is not an absolute path`);
+  const root = uploadsRoot();
+  let realRoot;
+  try { realRoot = fs.realpathSync(root); } catch { die(`refused: this machine has no dropped-files folder (${root})`); }
+  return list.map((f) => {
+    let real = null;
+    try { real = fs.realpathSync(f.path); } catch {}
+    if (real === null || droppedFileProblem(real, realRoot)) die(`refused: ${f.path} is not a dropped file in this machine's folder (${root})`);
+    return { name: f.name, path: real, bytes: fs.statSync(real).size };
+  });
+}
+const filesFlag = () => (flags.files === undefined ? undefined : attachedFiles(flagStr('files')));
 // How a stored file is served back, as the gateway serves it (its uploadType, copied): these four as
 // images, every other file (HTML and SVG among them) as bytes to save, never to render.
 const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
@@ -15956,11 +16007,17 @@ async function cmdDashboard() {
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
   const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
+  // The files dropped with an answer or a turn, passed on whole: only the list's shape is checked
+  // here, the command checks everything (attachedFiles). None, or an empty list, is no files; any
+  // other value is no action (null).
+  const filesArgs = (b) => (b.files === undefined || (Array.isArray(b.files) && !b.files.length) ? [] : Array.isArray(b.files) && b.files.length <= FILES_MAX ? [`--files=${JSON.stringify(b.files)}`] : null);
   const ACTIONS = {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : [])];
+      const files = filesArgs(b);
+      if (!files) return null;
+      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : []), ...files];
       // "Send it back" on a review: the owner's reason, no result
       if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
@@ -15989,10 +16046,10 @@ async function cmdDashboard() {
     // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
     // A capability is cut from the title and subject first, so not even the argv holds one.
     'thread-new': (b) => {
-      const [title, subject] = [uncapped(b.title), uncapped(b.subject)];
-      return lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), '--', b.text.trim()] : null;
+      const [title, subject, files] = [uncapped(b.title), uncapped(b.subject), filesArgs(b)];
+      return files && lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), ...files, '--', b.text.trim()] : null;
     },
-    'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
+    'thread-say': (b) => { const files = filesArgs(b); return files && (typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, ...files, '--', b.text.trim()] : null; },
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
     // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
@@ -16442,7 +16499,7 @@ async function cmdDashboard() {
       }
     }
     // a dropped file, back to this page: before the routes below, which parse the URL
-    if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url, send);
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url.split('?')[0], send);
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.

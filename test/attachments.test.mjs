@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -113,7 +114,11 @@ async function laptop(t, extraEnv = {}) {
   const post = (name, body, headers = {}, how = {}) => request(port, `/upload?name=${encodeURIComponent(name)}`, { headers: { ...own, ...headers }, body, ...how });
   // a GET as the dashboard's own page sends one: same-origin, and no Origin
   const get = (route, headers = {}, method = 'GET') => request(port, route, { method, headers: { host: own.host, 'sec-fetch-site': 'same-origin', ...headers } });
-  return { base, root, port, home, folder, post, get, stop: () => dash.stop(), out: () => dash.out() };
+  // a command in the project, as the owner (no DEVTEAM_ROLE) unless the env says otherwise
+  const dt = (args, more = {}) => spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...more }, encoding: 'utf8', timeout: 120000 });
+  // an owner action, as the dashboard's own page posts it
+  const api = (name, body) => request(port, `/api/${name}`, { headers: { host: own.host, origin: own.origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  return { base, root, port, home, env, folder, post, get, dt, api, stop: () => dash.stop(), out: () => dash.out() };
 }
 const LAPTOP = { timeout: 240000 };
 
@@ -547,6 +552,8 @@ test('laptop serve: a stored file comes back to the dashboard\'s own page with i
     assert.equal(path.basename(up.json.path), want.name);
     assertServed(await L.get(servedAt(up.json.path)), want, bytes, want.name);
     if (want.name === 'a.png') {
+      // a query (a page's cache-buster) names the same file (task review T4-1)
+      assertServed(await L.get(`${servedAt(up.json.path)}?v=1`), want, bytes, 'with ?v=1');
       const head = await L.get(servedAt(up.json.path), {}, 'HEAD');
       assertServed(head, want, null, 'HEAD');
       assert.equal(head.bytes.length, 0, 'HEAD: no body');
@@ -623,4 +630,254 @@ test('box upload: the gateway\'s first sweep removes old, empty and cut-off fold
   // the one difference from the laptop (§3 step 6): only one gateway writes its root, so any .part or empty folder at its first scan was cut off
   assert.deepEqual(fs.readdirSync(root).sort(), [fresh, made, notOurs].sort());
   for (const gone of [old, stalePart, empty, freshEmpty, freshPart]) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
+});
+
+// --- files on answers and turns (spec §6) --------------------------------------------------------
+const SUP = { DEVTEAM_ROLE: 'supervisor' };
+const TOO_LONG = /That is too long with its files; shorten it or attach fewer\./;
+// Every log line the project holds, live and durable: a refusal leaves the count where it was.
+function logLineCount(L) {
+  let n = 0;
+  for (const d of ['run/log', 'project/log']) {
+    const dir = path.join(L.root, 'docs/devteam', d);
+    if (fs.existsSync(dir)) for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl')) n += fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).length;
+  }
+  return n;
+}
+const ownerLogFile = (L) => path.join(L.root, 'docs/devteam/run/log', `owner-${new Date().toISOString().slice(0, 7)}.jsonl`);
+// A question the supervisor asks, and a thread the owner starts: what the answers and turns go on.
+function askQuestion(L, q = 'Which one?') {
+  const r = L.dt(['ask', '--kind', 'owner-decision', '--question', q], SUP);
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout.trim().split('\n')[0];
+}
+function newThread(L) {
+  const r = L.dt(['thread', 'new', '--title', 'About the shots', '--', 'first words']);
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout.trim().split('\n')[0];
+}
+const questionOf = (L, id) => JSON.parse(L.dt(['log', '--type', 'question', '--json']).stdout).find((q) => q.id === id);
+const turnsOf = (L, tid) => fs.readFileSync(ownerLogFile(L), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((o) => o.type === 'turn' && o.thread === tid);
+const openThreads = (L) => JSON.parse(L.dt(['thread', 'list', '--open', '--json']).stdout).length;
+async function upload(L, name, bytes) {
+  const r = await L.post(name, bytes);
+  assert.equal(r.status, 200, r.text);
+  return r.json.path;
+}
+
+test('files: an answer and both thread actions carry the dropped files, real paths and real sizes; the schema refuses a loose one (B1, B2, B6)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const png = await upload(L, 'Shot 1.png', crypto.randomBytes(2000));
+  const pdf = await upload(L, 'notes.pdf', crypto.randomBytes(3000));
+  // the page's sizes are wrong on purpose: the log says the real ones
+  const given = [{ name: 'Shot 1.png', path: png, bytes: 1 }, { name: 'notes.pdf', path: pdf, bytes: 1 }];
+  const want = [{ name: 'Shot 1.png', path: fs.realpathSync(png), bytes: 2000 }, { name: 'notes.pdf', path: fs.realpathSync(pdf), bytes: 3000 }];
+  // B1
+  const qid = askQuestion(L);
+  const a = await L.api('answer', { id: qid, answer: 'This one', files: given });
+  assert.equal(a.status, 200, a.text);
+  const set = questionOf(L, qid).updates.find((u) => u.answer !== undefined);
+  assert.deepEqual(set.files, want, 'the answer line has both files');
+  // B2
+  const n = await L.api('thread-new', { title: 'Look at these', text: 'see the shots', files: given });
+  assert.equal(n.status, 200, n.text);
+  const tid = n.json.out.split('\n')[0];
+  assert.deepEqual(turnsOf(L, tid).map((u) => u.files), [want], 'the first turn has the files');
+  const s = await L.api('thread-say', { id: tid, text: 'and again', files: [given[1]] });
+  assert.equal(s.status, 200, s.text);
+  assert.deepEqual(turnsOf(L, tid).map((u) => u.files), [want, [want[1]]], 'the said turn has its file');
+  // with no files, a turn is as before
+  assert.equal((await L.api('thread-say', { id: tid, text: 'no files', files: [] })).status, 200);
+  assert.equal(turnsOf(L, tid).pop().files, undefined, 'files: [] is no files');
+  // B6: log-check holds every line to the schema
+  const ok = L.dt(['log-check']);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  const file = ownerLogFile(L);
+  const kept = fs.readFileSync(file, 'utf8');
+  const said = JSON.parse(kept.split('\n').filter(Boolean).find((l) => { const o = JSON.parse(l); return o.type === 'turn' && o.text === 'and again'; }));
+  const at = new Date(Date.now() + 5000).toISOString();
+  const forged = (files) => `${JSON.stringify({ ...said, id: `u-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-owner`, at, files })}\n`;
+  for (const [what, files] of [['an extra key', [{ ...want[0], extra: 1 }]], ['11 files', Array.from({ length: 11 }, () => want[0])]]) {
+    fs.appendFileSync(file, forged(files));
+    const r = L.dt(['log-check']);
+    assert.notEqual(r.status, 0, `${what}: log-check passed`);
+    assert.match(r.stdout + r.stderr, /files/, `${what}: names files`);
+    fs.writeFileSync(file, kept);
+  }
+  assert.equal(L.dt(['log-check']).status, 0, 'restored');
+});
+
+test('files: a path that isn\'t a dropped file in this machine\'s folder is refused, naming it, with nothing written (B3)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const stored = await upload(L, 'a.txt', Buffer.from('a'));
+  const root = L.folder();
+  const folder = path.dirname(stored);
+  const mk = (p) => { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, 'x'); return p; };
+  const outside = mk(path.join(L.base, 'outside.txt'));
+  const link = path.join(folder, 'link.txt');
+  fs.symlinkSync(outside, link);
+  const ours = path.join(root, newFolderName());
+  const cases = [
+    `${folder}${'/..'.repeat(folder.split('/').length - 1)}/etc/passwd`,
+    '/etc/hosts',
+    link,
+    'a.txt',
+    folder,
+    path.join(folder, 'missing.txt'),
+    mk(path.join(root, 'top.txt')),
+    mk(path.join(folder, 'sub', 'x.txt')),
+    mk(path.join(ours, R.part)),
+    mk(path.join(ours, 'A B.txt')),
+    mk(path.join(root, 'not-ours', 'x.txt')),
+    // a sibling named with the root's name as a prefix: a startsWith without the separator would pass it
+    mk(path.join(`${root}-evil`, path.basename(folder), 'x.txt')),
+  ];
+  const qid = askQuestion(L);
+  const tid = newThread(L);
+  const before = logLineCount(L);
+  for (const p of cases) {
+    const files = [{ name: 'x.txt', path: p, bytes: 1 }];
+    for (const [name, body] of [['answer', { id: qid, answer: 'Yes', files }], ['thread-say', { id: tid, text: 'look', files }]]) {
+      const r = await L.api(name, body);
+      assert.equal(r.status, 400, `${name} ${p}: ${r.text}`);
+      assert.ok(r.json?.error?.includes(p), `${name} ${p}: the error names it: ${r.text}`);
+      assert.match(r.json.error, p === 'a.txt' ? /is not an absolute path/ : /is not a dropped file in this machine's folder/, `${name} ${p}`);
+    }
+    assert.equal(logLineCount(L), before, `${p}: nothing written`);
+  }
+  // a missing root names it
+  fs.rmSync(root, { recursive: true, force: true });
+  const gone = L.dt(['answer', qid, 'Yes', '--files', JSON.stringify([{ name: 'a.txt', path: stored, bytes: 1 }])]);
+  assert.notEqual(gone.status, 0);
+  assert.match(gone.stderr, /refused: this machine has no dropped-files folder \(/);
+  assert.equal(logLineCount(L), before);
+});
+
+test('files: the shape is checked, by the action and by the command, with nothing written (B4, the refused modes)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const stored = await upload(L, 'a.png', Buffer.from('png'));
+  const one = { name: 'a.png', path: stored, bytes: 3 };
+  const qid = askQuestion(L);
+  const tid = newThread(L);
+  const before = logLineCount(L);
+  const shapes = [
+    ['11 files', Array.from({ length: 11 }, () => one)],
+    ['an extra key', [{ ...one, extra: 1 }]],
+    ['a key missing', [{ name: 'a.png', path: stored }]],
+    ['a name with a newline', [{ ...one, name: 'a\n.png' }]],
+    ['an empty name', [{ ...one, name: '' }]],
+    ['a name of 201 characters', [{ ...one, name: 'n'.repeat(201) }]],
+    ['bytes -1', [{ ...one, bytes: -1 }]],
+    ['bytes 1.5', [{ ...one, bytes: 1.5 }]],
+    ['bytes as text', [{ ...one, bytes: '3' }]],
+    ['a path over 1024 bytes', [{ ...one, path: `/${'p'.repeat(1024)}` }]],
+    ['not an array', 'a.png'],
+    ['an object', one],
+    ['null in the list', [null]],
+  ];
+  for (const [what, files] of shapes) {
+    for (const [name, body] of [['answer', { id: qid, answer: 'Yes', files }], ['thread-say', { id: tid, text: 'look', files }], ['thread-new', { title: 'T', text: 'look', files }]]) {
+      const r = await L.api(name, body);
+      assert.equal(r.status, 400, `${name} ${what}: ${r.text}`);
+      assert.ok(r.json?.error, `${name} ${what}: a reason`);
+    }
+    assert.equal(logLineCount(L), before, `${what}: nothing written`);
+  }
+  // the command's own refusals: a bare --files, JSON that isn't, and the modes that carry none
+  const json = JSON.stringify([one]);
+  for (const [what, args, env] of [
+    ['a bare --files', ['answer', qid, 'Yes', '--files']],
+    ['not JSON', ['answer', qid, 'Yes', '--files', '[nope']],
+    ['an empty list', ['answer', qid, 'Yes', '--files', '[]']],
+    ['a bare --files on a turn', ['thread', 'say', tid, '--files', '--', 'look']],
+  ]) {
+    const r = L.dt(args, env);
+    assert.notEqual(r.status, 0, what);
+    assert.match(r.stderr, /--files is a JSON array of 1 to 10 dropped files/, `${what}: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /SyntaxError|at JSON\.parse/, `${what}: no stack`);
+  }
+  for (const [what, args, env] of [
+    ['--defaulted', ['answer', qid, '--defaulted', '--files', json], SUP],
+    ['--from-chat', ['answer', qid, 'Yes', '--from-chat', '--said', 'yes', '--files', json], SUP],
+    ['--from-turn', ['answer', qid, 'Yes', '--from-turn', 'u-20261117-000000000-owner', '--files', json], SUP],
+    ['--decline', ['answer', qid, 'why', '--decline', '--files', json]],
+    ['--review-result', ['answer', qid, '--review-result', '-', '--files', json]],
+  ]) {
+    const r = L.dt(args, env);
+    assert.notEqual(r.status, 0, what);
+    assert.match(r.stderr, /--files go with the owner's own answer/, `${what}: ${r.stderr}`);
+  }
+  // the supervisor's reply carries none
+  const reply = L.dt(['thread', 'reply', tid, '--files', json, '--', 'ok'], SUP);
+  assert.notEqual(reply.status, 0);
+  assert.match(reply.stderr, /--files go with the owner's own turn/);
+  assert.equal(logLineCount(L), before, 'nothing written');
+});
+
+test('files: on a box the dropped files are the gateway\'s folder, never the laptop\'s (B5)', LAPTOP, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attach-gwroot-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const folder = newFolderName();
+  fs.mkdirSync(path.join(dir, folder));
+  fs.writeFileSync(path.join(dir, folder, 'x.png'), 'png!');
+  const L = await laptop(t, { DEVTEAM_GATEWAY: '1', DEVTEAM_UPLOADS_DIR: dir });
+  const mine = path.join(L.folder(), newFolderName(), 'y.png');
+  fs.mkdirSync(path.dirname(mine), { recursive: true });
+  fs.writeFileSync(mine, 'png');
+  const q1 = askQuestion(L, 'First?');
+  const q2 = askQuestion(L, 'Second?');
+  const before = logLineCount(L);
+  const no = await L.api('answer', { id: q2, answer: 'Yes', files: [{ name: 'y.png', path: mine, bytes: 3 }] });
+  assert.equal(no.status, 400, no.text);
+  assert.ok(no.json.error.includes(mine), no.text);
+  assert.ok(no.json.error.includes(`(${dir})`), `names the box's folder: ${no.text}`);
+  assert.equal(logLineCount(L), before);
+  const yes = await L.api('answer', { id: q1, answer: 'Yes', files: [{ name: 'x.png', path: path.join(dir, folder, 'x.png'), bytes: 1 }] });
+  assert.equal(yes.status, 200, yes.text);
+  assert.deepEqual(questionOf(L, q1).updates.find((u) => u.answer !== undefined).files, [{ name: 'x.png', path: fs.realpathSync(path.join(dir, folder, 'x.png')), bytes: 4 }]);
+});
+
+test('files: a line its files make too long is refused before anything is written; one exactly at the limit is kept (B7)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const long = `${'n'.repeat(196)}.png`;
+  assert.equal(long.length, R.name);
+  const paths = [];
+  for (let i = 0; i < 10; i++) paths.push(await upload(L, long, Buffer.from(`file ${i}`)));
+  const ten = JSON.stringify(paths.map((p) => ({ name: long, path: p, bytes: 1 })));
+  const words = 'w'.repeat(1900);
+  const qid = askQuestion(L);
+  const tid = newThread(L);
+  const before = logLineCount(L);
+  const threads = openThreads(L);
+  for (const [what, args] of [
+    ['thread say', ['thread', 'say', tid, '--files', ten, '--', words]],
+    ['thread new', ['thread', 'new', '--title', 'Long', '--files', ten, '--', words]],
+    ['answer', ['answer', qid, words, '--files', ten]],
+  ]) {
+    const r = L.dt(args);
+    assert.notEqual(r.status, 0, `${what}: accepted`);
+    assert.match(r.stderr, TOO_LONG, `${what}: ${r.stderr}`);
+    assert.equal(logLineCount(L), before, `${what}: nothing written`);
+    assert.equal(openThreads(L), threads, `${what}: no new thread`);
+    assert.equal(questionOf(L, qid).updates.length, 0, `${what}: the question is still open`);
+  }
+  // one file of the longest name goes
+  const ok = L.dt(['answer', qid, 'Yes', '--files', JSON.stringify([{ name: long, path: paths[0], bytes: 1 }])]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.equal(questionOf(L, qid).updates.find((u) => u.answer !== undefined).files[0].name, long);
+  // the size check builds the very line appendLog writes: exactly LINE_MAX goes, a byte more is refused with the files' words
+  const q2 = askQuestion(L, 'Exactly?');
+  const files = [{ name: long, path: fs.realpathSync(paths[1]), bytes: 6 }];
+  const lineBytes = (answer) => Buffer.byteLength(`${JSON.stringify({ v: 1, id: q2, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'cli', answer, files, question_hash: '0'.repeat(16) })}\n`);
+  const exact = 'a'.repeat(4096 - lineBytes(''));
+  assert.equal(lineBytes(exact), 4096);
+  const given = JSON.stringify([{ name: long, path: paths[1], bytes: 1 }]);
+  const over = L.dt(['answer', q2, `${exact}a`, '--files', given]);
+  assert.notEqual(over.status, 0, 'a byte over: accepted');
+  assert.match(over.stderr, TOO_LONG, over.stderr);
+  const at = L.dt(['answer', q2, exact, '--files', given]);
+  assert.equal(at.status, 0, at.stderr);
+  const last = fs.readFileSync(ownerLogFile(L), 'utf8').split('\n').filter(Boolean).pop();
+  assert.equal(Buffer.byteLength(`${last}\n`), 4096, 'the line written is exactly LINE_MAX');
+  assert.equal(JSON.parse(last).id, q2);
 });
