@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| F1 | Minor | quality.md §3 (CI at head) | PR #323 checks at 7b94ab0c | CI for the head was still pending when I reviewed. The head differs from the green run 44078649675 (c0e53a84) only by records under docs/devteam-dev/. The supervisor should confirm the head's run is green before merge. | |
+| F1 | Minor | quality.md §3 (CI at head) | PR #323 checks at 7b94ab0c | CI for the head was still pending when I reviewed. The head differs from the green run 44078649675 (c0e53a84) only by records under docs/devteam-dev/. The supervisor should confirm the head's run is green before merge. | fixed: the merge request names the test.yml run gated green at its exact head (records-only commits after 7b94ab0c) |
 
 ## What I checked
 
