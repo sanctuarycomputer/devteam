@@ -128,7 +128,8 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   // the hub has no .shell until its own ticket (kit-94)
   const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
   assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
-  for (const id of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
+  // Goals is ported (kit-90); Overview stays fenced until kit-90's Overview task ports it
+  for (const id of ['overview', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
     const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
@@ -161,8 +162,8 @@ test("the JS block's names are its own: neither page declares one outside it", (
     assert.ok(scripts.some((x) => x.includes('/* devteam-shell-js start */')), `${name}: the block is in a script`);
     for (const x of scripts) assert.doesNotThrow(() => new vm.Script(x), `${name}: a script compiles`);
   }
-  // index's own step bar keeps its markup under its new name
-  assert.match(INDEX, /function goalStepper\(g, s, R\)/);
+  // index's own step bar is gone (kit-90): every caller draws the block's goalSteps
+  assert.doesNotMatch(INDEX, /function goalStepper\b/);
   assert.doesNotMatch(without(INDEX, 'devteam-shell-js'), /\bgoalSteps\(g, s, R\)/);
 });
 
