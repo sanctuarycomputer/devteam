@@ -875,8 +875,8 @@ try {
   #th-inbox .card { margin: 0; }
   #th-inbox .qcard .why { flex-wrap: wrap; }
   /* a closed ⋯ menu's pop out of layout: Chrome keeps a closed <details>' content boxed at the summary's width
-     (26px), so its 70px key column would stick out of it (the measure, kit-100 spec AC6) */
-  #th-inbox details.menu:not([open]) > .pop { display: none; }
+     (26px), so its 70px key column would stick out of it (the measure, kit-100 spec AC6; kit-90's goal cards) */
+  #th-inbox details.menu:not([open]) > .pop, #goals details.menu:not([open]) > .pop { display: none; }
   .threads-head .end .icon-btn { margin: 0; }
   .th-filter { margin: 0 0 6px; }
   .th-filter .seg { display: flex; width: 100%; }
@@ -941,11 +941,21 @@ try {
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
   /* Goals (kit-90): the tabs, then the cards two across on the shell's grid; a card spans its columns, its
      running text keeps the measure */
+  /* the tab bar is Goals' first content, inside its section: the shell's first-child tab bar rule (-8px, its
+     tabs' text --page-top below the bar) doesn't reach it there */
+  #goals-list > .tabbar:first-child { margin-top: -8px; }
   #goals .goal-grid { margin-top: 14px; }
+  /* a long state badge (a held goal's "Draining… (1 still running) · Milestone 2 of 2: being built") ends in
+     an ellipsis inside its head or row, not past it, at 720px and below; Overview's goal title keeps 40% */
+  #goals .card.goal > .card-head > .badge, #overview .ov-goal > .rowline > .badge { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #overview .ov-goal > .rowline > .t { min-width: 40%; }
   #goals .card.goal { max-width: none; }
   #goals .goal-next { max-width: var(--measure); }
   #goals > #unassigned { margin-top: 12px; }
   /* Overview (kit-90): a header with the status pill at its far right, then the shell's ruled sections */
+  /* the header is Overview's first content, inside its section, where the shell's first-child header rule
+     doesn't reach: its name's text --page-top below the bar (it sits 2px lower in its 27px line box) */
+  #overview > .ov-head:first-child { margin-top: -2px; }
   #overview .ov-head { margin-bottom: 14px; }
   #overview .ov-head .ov-pill { margin-left: auto; display: inline-flex; flex: none; }
   #overview .sec-b { min-width: 0; }

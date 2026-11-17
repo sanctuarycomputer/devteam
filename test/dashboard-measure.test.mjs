@@ -16,6 +16,23 @@ import { SIZES, measureAt } from './lib/measure.mjs';
 // options, and a script run in each load before the page's own (Page.addScriptToEvaluateOnNewDocument),
 // so a page is measured with the data it draws, not its empty state
 const READY = "!document.querySelector('main.waiting')";
+// kit-90: Overview, the three Goals tabs, a goal's peek over Goals and Upkeep's. A peek's top-right
+// button moves left of the peek on purpose (dashboard-peek.test.mjs owns its place), so inbox matches
+// nothing there; the page under the peek is on the shell and judged whole. page-top runs at 1440x900
+// only (narrow: its view a selector no element has), as for the Inbox entry below: on a load at scrollY 0
+// at 720x800 and 390x844 every shell page starts 104px below the bar (kit-87's nav row,
+// o-20261116-110914358); every other check runs at all three sizes.
+const OV_READY = "!!document.querySelector('#overview .ov-head h2') && !!document.querySelector('#overview .sec')";
+const GOALS_READY = (tab) => `document.querySelector('#goals .tabbar [aria-selected="true"]')?.dataset.tab === '${tab}' && !!document.querySelector('#goals .card${tab === 'active' ? '.goal' : ''}, #goals .empty')`;
+const GOAL_PEEK_READY = (title) => `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-bar-title .dtitle')?.textContent === ${JSON.stringify(title)}`;
+const OVERVIEW_GOALS = [
+  { hash: '#overview', ready: OV_READY },
+  { hash: '#goals', ready: GOALS_READY('active') },
+  { hash: '#goals?gt=met', ready: GOALS_READY('met') },
+  { hash: '#goals?gt=letgo', ready: GOALS_READY('letgo') },
+  { hash: '#goal/<seeded>', ready: GOAL_PEEK_READY('Self-serve billing'), opts: { inbox: '#no-such-inbox' } },
+  { hash: '#goal/upkeep', ready: GOAL_PEEK_READY('Upkeep'), opts: { inbox: '#no-such-inbox' } },
+].map((pg) => ({ ...pg, narrow: { view: '#no-such-view' } }));
 const PAGES = [
   // kit-87: Settings, on the shell, whole
   { hash: '#settings', ready: READY },
@@ -23,7 +40,9 @@ const PAGES = [
   // other checks ignore; with the default view it would be taken for the page's first content, whose
   // page-top is its page ticket's, so the view is a selector no element has. (kit-100 moved the interim
   // Inbox page into the Threads panel: its entry is the panel's, below.)
-  ...['overview', 'goals', 'progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  ...['progress', 'board', 'library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  // kit-90: Overview and Goals, on the shell, whole, with the goal the test seeds (goalArgs, below)
+  ...OVERVIEW_GOALS,
   // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
   // line exist only with it)
   { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
@@ -55,6 +74,10 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'measure');
+  // kit-90: one goal, so Goals' Active tab has a goal's card beside Upkeep's and its peek has a goal to open
+  const g = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...goalArgs('Self-serve billing', 1)], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
+  assert.equal(g.status, 0, g.stderr);
+  const goalId = idOf(g.stdout);
   const { dash, port } = await dashboardOnFreePort(root, env);
   later(() => dash.stop());
   const chrome = await openChrome();
@@ -73,7 +96,9 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
   }
   for (const pg of PAGES) {
     if (!pg.init) {
-      const res = await measureAt(p, url(pg.hash), { ready: pg.ready ?? 'true', ...(pg.opts || {}) });
+      const at = url(pg.hash.replace('<seeded>', encodeURIComponent(goalId))), o = { ready: pg.ready ?? 'true', ...(pg.opts || {}) };
+      const res = pg.narrow ? { ...(await measureAt(p, at, { ...o, sizes: SIZES.slice(0, 1) })), ...(await measureAt(p, at, { ...o, ...pg.narrow, sizes: SIZES.slice(1) })) } : await measureAt(p, at, o);
+      assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
       for (const [size, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${size}`);
       continue;
     }
