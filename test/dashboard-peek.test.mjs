@@ -459,7 +459,12 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev("window.__ttc = 0; document.querySelector('.pagebar .tt').addEventListener('click', () => { window.__ttc++; }); void 0");
     await p.click('#tt-peek');
     await soon('window.__ttc === 1', ".tt's click ran");
-    await soon(isClosed, 'the Inbox, the peek closed');
+    // .tt opens the Threads panel beside the peek (kit-89): the peek closed, then the panel
+    await soon("document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'", 'the Threads panel, at rest');
+    await p.click('#drawer-close');
+    await soon(isClosed, 'the peek closed');
+    if (await p.ev("document.body.classList.contains('threads-open')")) await p.click('#th-close');
+    await soon("!document.body.classList.contains('threads-open')", 'the panel closed');
     await soon(`(() => { ${SEEN} return !seen(document.getElementById('tt-peek')) && seen(document.querySelector('.pagebar .tt')); })()`, 'no peek: .tt again');
   });
 });
