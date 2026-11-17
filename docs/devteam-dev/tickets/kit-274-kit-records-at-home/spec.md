@@ -62,20 +62,51 @@ why).
 
 ### Where it's computed
 
-One predicate, `recordsLeftInRepo(t, at)` (memoized per process by id and `at`), and
-`recordsInHome(t, { at } = {})` becomes `setting is "home" && !recordsLeftInRepo(t, at)`.
-`recordsInHomeId(id)` passes no `at` (views). checkTicket evaluates it at its resolved `sha`;
-cmdMerge at the PR head; cmdCheckPr's `--repo` records lookup at `--sha`. The predicate reads git
-(cat-file on three home refs and one link ref), so the comment on `recordsInHome` ("never touches
-a checkout") is updated to say it reads refs but never a working tree.
+One predicate, `recordsLeftInRepo(t, at)`, and `recordsInHome(t, { at } = {})` becomes
+`setting is "home" && !recordsLeftInRepo(t, at)`; `recordsInHomeId(id, { at })` passes it through.
+
+- **Memo:** through the kit's `memo()` (scoped to the log read, `readLog().memo`), keyed by id and
+  `at`, so the long-running dashboard re-decides on its next log read, like every other view (S4).
+- **Cost:** only tickets of a `records: "home"` link run it. Home main's `<projectRel>/tickets/`
+  is listed once per log read (`git ls-tree --name-only`), not one cat-file per ticket; per ticket
+  at most two home branch reads (only for refs that resolve) and one link read (S5).
+- **One decision per command (S1).** A command that judges a commit decides once and passes that
+  decision to every records read it makes, never re-deciding through the views form:
+  - `checkTicket` decides at its resolved `sha` (`H`), and passes `H` to `ticketReviews` (the
+    src carries it: `{ ref, repo, inHome: H }`; `ticketReviewsRead` uses `src.inHome` when set,
+    else `recordsInHomeId(id)`; the reviews memo key includes it).
+  - `cmdMerge` decides at the PR head, after fetching home's `origin/ticket/<id>` (S2), and passes
+    the decision to `checkPr`/`checkTicket` (a new `inHome` option, so checkTicket doesn't decide
+    again at the same sha with possibly different refs).
+  - `cmdCheckPr --repo` fetches home's `origin/ticket/<id>` first, then decides at `--sha` (S2).
+  - `review-worktree <id> <sha>` decides at its `sha` (S8).
+  - Views (status, timeline, park checks, approve-plan, the worker's prompt and records worktree,
+    `worker --remove`) use the views form: the link's ticket branch, else its main.
+- **Fetch before deciding (S2).** merge and check-pr --repo fetch home's `ticket/<id>` from
+  origin before the first decision, so home records pushed from another clone count, and home
+  wins.
+- The comment on `recordsInHome` ("never touches a checkout") is updated: it reads refs, never a
+  working tree.
+
+**Inherited call sites (S3).** Through `recordsInHomeId`/`recordsRepo`, a left-in-link ticket is
+also treated as `records: "repo"` by: approve-plan (reads the link's plan), `parkMessage` and
+`recordsParkProblems` (no records worktree to push), `recordsLandedOnly`, `ensureRecordsWorktree`
+and `promptFor` (no records worktree; the default records line), `worker --remove` (no records
+worktree to remove), `timelineView`, and home's `check-pr --head-ref ticket/<id>` (a home
+`ticket/<id>` with a records folder makes the ticket not left, so that path is unchanged).
+
+**The warning, once (S6).** Printed on stderr by check-ticket, check-pr and merge, once per
+process per ticket (merge and check-pr run checkTicket inside them; it still prints once).
 
 ### Rollout note (for the supervisor, not code)
 
 Home runs its own materialized kit. Set `links.devteam-kit.records: "home"` only once home's kit
 includes this change; before that, kit-100, kit-90 and this ticket would fail check-ticket with
 `no records … in home`. After the flip, a ticket started fresh writes records in home; the ones
-already writing in the kit merge under this rule, and their folders join the supervisor's
-copy-and-delete chore.
+already writing in the kit merge under this rule, so each such merge brings its
+`docs/devteam-dev/tickets/<id>/` back into the kit (S7). Run the copy-and-delete chore after the
+last of them (kit-100, kit-90, this ticket) merges, or once more for each one that merges later;
+`git ls-tree origin/main -- docs/devteam-dev` in the kit, empty, is the check.
 
 ## Acceptance checks
 
@@ -93,11 +124,22 @@ Done-when 2 (the transition rule), all in `test/multirepo-home.test.mjs`, new te
 - A2. **Left in the link passes.** A console ticket under `records: "home"` with records only in the
   link's `docs/devteam/project/tickets/<id>/` (spec, plan, verification, final review at the code
   head), no home records: `check-ticket <id> --sha <head>` exits 0 and its stderr has the warning;
-  `check-pr --repo console --head-ref ticket/<id> --sha <head>` exits 0 with the warning;
-  `merge <id> --dry-run` says `ok … would merge in console` with no `records at` in home, and
+  `check-pr --repo console --head-ref ticket/<id> --sha <head>` exits 0 with the warning exactly
+  once in its stderr; `merge <id> --dry-run` says `ok … would merge in console` with no `records at`
+  in home and the warning exactly once (S6), and
   `merge <id>` lands it (code and the link records folder on console's trunk, nothing under home's
   `tickets/<id>/`). Fails if the rule is removed: today these say `no records for <id> in home` and
   `changes files outside touches: docs/devteam/project/tickets/<id>/…`.
+- A2b. **One decision per command (S1).** The same ticket with the link's `ticket/<id>` refs gone
+  (the console worktree detached at the head, its local branch and `origin/ticket/<id>`
+  remote-tracking ref deleted, as in a CI checkout): `check-ticket <id> --sha <head>` still exits 0
+  with the warning. Fails if the reviews are read through the views form (they would come from home:
+  `no final review record`).
+- A2c. **Fetch before deciding (S2).** Home records for a left-in-link ticket pushed to home's
+  origin from another clone (home's local `ticket/<id>` and `origin/ticket/<id>` ref absent in the
+  main checkout before the command): `merge <id> --dry-run` and `check-pr --repo console …` both
+  judge it records-in-home: refused as `changes files outside touches: docs/devteam/project/tickets/<id>/…`.
+  Fails if they decided before fetching (they'd pass it as left in the link).
 - A3. **Stale verdict, link side.** A non-review commit after the final review on the link branch:
   check-ticket fails with `its verdict is at …, which does not hold at …`. Fails (stays green) if the
   rule read the link records without holding them to the head.
@@ -118,11 +160,16 @@ Done-when 2 (the transition rule), all in `test/multirepo-home.test.mjs`, new te
   (no home checkout); `prompt worker <id>` (the worker's prompt text, no tmux launch) ends with
   the default `keep this ticket's records under docs/devteam/project/tickets/<id>/ in this repo.`
   and not `Keep its records … a checkout of home`; after its merge, `timeline <id> --json` lists its
-  spec with `repo: "console"`. Fails if views still route it to home (no files, a home records
-  checkout, the home prompt).
-- A8. **Defaults unchanged.** The existing records-in-home and multirepo tests in
-  test/multirepo-home.test.mjs and test/multirepo-landing.test.mjs pass unchanged. Fails if the
-  predicate changes `records: "repo"` or fresh records-in-home behaviour.
+  spec with `repo: "console"`. And approve-plan: with a plan only in the link and no home records,
+  `act --class approve-plan` succeeds (it reads the link's plan); once home's `ticket/<id>` has a
+  records folder without a plan, it refuses with `no plan.md for <id> on ticket/<id>`. Fails if views
+  still route it to home (no files, a home records checkout, the home prompt, approve-plan refused).
+- A8. **Defaults unchanged.** The existing tests in test/multirepo-home.test.mjs and
+  test/multirepo-landing.test.mjs pass, with one change (S3): the setting test's approve-plan case
+  ("a plan in the link doesn't count") now first gives home's `ticket/<id>` a records folder (a
+  spec), so it is a home-wins ticket, and keeps its assertion; the left-in-link case moves to A7.
+  Nothing else in either file changes. Fails if the predicate changes `records: "repo"` or fresh
+  records-in-home behaviour.
 
 Done-when 3 (no docs/superpowers/):
 - A9. `git ls-tree -r --name-only HEAD -- docs/superpowers` is empty at the PR head; and before the
