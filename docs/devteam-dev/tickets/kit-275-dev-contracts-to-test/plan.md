@@ -12,7 +12,8 @@
 > For agentic workers: use superpowers:subagent-driven-development (or executing-plans). Steps are checkboxes.
 
 **Goal:** the two developer-only contracts live under `test/contracts/`, every reference names them there, and the kit's shipped `docs/devteam/` no longer has them.
-**Spec:** `docs/devteam-dev/tickets/kit-275-dev-contracts-to-test/spec.md`. The contracts move with their content unchanged: `dashboard-shell@1` and `browser@1`.
+**Spec:** `docs/devteam-dev/tickets/kit-275-dev-contracts-to-test/spec.md` (approve-spec m-20261117-111145729 at 9ddaaf21).
+**Ruling m-20261117-111118330-supervisor:** rewrite the four block comments (`index.html:47/1168`, `hub.html:31/402`) to `test/contracts/shell.md`, with the same bytes in both pages. There is no contract bump, no kit-94 edge and no grep exemption. `shell.md` holds no copy of the block text, only the markers in its table, so nothing changes there for this ruling. The contracts move with their content unchanged: `dashboard-shell@1` and `browser@1`.
 
 ## Global Constraints
 
@@ -54,7 +55,7 @@
 **Interfaces:** produces the paths `test/contracts/shell.md` and `test/contracts/browser.schema.json`, which T2's mutations edit.
 
 - [ ] **Step 1: Make the move (red).** `mkdir -p test/contracts`, then run the two `git mv` commands.
-- [ ] **Step 2: Watch the readers fail.** Run `test/dashboard-shell.test.mjs`, then `test/browser-contract.test.mjs`, as in Global Constraints. Expected: both FAIL with `ENOENT … docs/devteam/...`. Record the two lines for verification.md.
+- [ ] **Step 2: Watch the readers fail.** Run `test/dashboard-shell.test.mjs`, `test/browser-contract.test.mjs` and `test/browser-view-page.test.mjs`, one at a time, as in Global Constraints. Expected: each FAILs with `ENOENT … docs/devteam/...`. Record the three lines for verification.md.
 - [ ] **Step 3: Repoint the three readers,** as listed under Files.
 - [ ] **Step 4: Green.** Run `test/dashboard-shell.test.mjs`, `test/browser-contract.test.mjs` and `test/browser-view-page.test.mjs`, one at a time. Expected: each passes with 0 failed and 0 skipped.
 - [ ] **Step 5: Rewrite the comments,** then check both greps:
@@ -62,8 +63,9 @@
   - `git grep -n 'shell\.md' -- docs/devteam test ':!test/contracts'` must show only `test/contracts/shell.md` forms, plus the bare hits in `test/dashboard-shell.test.mjs` (the `'contracts', 'shell.md'` reader line and its `shell.md …` assertion labels).
   - Then re-run `test/dashboard-shell.test.mjs`. It must pass, which shows the blocks are still byte-identical.
 - [ ] **Step 6: Check the renames and the folder rule** (done-whens 1 and 4), after committing:
+  - `test ! -e docs/devteam/dashboard/shell.md && test ! -e docs/devteam/schema/browser.schema.json && test -f test/contracts/shell.md && test -f test/contracts/browser.schema.json && echo ok` prints `ok`.
   - `git diff -M100% --name-status origin/main...HEAD` shows `R100 docs/devteam/dashboard/shell.md test/contracts/shell.md` and `R100 docs/devteam/schema/browser.schema.json test/contracts/browser.schema.json`.
-  - `git log --follow --oneline test/contracts/shell.md | tail -3` reaches kit-83's commits.
+  - `git log --follow --oneline test/contracts/shell.md | tail -3` reaches kit-83's commits, and `git log --follow --oneline test/contracts/browser.schema.json | tail -3` reaches kit-61's.
   - `git diff --diff-filter=A --name-only origin/main...HEAD -- . ':!test/' ':!docs/devteam-dev/tickets/kit-275-dev-contracts-to-test/'` prints nothing.
 - [ ] **Step 7: Commit:** `kit-275 T1: move shell.md and browser.schema.json to test/contracts/, repoint every reference`. Then write the task review record `reviews/task-1.md` from a fresh reviewer.
 
@@ -76,9 +78,9 @@
 - [ ] **Step 1: Write the mutation script.** Write `mutate.sh` in a private `mktemp -d` dir. For each Mi it applies the edit with `node -e` or `sed`, runs the named file as in Global Constraints, captures the result, and restores the file with `git checkout --`. It ends by checking that `git status --porcelain` is empty.
   - **M1:** in `hub.html`, inside `devteam-shell-js`, change `pages share.` to `pages  share.` (one extra space). Run `test/dashboard-shell.test.mjs`. Expected FAIL: the blocks are no longer byte-identical.
   - **M2:** in `test/contracts/shell.md`, replace `bindFleetSwitch` with `bindFleetX` (one occurrence, line 97). Run `test/dashboard-shell.test.mjs`. Expected FAIL: `shell.md defines bindFleetSwitch`.
-  - **M3:** delete `"browser"` from `test/fixtures/browser/state.json`. Run `test/browser-contract.test.mjs`. Expected FAIL on `state.json`.
+  - **M3:** delete the whole line `  "browser": 1,` from `test/fixtures/browser/state.json` (`sed -i '/^  "browser": 1,$/d'`), so the JSON still parses and only the contract fails. Run `test/browser-contract.test.mjs`. Expected FAIL on `state.json`.
   - **M4:** add `"view_url"` to the `required` of the `state` shape in `test/contracts/browser.schema.json`. Run `test/browser-contract.test.mjs`. Expected FAIL on `state.json`.
   - **M5:** change one character of `x-masked-url` in `test/contracts/browser.schema.json`. Run `test/browser-view-page.test.mjs`. Expected FAIL: "the page's mask is x-masked-url, exactly".
 - [ ] **Step 2: Run it.** Expected: all five FAIL as named, and the tree is clean afterwards.
-- [ ] **Step 3: Write verification.md.** One row per done-when, each with its command and result at the named commit, including T1 step 2's red, step 4's green and the mutation table. Then push, run CI `test.yml` through `devteam.mjs gate ci -- gh run watch <run> --exit-status` (unpiped), and confirm with `gh run view <run> --json conclusion`.
+- [ ] **Step 3: Write verification.md.** One row per done-when, each with its command and result at the named commit, including T1 step 2's red, step 4's green and the mutation table. Then push. The PR changes `hub.html` and `docs/devteam/schema/**`, so `box-image.yml` (a Docker build that can take up to 45 minutes) runs too; record its conclusion alongside test.yml's. Run CI `test.yml` through `devteam.mjs gate ci -- gh run watch <run> --exit-status` (unpiped), and confirm with `gh run view <run> --json conclusion`.
 - [ ] **Step 4: Commit:** `kit-275 T2: verification (mutations M1-M5, CI <run>)`.
