@@ -202,6 +202,12 @@ export function paneSignature(privateKeyPem, port, body, ts = Date.now(), nonce 
   const msg = Buffer.from(`devteam-pane-answer-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
   return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
 }
+// The same for the owner's Save on an instance's Settings page (/api/owner-setting): its own name,
+// so a pane-answer signature is never good for a setting, nor the reverse.
+export function ownerSettingSignature(privateKeyPem, port, body, ts = Date.now(), nonce = b64u(crypto.randomBytes(24))) {
+  const msg = Buffer.from(`devteam-owner-setting-v1\n${port}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': b64u(crypto.sign(null, msg, crypto.createPrivateKey(privateKeyPem))) };
+}
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
@@ -830,6 +836,8 @@ const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
 // five minutes by a timer of its own (BODY_MS). A stalled upload goes sooner (UPLOAD_STALL_MS).
 const REQUEST_MS = 3600 * 1000;
 const BODY_MS = 5 * 60 * 1000;
+// What the kit's own upload routes (devteam.mjs) share with this gateway; a test holds the two copies equal.
+export const UPLOAD_RULES = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, keepMs: UPLOAD_KEEP_MS, stallMs: UPLOAD_STALL_MS, name: UPLOAD_NAME, part: UPLOAD_PART, folder: UPLOAD_FOLDER };
 // The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
 // so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
 // path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
@@ -857,6 +865,13 @@ export function isDropImage(p) {
 }
 export function dropSpace(paths) {
   return paths.some((p) => !isDropImage(p));
+}
+// How a stored file is served back: these four as images, every other file (HTML and SVG among
+// them) as bytes to save, never to render. A .jpeg is saved too: the list is the design's.
+const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function uploadType(name) {
+  const ext = path.extname(name);
+  return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
 }
 // What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
 export function dropNote(paths) {
@@ -1147,11 +1162,13 @@ export function createGateway(opts = {}) {
     });
     pipeline(req, up, () => {});
   };
-  // The owner's answer to what an instance's supervisor's terminal asks: the one dashboard request
-  // the gateway signs (paneSignature), after the session check, since on a box every agent can send
-  // that dashboard any header. The body is read whole (it is small) so its hash is what is signed;
-  // whatever signature headers the browser sent are replaced.
-  const panePost = (req, res, port, publicOrigin) => {
+  // The owner's answer to what an instance's supervisor's terminal asks (paneSignature), and the
+  // owner's Save on its Settings page (ownerSettingSignature): the two dashboard requests the gateway
+  // signs, after the session check, since on a box every agent can send that dashboard any header.
+  // The body is read whole (it is small) so its hash is what is signed; whatever signature headers
+  // the browser sent are replaced.
+  const SIGNED_POSTS = { '/api/pane-answer': paneSignature, '/api/owner-setting': ownerSettingSignature };
+  const signedPost = (req, res, port, publicOrigin, route, signer) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => { size += c.length; if (size <= 20000) chunks.push(c); else chunks.length = 0; });
@@ -1159,7 +1176,7 @@ export function createGateway(opts = {}) {
     req.on('end', () => {
       if (size > 20000) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const data = Buffer.concat(chunks);
-      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/pane-answer', headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...paneSignature(threadKey(store).privateKey, port, data) } }, (ur) => {
+      const up = http.request({ host: '127.0.0.1', port, method: 'POST', path: route, headers: { ...upstreamHeaders(req, port, publicOrigin), 'content-length': data.length, ...signer(threadKey(store).privateKey, port, data) } }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, undefined, publicOrigin), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
@@ -1437,6 +1454,34 @@ export function createGateway(opts = {}) {
     });
   }, 100);
 })();</script>`);
+  // A phone's swipe doesn't scroll tmux: xterm.js sends tmux a mouse wheel, but nothing for a touch, and
+  // tmux's history isn't in xterm's own scrollback. This turns a one-finger vertical swipe into wheel
+  // steps on the terminal, which tmux (mouse on) reads as scrolling its history. Taps are left alone.
+  const TERM_TOUCH = Buffer.from(`<script>(() => {
+  // y follows the finger; y0 is where it touched down, and every wheel step of the gesture goes there,
+  // kept off the last rows: tmux's status bar is the bottom row, and a wheel on it switches windows
+  let y = null, y0 = null, acc = 0;
+  const STEP = 18;
+  addEventListener('touchstart', (e) => { y = y0 = e.touches.length === 1 ? e.touches[0].clientY : null; acc = 0; }, { passive: true, capture: true });
+  addEventListener('touchmove', (e) => {
+    if (y === null || e.touches.length !== 1) return;
+    const t = document.querySelector('.xterm-screen');
+    if (!t) return;
+    const ny = e.touches[0].clientY;
+    acc += y - ny;
+    y = ny;
+    const r = t.getBoundingClientRect();
+    const row = document.querySelector('.xterm-rows > div')?.getBoundingClientRect().height || 20;
+    const at = Math.min(Math.max(y0, r.top + row / 2), r.bottom - 2 * row);
+    while (Math.abs(acc) >= STEP) {
+      const d = acc > 0 ? STEP : -STEP;
+      acc -= d;
+      t.dispatchEvent(new WheelEvent('wheel', { deltaY: d, deltaMode: 0, clientX: r.left + r.width / 2, clientY: at, bubbles: true, cancelable: true }));
+    }
+    e.preventDefault();
+  }, { passive: false, capture: true });
+  addEventListener('touchend', () => { y = null; }, { capture: true });
+})();</script>`);
   // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
   // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
   // ttyd reconnects without loading the page again, so a tab left open through a deploy keeps the
@@ -1612,8 +1657,8 @@ export function createGateway(opts = {}) {
   // The page the terminal is served, and a name for it that changes only when its bytes do.
   const termPage = () => {
     const html = ttydPage();
-    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP]))).slice(0, 22);
-    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP]) };
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP, TERM_TOUCH]) };
   };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
@@ -1899,13 +1944,42 @@ export function createGateway(opts = {}) {
       await fh?.close().catch(() => {});
       await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
       if (e.tooBig) return tooBig();
-      if (req.destroyed || res.destroyed) return;
+      // req.destroyed is true once a body is read whole, so it can't say the client has gone: the socket can
+      if (res.destroyed || req.socket?.destroyed) return;
       if (e.code === 'ENOSPC') return refuse(507, 'the box\'s disk is too full for this file', { connection: 'close' });
       log(`a dropped file could not be stored: ${e.message}`);
       return refuse(500, 'the box could not store this file', { connection: 'close' });
     } finally {
       clearTimeout(stall);
       receiving.delete(id);
+    }
+  };
+
+  // GET /upload/<folder>/<name>: a file dropped on an instance's page, back to that page (spec §5).
+  // Matched on the raw path, so nothing URL parsing folds (.., %2e, %2F) can name another file:
+  // only a name exactly as one is stored, in a folder named as ours, really inside the root.
+  const serveUpload = async (req, res, rawPath) => {
+    const none = () => send(res, 404, 'text/plain', 'not found');
+    const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
+    if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
+    let fh = null;
+    try {
+      const root = await fs.promises.realpath(uploadsRoot);
+      const real = await fs.promises.realpath(path.join(uploadsRoot, m[1], m[2]));
+      // exactly the file named, not merely inside the root: a link in a folder to another stored file,
+      // or out to <root>-evil/…, names a file never dropped there (task review T3-1)
+      if (real !== path.join(root, m[1], m[2])) return none();
+      fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      const st = await fh.stat();
+      if (!st.isFile()) { await fh.close(); return none(); }
+      const { type, attachment } = uploadType(m[2]);
+      res.writeHead(200, { 'content-type': type, ...(attachment ? { 'content-disposition': `attachment; filename="${m[2]}"` } : {}), 'content-length': st.size, 'x-content-type-options': 'nosniff', 'content-security-policy': 'sandbox', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', ...hsts });
+      if (req.method === 'HEAD') { await fh.close(); return res.end(); }
+      // pipeline: a reader who goes mid-file closes the file too
+      pipeline(fh.createReadStream(), res, () => {});
+    } catch {
+      await fh?.close().catch(() => {});
+      return res.headersSent ? res.destroy() : none();
     }
   };
 
@@ -2001,9 +2075,12 @@ export function createGateway(opts = {}) {
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
+        // dropped files, as on term. (receiveUpload, after the session and the Origin rule above), and served back
+        if (rawPath === '/upload' && req.method === 'POST') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
+        if (['GET', 'HEAD'].includes(req.method) && rawPath.startsWith('/upload/')) return await serveUpload(req, res, rawPath);
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        if (req.method === 'POST' && rawPath === '/api/pane-answer') return panePost(req, res, port, own);
+        if (req.method === 'POST' && Object.hasOwn(SIGNED_POSTS, rawPath)) return signedPost(req, res, port, own, rawPath, SIGNED_POSTS[rawPath]);
         return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).

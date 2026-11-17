@@ -4,7 +4,23 @@ exit 0
   "project": "g1",
   "kit": "unreleased",
   "caps": {
-    "max_active_tickets": 5
+    "max_active_tickets": null
+  },
+  "asked_settings": {
+    "max_active_tickets": {
+      "value": null,
+      "shown": "No limit",
+      "label": "The kit's default",
+      "asked": null,
+      "act": null
+    },
+    "max_active_per_component": {
+      "value": null,
+      "shown": "No limit",
+      "label": "The kit's default",
+      "asked": null,
+      "act": null
+    }
   },
   "gates_configured": [],
   "tickets": [
@@ -29,7 +45,8 @@ exit 0
       "task": null,
       "note": null,
       "usd": null,
-      "waiting": null
+      "waiting": null,
+      "held_by": "q-<sha>-<sha>-supervisor"
     },
     {
       "id": "g1-02-b",
@@ -55,9 +72,64 @@ exit 0
       "task": null,
       "note": null,
       "usd": null,
-      "waiting": null
+      "waiting": null,
+      "held_by": null
     }
   ],
+  "class_words": {
+    "new-feature": "Starting a feature you haven't asked for",
+    "priority-change": "Changing what gets worked on first",
+    "release-scope": "Moving a story to a later release",
+    "upstream-pr": "Proposing an improvement to the kit itself",
+    "release-production": "Shipping a release to production",
+    "production-migration": "Changing production data",
+    "incident-fix": "Fixing a production incident",
+    "production-remediation": "Restarting, scaling or rolling back production",
+    "merge-word": "Merging a ticket",
+    "approve-feature-plan": "Approving a feature's plan",
+    "merge-chore": "Merging a chore",
+    "worker-slots": "Starting and stopping workers",
+    "replan-within-feature": "Replanning the tickets of a feature",
+    "add-ticket": "Adding a ticket",
+    "approve-spec": "Approving a ticket's spec",
+    "approve-plan": "Approving a ticket's plan",
+    "approve-design-change": "Approving a change to a design",
+    "contract-ruling": "Ruling on a contract between pieces of work",
+    "improvement-trial": "Trying out a process improvement",
+    "release-staging": "Shipping a release to staging",
+    "goal-readiness": "Saying a goal is ready to start",
+    "apply-default": "Going ahead with a question's default",
+    "withdraw-question": "Taking back a question",
+    "recovery": "Getting stuck work going again",
+    "carry-answer": "Applying an earlier answer of yours",
+    "drain": "Letting running work finish and starting nothing new",
+    "undrain": "Starting new work again after a wind-down",
+    "goal-hold": "Holding a goal or letting it go",
+    "fleet-drain": "Winding down the whole fleet",
+    "fleet-park": "Parking the whole fleet",
+    "fleet-undrain": "Starting the whole fleet again after a wind-down",
+    "fleet-unpark": "Unparking the whole fleet",
+    "registry-edit": "Changing a registry entry",
+    "goal-impact": "Judging how much a goal matters",
+    "orient-noise": "Ruling some signals to be noise",
+    "gate-add": "Adding a check",
+    "one-way-door": "A change that can't be undone",
+    "check-override": "Overriding a failing check",
+    "governance-edit": "Changing the rules",
+    "process-edit": "Changing how the team works",
+    "gate-change": "Changing a check",
+    "goal-change": "Changing a goal",
+    "strategy-change": "Changing the strategy",
+    "goal-met": "Saying a goal is met",
+    "registry-attest": "Confirming the registry is complete",
+    "new-dependency": "Adding a new dependency",
+    "artifact-publish": "Publishing a page",
+    "pane-answer": "Answering the supervisor's terminal",
+    "goal-order": "Putting the goals in order",
+    "goal-approval": "Approving a goal",
+    "owner-setting": "Asking for a setting",
+    "settings-edit": "Changing one of its own settings"
+  },
   "critical_path": [
     "g1-01-a",
     "g1-02-b"
@@ -165,7 +237,8 @@ exit 0
           "settles": [],
           "settled_by": []
         }
-      }
+      },
+      "class_name": null
     }
   ],
   "open_messages": [],
@@ -195,7 +268,8 @@ exit 0
         "final": {
           "first_passes": 1,
           "rejected": 0,
-          "rejection_rate": 0
+          "rejection_rate": 0,
+          "top_blocking_rules": []
         }
       },
       "findings": 0,
@@ -217,6 +291,17 @@ exit 0
       "answer_rate_14d": null
     },
     "escaped_defects": 0,
+    "mis_rated": [],
+    "efficiency": {
+      "wait_usd_pct": null,
+      "usd_per_point": null,
+      "first_pass_rejection": {
+        "spec": null,
+        "plan": null,
+        "final": 0
+      },
+      "mis_rated": []
+    },
     "findings": [
       {
         "severity": "high",
@@ -236,6 +321,525 @@ exit 0
       }
     ],
     "acknowledged": []
+  },
+  "efficiency": {
+    "weeks": [
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      },
+      {
+        "tickets": 0,
+        "points": 0,
+        "usd_per_point": null,
+        "first_pass": 1,
+        "first_passes": 0,
+        "cache_read_share": null,
+        "escaped_defects": 0,
+        "usd_by_phase": {},
+        "tokens_by_phase": {},
+        "score": null,
+        "parts": null
+      }
+    ],
+    "best": null,
+    "score": {
+      "this_week": null,
+      "last_week": null
+    },
+    "parts": null,
+    "observe": {
+      "phase_usd": {},
+      "by_model": {},
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "tokens_by_phase": {}
+    },
+    "waste": [],
+    "trials": [],
+    "suggestions": []
+  },
+  "awareness": {
+    "score": {
+      "this_week": 0,
+      "last_week": null
+    },
+    "parts": {
+      "signals": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      },
+      "incidents": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      },
+      "lessons": {
+        "count": 0,
+        "of": 1,
+        "share": 0
+      },
+      "starts": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      }
+    },
+    "weeks": [
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": 0,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 1,
+            "share": 0
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      }
+    ],
+    "suggestions": [
+      {
+        "id": "aw-lessons-unused",
+        "kind": "lessons",
+        "what": "Look at the lesson no session was given in 4 weeks",
+        "evidence": "1 of 1 lesson in force reached no session start in the last 28 days",
+        "effect": "Lessons sessions use: 0 of 1 → 0 of 0 once it is retired"
+      }
+    ]
   },
   "progress": {
     "features": [
@@ -485,7 +1089,8 @@ exit 0
           "authority": "constitution",
           "approved_by": null,
           "own": true
-        }
+        },
+        "class_name": "Approving a ticket's plan"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -504,7 +1109,8 @@ exit 0
           "authority": "constitution",
           "approved_by": null,
           "own": true
-        }
+        },
+        "class_name": "Approving a ticket's spec"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -523,7 +1129,8 @@ exit 0
           "authority": "constitution",
           "approved_by": null,
           "own": true
-        }
+        },
+        "class_name": "Adding a ticket"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -542,7 +1149,8 @@ exit 0
           "authority": "constitution",
           "approved_by": null,
           "own": true
-        }
+        },
+        "class_name": "Adding a ticket"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -561,7 +1169,8 @@ exit 0
           "authority": "constitution",
           "approved_by": null,
           "own": true
-        }
+        },
+        "class_name": "Adding a ticket"
       }
     ],
     "decisions": [
@@ -577,7 +1186,8 @@ exit 0
           "status": "accepted"
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": null
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -600,7 +1210,8 @@ exit 0
           "approved_by": null
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": "Approving a ticket's plan"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -623,7 +1234,8 @@ exit 0
           "approved_by": null
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": "Approving a ticket's spec"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -646,7 +1258,8 @@ exit 0
           "approved_by": null
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": "Adding a ticket"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -669,7 +1282,8 @@ exit 0
           "approved_by": null
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": "Adding a ticket"
       },
       {
         "id": "a-<sha>-<sha>-supervisor",
@@ -692,7 +1306,8 @@ exit 0
           "approved_by": null
         },
         "acts": [],
-        "correction": null
+        "correction": null,
+        "class_name": "Adding a ticket"
       }
     ],
     "trust": [
@@ -710,7 +1325,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Starting a feature you haven't asked for"
       },
       {
         "class": "priority-change",
@@ -726,7 +1342,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Changing what gets worked on first"
       },
       {
         "class": "release-scope",
@@ -742,7 +1359,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Moving a story to a later release"
       },
       {
         "class": "upstream-pr",
@@ -758,7 +1376,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Proposing an improvement to the kit itself"
       },
       {
         "class": "release-production",
@@ -774,7 +1393,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Shipping a release to production"
       },
       {
         "class": "production-migration",
@@ -790,7 +1410,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Changing production data"
       },
       {
         "class": "incident-fix",
@@ -806,7 +1427,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Fixing a production incident"
       },
       {
         "class": "production-remediation",
@@ -822,7 +1444,8 @@ exit 0
         "agreement_questions": [],
         "meets_agreement": false,
         "can_ask": false,
-        "history": []
+        "history": [],
+        "class_name": "Restarting, scaling or rolling back production"
       }
     ],
     "classes": {
@@ -830,49 +1453,57 @@ exit 0
         "ceiling": 3,
         "start": 2,
         "about": "start planning a feature the owner hasn't asked for",
-        "rung": 2
+        "rung": 2,
+        "class_name": "Starting a feature you haven't asked for"
       },
       "priority-change": {
         "ceiling": 3,
         "start": 2,
         "about": "reorder goals' work or move a feature between releases",
-        "rung": 2
+        "rung": 2,
+        "class_name": "Changing what gets worked on first"
       },
       "release-scope": {
         "ceiling": 3,
         "start": 2,
         "about": "move a story to a later release to ship the rest on time",
-        "rung": 2
+        "rung": 2,
+        "class_name": "Moving a story to a later release"
       },
       "upstream-pr": {
         "ceiling": 3,
         "start": 2,
         "about": "open a PR on upstream devteam with a general improvement",
-        "rung": 2
+        "rung": 2,
+        "class_name": "Proposing an improvement to the kit itself"
       },
       "release-production": {
         "ceiling": 3,
         "start": 1,
         "about": "ship a tagged release to production, with every gate passing at the tagged commit",
-        "rung": 1
+        "rung": 1,
+        "class_name": "Shipping a release to production"
       },
       "production-migration": {
         "ceiling": 3,
         "start": 1,
         "about": "run a rollback-safe migration against production data",
-        "rung": 1
+        "rung": 1,
+        "class_name": "Changing production data"
       },
       "incident-fix": {
         "ceiling": 3,
         "start": 2,
         "about": "open and run a ticket that fixes a production incident the sensors found",
-        "rung": 2
+        "rung": 2,
+        "class_name": "Fixing a production incident"
       },
       "production-remediation": {
         "ceiling": 2,
         "start": 1,
         "about": "restart, scale or roll back production with a reviewed remediation script",
-        "rung": 1
+        "rung": 1,
+        "class_name": "Restarting, scaling or rolling back production"
       }
     },
     "impact_words": {
@@ -934,6 +1565,903 @@ exit 0
       "unknown": 0
     }
   },
+  "autonomy": {
+    "decisions": {
+      "score": {
+        "this_week": 100,
+        "last_week": 0
+      },
+      "this_week": {
+        "record": null,
+        "alone": 5,
+        "asked": 0,
+        "corrected": 0,
+        "decisions": 5,
+        "score": 100,
+        "lessons": [
+          "k-<sha>-<sha>-owner"
+        ],
+        "merged": 1,
+        "answers": 0,
+        "merged_per_answer": 1,
+        "asked_again": 0,
+        "with_recommendation": {
+          "count": 0,
+          "of": 0,
+          "share": 0
+        }
+      },
+      "last_week": {
+        "record": null,
+        "alone": 0,
+        "asked": 0,
+        "corrected": 0,
+        "decisions": 0,
+        "score": 0,
+        "lessons": [],
+        "merged": 0,
+        "answers": 0,
+        "merged_per_answer": 0,
+        "asked_again": 0,
+        "with_recommendation": {
+          "count": 0,
+          "of": 0,
+          "share": 0
+        }
+      },
+      "weeks": [
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 0,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 0,
+          "score": 0,
+          "lessons": [],
+          "merged": 0,
+          "answers": 0,
+          "merged_per_answer": 0,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        },
+        {
+          "record": null,
+          "alone": 5,
+          "asked": 0,
+          "corrected": 0,
+          "decisions": 5,
+          "score": 100,
+          "lessons": [
+            "k-<sha>-<sha>-owner"
+          ],
+          "merged": 1,
+          "answers": 0,
+          "merged_per_answer": 1,
+          "asked_again": 0,
+          "with_recommendation": {
+            "count": 0,
+            "of": 0,
+            "share": 0
+          }
+        }
+      ]
+    },
+    "trust": {
+      "own": 0,
+      "kinds": 8,
+      "raised": 0,
+      "dropped": 0,
+      "changes": []
+    },
+    "senses": {
+      "needed": 0,
+      "has": 0,
+      "working": 0,
+      "missing": [],
+      "names": {
+        "needed": [],
+        "has": [],
+        "working": []
+      }
+    }
+  },
+  "autonomy_score": {
+    "this_week": null,
+    "last_week": null,
+    "weeks": [
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      }
+    ]
+  },
+  "threads": {
+    "you": 0,
+    "waiting": 0,
+    "ready": 0
+  },
+  "upkeep_days": [
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    },
+    {
+      "items": [],
+      "failed": false
+    }
+  ],
+  "settings_all": [
+    {
+      "key": "max_active_tickets",
+      "group": "Fleet and capacity",
+      "name": "Workers at once, in all",
+      "description": "the most tickets with a worker running at the same time",
+      "shown": "value",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "max_active_per_component",
+      "group": "Fleet and capacity",
+      "name": "Workers at once, per component",
+      "description": "the most workers at the same time within one component",
+      "shown": "value",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "max_active_planners",
+      "group": "Fleet and capacity",
+      "name": "Planners at once",
+      "description": "the most planners running together; none means no cap",
+      "shown": "value",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "machine_memory_ceiling",
+      "group": "Fleet and capacity",
+      "name": "Memory ceiling",
+      "description": "share of the machine's memory at or above which a new worker or planner waits",
+      "shown": "value",
+      "value": 0.8,
+      "set": false,
+      "default": 0.8,
+      "owner_only": null
+    },
+    {
+      "key": "tick_minutes",
+      "group": "Fleet and capacity",
+      "name": "Supervisor tick",
+      "description": "how often the supervisor looks over everything when nothing wakes it",
+      "shown": "value",
+      "value": 15,
+      "set": false,
+      "default": 15,
+      "owner_only": null
+    },
+    {
+      "key": "stale_after_minutes",
+      "group": "Fleet and capacity",
+      "name": "Silent session after",
+      "description": "minutes without a sign of life before a worker counts as stuck",
+      "shown": "value",
+      "value": 30,
+      "set": false,
+      "default": 30,
+      "owner_only": null
+    },
+    {
+      "key": "tmux_session",
+      "group": "Fleet and capacity",
+      "name": "Terminal session name",
+      "description": "the tmux session the windows live in; none means one named after the project",
+      "shown": "value",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "dashboard_port",
+      "group": "Fleet and capacity",
+      "name": "Dashboard port",
+      "description": "where this dashboard listens; none means a free port in the hub's range",
+      "shown": "value",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "agent_command",
+      "group": "Agents and sessions",
+      "name": "Agent command",
+      "description": "what starts each worker, planner and the supervisor",
+      "shown": "hidden",
+      "value": null,
+      "set": true,
+      "default": "claude --dangerously-skip-permissions",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "resume_command",
+      "group": "Agents and sessions",
+      "name": "Resume command",
+      "description": "what brings a stopped session back on its own conversation",
+      "shown": "hidden",
+      "value": null,
+      "set": true,
+      "default": "claude --continue --dangerously-skip-permissions",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "agent_trust_command",
+      "group": "Agents and sessions",
+      "name": "Folder-trust answer",
+      "description": "a command run before each agent starts so it trusts its worktree; empty runs nothing",
+      "shown": "hidden",
+      "value": null,
+      "set": false,
+      "default": "",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "worker_denied_commands",
+      "group": "Agents and sessions",
+      "name": "Commands workers may not run",
+      "description": "patterns refused in every worker and planner",
+      "shown": "value",
+      "value": [
+        "gh pr merge*",
+        "gh api*",
+        "git push*main*",
+        "git push*--force*",
+        "git push*-f *",
+        "git push*+*"
+      ],
+      "set": false,
+      "default": [
+        "gh pr merge*",
+        "gh api*",
+        "git push*main*",
+        "git push*--force*",
+        "git push*-f *",
+        "git push*+*"
+      ],
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "worktree_setup",
+      "group": "Agents and sessions",
+      "name": "Worktree setup",
+      "description": "a command run in each new worktree after its files are copied",
+      "shown": "hidden",
+      "value": null,
+      "set": false,
+      "default": "",
+      "owner_only": "gate-change"
+    },
+    {
+      "key": "worktree_files",
+      "group": "Agents and sessions",
+      "name": "Files copied into worktrees",
+      "description": "untracked files each worktree needs, copied from the main checkout",
+      "shown": "value",
+      "value": [
+        "config/dev.key"
+      ],
+      "set": true,
+      "default": [],
+      "owner_only": "gate-change"
+    },
+    {
+      "key": "usage_command",
+      "group": "Agents and sessions",
+      "name": "Usage command",
+      "description": "a command that reports spend for a harness the kit can't read",
+      "shown": "hidden",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "usage_sources",
+      "group": "Agents and sessions",
+      "name": "Usage sources",
+      "description": "which agents' own logs spend is read from",
+      "shown": "value",
+      "value": [
+        "claude-code",
+        "codex"
+      ],
+      "set": false,
+      "default": [
+        "claude-code",
+        "codex"
+      ],
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "model_prices",
+      "group": "Agents and sessions",
+      "name": "Model prices",
+      "description": "prices for models the kit has none for, or overrides",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "gates",
+      "group": "Merging and checks",
+      "name": "Checks before merge",
+      "description": "the commands that must pass at a ticket's head before it merges",
+      "shown": "names",
+      "value": [],
+      "set": true,
+      "default": [],
+      "owner_only": "gate-change"
+    },
+    {
+      "key": "ignored_checks",
+      "group": "Merging and checks",
+      "name": "Ignored forge checks",
+      "description": "forge checks merge doesn't wait for",
+      "shown": "value",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": "gate-change"
+    },
+    {
+      "key": "slow_gate_minutes",
+      "group": "Merging and checks",
+      "name": "Slow check after",
+      "description": "minutes a check may take before it's flagged slow",
+      "shown": "value",
+      "value": 10,
+      "set": false,
+      "default": 10,
+      "owner_only": null
+    },
+    {
+      "key": "main_branch",
+      "group": "Merging and checks",
+      "name": "Main branch",
+      "description": "the branch work merges into",
+      "shown": "value",
+      "value": "main",
+      "set": false,
+      "default": "main",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "merge_method",
+      "group": "Merging and checks",
+      "name": "Merge method",
+      "description": "how PRs land: a merge commit, squash or rebase",
+      "shown": "value",
+      "value": "merge",
+      "set": false,
+      "default": "merge",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "merge_admin",
+      "group": "Merging and checks",
+      "name": "Merge past branch protection",
+      "description": "whether merge uses admin rights where the forge requires a review the author can't give",
+      "shown": "value",
+      "value": false,
+      "set": false,
+      "default": false,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "forge",
+      "group": "Merging and checks",
+      "name": "Forge",
+      "description": "where PRs live: GitHub, or plain git",
+      "shown": "value",
+      "value": "git",
+      "set": true,
+      "default": "github",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "autonomy_ceilings",
+      "group": "Merging and checks",
+      "name": "Autonomy ceilings",
+      "description": "the highest level the supervisor may reach for a kind of decision, below the kit's",
+      "shown": "value",
+      "value": {},
+      "set": false,
+      "default": {},
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "hold_review_days",
+      "group": "Merging and checks",
+      "name": "Parked goal review",
+      "description": "days a goal stays parked before the owner is asked about it again",
+      "shown": "value",
+      "value": 14,
+      "set": false,
+      "default": 14,
+      "owner_only": null
+    },
+    {
+      "key": "question_default_after_hours",
+      "group": "Questions and findings",
+      "name": "A default applies after",
+      "description": "hours before a question with a default takes it",
+      "shown": "value",
+      "value": 24,
+      "set": false,
+      "default": 24,
+      "owner_only": null
+    },
+    {
+      "key": "finding_ack_hours",
+      "group": "Questions and findings",
+      "name": "A finding set aside for",
+      "description": "hours a set-aside finding stays quiet, unless its subject changes",
+      "shown": "value",
+      "value": 24,
+      "set": false,
+      "default": 24,
+      "owner_only": null
+    },
+    {
+      "key": "upstream_repo",
+      "group": "Upstream and releases",
+      "name": "Kit source",
+      "description": "where new devteam releases come from",
+      "shown": "hidden",
+      "value": null,
+      "set": false,
+      "default": null,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "upstream_base",
+      "group": "Upstream and releases",
+      "name": "Kit release in use",
+      "description": "the devteam release this project runs",
+      "shown": "value",
+      "value": null,
+      "set": true,
+      "default": null,
+      "owner_only": null
+    },
+    {
+      "key": "upstream_sync",
+      "group": "Upstream and releases",
+      "name": "Kit updates",
+      "description": "adopt each release on its own, or ask you first",
+      "shown": "value",
+      "value": "adopt",
+      "set": true,
+      "default": "adopt",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "upstream_check_hours",
+      "group": "Upstream and releases",
+      "name": "Check for kit releases every",
+      "description": "hours between checks for a new devteam release",
+      "shown": "value",
+      "value": 24,
+      "set": false,
+      "default": 24,
+      "owner_only": null
+    },
+    {
+      "key": "release",
+      "group": "Upstream and releases",
+      "name": "How a release reaches production",
+      "description": "a tag, a production branch, or every merge to main",
+      "shown": "value",
+      "value": "tag",
+      "set": false,
+      "default": "tag",
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "sensors",
+      "group": "Production",
+      "name": "Sensors",
+      "description": "the production signals the supervisor reads",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": null
+    },
+    {
+      "key": "sensor_defaults",
+      "group": "Production",
+      "name": "Sensor defaults",
+      "description": "settings every sensor starts from",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": null
+    },
+    {
+      "key": "sensor_scrub",
+      "group": "Production",
+      "name": "Sensor scrub patterns",
+      "description": "extra patterns scrubbed from what sensors bring back",
+      "shown": "count",
+      "value": 0,
+      "set": false,
+      "default": 0,
+      "owner_only": null
+    },
+    {
+      "key": "remediations",
+      "group": "Production",
+      "name": "Remediations",
+      "description": "the reviewed scripts that may restart, scale or roll back production",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "incident_slots",
+      "group": "Production",
+      "name": "Incident fixes past the cap",
+      "description": "fix tickets that may run beyond the worker cap, so an incident never waits",
+      "shown": "value",
+      "value": 1,
+      "set": false,
+      "default": 1,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "secret_commands",
+      "group": "Production",
+      "name": "Commands a secret may be sent to",
+      "description": "command prefixes a secret's sink may run, as you",
+      "shown": "count",
+      "value": 0,
+      "set": false,
+      "default": 0,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "retro_every_days",
+      "group": "Rhythm",
+      "name": "Retro every",
+      "description": "days between retrospectives",
+      "shown": "value",
+      "value": 7,
+      "set": false,
+      "default": 7,
+      "owner_only": null
+    },
+    {
+      "key": "research_every_days",
+      "group": "Rhythm",
+      "name": "Research every",
+      "description": "days between research spikes on new tools and practice",
+      "shown": "value",
+      "value": 7,
+      "set": false,
+      "default": 7,
+      "owner_only": null
+    },
+    {
+      "key": "project",
+      "group": "Project and links",
+      "name": "Project name",
+      "description": "this project's name on the hub and in its public links",
+      "shown": "value",
+      "value": "g1",
+      "set": true,
+      "default": null,
+      "owner_only": "governance-edit"
+    },
+    {
+      "key": "components",
+      "group": "Project and links",
+      "name": "Components",
+      "description": "the parts of the work, each with its own lines of files",
+      "shown": "names",
+      "value": [],
+      "set": true,
+      "default": [],
+      "owner_only": null
+    },
+    {
+      "key": "links",
+      "group": "Project and links",
+      "name": "Linked repos and resources",
+      "description": "the repos and resources this project works in or reads",
+      "shown": "names",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": null
+    }
+  ],
   "upkeep": {
     "id": null,
     "mode": "run",

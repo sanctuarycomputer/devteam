@@ -258,17 +258,33 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     assert.ok(cards[3].lesson);
     assert.match(await p.ev(`document.querySelector('[id="q-${detail}"] .kv').textContent`), /Order2 of 3\. Score 6: impact 3 \(moves a number the project watches\) × stake 1 \(a detail\) × urgency 2 /);
     assert.match(await p.ev(`document.querySelector('[id="q-${gate}"] .kv').textContent`), /RatedWhen asked: stake 3, urgency 1, settles 1/);
-    assert.equal(await p.ev(`document.querySelector('#inbox h2 .sub').textContent`), 'decisions only you can make, the most valuable first');
     assert.match(await p.ev(`document.querySelector('#strategy-link').getAttribute('href')`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/);
     // the goal: its impact beside its priority, why, and Wrong? sends the owner's own value
     assert.match(await p.ev(`document.querySelector('#goals-list a.title-link[href="#goal/${G}"]').closest('.card').querySelector('.card-head').textContent`), /priority 1 · moves a number the project watches/);
+    // #questions opened the Inbox in the panel (kit-100), which covers the window below 900px: closed, at
+    // rest, before the goal's peek, so Wrong? is pressed on the peek and not on the panel over it
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).visibility === 'hidden'`, 'the panel closed');
     await p.ev(`void (location.hash = '#goal/${G}')`);
     const key = `imp:${D}`;
-    await soon(`!!document.querySelector('[data-correct="${key}"]')`, 'the goal drawer');
+    // The drawer is drawn at once, before the goal's record (its peek) arrives, and again when it
+    // lands: the record's rows go above "Why it matters" and push Wrong? down. p.click measures and
+    // presses in two steps, so a record landing between them makes the press miss. Wait for the
+    // record: its Created row there (a load pending or failed draws a Record row instead) and no
+    // `.loading` left.
+    await soon(`!!document.querySelector('[data-correct="${key}"]') && [...document.querySelectorAll('#drawer-body section.attrs dt')].some((dt) => dt.textContent === 'Created') && !document.querySelector('#drawer-body .loading')`, 'the goal drawer with its record');
+    // the peek slides in (kit-88): click once it is at rest, or the click lands where the button was
+    await soon(`(() => { const d = document.getElementById('drawer'); return getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()`, 'the goal drawer at rest');
     assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
     await p.click(`[data-correct="${key}"]`);
+    // the click's effect; and the focused field holds the drawer's redraws while the values go in
+    await soon(`document.activeElement === document.querySelector('input[data-reason="${key}"]')`, 'the correction form open');
     await p.ev(`(() => { document.querySelector('select[data-impact="${key}"]').value = '4'; document.querySelector('input[data-reason="${key}"]').value = 'the launch blocker'; })()`);
     await p.click(`[data-correct-send="${key}"]`);
+    // the press was taken: its note, or (once the server has it and a refresh redraws the drawer,
+    // which drops the note) the owner's own value's button
+    await soon(`!!document.querySelector('[data-correct-sent="${key}"]') || document.querySelector('[data-correct="${key}"]')?.textContent === 'Change it'`, 'Correction sent');
     await until(() => json(ok(old, ['goal', 'show', G])).impact.level === 4, 'the owner\'s value');
     assert.deepEqual([json(ok(old, ['goal', 'show', G])).impact.by, json(ok(old, ['goal', 'show', G])).impact.rationale], ['owner', 'the launch blocker']);
   } finally {

@@ -403,8 +403,24 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const pub = crypto.createPublicKey(gw.g.threadPublicKey());
     assert.equal(crypto.verify(null, signedBytes(P + 5), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), true, 'signed for this port and this body');
     assert.equal(crypto.verify(null, signedBytes(P), pub, Buffer.from(ph['x-devteam-gateway-sig'], 'base64url')), false, 'and for no other instance');
-    assert.equal(seen.filter((x) => x !== ph).every((x) => x['x-devteam-gateway-sig'] === undefined), true, 'nothing else an instance gets is signed');
     assert.equal((await gw.req('POST', '/api/pane-answer', { on: P + 5, body: press, cookie: '' })).status, 401, 'never without the session');
+    // the owner's Save on the Settings page is the other: signed under a name of its own, so a
+    // signature made for one route is never good for the other (kit-85)
+    const save = { key: 'max_active_tickets', value: 7 };
+    const os_ = await gw.req('POST', '/api/owner-setting', { on: P + 5, body: save, headers: { 'x-devteam-gateway-sig': 'forged', 'x-devteam-gateway-nonce': 'forged', 'x-devteam-gateway-ts': '1' } });
+    assert.equal(os_.status, 200);
+    const oh = seen.at(-1);
+    assert.match(oh['x-devteam-gateway-ts'], /^\d{13}$/);
+    assert.notEqual(oh['x-devteam-gateway-sig'], 'forged');
+    assert.notEqual(oh['x-devteam-gateway-nonce'], 'forged');
+    const savedBytes = (domain, port, hd) => Buffer.from(`${domain}\n${port}\n${hd['x-devteam-gateway-ts']}\n${hd['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(JSON.stringify(domain === 'devteam-pane-answer-v1' && hd === ph ? press : save)).digest('hex')}`);
+    const verifies = (bytes, hd) => crypto.verify(null, bytes, pub, Buffer.from(hd['x-devteam-gateway-sig'], 'base64url'));
+    assert.equal(verifies(savedBytes('devteam-owner-setting-v1', P + 5, oh), oh), true, 'signed for this port and this body');
+    assert.equal(verifies(savedBytes('devteam-owner-setting-v1', P, oh), oh), false, 'and for no other instance');
+    assert.equal(verifies(savedBytes('devteam-pane-answer-v1', P + 5, oh), oh), false, 'an owner-setting signature is no pane-answer one');
+    assert.equal(verifies(Buffer.from(`devteam-owner-setting-v1\n${P + 5}\n${ph['x-devteam-gateway-ts']}\n${ph['x-devteam-gateway-nonce']}\n${crypto.createHash('sha256').update(JSON.stringify(press)).digest('hex')}`), ph), false, 'nor the reverse');
+    assert.equal((await gw.req('POST', '/api/owner-setting', { on: P + 5, body: save, cookie: '' })).status, 401, 'never without the session');
+    assert.equal(seen.filter((x) => x !== ph && x !== oh).every((x) => x['x-devteam-gateway-sig'] === undefined), true, 'nothing else an instance gets is signed: only the pane answer and the owner\'s Save');
 
     // another site's page can't use the cookie for a read; a sandboxed review page's loads can
     const xs = (route, dest) => gw.req('GET', route, { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest } });
@@ -1819,6 +1835,49 @@ test('dropped files: the root must be the gateway\'s own; old ones go, and only 
   } finally { await gw.close(); }
 });
 
+// A phone has no wheel: the terminal's page turns a one-finger swipe into the wheel events xterm
+// passes to tmux, which scrolls; a two-finger touch is left alone.
+test('the terminal\'s page turns a swipe into wheel events on the terminal', async () => {
+  const gw = await signedIn('touch-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    const all = [...tp.body.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    const touch = all.find((x) => x.includes("addEventListener('touchmove'"));
+    assert.ok(touch, 'the page carries the swipe handler');
+    const on = {};
+    const wheels = [];
+    const screen = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 300, height: 600, bottom: 600 }), dispatchEvent: (e) => wheels.push(e) };
+    class WheelEvent { constructor(type, o) { Object.assign(this, o, { type }); } }
+    new Function('addEventListener', 'document', 'WheelEvent', touch)((ev, f) => { on[ev] = f; }, { querySelector: (q) => (q === '.xterm-screen' ? screen : null) }, WheelEvent);
+    let prevented = 0;
+    const touches = (...ys) => ({ touches: ys.map((clientY) => ({ clientY })), preventDefault: () => { prevented++; } });
+    on.touchstart(touches(400));
+    on.touchmove(touches(300));
+    assert.ok(wheels.length >= 5, `a 100px swipe up is several wheel steps (${wheels.length})`);
+    assert.ok(wheels.every((w) => w.type === 'wheel' && w.deltaY > 0), 'a finger moving up is wheel-down: toward newer output');
+    assert.ok(prevented > 0, 'the page itself does not scroll');
+    on.touchend();
+    // a finger moving down is wheel-up (older output), and a swipe ending on the bottom row, tmux's
+    // status bar, still scrolls where it touched down, never on the bar (a wheel there switches windows)
+    wheels.length = 0;
+    on.touchstart(touches(300));
+    on.touchmove(touches(599));
+    on.touchend();
+    assert.ok(wheels.length >= 5 && wheels.every((w) => w.deltaY < 0), 'a finger moving down scrolls back');
+    assert.ok(wheels.every((w) => w.clientY === 300), 'every step where the finger touched down');
+    wheels.length = 0;
+    on.touchstart(touches(599));
+    on.touchmove(touches(450));
+    assert.ok(wheels.length && wheels.every((w) => w.clientY <= 600 - 40), 'a swipe starting on the bar is kept off its rows');
+    on.touchend();
+    const before = wheels.length;
+    on.touchstart(touches(100, 200));
+    on.touchmove(touches(300, 400));
+    assert.equal(wheels.length, before, 'two fingers are left alone (pinch, select)');
+  } finally { await gw.close(); }
+});
+
 test('the terminal\'s page takes a drop, and pastes what a shell reads back unchanged', async () => {
   const hostile = ['/data/uploads/d/plain-name_1.png', '/a b/c', 'it\'s', '$(id)', '`id`', 'a"b', 'back\\slash', '-x', 'é'];
   for (const s of hostile) assert.equal(execFileSync('sh', ['-c', `printf %s ${G.shellQuote(s)}`], { encoding: 'utf8' }), s);
@@ -2106,12 +2165,38 @@ async function previewSetup(name, { hubDelay = 0 } = {}) {
 }
 const NAV = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none', accept: 'text/html' };
 const previewRow = (name, port, over = {}) => ({ name, port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false, ...over });
+// A dev server on the port the OS gives it at listen, its own ready signal: a port probed, closed and
+// bound later (freePort) is anyone's in between, on a runner busy with other suites. Never a port the
+// gateway refuses a preview by design (its terminal's, the hub's, the instance block).
+async function devServer(srv, S, host = '127.0.0.1') {
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(0, host, () => { srv.off('error', reject); resolve(); }); });
+    const { port } = srv.address();
+    if (port !== S.gw.ttydPort && port !== HUB && !(port >= P && port < P + 25)) return port;
+    await new Promise((r) => srv.close(r));
+  }
+  return assert.fail(`no dev port apart from the gateway's own (terminal ${S.gw.ttydPort}, hub ${HUB}, instances ${P}..${P + 24})`);
+}
+// What the ports were, and what the gateway's own page of previews says, for a failure's message.
+async function previewState(S, devPort) {
+  const dev = await S.gw.req('GET', '/dev/');
+  return `dev port ${devPort}, terminal ${S.gw.ttydPort}, hub ${HUB}, instances ${P}..${P + 24}; /dev/ ${dev.status}: ${dev.body.replace(/<(style|script)[\s\S]*?<\/\1>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 1500)}`;
+}
+// One request through the relay, after the poll, before anything is asserted: the app's own answer,
+// first time, with no second read of the hub (the map is the poll's). Never retried: a 503 here is the
+// failure under test, reported with the ports and the gateway's view instead of a bare status.
+async function previewReady(S, name, devPort, body) {
+  const hits = S.hub.hits;
+  const r = await S.req(name, 'GET', '/', { headers: { 'sec-fetch-mode': 'cors', accept: '*/*' } });
+  if (r.status === 200 && r.body === body && S.hub.hits === hits) return;
+  assert.fail(`${name}: ${r.status} ${JSON.stringify(r.body.slice(0, 200))} (hub read ${S.hub.hits - hits} more times); ${await previewState(S, devPort)}`);
+}
 
 test('a preview: the owner reaches the dev server on its own name, with localhost headers and nothing of the owner\'s', async () => {
   const S = await previewSetup('preview-proxy');
   const { gw, hub, instance, req, origin } = S;
   const seen = [];
-  const devPort = await freePort();
+  let devPort = 0;
   const dev = http.createServer((q, s) => {
     seen.push({ url: q.url, method: q.method, h: q.headers });
     const headers = { 'content-type': 'text/plain', 'x-frame-options': 'DENY', 'content-security-policy': `default-src http://127.0.0.1:${devPort}; connect-src ws://localhost:${devPort}`, 'set-cookie': ['a=1; Domain=box.localhost', 'b=2', `devteam_session=evil`] };
@@ -2120,7 +2205,7 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     s.writeHead(q.url === '/go' ? 302 : 200, headers);
     s.end('hello from the app');
   });
-  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  devPort = await devServer(dev, S);
   // an upstream instance, for the header on /api/data
   const inst = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'application/json' }); s.end('{}'); });
   await new Promise((r) => inst.listen(P + 2, '127.0.0.1', r));
@@ -2135,7 +2220,9 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     assert.equal((await req('never-heard', 'GET', '/', { cookie: '', headers: NAV })).status, 302);
     assert.equal((await req('never-heard', 'GET', '/x.js', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
     assert.equal(hub.hits, before, 'no anonymous request makes the gateway poll the hub');
-    // with the session
+    // with the session, once the poll has the name
+    await gw.g.pollPush();
+    await previewReady(S, 'cool-tiger', devPort, 'hello from the app');
     r = await req('cool-tiger', 'GET', '/page', { headers: { ...NAV, referer: `${site}/old`, 'x-forwarded-host': 'evil' }, cookie: `${gw.jar()}; app=1` });
     assert.equal(r.status, 200, r.body);
     assert.equal(r.body, 'hello from the app');
@@ -2172,7 +2259,8 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     if (onV6) {
       hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort), previewRow('cool-owl', v6Port)])];
       await gw.g.pollPush();
-      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}');
+      await previewReady(S, 'cool-owl', v6Port, 'v6:');
+      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}', `the body survives the retry on ::1 (port ${v6Port})`);
       v6.close();
       hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
       await gw.g.pollPush();
@@ -2287,7 +2375,12 @@ function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc'
       parse();
     });
     const send = (text) => { const mask = Buffer.from([1, 2, 3, 4]); const body = Buffer.from(text).map((b, i) => b ^ mask[i % 4]); sock.write(Buffer.concat([Buffer.from([0x81, 0x80 | body.length]), mask, body])); };
-    const next = () => new Promise((r) => { if (frames.length) return r(frames.shift()); waiters.push(() => r(frames.shift())); });
+    // a frame, or a failure after 5 s: a relay that drops frames fails here rather than hanging the file
+    const next = () => new Promise((r, reject) => {
+      if (frames.length) return r(frames.shift());
+      const t = setTimeout(() => reject(new Error('no frame came back within 5 s')), 5000);
+      waiters.push(() => { clearTimeout(t); r(frames.shift()); });
+    });
     sock.on('error', () => {});
     sock.on('close', () => { if (!handshaken) resolve({ status: 0 }); });
   });
@@ -2298,7 +2391,6 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
   const { gw, hub, instance, origin, on } = S;
   const seen = [];
   let upstreamClosed = 0;
-  const devPort = await freePort();
   const dev = http.createServer((q, s) => s.end('page'));
   dev.on('upgrade', (q, sock) => {
     seen.push({ url: q.url, h: q.headers });
@@ -2315,14 +2407,16 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
       sock.write(Buffer.concat([Buffer.from([0x81, len]), body]));
     });
   });
-  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const devPort = await devServer(dev, S);
   const site = origin('cool-tiger');
   const sockets = [];
+  let c = null;
   try {
     hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
     await gw.g.pollPush();
-    let c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
-    assert.equal(c.status, 101);
+    await previewReady(S, 'cool-tiger', devPort, 'page');
+    c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    if (c.status !== 101) assert.fail(`the first socket: ${c.status}; ${await previewState(S, devPort)}`);
     assert.doesNotMatch(c.head, /bad=1|devteam_session/i, 'the handshake\'s cookies get the same rule as any response');
     assert.match(c.head, /set-cookie: ok=1/i, 'a host-only cookie still passes');
     assert.doesNotMatch(c.head, /max-age=9/, 'and so do the other headers');
@@ -2351,7 +2445,7 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
     assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 503, 'ambiguous');
     // the terminal's socket is unchanged
     assert.equal((await wsClient(gw.port, `term.${S.box}`, { origin: gw.term, path: '/nope', cookie: gw.jar() })).status, 404);
-  } finally { for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
+  } finally { c?.close?.(); for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
 });
 
 test('/dev/ lists every preview on the box with its state, for the owner only, as a document', async () => {

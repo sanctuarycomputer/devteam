@@ -1,0 +1,9 @@
+# kit-275 plan review 2
+
+- Reviewer: fresh subagent (opus), not the author
+
+Read plan.md at a610581c, the plan diff `605a3836..a610581c`, spec.md (approved at 9ddaaf21) with its Rulings section (m-20261117-111118330-supervisor), `reviews/plan-1.md`, the ticket (`ticket show`: touches, done_when, notes), and `quality.md` §3 and §6. P1-1: T1 step 2 now runs all three reading files, matching the TL;DR's "three"; `browser-view-page.test.mjs:10` imports `check.mjs`, whose line 6 reads the schema at load, so it does throw ENOENT. P1-2: step 6 now carries check (a) verbatim from the spec, and the `--follow` check on the schema; `git log --follow` on the current path ends at 22a785a3 (kit-61), and on shell.md at c12f3520 (kit-83). P1-3: ran the new M3 `sed -i '/^  "browser": 1,$/d'` on a copy of `test/fixtures/browser/state.json` in a private `mktemp -d` dir: the line matches once, the diff is exactly `2d1 <   "browser": 1,` (11 lines to 10), and `JSON.parse` of the result succeeds with the other eight keys; the repo stayed clean (`git status --porcelain` empty). P1-4: `.github/workflows/box-image.yml:7` triggers on `docs/devteam/dashboard/hub.html` and `docs/devteam/schema/**`, and T2 step 3 now names it and records its conclusion. P1-5: the plan's Ruling line cites the ruling and says shell.md holds no copy of the block text; `git grep` confirms shell.md has no `docs/devteam/` path. Re-checked the whole plan against the spec: every file it edits is in touches; the four block lines (index.html 47/1168, hub.html 31/402) are rewritten with no bump, no kit-94 edge and no grep exemption, as the ruling says; every current `shell.md` hit outside `docs/devteam-dev/` is at a line the plan names, and the bare hits left in `test/dashboard-shell.test.mjs` (21, 92, 95, 98, 99) are the reader and labels the step 5 grep allows; the TL;DR matches the tasks. Ran no tests.
+
+No findings.
+
+Verdict: APPROVE a610581c44278586100ee735b5dc1ae15ded1307

@@ -28,7 +28,7 @@
   } }
   /* devteam-ui tokens end */
   /* devteam-layout start */
-  /* dashboard-shell@1 (docs/devteam/dashboard/shell.md): the layout both pages share, byte-identical in
+  /* dashboard-shell@1 (test/contracts/shell.md): the layout both pages share, byte-identical in
      index.html and hub.html. Tokens on :root. Every rule styles only inside a .shell element and outside
      any .no-shell region in it (:where(.shell) … :not(:where(.no-shell, .no-shell *))), at the specificity
      of its bare selector: nothing changes on a page until it adopts the shell, region by region. */
@@ -207,10 +207,6 @@
   .tab.gone { opacity: .45; }
   /* as the dashboard's nav shows its Inbox count */
   .badge { font-size: 11px; color: var(--red-fg); font-variant-numeric: tabular-nums; }
-  #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
-  #box-links { flex: 0 0 auto; padding-bottom: 7px; font-size: 12px; }
-  #box-links a { color: var(--fg-2); }
-  #box-links a + a { margin-left: 10px; }
   #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   #notify button.plain { color: inherit; border: 0; padding: 0; }
   main { flex: 1 1 auto; position: relative; }
@@ -219,65 +215,68 @@
   @media (max-width: 640px) { header { flex-wrap: wrap; } nav { order: 3; flex-basis: 100%; } }
   #drop-hint { position: fixed; left: 50%; top: 52px; transform: translateX(-50%); z-index: 10; padding: 8px 14px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
   #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
-  /* the Overview: a card per project, read at a glance */
-  #overview { position: absolute; inset: 0; overflow: auto; padding: 20px 16px 40px; }
+  /* the Overview: a card per project, read at a glance. On the shell (dashboard-shell@1, kit-94): the
+     block styles the page, the grid, the cards and their heads, the pills, dots and switches; what
+     follows is the hub's own. */
+  #overview { position: absolute; inset: 0; overflow: auto; }
   #overview[hidden] { display: none; }
-  .ov-head { max-width: 1200px; margin: 0 auto 16px; min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
-  .ov-head h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.01em; }
-  .ov-head .sum { color: var(--fg-2); }
-  .ov-grid { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; align-items: start; }
-  .ov-card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow); min-width: 0; overflow-wrap: anywhere; }
-  .ov-card.bad { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
-  .ov-card.warn { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
-  .ov-top { display: flex; align-items: center; gap: 8px; }
-  .ov-name { font: 600 15px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
-  .ov-name:hover { text-decoration: underline; }
-  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; background: var(--well); color: var(--fg-2); }
-  .pill::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-  .pill.green { color: var(--green-fg); background: color-mix(in srgb, var(--green) 14%, transparent); }
-  .pill.blue { color: var(--blue-fg); background: color-mix(in srgb, var(--blue) 12%, transparent); }
-  .pill.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 16%, transparent); }
-  .pill.red { color: var(--red-fg); background: color-mix(in srgb, var(--red) 12%, transparent); }
-  .ov-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  /* the hub's Settings: a view like the Overview, its rows in the project settings' format */
+  #settings-view { position: absolute; inset: 0; overflow: auto; }
+  #settings-view[hidden] { display: none; }
+  .set-row .t { flex: 1 1 auto; min-width: 0; }
+  .set-key { font: 11px var(--mono); color: var(--muted); margin-left: 6px; }
+  .set-row .r { margin-left: auto; text-align: right; max-width: 55%; min-width: 0; color: var(--fg-2); white-space: normal; overflow-wrap: anywhere; display: inline-flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; }
+  .set-row .r .amber { color: var(--amber-fg); }
+  .set-row .r a { color: var(--fg); }
+  .set-row .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; white-space: nowrap; }
+  .set-row .badge.amber { color: var(--amber-fg); background: color-mix(in srgb, var(--amber) 14%, transparent); }
+  .set-desc { font-size: 12px; color: var(--fg-2); margin: -2px 0 8px; max-width: var(--measure); }
+  #notify { color: var(--fg-2); }
+  @media (max-width: 700px) { .set-row { flex-wrap: wrap; } .set-row .t { flex-basis: 100%; white-space: normal; } .set-row .r { flex-basis: 100%; max-width: none; justify-content: flex-start; text-align: left; margin-top: 2px; } }
+  /* the machine switch is a little taller than the heading: it mustn't set the head's height, or the
+     heading drops below --page-top */
+  #ov-body > .ov-head > .acts { margin-block: -2px; align-items: center; }
+  #ov-body > .ov-head .acts a.set { color: var(--fg-2); font-size: 12px; text-decoration: none; margin-left: 4px; white-space: nowrap; }
+  #ov-body > .ov-head .acts a.set:hover, #ov-body > .ov-head .acts a.set:focus-visible { color: var(--fg); text-decoration: underline; }
+  #ov-body > .g12 { margin-top: 12px; }
+  .ov-card .ov-name { font: 600 14px/1.3 var(--sans); color: var(--fg); background: none; border: 0; padding: 0; cursor: pointer; text-align: left; }
+  .ov-card .ov-name:hover { text-decoration: underline; }
+  /* the name gives way last: the long pills shrink first */
+  .ov-card .card-head .ov-name { min-width: min(12ch, 40%); }
+  /* the head's pills: the status pill keeps its size; the two long ones shrink, their words truncating */
+  .ov-card .card-head .pill { flex: none; }
+  .ov-card .card-head .pill.shrink { flex: 0 12 auto; min-width: 0; overflow: hidden; }
+  .pill.shrink .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  a.pill { text-decoration: none; cursor: pointer; }
+  .ov-card .menu-btn { width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--fg-2); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .ov-card .menu-btn svg { width: 14px; height: 14px; fill: currentColor; }
+  .ov-card .menu-btn:hover { background: var(--hover); color: var(--fg); }
+  /* a fully blocked project (and any other red state): the blocked ticket card's treatment; its head's divider stays --line */
+  .ov-card.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .hub-why { margin: 0; color: var(--fg-2); font-size: 12.5px; }
+  .hub-body { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: flex-start; min-width: 0; }
+  .ov-stats { flex: 1 1 200px; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; }
   .ov-stat { display: flex; flex-direction: column; min-width: 0; }
   .ov-stat .k { color: var(--muted); font-size: 11px; }
-  .ov-stat .v { font: 500 14px/1.3 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ov-stat .v.red { color: var(--red-fg); }
+  .ov-stat .v { font: 500 13px/1.4 var(--sans); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ov-stat .v.amber { color: var(--amber-fg); }
-  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font: inherit; font: 500 14px/1.3 var(--sans); }
-  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; }
-  .ov-bar { display: flex; }
+  .ov-stat button.v { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; color: var(--fg); }
+  .ov-act { display: flex; flex-direction: column; gap: 4px; min-width: 0; max-width: 100%; overflow: hidden; }
+  .ov-act .k { color: var(--muted); font-size: 11px; }
+  .hub-goal { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 12px; font-size: 12.5px; min-width: 0; }
+  .hub-goal .gt { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1 1 160px; }
+  .hub-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .hub-goal .dim, .hub-goal .w { color: var(--fg-2); flex: none; }
+  .hub-goal .gp { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; flex: 1 1 220px; min-width: 0; }
+  .hub-goal .ov-bar { flex: 1 1 60px; min-width: 40px; }
+  .ov-bar { height: 6px; border-radius: 3px; background: var(--well); overflow: hidden; display: flex; }
   .ov-bar > span { display: block; height: 100%; background: var(--green); }
   .ov-bar > span.held { background: var(--amber); }
-  .ov-pills { display: flex; gap: 6px; flex: 0 0 auto; }
-  .ov-goal { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; min-width: 0; }
-  .ov-goal .k { color: var(--muted); font-size: 11px; flex: 0 0 auto; }
-  .ov-goal .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  .ov-goal .n { color: var(--fg-2); flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-  .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; flex: 0 0 auto; }
-  .seg button { font: 500 12px/1 var(--sans); color: var(--fg-2); background: none; border: 0; padding: 6px 10px; cursor: pointer; }
-  .seg button + button { border-left: 1px solid var(--line-2); }
-  .seg button:hover:not(:disabled) { background: var(--hover); color: var(--fg); }
-  .seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
-  .seg button.confirm { background: var(--red); color: #fff; }
-  .seg button:disabled { cursor: default; opacity: .6; }
-  .seg button[aria-pressed="true"]:disabled { opacity: 1; }
-  .ov-ctl { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-  .ov-ctl .msg { font-size: 12px; color: var(--fg-2); }
-  .ov-ctl .msg.err { color: var(--red-fg); }
-  .ov-head .acts { margin-left: auto; display: flex; gap: 8px; }
-  .ov-head .acts button { font: 500 12.5px/1 var(--sans); padding: 7px 12px; border-radius: 7px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); cursor: pointer; }
-  .ov-head .acts button:hover { background: var(--hover); }
-  .ov-head .acts button.confirm { background: var(--red); border-color: var(--red); color: #fff; }
-  .ov-head .ov-box { flex-basis: 100%; order: 1; color: var(--fg-2); }
-  .ov-box .amber { color: var(--amber-fg); }
-  .ov-prog { display: flex; flex-direction: column; gap: 4px; }
-  .ov-prog .k { color: var(--fg-2); font-size: 12px; }
-  .ov-att { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .ov-att { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
   .ov-att li { position: relative; padding-left: 14px; font-size: 12.5px; color: var(--fg); }
   .ov-att li::before { content: ''; position: absolute; left: 2px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); }
   .ov-att li.red::before { background: var(--red); }
-  .ov-ok { font-size: 12.5px; color: var(--fg-2); }
+  .ov-card > .foot { padding-top: 12px; }
   .ov-mosaic { display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, 9px); grid-auto-columns: 9px; gap: 2px; }
   .ov-mosaic i { border-radius: 2px; background: var(--well); }
   .ov-mosaic i.l1 { background: color-mix(in srgb, var(--green) 30%, var(--well)); }
@@ -285,10 +284,23 @@
   .ov-mosaic i.l3 { background: color-mix(in srgb, var(--green) 78%, var(--well)); }
   .ov-mosaic i.l4 { background: var(--green); }
   .ov-mosaic i.pad { background: none; }
-  .ov-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
-  .ov-foot .k { color: var(--muted); font-size: 11px; }
   .ov-none { color: var(--fg-2); font-size: 12.5px; }
-  @media (max-width: 640px) { .ov-stat .v { font-size: 13px; } #overview { padding: 14px 12px 32px; } .ov-grid { grid-template-columns: minmax(0, 1fr); } }
+  /* a project's tab: its state's dot, then its name, then the Inbox button's counts for it */
+  .tab .dot { margin-right: 1px; }
+  .tab-counts { display: inline-flex; align-items: baseline; gap: 4px; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tab-counts .dim { color: var(--muted); }
+  .tab-counts .n.q { color: var(--red-fg); }
+  .tab-counts .n.th.ok { color: var(--green-fg); }
+  .tab-counts .n.th.you { color: var(--blue-fg); }
+  .tab-counts .n.th.wait { color: var(--muted); }
+  /* a card's ⋯: a small menu, placed by the page */
+  .menu-pop { position: fixed; z-index: 45; min-width: 200px; max-width: calc(100vw - 16px); background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 4px; display: flex; flex-direction: column; }
+  .menu-pop .mi { padding: 6px 10px 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; font-size: 12px; display: grid; gap: 2px; }
+  .menu-pop .mi div { display: flex; justify-content: space-between; gap: 12px; }
+  .menu-pop .mi span { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .menu-pop .mi b { font-weight: 500; overflow-wrap: anywhere; text-align: right; }
+  .menu-pop button { all: unset; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
+  .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--hover); }
   /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
   #ov-body { min-width: 0; }
   #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
@@ -362,16 +374,16 @@
   @media (pointer: coarse) { #tl .btn { height: 36px; padding: 0 14px; } #tl .btn.x { width: 36px; padding: 0; } #tl .tl-pill { height: 40px; } }
 </style>
 </head>
-<body>
+<body class="shell">
 <header>
   <nav id="tabs" role="tablist" aria-label="devteam instances"></nav>
-  <span id="notify"></span>
-  <span id="box-links" hidden></span>
 </header>
-<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"><div id="ov-body"></div><div id="tl-pins" class="tl-pins"></div></section></main>
+<!-- the notifications control: kept here, shown in the hub's Settings (its New Inbox items row) -->
+<div id="hub-later" hidden><span id="notify"></span></div>
+<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p><section id="overview" hidden aria-label="Overview of every project"><div id="ov-body" class="page"></div><div id="tl-pins" class="tl-pins"></div></section><section id="settings-view" hidden aria-label="This machine's settings"><div id="hub-settings" class="page"></div></section></main>
 <div id="drop-hint" hidden></div>
 <!-- the thread layer: outside what the Overview redraws every 10 s (the pins are in its box, beside it) -->
-<div id="tl" hidden>
+<div id="tl" class="no-shell" hidden>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
@@ -387,7 +399,7 @@
 </div>
 <script>
 /* devteam-shell-js start */
-// dashboard-shell@1 (docs/devteam/dashboard/shell.md): the builders, binders and URL rules both
+// dashboard-shell@1 (test/contracts/shell.md): the builders, binders and URL rules both
 // pages share. Byte-identical in index.html and hub.html; it touches no DOM until a binder is
 // called and uses no page global, so test/dashboard-shell.test.mjs runs it in vm.
 const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -685,7 +697,7 @@ async function hexOf(root) {
 }
 function keyOf(it) {
   const twins = [...items.values()].filter((o) => o.x.name === it.x.name).length > 1;
-  return twins ? `${it.x.name}-${hex6.get(it.x.root)}` : String(it.x.name);
+  return hubKey(it.x.name, twins, hex6.get(it.x.root));
 }
 // Each dashboard is on its own address: on the machine, its own port on 127.0.0.1. On a cloud box
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
@@ -699,13 +711,20 @@ const OVERVIEW = '\u0000overview';
 const ovEl = $('overview');
 const ovBody = $('ov-body');
 let ovTab = null;
+// the hub's Settings: a view with no tab, opened from the Overview's link (#settings)
+const SETTINGS = '\u0000settings';
+const setEl = $('settings-view');
 const byRoot = (a, b) => String(a).localeCompare(String(b));
 const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
 
 // Whatever is selected, only its own view shows: the Overview, the terminal or one dashboard.
 function showOnly(key) {
-  if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW ? 0 : -1; }
+  // a card's ⋯ menu belongs to the Overview
+  closeMenu();
+  // under Settings no tab is selected, but the Overview tab stays in the tab order: the keyboard's way back
+  if (ovTab) { ovTab.setAttribute('aria-selected', String(key === OVERVIEW)); ovTab.tabIndex = key === OVERVIEW || key === SETTINGS ? 0 : -1; }
   ovEl.hidden = key !== OVERVIEW;
+  setEl.hidden = key !== SETTINGS;
   // the thread layer is the Overview's: its dock, its pins and its polls go with it
   $('tl').hidden = key !== OVERVIEW;
   if (key !== OVERVIEW) tlLeave();
@@ -723,6 +742,12 @@ function selectOverview() {
   paintOverview();
   tlRefresh();
 }
+function selectSettings() {
+  selected = SETTINGS;
+  history.replaceState(null, '', '#settings');
+  showOnly(SETTINGS);
+  paintSettings();
+}
 function selectTerminal() {
   if (!term) return;
   selected = TERM;
@@ -730,6 +755,7 @@ function selectTerminal() {
   if (!term.frame) {
     term.frame = document.createElement('iframe');
     term.frame.title = 'Terminal';
+    term.frame.className = 'no-shell';
     term.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
     term.frame.setAttribute('allow', 'clipboard-read; clipboard-write');
     term.frame.src = box.terminal;
@@ -741,6 +767,7 @@ function selectTerminal() {
 function select(root) {
   if (root === TERM) return selectTerminal();
   if (root === OVERVIEW) return selectOverview();
+  if (root === SETTINGS) return selectSettings();
   const it = items.get(root);
   if (!it) return;
   selected = root;
@@ -754,6 +781,7 @@ function frameFor(it) {
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
+    it.frame.className = 'no-shell';
     it.frame.hidden = selected !== it.x.root;
     // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
     // never navigates this page, whatever answers in the block. A nested frame can't gain what this
@@ -860,10 +888,6 @@ function mosaic(days, commits = false) {
   box.setAttribute('aria-label', `Activity over the last ${Math.round(n / 7)} weeks: ${active} active days`);
   return box;
 }
-// A press that needs a second press to confirm (Park, Park all): remembered across redraws, 5 s.
-const confirming = new Map(); // key -> until
-const confirmed = (key) => { const until = confirming.get(key) ?? 0; if (until > Date.now()) { confirming.delete(key); return true; } confirming.set(key, Date.now() + 5000); setTimeout(paintOverview, 5100); paintOverview(); return false; };
-const isConfirming = (key) => (confirming.get(key) ?? 0) > Date.now();
 const modeOf = (it) => {
   const said = ['park', 'drain'].includes(it.x.fleet?.mode) ? it.x.fleet.mode : 'run';
   const set = fleetSet.get(it.x.root);
@@ -874,107 +898,224 @@ const modeOf = (it) => {
 };
 // what the Overview can steer: a dashboard answering, on a kit that sends a pulse
 const steerable = (it) => !it.goneAt && Boolean(it.x.pulse);
-function fleetControl(it) {
-  const root = it.x.root;
-  const ctl = el('div', 'ov-ctl');
-  const seg = el('div', 'seg');
-  seg.setAttribute('role', 'group');
-  seg.setAttribute('aria-label', `${it.x.name}: run, drain or park`);
-  const busy = fleetBusy.get(root);
-  const now = modeOf(it);
-  const opts = [['run', 'Run', 'Workers start and continue tickets'], ['drain', 'Drain', 'Workers finish what they have; nothing new starts'], ['park', 'Park', 'Every session stops where it is']];
-  for (const [mode, label, why] of opts) {
-    const key = `${root}:${mode}`;
-    const b = el('button', isConfirming(key) ? 'confirm' : '', isConfirming(key) ? 'Confirm park' : label);
-    b.dataset.k = key;
-    b.title = why;
-    b.setAttribute('aria-pressed', String(now === mode));
-    b.disabled = Boolean(busy?.asking) || now === mode;
-    b.onclick = () => { if (mode === 'park' && !confirmed(key)) return; setFleet([root], mode); };
-    seg.append(b);
-  }
-  pinOn(ctl, 'fleet', `Fleet: ${now}`);
-  ctl.append(seg);
-  if (busy?.asking) ctl.append(el('span', 'msg', busy.asking));
-  else if (busy?.error) ctl.append(el('span', 'msg err', busy.error));
-  return ctl;
+// The fleet switches (dashboard-shell@1's fleetSwitch, bound with bindFleetSwitch): one a card,
+// keyed by its root, and the machine's in the header, keyed 'machine'. What each is doing outlives
+// the redraws: a confirm waiting for its second press (5 s), what it is asking, its last error.
+const sw = new Map(); // key -> { confirming: 'park'|'run'|null, until, busy, error }
+function swGet(key) {
+  const s_ = sw.get(key) ?? { confirming: null, until: 0, busy: null, error: null };
+  return s_.confirming && s_.until <= Date.now() ? { ...s_, confirming: null } : s_;
 }
+function swSet(key, patch) {
+  const next = { ...swGet(key), ...patch };
+  if ('confirming' in patch && patch.confirming) { next.until = Date.now() + 5000; setTimeout(paintOverview, 5100); }
+  sw.set(key, next);
+  paintOverview();
+}
+// Run, Drain or Park for a card's project, or for every project the machine's press would change
+async function post(key, m) {
+  const can = [...items.values()].filter(steerable);
+  const roots = key === 'machine' ? can.filter((it) => (m === 'run' ? modeOf(it) !== 'run' : m === 'drain' ? modeOf(it) === 'run' : modeOf(it) !== 'park')).map((it) => it.x.root) : [key];
+  if (!roots.length) return void swSet(key, { confirming: null });
+  const verb = { park: 'Parking', drain: 'Draining', run: 'Resuming' }[m];
+  swSet(key, { confirming: null, busy: key === 'machine' ? `${verb} ${plural(roots.length, 'project')}…` : `${verb}…`, error: null });
+  await setFleet(roots, m);
+  const failed = roots.find((r) => fleetBusy.get(r)?.error);
+  const why = failed ? fleetBusy.get(failed).error : null;
+  swSet(key, { busy: null, error: !failed ? null : key === 'machine' ? `${items.get(failed)?.x.name ?? failed}: ${why}` : why });
+}
+// a switch, drawn by the shell's builder; its buttons named for the redraw's focus, Run asking
+// first on a project partly held (it runs every goal)
+function switchEl(key, { scope, mode, counts, runConfirm = false }) {
+  const s_ = swGet(key);
+  const fb = scope === 'row' ? fleetBusy.get(key) : null;
+  const div = el('div', 'sw');
+  div.innerHTML = fleetSwitch({ scope, mode, counts, confirming: s_.confirming === 'park', busy: s_.busy ?? fb?.asking ?? null, error: s_.error ?? fb?.error ?? null });
+  for (const b of div.querySelectorAll('[data-fleet]')) b.dataset.k = `${key}:${b.dataset.fleet}`;
+  if (s_.confirming === 'run' && runConfirm) {
+    const b = div.querySelector('[data-fleet=run]');
+    b.textContent = 'Run every goal?';
+    b.classList.add('confirm');
+    b.dataset.confirm = '1';
+    div.querySelector('.fleet-switch').dataset.confirming = '1';
+  }
+  bindFleetSwitch(div, {
+    onPress: (m) => {
+      // a new press: the last error (this switch's, or a machine op's on this card) goes
+      if (fleetBusy.get(key)?.error) fleetBusy.delete(key);
+      // Run on a partly held project asks first even when it runs (it runs every goal); any other press of the mode it is in does nothing
+      if (m === 'run' && runConfirm) return swSet(key, { confirming: 'run', error: null });
+      if (m === mode) return;
+      if (m === 'park') return swSet(key, { confirming: 'park', error: null });
+      post(key, m);
+    },
+    onConfirm: (m) => { sw.set(key, { ...swGet(key), confirming: null }); post(key, m); },
+    onCancel: () => swSet(key, { confirming: null }),
+  });
+  return div;
+}
+// a project's counts, as its tab and its Inbox stat show them: red questions, then its threads in
+// their most pressing state's colour (tabCounts); on the stat, 0 when there are none
+function countsEl(x, stat = false) {
+  const { q, th } = tabCounts(x.inbox, x.threads);
+  if (!q && !th) return stat ? document.createTextNode('0') : null;
+  const c = el('span', 'tab-counts');
+  if (q) { const n = el('span', 'n q', q); n.title = plural(q, 'open question'); c.append(n); }
+  if (q && th) c.append(el('span', 'dim', '·'));
+  if (th) { const n = el('span', `n th ${th.tone}`, th.n); n.title = th.title; c.append(n); }
+  // the numbers' words, for a screen reader
+  c.setAttribute('role', 'img');
+  c.setAttribute('aria-label', [q ? plural(q, 'open question') : '', th ? th.title : ''].filter(Boolean).join(', '));
+  return c;
+}
+// that project's dashboard, at a place in it: its frame pointed there, its tab chosen
+function openAt(root, hash) {
+  const it = items.get(root);
+  if (!it) return;
+  frameFor(it).src = `${urlOf(it.x)}${hash}`;
+  select(root);
+}
+// a card's ⋯: its root and port, and two ways to open its dashboard
+let menuPop = null;
+// closed, the keyboard goes back to the ⋯ it came from (Escape), found by its data-k after a redraw
+function closeMenu(back = false) {
+  if (!menuPop) return;
+  const root = menuPop.dataset.root;
+  menuPop.remove();
+  menuPop = null;
+  if (back) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${root}:menu`)?.focus({ preventScroll: true });
+}
+function cardMenu(btn, it) {
+  const again = menuPop?.dataset.root === it.x.root;
+  closeMenu();
+  if (again) return;
+  const m = el('div', 'menu-pop');
+  m.dataset.root = it.x.root;
+  m.setAttribute('role', 'menu');
+  const mi = el('div', 'mi');
+  for (const [k, v] of [['root', it.x.root], ['port', Number(it.x.port)]]) { const d = el('div'); d.append(el('span', '', k), el('b', '', v)); mi.append(d); }
+  const open = el('button', '', 'Open its dashboard');
+  open.onclick = () => { closeMenu(); select(it.x.root); };
+  const tab = el('button', '', 'Open in a new tab');
+  tab.onclick = () => { closeMenu(); window.open(urlOf(it.x), '_blank', 'noopener'); };
+  for (const b of [open, tab]) { b.type = 'button'; b.setAttribute('role', 'menuitem'); }
+  m.append(mi, open, tab);
+  document.body.append(m);
+  menuPop = m;
+  const r = btn.getBoundingClientRect();
+  m.style.top = `${Math.round(r.bottom + 4)}px`;
+  m.style.left = `${Math.round(Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)))}px`;
+  open.focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && menuPop) closeMenu(true); });
+window.addEventListener('pointerdown', (e) => { if (menuPop && !menuPop.contains(e.target) && !e.target.closest?.('.menu-btn')) closeMenu(); }, true);
 function overviewCard(it, newest) {
   const { x } = it;
   const p = x.pulse ?? null;
   const st = stateOf(it);
   const S = STATES[st];
-  const card = el('article', `ov-card${S.tone === 'red' ? ' bad' : S.tone === 'amber' ? ' warn' : ''}`);
+  const card = el('article', `c6 card ov-card click${S.tone === 'red' ? ' blocked' : ''}`);
   card.dataset.root = x.root;
   pinOn(card, 'card', `${x.name}: ${S.label}`);
-  const top = el('div', 'ov-top');
-  const name = el('button', 'ov-name', x.name);
+  // the standard head: the name, Partly blocked and the partly-held pill when they apply, the status pill, ⋯
+  const head = el('div', 'card-head');
+  const name = el('button', 'ov-name grow', x.name);
+  name.type = 'button';
   name.dataset.k = `${x.root}:name`;
-  name.title = `Open ${x.name}'s dashboard\n${x.root}`;
+  name.title = `Open ${x.name}'s dashboard`;
   name.onclick = () => select(x.root);
-  pinOn(name, 'name', x.name);
-  const pills = el('span', 'ov-pills');
+  head.append(pinOn(name, 'name', x.name));
   // partly blocked is beside what the project is doing: it is still doing it
-  if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber', 'Partly blocked'); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; pills.append(pb); }
-  pills.append(pinOn(el('span', `pill ${S.tone}`, S.label), 'state', S.label));
-  top.append(name, pills);
-  card.append(top);
+  if (p?.blocking === 'partial' && st !== 'blocked') { const pb = el('span', 'pill amber shrink'); pb.append(el('span', 't', 'Partly blocked')); pb.title = `${p.blocked_tickets} of ${p.open_tickets} open tickets wait on your answers`; head.append(pb); }
+  const held = heldPill(x.fleet);
+  if (held) {
+    const a = el('a', 'pill amber shrink held-pill');
+    a.href = '#';
+    a.dataset.k = `${x.root}:held`;
+    a.title = held.title;
+    a.append(el('span', 't', held.text));
+    a.onclick = (e) => { e.preventDefault(); openAt(x.root, '#goals'); };
+    head.append(a);
+  }
+  head.append(pinOn(el('span', `pill ${S.tone}`, S.label), 'state', S.label));
+  const more = el('button', 'end menu-btn');
+  // three dots, drawn: no font has to carry a glyph for them
+  const dots = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  dots.setAttribute('viewBox', '0 0 16 16');
+  dots.setAttribute('aria-hidden', 'true');
+  for (const cx of [3, 8, 13]) { const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle'); c.setAttribute('cx', String(cx)); c.setAttribute('cy', '8'); c.setAttribute('r', '1.5'); dots.append(c); }
+  more.append(dots);
+  more.type = 'button';
+  more.dataset.k = `${x.root}:menu`;
+  more.setAttribute('aria-label', 'More');
+  more.setAttribute('aria-haspopup', 'menu');
+  more.onclick = () => cardMenu(more, it);
+  head.append(more);
+  card.append(head);
 
+  // a dashboard answering on a kit that sends no pulse: an older kit
+  if (!p && !it.goneAt && typeof x.inbox === 'number') { card.append(el('p', 'hub-why', 'Update its kit to see what it is doing')); return card; }
+  const body = el('div', 'hub-body');
   const stats = el('div', 'ov-stats');
-  const stat = (part, k, v, cls = '', onclick = null) => { const s_ = pinOn(el('div', 'ov-stat'), part, `${k} ${v}`); s_.append(el('span', 'k', k)); const vv = el(onclick ? 'button' : 'span', `v ${cls}`.trim(), v); if (onclick) { vv.onclick = onclick; vv.dataset.k = `${x.root}:inbox`; vv.title = `Open ${x.name}'s dashboard, where its Inbox is`; } s_.append(vv); stats.append(s_); };
+  const stat = (part, k, v, cls = '') => { const s_ = pinOn(el('div', 'ov-stat'), part, `${k} ${typeof v === 'string' || typeof v === 'number' ? v : v.textContent}`); s_.append(el('span', 'k', k)); const vv = typeof v === 'object' ? v : el('span', `v ${cls}`.trim(), v); s_.append(vv); stats.append(s_); return s_; };
   const kit = x.kit ?? '?';
   const nums = relNums(kit);
   const behind = newest && nums && relCmp(nums, newest) < 0;
-  stat('kit', 'Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
-  if (behind) stats.lastChild.title = `Behind the newest kit here (v${newest.join('.')})`;
-  else if (/\+local$/.test(String(kit))) stats.lastChild.title = 'This release, with local changes to the kit';
-  const inbox = typeof x.inbox === 'number' ? x.inbox : null;
-  stat('inbox', 'Inbox', inbox ?? '–', inbox ? 'red' : '', inbox ? () => select(x.root) : null);
+  const ks = stat('kit', 'Kit', String(kit).replace(/\+local$/, '+'), behind ? 'amber' : '');
+  if (behind) ks.title = `Behind the newest kit here (v${newest.join('.')})`;
+  else if (/\+local$/.test(String(kit))) ks.title = 'This release, with local changes to the kit';
+  const inbox = el('button', 'v');
+  inbox.type = 'button';
+  inbox.dataset.k = `${x.root}:inbox`;
+  inbox.title = `Open ${x.name}'s Inbox`;
+  inbox.append(typeof x.inbox === 'number' ? countsEl(x, true) : document.createTextNode('–'));
+  inbox.onclick = () => openAt(x.root, '#overview?th=inbox');
+  stat('inbox', 'Inbox', inbox);
   stat('working', 'Working', p ? p.working : x.fleet ? x.fleet.workers : '–');
   stat('moved', 'Last moved', p ? agoText(p.last_activity) : '–');
-  card.append(stats);
+  body.append(stats);
+  if (Array.isArray(p?.activity) && p.activity.length) {
+    const act = pinOn(el('div', 'ov-act'), 'activity', 'Activity');
+    act.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
+    body.append(act);
+  }
+  card.append(body);
 
-  if (p?.goal) {
-    const g = pinOn(el('div', 'ov-goal'), 'goal', `Goal: ${p.goal.title}`);
-    const more = (Number(p.goals_open) || 1) - 1;
-    g.append(el('span', 'k', 'Goal'), el('span', 't', p.goal.title), el('span', 'n', `${p.goal.total ? `${p.goal.done} of ${p.goal.total}` : 'not planned yet'}${more > 0 ? ` · +${more} more` : ''}`));
-    g.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
-    card.append(g);
-  } else if (p && p.goals_open === 0 && st !== 'idle') { const g = el('div', 'ov-goal'); g.append(el('span', 'k', 'Goal'), el('span', 'n', 'none approved yet')); card.append(g); }
-
-  if (p) {
-    const total = p.open_tickets + p.done_tickets;
-    const prog = el('div', 'ov-prog');
-    const heldN = Math.max(0, Number(p.blocked_tickets) || 0);
-    pinOn(prog, 'progress', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged` : 'No tickets planned yet');
-    prog.append(el('span', 'k', total ? `${p.done_tickets} of ${plural(total, 'ticket')} merged${heldN ? `, ${heldN} waiting on you` : ''}` : 'No tickets planned yet'));
-    const bar = el('div', 'ov-bar');
+  // the top goal, +N more, and its merged bar: merged in green, waiting on the owner in amber
+  if (p && !it.goneAt) {
+    const g = el('div', 'hub-goal');
+    const gt = pinOn(el('span', 'gt'), 'goal', p.goal ? `Goal: ${p.goal.title}` : 'No goal approved yet');
+    gt.append(el('span', 't', p.goal ? p.goal.title : 'No goal approved yet'));
+    const moreN = (Number(p.goals_open) || 0) - 1;
+    if (p.goal && moreN > 0) gt.append(el('span', 'dim', `+${moreN} more`));
+    if (p.goal) gt.title = `${p.goal.title}\nthe approved goal first in priority${p.goal.mode && p.goal.mode !== 'run' ? ` (${p.goal.mode === 'park' ? 'parked' : 'draining'})` : ''}`;
+    const done = Math.max(0, Number(p.done_tickets) || 0), total = done + Math.max(0, Number(p.open_tickets) || 0), heldN = Math.max(0, Number(p.blocked_tickets) || 0);
+    const words = total ? `${done} of ${total} merged${heldN ? ` · ${heldN} waiting on you` : ''}` : 'No tickets planned yet';
+    const gp = pinOn(el('span', 'gp'), 'progress', words);
+    const bar = el('span', 'ov-bar');
     const fill = el('span');
-    fill.style.width = `${total ? (p.done_tickets / total) * 100 : 0}%`;
+    fill.style.width = `${total ? (done / total) * 100 : 0}%`;
     bar.append(fill);
     if (heldN && total) { const h = el('span', 'held'); h.style.width = `${(heldN / total) * 100}%`; h.title = `${plural(heldN, 'ticket')} waiting on your answers`; bar.append(h); }
     bar.setAttribute('role', 'progressbar');
     bar.setAttribute('aria-valuemin', '0');
     bar.setAttribute('aria-valuemax', String(total));
-    bar.setAttribute('aria-valuenow', String(p.done_tickets));
-    prog.append(bar);
-    card.append(prog);
+    bar.setAttribute('aria-valuenow', String(done));
+    gp.append(bar, el('span', 'w', words));
+    g.append(gt, gp);
+    card.append(g);
   }
 
-  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: 'Its dashboard stopped answering', red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
+  // what needs the owner: its alert, a dashboard that stopped answering, the pulse's lines
+  const notes = [...(x.alert ? [{ t: String(x.alert), red: true }] : []), ...(it.goneAt ? [{ t: `Its dashboard stopped answering at ${new Date(it.goneAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`, red: true }] : []), ...((Array.isArray(p?.attention) ? p.attention : []).map((t) => ({ t: String(t), red: (st === 'stalled' && /moved/.test(t)) || /^Fully blocked/.test(t) })))];
   if (notes.length) {
     const ul = el('ul', 'ov-att');
     for (const n of notes.slice(0, 5)) ul.append(pinOn(el('li', n.red ? 'red' : '', n.t), 'attention', tLine(n.t, 200)));
     card.append(ul);
-  } else if (p) card.append(el('div', 'ov-ok', st === 'idle' ? 'Nothing open. Waiting for a new goal.' : inbox ? 'Moving without you. The questions can wait.' : 'Nothing needs you.'));
-  else if (!it.goneAt && inbox !== null) card.append(el('div', 'ov-none', 'Update its kit to see what it is doing and how far along it is.'));
-
-  if (Array.isArray(p?.activity) && p.activity.length) {
-    const foot = pinOn(el('div', 'ov-foot'), 'activity', 'Activity');
-    foot.append(mosaic(p.activity.slice(-371).map((n) => Math.max(0, Number(n) || 0)), p.activity_of === 'commits'), el('span', 'k', `${p.activity_of === 'commits' ? 'Commits, ' : ''}${Math.round(Math.min(371, p.activity.length) / 7)} weeks`));
-    card.append(foot);
   }
-  if (steerable(it)) card.append(fleetControl(it));
+  const foot = el('div', 'foot');
+  if (steerable(it)) { const m = modeOf(it); foot.append(pinOn(switchEl(x.root, { scope: 'row', mode: m, runConfirm: Boolean(held) }), 'fleet', `Fleet: ${m}`)); }
+  card.append(foot);
   return card;
 }
 /* box-line start */
@@ -998,43 +1139,168 @@ function boxLine(image, list) {
   return [{ text: `Box ${release}`, amber: false }, hub, ...tools.filter(([n, v]) => tok(n) && tok(v)).map(([n, v]) => ({ text: `${Object.hasOwn(TOOL_WORDS, n) ? TOOL_WORDS[n] : n} ${v}`, amber: false }))];
 }
 /* box-line end */
+/* hub-overview start */
+// The Overview's rules (kit-94), pure: what a project's tab and Inbox stat count, the partly-held
+// pill, the machine switch's mode, and the address keys no view loses. They read only what they are
+// given (and tLine), so test/hub-overview.test.mjs runs them in vm.
+const wholeN = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+// red questions, then the threads in their most pressing state's colour: ready to accept (with the
+// owner's moves) green, else the owner's moves blue, else those waiting on the supervisor grey
+function tabCounts(inbox, threads) {
+  const q = Number.isInteger(inbox) && inbox > 0 ? inbox : 0;
+  const t = threads && typeof threads === 'object' ? threads : {};
+  const you = wholeN(t.you), waiting = wholeN(t.waiting), ready = wholeN(t.ready);
+  const th = ready ? { n: ready + you, tone: 'ok', title: `${ready} ready to accept${you ? `, ${you} your move` : ''}` }
+    : you ? { n: you, tone: 'you', title: `${you} your move` }
+    : waiting ? { n: waiting, tone: 'wait', title: 'all waiting on the supervisor' } : null;
+  return { q, th };
+}
+// a fleet whose goals are mixed (at least two of run, drain, park): "Partly parked · 2 of 11 goals
+// running"; its hover names the held goals when the hello does (fleet.goals.held), else the counts
+function heldPill(fleet) {
+  const g = fleet && typeof fleet === 'object' ? fleet.goals : null;
+  if (!g || typeof g !== 'object') return null;
+  const { run, drain, park } = g;
+  if (![run, drain, park].every((n) => Number.isInteger(n) && n >= 0)) return null;
+  const total = run + drain + park;
+  if (!total || [run, drain, park].filter(Boolean).length < 2) return null;
+  const word = park ? 'Partly parked' : 'Partly draining';
+  const named = Array.isArray(g.held) ? g.held.filter((h) => h && typeof h === 'object' && typeof h.title === 'string').slice(0, 20).map((h) => `${tLine(h.title, 200)}: ${tLine(typeof h.why === 'string' && h.why ? h.why : typeof h.mode === 'string' && h.mode ? h.mode : 'held', 200)}`) : [];
+  return { word, running: run, total, text: `${word} · ${run} of ${total} goals running`, title: named.length ? named.join('\n') : `${park} parked, ${drain} draining` };
+}
+// the machine switch: the mode every steerable project shares, or mixed; and the three tallies
+function machineMode(modes) {
+  const counts = { running: 0, draining: 0, parked: 0 };
+  const ms = modes.filter((m) => ['run', 'drain', 'park'].includes(m));
+  for (const m of ms) counts[{ run: 'running', drain: 'draining', park: 'parked' }[m]]++;
+  const mode = !ms.length ? null : ms.every((m) => m === ms[0]) ? ms[0] : 'mixed';
+  return { mode, counts };
+}
+// a project's address: its name, with 6 hex of its root when two share it or the name is a view's
+const HUB_VIEWS = ['overview', 'terminal', 'settings'];
+const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) ? `${name}-${hex}` : String(name));
+/* hub-overview end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
+  // the redraw closes an open ⋯ menu; the keyboard, if it was in the menu, goes back to its ⋯ below
+  const fromMenu = menuPop?.contains(document.activeElement) ? menuPop.dataset.root : null;
+  closeMenu();
   const all = [...items.values()];
   const newest = all.map((it) => relNums(it.x.kit)).filter(Boolean).sort(relCmp).pop() ?? null;
   // what needs the owner first: stalled and gone, then waiting, then the rest by name
   all.sort((a, b) => STATES[stateOf(a)].rank - STATES[stateOf(b)].rank || String(a.x.name).localeCompare(String(b.x.name)));
-  const count = (s_) => all.filter((it) => stateOf(it) === s_).length;
-  const owed = all.reduce((n, it) => n + (typeof it.x.inbox === 'number' ? it.x.inbox : 0), 0);
-  const stuck = count('stalled') + count('gone');
-  const full = count('blocked') + count('waiting');
-  const partly = all.filter((it) => it.x.pulse?.blocking === 'partial' && stateOf(it) !== 'blocked').length;
+  const count = (...ss) => all.filter((it) => ss.includes(stateOf(it))).length;
+  // the header: this machine, and the summary
   const head = el('div', 'ov-head');
-  head.append(pinOn(el('h1', '', !all.length ? 'No projects running' : full ? `${plural(full, 'project')} fully blocked on you` : stuck ? `${plural(stuck, 'project')} ${stuck === 1 ? 'needs' : 'need'} a look` : all.every((it) => ['parked', 'idle'].includes(stateOf(it))) ? (count('parked') ? 'Everything is parked or idle' : 'Everything is idle') : 'Everything is moving'), 'headline'));
-  const parts = [plural(all.length, 'project'), count('building') + count('moving') ? `${count('building') + count('moving')} moving` : null, partly ? `${partly} partly blocked` : null, full && stuck ? `${stuck} stalled` : null, count('parked') ? `${count('parked')} parked` : null, owed ? `${plural(owed, 'answer')} owed` : null].filter(Boolean);
+  head.append(pinOn(el('h2', '', 'This machine'), 'headline'));
+  const parts = !all.length ? ['No projects running'] : [plural(all.length, 'project'), ...[[count('building', 'moving', 'unknown'), 'moving'], [count('waiting'), 'waiting on you'], [count('blocked', 'stalled', 'gone'), 'blocked'], [count('parked'), 'parked']].filter(([n]) => n).map(([n, w]) => `${n} ${w}`)];
   head.append(pinOn(el('span', 'sum', parts.join(' · ')), 'summary'));
-  // the box's image and who serves its hub, on a row of its own under the rest
-  const bl = boxLine(box?.image ?? null, hubSeen);
-  if (bl) { const d = el('div', 'ov-box'); bl.forEach((x, i) => { if (i) d.append(' · '); d.append(el('span', x.amber ? 'amber' : '', x.text)); }); head.append(d); }
-  // every fleet at once: Park all (confirmed), and Resume all while any is held
+  // every fleet at once: the machine's switch, then the way into the hub's Settings
   const can = all.filter(steerable);
   const acts = el('div', 'acts');
-  const held_ = can.filter((it) => modeOf(it) !== 'run');
-  const running = can.filter((it) => modeOf(it) !== 'park');
-  const anyBusy = can.some((it) => fleetBusy.get(it.x.root)?.asking);
-  if (held_.length) { const b = el('button', '', `Resume all (${held_.length})`); b.dataset.k = 'all:run'; b.title = 'Undo every park and drain'; b.disabled = anyBusy; b.onclick = () => setFleet(held_.map((it) => it.x.root), 'run'); acts.append(b); }
-  if (running.length) { const b = el('button', isConfirming('all:park') ? 'confirm' : '', isConfirming('all:park') ? `Confirm: park ${plural(running.length, 'project')}` : 'Park all'); b.dataset.k = 'all:park'; b.title = 'Stop every session in every project where it is'; b.disabled = anyBusy; b.onclick = () => { if (confirmed('all:park')) setFleet(running.map((it) => it.x.root), 'park'); }; acts.append(b); }
-  if (acts.childElementCount) head.append(acts);
-  const grid = el('div', 'ov-grid');
+  const set = el('a', 'set', 'Settings');
+  set.href = '#settings';
+  set.dataset.k = 'overview:settings';
+  // beside the machine switch, inside it (the block styles it there); alone when there is none
+  if (can.length) { const mm = machineMode(can.map(modeOf)); const m = switchEl('machine', { scope: 'machine', mode: mm.mode, counts: mm.counts }); m.querySelector('.fleet-switch').append(set); acts.append(m); } else acts.append(set);
+  head.append(acts);
+  // a card per project, two to a row
+  const grid = el('div', 'g12');
   // one answer in the block that isn't shaped like a hello costs its own card, not the page
-  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'ov-card bad'); c.dataset.root = it.x.root; pinOn(c, 'card', `${it.x.name}: can't be read`); c.append(el('div', 'ov-name', it.x.name), el('div', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
+  for (const it of all) { try { grid.append(overviewCard(it, newest)); } catch { const c = el('article', 'c6 card ov-card blocked'); c.dataset.root = it.x.root; pinOn(c, 'card', `${it.x.name}: can't be read`); const h = el('div', 'card-head'); h.append(el('b', 'ov-name grow', it.x.name)); c.append(h, el('p', 'ov-none', 'Its dashboard sent something this page can\'t read.')); grid.append(c); } }
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-  ovBody.replaceChildren(head, ...(all.length ? [grid] : [el('p', 'ov-none', 'Start a dashboard in a devteam project and it shows up here.')]));
+  ovBody.replaceChildren(head, ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
+  else if (fromMenu !== null) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${fromMenu}:menu`)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
   tlDraw();
+}
+// a click on a card, off its controls, opens that project's dashboard, as its tab does (the thread
+// layer's Shift+click and Pin take their clicks first, in its capture listener)
+ovBody.addEventListener('click', (e) => {
+  const c = e.target.closest('.ov-card');
+  if (!c || !ovBody.contains(c) || e.target.closest('a, button, input, select, textarea, label, .fleet-switch, .menu-pop')) return;
+  if (items.has(c.dataset.root)) select(c.dataset.root);
+});
+// ----- the hub's Settings: only what the hub has, in the project settings' format ---------------
+// a row: its name and key, its value at the right (with "yours to change" where only the owner
+// changes it), and under it what it does
+function setRow(name, key, value, desc, yours = false) {
+  const row = el('div', 'rowline set-row');
+  const t = el('span', 't', name);
+  t.append(el('code', 'set-key', key));
+  const r = el('span', 'r');
+  r.append(value);
+  if (yours) r.append(el('span', 'badge amber', 'yours to change'));
+  row.append(t, r);
+  return [row, el('div', 'set-desc', desc)];
+}
+let testBtn = null; // the Test row's button, made once
+let pushSub = null; // this device's push subscription, on a box, once notifications are on
+const notifyOn = () => (box?.push ? Boolean(pushSub) : NOTIFY_OK && Notification.permission === 'granted');
+function paintSettings() {
+  if (selected !== SETTINGS) return;
+  const page = $('hub-settings');
+  // read before anything moves: building the rows moves the Notify control out of its old one
+  const had = page.contains(document.activeElement) ? document.activeElement : null;
+  const head = el('div', 'ov-head');
+  head.append(el('h2', '', 'Settings'));
+  const sec = (name, rows) => { const d = el('div', 'sec'); const r = el('div', 'rows'); for (const x of rows) r.append(...x); d.append(el('div', 'lbl', name), r); return d; };
+  const text = (t, cls = '') => el('span', cls, t);
+  const link = (href, words) => { const a = document.createElement('a'); a.href = href; a.textContent = words; a.dataset.k = `settings:${words}`; return a; };
+  // This machine: on a box, the box line's parts; on a laptop, which kit serves this hub
+  const parts = boxLine(box?.image ?? null, hubSeen);
+  const machine = [];
+  if (box && parts) {
+    const [rel, hub, ...tools] = parts;
+    machine.push(setRow('Box release', 'DEVTEAM_KIT_RELEASE', text(rel.text.replace(/^Box /, '')), 'the box image this machine runs'));
+    machine.push(setRow('Hub', 'hub', text(hub.text, hub.amber ? 'amber' : ''), 'the kit whose hub you are reading; each project keeps its own kit'));
+    for (const x of tools) { const i = x.text.lastIndexOf(' '); machine.push(setRow(x.text.slice(0, i), 'DEVTEAM_BOX_TOOLS', text(x.text.slice(i + 1)), 'the version on this box')); }
+  } else {
+    const kit = hubSeen && typeof hubSeen.kit === 'string' && hubSeen.kit ? tLine(hubSeen.kit, 64) : 'a kit outside its project';
+    machine.push(setRow('Hub served by kit', 'hub', text(kit), 'the kit whose hub you are reading; each project keeps its own kit'));
+  }
+  const groups = [sec('This machine', machine)];
+  if (box?.passkeys) groups.push(sec('Signing in', [setRow('Passkeys', 'passkeys', link(box.passkeys, 'Manage'), 'the keys that may open this hub and its dashboards; add one per device, remove a lost one', true)]));
+  // Notifications: the control itself (one node, kept: notifyControl writes into it), then a test once they're on
+  const notes = [setRow('New Inbox items', 'on this device', $('notify'), 'a notification on this device when any project asks you something', true)];
+  if (notifyOn()) {
+    // one button, kept: its answer ("Test sent") and its focus outlive the 10 s repaint
+    if (!testBtn) {
+      const b = testBtn = el('button', '', 'Send a test');
+      b.type = 'button';
+      b.dataset.k = 'settings:test';
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          if (box?.push) {
+            const r = await fetch('push/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: pushSub.endpoint }) });
+            b.textContent = r.ok ? 'Test sent' : `Test failed: ${(await r.json()).error}`;
+          } else {
+            new Notification('devteam', { body: 'A test notification from this hub' });
+            b.textContent = 'Test sent';
+          }
+        } catch (e) { b.textContent = `Test failed: ${e.message}`; }
+        setTimeout(() => { b.textContent = 'Send a test'; b.disabled = false; }, 4000);
+      };
+    }
+    const b = testBtn;
+    notes.push(setRow('Test', 'on this device', b, 'send one now, to see that this device gets them'));
+  }
+  groups.push(sec('Notifications', notes));
+  if (box?.previews) {
+    const a = document.createElement('a');
+    a.href = box.previews;
+    a.textContent = 'Previews';
+    a.dataset.k = 'settings:Previews';
+    groups.push(sec('Serving', [setRow('Previews', 'previews', a, 'the live previews this box runs for drafts')]));
+  }
+  // whatever had the keyboard keeps it: the same element when it is kept (the Notify control, the
+  // Test button), else the new one with its data-k
+  page.replaceChildren(head, ...groups);
+  if (had && had !== document.activeElement) (had.isConnected ? had : had.dataset.k ? page.querySelector(`[data-k="${CSS.escape(had.dataset.k)}"]`) : null)?.focus({ preventScroll: true });
 }
 // ----- threads with the operator: the dashboard's thread layer, over the Overview ------------------
 // The dock, the pin and the card of a project's dashboard (index.html, "threads"), ported: here every
@@ -1636,26 +1902,18 @@ function tlDock() {
 }
 function paintTab(it) {
   const { x, tab } = it;
+  const S = STATES[stateOf(it)];
   tab.replaceChildren();
-  const label = document.createElement('span');
-  label.textContent = String(x.name);
-  tab.append(label);
-  if (typeof x.inbox === 'number' && x.inbox > 0) {
-    const b = document.createElement('span');
-    b.className = 'badge';
-    b.textContent = String(x.inbox);
-    b.setAttribute('aria-label', `${x.inbox} in the Inbox`);
-    tab.append(b);
-  }
+  // its state's dot (red pulses, except under reduced motion), its name, the Inbox button's counts for it
+  tab.append(el('span', `dot${S.tone ? ` ${S.tone}` : ''}${S.tone === 'red' ? ' pulse' : ''}`), el('span', '', x.name));
+  const c = countsEl(x);
+  if (c) tab.append(c);
   if (x.alert) {
-    const a = document.createElement('span');
-    a.className = 'badge';
-    a.textContent = '!';
+    const a = el('span', 'badge', '!');
     a.setAttribute('aria-label', String(x.alert));
     tab.append(a);
   }
-  const state = x.inbox === null || x.inbox === undefined ? 'starting' : `${x.inbox} in the Inbox; ${x.fleet ? `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}` : ''}`;
-  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${x.alert ? `\n${x.alert}` : ''}${it.goneAt ? '\nnot answering' : ''}`;
+  tab.title = S.label;
   if (it.frame) it.frame.title = String(x.name);
   tab.classList.toggle('gone', Boolean(it.goneAt));
 }
@@ -1683,21 +1941,11 @@ async function pushControl() {
     const sub = p === 'granted' ? await reg.pushManager.getSubscription() : null;
     if (sub) {
       await pushSave(sub).catch(() => {});
-      const on = 'Notifying you of new Inbox items';
-      const t = document.createElement('button');
-      t.className = 'plain';
-      t.textContent = on;
-      t.title = 'Send a test notification to this device';
-      t.onclick = async () => {
-        t.disabled = true;
-        try {
-          const r = await fetch('push/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: sub.endpoint }) });
-          t.textContent = r.ok ? 'Test sent' : `Test failed: ${(await r.json()).error}`;
-        } catch (e) { t.textContent = `Test failed: ${e.message}`; }
-        setTimeout(() => { t.textContent = on; t.disabled = false; }, 4000);
-      };
-      return el.replaceChildren(t);
+      pushSub = sub;
+      say('Notifying you of new Inbox items');
+      return void paintSettings();
     }
+    pushSub = null;
     const b = document.createElement('button');
     b.textContent = 'Notify me of new Inbox items';
     // asked first and at once: Safari allows the prompt only straight from the click
@@ -1711,6 +1959,7 @@ async function pushControl() {
       } catch (e) { say(`Couldn't turn on notifications: ${e.message}`); }
     };
     el.replaceChildren(b);
+    paintSettings();
   };
   await paint().catch(() => say('Notifications are unavailable here'));
 }
@@ -1718,14 +1967,17 @@ function notifyControl() {
   if (box?.push) return void pushControl();
   const el = $('notify');
   el.replaceChildren();
-  if (!NOTIFY_OK) return;
+  if (!NOTIFY_OK) { el.textContent = "This browser can't notify from this page"; return void paintSettings(); }
   const p = Notification.permission;
-  if (p === 'granted') { el.textContent = 'Notifying you of new Inbox items'; return; }
-  if (p === 'denied') { el.textContent = 'Notifications are blocked for this page'; return; }
-  const b = document.createElement('button');
-  b.textContent = 'Notify me of new Inbox items';
-  b.onclick = async () => { try { await Notification.requestPermission(); } catch {} notifyControl(); };
-  el.append(b);
+  if (p === 'granted') el.textContent = 'Notifying you of new Inbox items';
+  else if (p === 'denied') el.textContent = 'Notifications are blocked for this page';
+  else {
+    const b = document.createElement('button');
+    b.textContent = 'Notify me of new Inbox items';
+    b.onclick = async () => { try { await Notification.requestPermission(); } catch {} notifyControl(); };
+    el.append(b);
+  }
+  paintSettings();
 }
 
 async function draw() {
@@ -1737,7 +1989,7 @@ async function draw() {
     data = await r.json();
     if (!data || typeof data !== 'object') throw new Error('not a list');
     hubSeen = data;
-  } catch { hubSeen = null; paintOverview(); return; }
+  } catch { hubSeen = null; paintOverview(); paintSettings(); return; }
   const now = Date.now();
   const seen = new Set();
   // One tab per root: if two answers claim one root (a second dashboard of one repo, or something
@@ -1788,18 +2040,20 @@ async function draw() {
   if (ovTab) tabsEl.prepend(ovTab);
   if (term) tabsEl.prepend(term.tab);
   for (const it of items.values()) paintTab(it);
-  empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW;
+  empty.hidden = items.size > 0 || Boolean(term) || selected === OVERVIEW || selected === SETTINGS;
   if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
-  if (!selected || (selected !== TERM && selected !== OVERVIEW && !items.has(selected))) {
+  if (!selected || (selected !== TERM && selected !== OVERVIEW && selected !== SETTINGS && !items.has(selected))) {
     const want = wanted();
     const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
     // the address picks a tab; with none, the Overview (the terminal when the address says so)
     const pick = ordered.find((it) => keyOf(it) === want);
     if (pick) select(pick.x.root);
     else if (term && want === 'terminal') selectTerminal();
+    else if (want === 'settings') selectSettings();
     else selectOverview();
   }
   paintOverview();
+  paintSettings();
   // the threads with the operator, on the same 10 s, and only while the Overview is what shows
   if (tlActive() && !firstDraw) tlRefresh();
   firstDraw = false;
@@ -1808,13 +2062,15 @@ window.addEventListener('hashchange', () => {
   const want = wanted();
   if (want === 'terminal' && term) return void (selected !== TERM && selectTerminal());
   if (want === 'overview') return void (selected !== OVERVIEW && selectOverview());
+  if (want === 'settings') return void (selected !== SETTINGS && selectSettings());
   const it = [...items.values()].find((o) => keyOf(o) === want);
   if (it && it.x.root !== selected) select(it.x.root);
 });
 tabsEl.addEventListener('keydown', (e) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
   const roots = [...(term ? [TERM] : []), OVERVIEW, ...[...items.keys()].sort(byRoot)];
-  const i = roots.indexOf(selected);
+  // Settings has no tab: its arrows move on from the Overview's
+  const i = roots.indexOf(selected === SETTINGS ? OVERVIEW : selected);
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
   if (next) { select(next); (next === TERM ? term.tab : next === OVERVIEW ? ovTab : items.get(next).tab).focus(); }
 });
@@ -1842,22 +2098,11 @@ async function findBox() {
     // https, or a local gateway on http://*.localhost (a laptop testing the box chain end to end)
     const secure = (u) => { try { const x = new URL(u.replace('{port}', '1')); return x.protocol === 'https:' || (location.protocol === 'http:' && x.protocol === 'http:' && x.hostname.endsWith('.localhost')); } catch { return false; } };
     if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
-    box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null, image: b.image };
-    if (typeof b.previews === 'string' && secure(b.previews)) {
-      const a = document.createElement('a');
-      a.href = b.previews;
-      a.textContent = 'Previews';
-      $('box-links').append(a);
-      $('box-links').hidden = false;
-    }
+    box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null, image: b.image, previews: null, passkeys: null };
+    // the box's links, shown in Settings (Serving, Signing in)
+    if (typeof b.previews === 'string' && secure(b.previews)) box.previews = b.previews;
     // signing in and passkeys are on the gateway's own name, never in the hub's
-    if (typeof b.passkeys === 'string' && secure(b.passkeys)) {
-      const a = document.createElement('a');
-      a.href = b.passkeys;
-      a.textContent = 'Passkeys';
-      $('box-links').append(a);
-      $('box-links').hidden = false;
-    }
+    if (typeof b.passkeys === 'string' && secure(b.passkeys)) box.passkeys = b.passkeys;
     const tab = document.createElement('button');
     tab.className = 'tab';
     tab.setAttribute('role', 'tab');
