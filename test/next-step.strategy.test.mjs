@@ -258,10 +258,14 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     assert.ok(cards[3].lesson);
     assert.match(await p.ev(`document.querySelector('[id="q-${detail}"] .kv').textContent`), /Order2 of 3\. Score 6: impact 3 \(moves a number the project watches\) × stake 1 \(a detail\) × urgency 2 /);
     assert.match(await p.ev(`document.querySelector('[id="q-${gate}"] .kv').textContent`), /RatedWhen asked: stake 3, urgency 1, settles 1/);
-    assert.equal(await p.ev(`document.querySelector('#inbox h2 .sub').textContent`), 'decisions only you can make, the most valuable first');
     assert.match(await p.ev(`document.querySelector('#strategy-link').getAttribute('href')`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/);
     // the goal: its impact beside its priority, why, and Wrong? sends the owner's own value
     assert.match(await p.ev(`document.querySelector('#goals-list a.title-link[href="#goal/${G}"]').closest('.card').querySelector('.card-head').textContent`), /priority 1 · moves a number the project watches/);
+    // #questions opened the Inbox in the panel (kit-100), which covers the window below 900px: closed, at
+    // rest, before the goal's peek, so Wrong? is pressed on the peek and not on the panel over it
+    await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel at rest');
+    await p.click('#th-close');
+    await soon(`!document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).visibility === 'hidden'`, 'the panel closed');
     await p.ev(`void (location.hash = '#goal/${G}')`);
     const key = `imp:${D}`;
     // The drawer is drawn at once, before the goal's record (its peek) arrives, and again when it

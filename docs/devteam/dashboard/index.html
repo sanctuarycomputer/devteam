@@ -881,6 +881,9 @@ try {
   #th-inbox { display: flex; flex-direction: column; gap: var(--gap); }
   #th-inbox .card { margin: 0; }
   #th-inbox .qcard .why { flex-wrap: wrap; }
+  /* a closed ⋯ menu's pop out of layout: Chrome keeps a closed <details>' content boxed at the summary's width
+     (26px), so its 70px key column would stick out of it (the measure, kit-100 spec AC6) */
+  #th-inbox details.menu:not([open]) > .pop { display: none; }
   .threads-head .end .icon-btn { margin: 0; }
   .th-filter { margin: 0 0 6px; }
   .th-filter .seg { display: flex; width: 100%; }

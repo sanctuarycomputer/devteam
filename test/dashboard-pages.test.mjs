@@ -22,6 +22,9 @@ const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 // True once an element's box reads the same twice running (until polls 100 ms apart): the page slides back over --dur
 // after the panel closes, and a click at a box read a moment before lands beside the button.
 const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
+// the panel open and at rest, and the Threads tab still (a click takes its centre once: kit-100)
+const THREADS_TAB = '#th-tabs [role="tab"][data-tab="threads"]';
+const PANEL_STILL = `document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && ${STEADY(THREADS_TAB)}`;
 async function pagesFixture(t, name, { records = true } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-dash-${name}-`));
   const later = cleanup(t);
@@ -125,8 +128,8 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev('scrollY'), 0, 'Library opens at the top');
   await p.ev("document.querySelector('#board').style.minHeight = ''; document.querySelector('#library').style.minHeight = ''");
 
-  // the Inbox button's count is the nav's
-  assert.equal(await p.ev("document.querySelector('#inbox-btn-n').textContent"), await p.ev("document.querySelector('#n-questions').textContent"));
+  // the Inbox button's count is the Inbox's (kit-100: inboxCount(), the panel tab's, since the nav item went)
+  assert.equal(await p.ev("document.querySelector('#inbox-btn-n').textContent"), await p.ev("String(inboxCount() || '')"));
 
   // a cold load of an unknown head: Overview, in the address bar too
   await load('#nonsense');
@@ -154,8 +157,10 @@ test('pages and nav', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
     await p.ev("location.hash = '#overview'");
     await onPage('overview');
-    // the Inbox button opens the Threads panel over the page (kit-89); the Inbox page is the nav's
+    // the Inbox button opens the panel over the page on its Inbox tab (kit-100), and its Threads tab is a click away (kit-89)
     await p.click('#inbox-btn');
+    await until(() => p.ev(`location.hash === '#overview?th=inbox' && ${PANEL_STILL}`), 'the panel over Overview on Inbox, at rest');
+    await p.click(THREADS_TAB);
     await until(() => p.ev("location.hash === '#overview?th=open' && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'"), 'the Threads panel over Overview, at rest');
     assert.deepEqual(await shown(), ['overview'], 'Overview still shown under the panel');
     await p.click('#th-close');
@@ -464,6 +469,9 @@ test('threads on pages', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('overview');
   await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
   await p.click('#inbox-btn');
+  // the button opens the panel on its Inbox tab (kit-100): the Threads tab lists it
+  await until(() => p.ev(`location.hash.endsWith('th=inbox') && ${PANEL_STILL}`), 'the panel on Inbox, at rest');
+  await p.click(THREADS_TAB);
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TT}"]')`), 'the Threads panel, at rest, lists it');
   n = await len();
   await p.click(`#tl-list [data-tl-open="${TT}"]`);
@@ -969,6 +977,9 @@ test('settings rows as thread targets', { skip: SKIP, timeout: 600000 }, async (
   // the Threads panel's row names the setting
   await until(() => p.ev(`!document.body.classList.contains('threads-open') && ${STEADY('#inbox-btn')}`), 'the Inbox button at rest, the panel closed');
   await p.click('#inbox-btn');
+  // the button opens the panel on its Inbox tab (kit-100): the Threads tab lists it
+  await until(() => p.ev(`location.hash.endsWith('th=inbox') && ${PANEL_STILL}`), 'the panel on Inbox, at rest');
+  await p.click(THREADS_TAB);
   await until(() => p.ev(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none' && !!document.querySelector('#tl-list [data-tl-open="${TA}"]')`), 'the Threads panel, at rest, lists it');
   assert.equal(await p.ev(`document.querySelector('#tl-list [data-tl-open="${TA}"] .th-where').textContent`), `Settings, ${name}`);
   await p.click('#th-close');
