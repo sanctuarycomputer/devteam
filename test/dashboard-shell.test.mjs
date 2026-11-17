@@ -128,11 +128,14 @@ test("every layout rule is scoped to .shell: index adopts it with its old region
   // the hub has no .shell until its own ticket (kit-94)
   const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
   assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
-  for (const id of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
+  for (const id of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
     const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
     assert.ok(tag, `index.html has #${id}`);
     assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
   }
+  // the Inbox is ported (kit-100): no #inbox section any more, and the panel's #th-inbox is not fenced
+  assert.doesNotMatch(IDX, /\bid="inbox"/, 'index.html has no #inbox section');
+  assert.doesNotMatch(IDX.match(/<[a-z]+\b[^>]*\bid="th-inbox"[^>]*>/)?.[0] ?? 'missing', /no-shell|missing/, '#th-inbox is there and carries no no-shell');
   // the hub adopts it too (kit-94): .shell on <body>, its timeline and frames fenced with .no-shell
   assert.match(without(HUB, 'devteam-layout', 'devteam-shell-js'), /<body class="shell">/, 'hub.html adopts the shell on <body>');
   for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
