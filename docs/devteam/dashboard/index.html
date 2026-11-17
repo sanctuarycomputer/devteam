@@ -850,8 +850,8 @@ try {
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
   /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
-  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
-  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+  .tl-pin { position: absolute; z-index: 10; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
   /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
@@ -865,7 +865,12 @@ try {
   /* a floating card in the corner sits beside the open panel, never under it; at 900px and below, where the
      open panel covers the page, every floating card hides until it closes (spec §2.6) */
   @media (min-width: 901px) { .shell.threads-open .tl-card.in-dock { right: calc(var(--threads-w) + 16px); } }
-  @media (max-width: 900px) { .shell.threads-open #tl .tl-card { display: none; } }
+  @media (max-width: 900px) { .shell.threads-open #tl .tl-card:not(.in-threads) { display: none; } }
+  /* a thread whose home is the Inbox tab (kit-100 spec §2.6): its pin and floating card fixed, placed in the window's
+     coordinates (a page scroll doesn't move the panel), and above the panel (.threads: 22, 23 over the viewer); the
+     card's own z-index (50) already is. Each pin is its own layer (.tl-pins makes none), so only these are lifted */
+  .tl-pin.in-threads, .tl-card.in-threads { position: fixed; }
+  .tl-pin.in-threads { z-index: 24; }
   /* the Threads panel (kit-89): the block's frame (.threads, .threads-head, .threads-body, .thread-list) styles
      it; here only what the block leaves to the page. The tab bar fills the head up to its three buttons */
   #th-tabs { display: flex; flex: 1; min-width: 0; }
@@ -5692,7 +5697,8 @@ const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T
 // What each kind is called where an item has no name of its own (the owner never reads a ref).
 const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
 // Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
-// feed, a question in a Decide row) is pinned in its home section.
+// feed, a question in a Decide row) is pinned in its home section. A question's, 'inbox', is the
+// Threads panel's Inbox tab (#th-inbox #questions, kit-100 spec §2.6), not a page's section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
 // The sections' names, as the sidebar shows them.
 const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', efficiency: 'Efficiency', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
@@ -5957,8 +5963,10 @@ const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'art
 const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pressed: null, route: null };
 const tlEl = (id) => document.getElementById(id);
 // The layer's own: #tl and the Threads panel (a press there held, its focus leaving redraws it, its clicks
-// let through the Shift-point capture, no pin over it, its fields hold no page redraw).
-const tlOwn = (el) => !!el?.closest?.('#tl, #threads');
+// let through the Shift-point capture, no pin over it, its fields hold no page redraw), except the panel's
+// Inbox tab (#th-inbox), which is pointed at as a page is (kit-100 spec §2.6).
+const inInbox = (el) => !!el?.closest?.('#th-inbox');
+const tlOwn = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
 const tlShowing = () => !tlEl('tl-cursor').hidden;
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
@@ -5968,9 +5976,11 @@ function tlSection(el) {
   return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || T_SECTIONS[sec.id] || '').trim() };
 }
 // What is under a point, past the layer's own; over the Threads panel nothing (it overlays the page below
-// 900px, and the page behind it is not what the owner points at): the panel is never a thread target.
+// 900px, and the page behind it is not what the owner points at), except in its Inbox tab, where what is
+// under the point is found as on a page (kit-100 spec §2.6).
 function tlHitAt(x, y) {
-  if (document.elementFromPoint(x, y)?.closest?.('#threads')) return null;
+  const top = document.elementFromPoint(x, y);
+  if (top?.closest?.('#threads') && !inInbox(top)) return null;
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
   return el ? tSubjectAt(el, x, y, tlSection) : null;
 }
@@ -6130,12 +6140,24 @@ function inboxAt({ rendered = false } = {}) {
   } else if (rendered) INBOX_AT = null;
 }
 // The one element a subject's pin and card follow: the one in its home section (an observation is
-// also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
+// also in the Sensors feed, a question in a Decide row), else wherever main draws it. A question's home
+// is its open card in the panel's Inbox tab (kit-100 spec §2.6), never the Answered list's copy.
 function tlHome(s) {
   if (s?.kind !== 'item') return null;
   const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
   const k = s.ref.split(':')[0];
-  return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+  const home = Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview';
+  return document.querySelector(home === 'inbox' ? `#th-inbox #questions ${sel}` : `main #${home} ${sel}`) ?? document.querySelector(`main ${sel}`);
+}
+// A thread whose home is the panel's Inbox tab (kit-100 spec §2.6): its subject an item drawn in #th-inbox (a
+// question's open card), or a page subject whose view the router sends to th=inbox (an old Inbox page spot).
+// Never in a /view/ tab, which has no Inbox.
+function tlInboxHome(t) {
+  const s = t?.subject;
+  if (VIEWER || !s) return false;
+  if (s.kind === 'item') return inInbox(tlHome(s));
+  if (s.kind === 'page') { const p = parseHead(String(s.view ?? ''), SHELL_ROUTES); return p.link === undefined && p.state?.th === 'inbox'; }
+  return false;
 }
 // A Settings row's element, as Settings draws it (null when it isn't drawn).
 const settingRow = (key) => (key ? document.querySelector(`#settings [data-setting="${CSS.escape(key)}"]`) : null);
@@ -6153,6 +6175,8 @@ function tlTargetRect(s) {
   const set = tlRowOf(s);
   if (set) return tlVisible(set.el) ? set.el.getBoundingClientRect() : null;
   if (s?.kind === 'page') {
+    // a spot on the old Inbox page: that page is gone, so no pin, and its card in the corner (kit-100 spec §2.6)
+    if (tlInboxHome({ subject: s })) return null;
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
     // a spot on a Loop tab is on that tab: none while another is shown
@@ -6202,6 +6226,13 @@ function tlGoTo(s) {
 // else its kind's home page, else Overview; a page subject's view through the router's redirects
 // (#loop/orient is #loop?lt=orient, #monitoring is #sensors), so views already in the log keep working.
 function subjectHead(s) {
+  // a subject whose home is the Inbox tab: the page head in force (cold: talk's home, Overview) with th=inbox
+  if (tlInboxHome({ subject: s })) {
+    const p = parseHead(thHead(), SHELL_ROUTES);
+    const state = { ...p.state, th: 'inbox' };
+    delete state.t;
+    return headFor({ page: p.page, state });
+  }
   if (s?.kind === 'item') {
     const el = tlHome(s);
     if (el) {
@@ -6254,7 +6285,8 @@ async function tlRoute(id) {
   }
   // its subject's page head, the panel's th kept and t added (kit-89 spec §2.5)
   const cur = parseHead(thHead(), SHELL_ROUTES), sp = parseHead(subjectHead(t.subject), SHELL_ROUTES);
-  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) ? { th: cur.state.th } : {}), t: id } });
+  // (a thread whose home is the Inbox keeps the th=inbox its subject's head has, kit-100 spec §2.6)
+  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) && !tlInboxHome(t) ? { th: cur.state.th } : {}), t: id } });
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
   // the page head changed after the router's part drew the panel from the old one
@@ -6419,23 +6451,37 @@ function tlPlaceCard(t) {
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
   // in the panel it is the slot's: nothing to place
-  if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock'); card.style.left = ''; card.style.top = ''; return; }
-  let r = null;
-  if (t) r = tlTargetRect(t.subject);
-  else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock', 'in-threads'); card.style.left = ''; card.style.top = ''; return; }
+  // a thread whose home is the Inbox tab (kit-100 spec §2.6): fixed, in the window's coordinates, shown over the
+  // panel at 900px and below; its subject's card (a draft's, found again once a render redrew it)
+  const fixed = tlInboxHome(t ?? { subject: TL.draft.subject });
+  let r = null, el = null;
+  if (t) { r = tlTargetRect(t.subject); el = r && t.subject?.kind === 'item' ? tlHome(t.subject) : null; }
+  else if (TL.draft.el?.isConnected || fixed) { el = TL.draft.el?.isConnected ? TL.draft.el : tlHome(TL.draft.subject); r = tlVisible(el) ? el.getBoundingClientRect() : null; }
   else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
   // beside its pin in the window left of the open panel (above 900px; below, the panel covers the page and the
   // card hides), never under the panel: tPlace is given the window narrowed by --threads-w (at least 640, since the
   // sheet is the whole window's), and the card is then kept inside that narrowed window
   const vw = innerWidth - (TH.th && innerWidth > 900 ? thWidth() : 0);
+  // a subject in the Inbox tab: its box clipped to the panel's left edge, so the card opens just outside the panel
+  // (named one by one: a DOMRect's sides are getters, which a spread doesn't copy)
+  if (r && inInbox(el)) { const panelLeft = $('threads').getBoundingClientRect().left; r = { left: panelLeft, right: panelLeft, top: r.top, bottom: r.bottom, width: 0, height: r.height }; }
+  card.classList.toggle('in-threads', fixed);
   const w = card.offsetWidth || 360;
   let p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, w, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
   if (!p.sheet && !p.dock) p = { ...p, left: Math.max(8, Math.min(p.left, vw - w - 8)) };
   card.classList.toggle('sheet', !!p.sheet);
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
-  card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
-  card.style.top = p.sheet || p.dock ? '' : `${p.top + scrollY}px`;
+  card.style.left = p.sheet || p.dock ? '' : `${p.left + (fixed ? 0 : scrollX)}px`;
+  card.style.top = p.sheet || p.dock ? '' : `${p.top + (fixed ? 0 : scrollY)}px`;
+}
+// The pins and a floating card placed again where their subjects now are, nothing redrawn: on a scroll of #th-body,
+// the panel's slide ending and a change of tab (kit-100 spec §2.6); a resize redraws the lot.
+function tlReplace() {
+  tlPins();
+  const card = tlEl('tl-card'), t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (!card.hidden && (t || (!TL.open && TL.draft))) tlPlaceCard(t);
 }
 // The draft is kept in this browser, as review drafts are, so a reload or another card keeps it: per
 // thread, and for a thread not yet started per subject, let go after 7 days.
@@ -6787,8 +6833,17 @@ function tlPins() {
     const r = tlTargetRect(g.subject);
     if (!r) return null;
     const corner = g.subject.kind === 'item' || !!tlRowOf(g.subject);
-    const x = (corner ? r.right - 10 : r.left + 1) + scrollX, y = (corner ? r.top - 10 : r.top + 1) + scrollY;
-    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+    let x = corner ? r.right - 10 : r.left + 1, y = corner ? r.top - 10 : r.top + 1;
+    // a subject inside the fixed panel (a question in the Inbox tab, kit-100 spec §2.6): its pin fixed, in the
+    // window's coordinates, over the panel; none once the subject is out of #th-body's visible box, and kept
+    // inside that box, never over the tab bar
+    const fixed = g.subject.kind === 'item' && !!tlHome(g.subject)?.closest('#threads');
+    if (fixed) {
+      const b = $('th-body').getBoundingClientRect();
+      if (r.bottom < b.top + 11 || r.top > b.bottom - 11) return null;
+      y = Math.min(Math.max(y, b.top), b.bottom - 22);
+    } else { x += scrollX; y += scrollY; }
+    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}${fixed ? ' in-threads' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
   tlPinsInto(box, pins, tlHeld);
   tsWatch();
@@ -6922,7 +6977,8 @@ function thDraw({ view = false } = {}) {
   if (key !== TH.pane && (view || !tlHeld(pane))) { TH.pane = key; threadsTabs.render(sel, pane); askDraw(); }
   // the Inbox: shown only while the panel is open on its tab (a closed panel keeps its boxes, kit-100 spec §2.2)
   const inbox = $('th-inbox'), off = !TH.th || sel !== 'inbox';
-  if (inbox && inbox.hidden !== off) inbox.hidden = off;
+  // shown or hidden, the pins and a floating card on its cards placed again (kit-100 spec §2.6)
+  if (inbox && inbox.hidden !== off) { inbox.hidden = off; tlReplace(); }
   // and no in-panel card beside it: a + draft left on Threads waits there, hidden
   const slot = $('th-card-slot');
   if (slot && slot.hidden !== (sel === 'inbox')) slot.hidden = sel === 'inbox';
@@ -7119,6 +7175,12 @@ function thShow() {
 }
 // the page's slide beside the panel has ended: what sits on it (pins, a floating card) placed where it now is
 document.querySelector('.main')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right') tlDraw(); });
+// the Inbox tab's cards move with #th-body's scroll and the panel's slide: what sits on them placed again (kit-100 spec §2.6)
+$('th-body')?.addEventListener('scroll', () => tlReplace(), { passive: true });
+// and with the page's scroll while that tab shows: fixed, they don't move with it, but the scrollbar a scroll comes
+// with can move the panel (a classic scrollbar narrows the window the panel is fixed to)
+addEventListener('scroll', () => { if (TH.th === 'inbox') tlReplace(); }, { passive: true });
+$('threads')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget) tlReplace(); });
 const thSeen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && el.getClientRects().length > 0; };
 function thFocus(kind) {
   const tab = () => $('th-tabs').querySelector('[role="tab"][aria-selected="true"]')?.focus();
@@ -7155,6 +7217,8 @@ const thWidth = () => parseFloat(getComputedStyle(document.documentElement).getP
 function tlInPanel(t) {
   const s = t?.subject;
   if (!s) return true;
+  // a thread whose home is the Inbox tab floats beside it (kit-100 spec §2.6): no #inbox section exists to judge by
+  if (tlInboxHome(t)) return false;
   if (VIEWER) return !(s.kind === VIEWER.kind && (s.kind === 'artifact' ? s.slug : s.name) === VIEWER.name);
   if (s.kind === 'item') return !tlHome(s);
   if (s.kind === 'page') { const id = String(s.view ?? '').replace(/^#/, '').split(/[/?]/)[0]; return !document.querySelector(`main section[id="${CSS.escape(id)}"]`) && !Object.hasOwn(SHELL_ROUTES.redirects, id); }
@@ -7193,8 +7257,11 @@ function thOpenRow(id) {
   if (VIEWER || (s.kind !== 'item' && s.kind !== 'page')) return void tlOpen(id);
   const p = parseHead(subjectHead(s), SHELL_ROUTES);
   const state = { ...p.state };
-  delete state.th;
-  if (TH.th && innerWidth > 900) state.th = TH.th;
+  // a thread whose home is the Inbox keeps its head's th=inbox at every width (kit-100 spec §2.6)
+  if (!tlInboxHome(t)) {
+    delete state.th;
+    if (TH.th && innerWidth > 900) state.th = TH.th;
+  }
   state.t = id;
   const head = headFor({ page: p.page, state });
   if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); TH_MADE = head; location.hash = head; return; }

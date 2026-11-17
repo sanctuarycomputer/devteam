@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 import { PORTS, bareProject, dashboardOnFreePort, inboxFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
@@ -101,10 +102,13 @@ const TAB = (id) => `document.querySelector('#th-tabs [role="tab"][data-tab="${i
 // an element inside #th-body's visible box (the panel's scroller), and so within the window
 const IN_BODY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}), b = document.getElementById('th-body'); if (!e || !b.contains(e)) return false;
   const r = e.getBoundingClientRect(), v = b.getBoundingClientRect(); return r.height > 0 && r.top >= v.top - 1 && r.bottom <= v.bottom + 1 && r.top >= 0 && r.bottom <= innerHeight; })()`;
+const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))';
+// a box steady between two reads (no slide or scroll moving it)
+const STEADY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(), k = [r.left, r.top, r.width, r.height].join(); const was = (window.__steady ||= {})[${JSON.stringify(sel)}]; window.__steady[${JSON.stringify(sel)}] = k; return was === k; })()`;
 const ON_PAGE = (id) => `!!document.querySelector('main.page > section[data-page="${id}"]')?.classList.contains('on')`;
 
 test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
-  const { p, soon, reload, fx, chrome, later, port } = await open(t, '#overview');
+  const { p, soon, size, reload, fx, chrome, later, port } = await open(t, '#overview');
   const { Q } = fx;
   const len = () => p.ev('history.length');
   const back = () => p.ev('history.back(); void 0');
@@ -292,4 +296,181 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
   });
+
+  // AC3, second part, and AC4 (done-when 3, 4)
+  await t.test('a thread on a question', async () => {
+    const { Q, P, G } = fx, q1 = fx.q.q1, q2 = fx.q.q2;
+    const CARD = "document.getElementById('tl-card')";
+    const PIN = (id) => `document.querySelector('#tl-pins [data-tl-pin="${id}"]')`;
+    const SHOWN = (e) => `(() => { const e = ${e}; if (!e || e.hidden) return false; const c = getComputedStyle(e); return c.display !== 'none' && c.visibility !== 'hidden' && e.getClientRects().length > 0; })()`;
+    // the pin's centre inside an element's box (±1px)
+    const PIN_ON = (id, sel) => `(() => { const b = ${PIN(id)}, c = document.querySelector(${JSON.stringify(sel)}); if (!b || !c || !${SHOWN(PIN(id))}) return false;
+      const r = b.getBoundingClientRect(), k = c.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+      return x >= k.left - 1 && x <= k.right + 1 && y >= k.top - 1 && y <= k.bottom + 1; })()`;
+    // the floating card open on a thread, shown, beside the panel: its right edge at most the panel's left, its top in the window
+    const FLOAT = (id) => `(TL.open === '${id}' && ${CARD}.parentElement?.id === 'tl' && ${SHOWN(CARD)})`;
+    const BESIDE = `(() => { const c = ${CARD}.getBoundingClientRect(), l = document.getElementById('threads').getBoundingClientRect().left; return c.right <= l + 0.5 && c.top >= 0 && c.top <= innerHeight; })()`;
+    const ROW = (id) => `document.querySelector('#tl-list [data-tl-open="${id}"]')`;
+    const thread = (id) => `TL.threads.find((x) => x.id === '${id}')`;
+    // the tab in front (an earlier subtest's cold tab took it): a tab behind runs no animation frames
+    await p.send('Page.bringToFront');
+
+    // on Overview with the panel on Inbox: Q's home is q1's card in #th-inbox, so Q floats; P's is the Inbox too; G's isn't
+    await p.ev("location.hash = '#overview?th=inbox'");
+    await soon(`location.hash === '#overview?th=inbox' && ${ON_PAGE('overview')} && ${ON_INBOX} && !!document.getElementById('q-${q1}')`, 'Overview, the panel on Inbox');
+    assert.equal(await p.ev(`!!tlHome({ kind: 'item', ref: 'question:${q1}' })?.closest('#th-inbox')`), true, 'tlHome: inside #th-inbox');
+    assert.equal(await p.ev(`tlHome({ kind: 'item', ref: 'question:${q1}' }) === document.getElementById('q-${q1}')`), true, "tlHome: q1's open card");
+    assert.deepEqual(await p.ev(`[${thread(Q)}, ${thread(P)}, ${thread(G)}].map((t) => [tlInboxHome(t), tlInPanel(t)])`), [[true, false], [true, false], [false, false]], 'tlInboxHome and tlInPanel for Q, P and G');
+
+    // Q's pin on q1's card, over the panel
+    await p.ev(`document.getElementById('q-${q1}').scrollIntoView({ block: 'center' }); void 0`);
+    await soon(PIN_ON(Q, `#q-${q1}`), "Q's pin on q1's card");
+    const top = await p.ev(`(() => { const r = ${PIN(Q)}.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('[data-tl-pin]') === ${PIN(Q)}; })()`);
+    assert.equal(top, true, 'the pin is the element at its centre: above the panel');
+    // a tall page scrolled: the pin stays on the card
+    await p.ev("(() => { const d = document.createElement('div'); d.id = 'probe-tall'; d.style.height = '3000px'; document.querySelector('main.page > section[data-page=\"overview\"]').append(d); window.scrollTo(0, 400); })()");
+    await p.ev(FRAMES);
+    assert.equal(await p.ev('scrollY'), 400, 'the page scrolled to 400');
+    assert.equal(await p.ev(PIN_ON(Q, `#q-${q1}`)), true, `the pin on the card after a page scroll: ${JSON.stringify(await p.ev(`(() => { const b = ${PIN(Q)}; return b && { cls: b.className, pos: getComputedStyle(b).position, pin: b.getBoundingClientRect().toJSON(), card: document.getElementById('q-${q1}').getBoundingClientRect().toJSON(), body: document.getElementById('th-body').getBoundingClientRect().toJSON(), sy: scrollY }; })()`))}`);
+    // #th-body scrolled by 100: the pin follows the card
+    const was = await p.ev("document.getElementById('th-body').scrollTop");
+    await p.ev("document.getElementById('th-body').scrollTop += 100; void 0");
+    assert.equal(await p.ev("document.getElementById('th-body').scrollTop"), was + 100, '#th-body scrolled by 100');
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(PIN_ON(Q, `#q-${q1}`)), true, 'the pin on the card after #th-body scrolled');
+    // q1's card scrolled out of #th-body's box: no pin shown
+    const out = await p.ev(`(() => { const b = document.getElementById('th-body'), c = document.getElementById('q-${q1}');
+      const off = () => { const k = c.getBoundingClientRect(), v = b.getBoundingClientRect(); return k.bottom <= v.top || k.top >= v.bottom; };
+      b.scrollTop += c.getBoundingClientRect().bottom - b.getBoundingClientRect().top + 20;
+      if (!off()) b.scrollTop = 0;
+      if (!off()) b.scrollTop = b.scrollHeight;
+      return off(); })()`);
+    assert.equal(out, true, "q1's card scrolled out of #th-body's box");
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(SHOWN(PIN(Q))), false, 'no pin once the card is out of the box');
+    await p.ev("document.getElementById('probe-tall').remove(); window.scrollTo(0, 0); void 0");
+    await p.ev(`document.getElementById('q-${q1}').scrollIntoView({ block: 'center' }); void 0`);
+    await soon(PIN_ON(Q, `#q-${q1}`), 'the pin back on the card');
+
+    // the pin opens Q's card beside the panel
+    await p.click(`#tl-pins [data-tl-pin="${Q}"]`);
+    await soon(`${FLOAT(Q)} && ${BESIDE}`, "Q's card open, beside the panel");
+    await p.click('#tl-card [data-tl-close]');
+    await soon(`${CARD}.hidden`, 'the card closed');
+
+    // from #goals?th=open, Q's row: the panel on Inbox, the card in view, the floating card beside it
+    await p.ev("location.hash = '#goals?th=open'");
+    await soon(`location.hash === '#goals?th=open' && ${ON_PAGE('goals')} && ${AT_REST} && !!${ROW(Q)}`, "Goals, the panel on Threads, Q's row");
+    await soon(STEADY(`#tl-list [data-tl-open="${Q}"]`), 'the row at rest');
+    await p.click(`#tl-list [data-tl-open="${Q}"]`);
+    await soon(`location.hash === '#goals?th=inbox&t=${Q}' && ${ON_PAGE('goals')} && ${ON_INBOX} && ${IN_BODY(`#q-${q1}`)} && ${FLOAT(Q)} && ${BESIDE}`, "Q's row: #goals?th=inbox&t=Q, the card in view, Q's card beside it");
+    await p.click('#tl-card [data-tl-close]');
+    await soon(`${CARD}.hidden && location.hash === '#goals?th=inbox'`, 'closed: t taken away');
+
+    // P, an old Inbox spot: listed under Threads as "Inbox"; its row opens the Inbox tab and its card, no pin, no rewrite to open
+    await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+    await soon(`location.hash === '#goals?th=open' && !!${ROW(P)}`, "Threads, P's row");
+    assert.equal(await p.ev(`${ROW(P)}.querySelector('.th-where').textContent`), 'Inbox', "P's subject line");
+    await soon(STEADY(`#tl-list [data-tl-open="${P}"]`), "P's row at rest");
+    await p.click(`#tl-list [data-tl-open="${P}"]`);
+    await soon(`location.hash === '#goals?th=inbox&t=${P}' && ${ON_INBOX} && ${FLOAT(P)} && ${BESIDE}`, "P's row: #goals?th=inbox&t=P, its card beside the panel");
+    // a read of the threads and a redraw later: still th=inbox, still no pin
+    const seq = await p.ev('TL.have');
+    await soon(`TL.have > ${seq}`, 'another read of the threads');
+    await p.ev(FRAMES);
+    assert.equal(await p.ev('location.hash'), `#goals?th=inbox&t=${P}`, 'P stays on th=inbox');
+    assert.equal(await p.ev(`!!document.querySelector('[data-tl-pin="${P}"]')`), false, 'P draws no pin');
+    await p.click('#tl-card [data-tl-close]');
+    await soon(`${CARD}.hidden && location.hash === '#goals?th=inbox'`, "P's card closed");
+
+    // Shift held over the tab bar: no pin; a Shift+click on q2's card in the Inbox tab starts a draft beside it, sent a thread on q2
+    const tab = await p.at('#th-tabs [role="tab"][data-tab="inbox"]');
+    await p.hold('Shift', true);
+    await p.move(tab.x, tab.y, 8);
+    await p.move(tab.x + 3, tab.y + 1, 8);
+    await p.ev(FRAMES);
+    assert.equal(await p.ev("document.getElementById('tl-cursor').hidden"), true, 'no pin over the tab bar');
+    await p.ev(`document.getElementById('q-${q2}').scrollIntoView({ block: 'center' }); void 0`);
+    await p.ev(FRAMES);
+    const c2 = await p.ev(`(() => { const r = document.getElementById('q-${q2}').getBoundingClientRect(); return { x: Math.round(r.left + 40), y: Math.round(r.top + 20) }; })()`);
+    await p.move(c2.x, c2.y, 8);
+    await p.move(c2.x + 2, c2.y + 2, 8);
+    await soon("!document.getElementById('tl-cursor').hidden", 'the pin over q2\'s card');
+    await p.clickAt(c2.x + 2, c2.y + 2, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.ref === 'question:${q2}' && ${CARD}.parentElement?.id === 'tl' && ${SHOWN(CARD)} && ${BESIDE} && document.activeElement?.id === 'tl-c-text'`, 'a draft beside q2\'s card');
+    await p.type('hello');
+    await p.key('Enter', 8);
+    const N = await soon(`TL.threads.find((x) => x.subject?.ref === 'question:${q2}' && !String(x.id).startsWith('pending-') && !x.pending)?.id`, 'the new thread read');
+    await p.click('#th-tabs [role="tab"][data-tab="threads"]');
+    await soon(`!!${ROW(N)} && ${thread(N)}.subject.kind === 'item'`, 'listed, its subject question:<q2>');
+    await soon(`${CARD}.hidden || TL.open === '${N}'`, 'the card');
+    if (await p.ev(`!${CARD}.hidden`)) { await p.click('#tl-card [data-tl-close]'); await soon(`${CARD}.hidden`, 'closed'); }
+
+    // a cold #talk/<Q> in a new tab, /api/data held back: nothing thrown; #overview?th=inbox&t=Q, the card in view, Q's card beside it
+    const c = await chrome.newPage();
+    later(() => c.close());
+    await c.send('Page.enable');
+    await c.send('Runtime.enable');
+    await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await c.send('Page.addScriptToEvaluateOnNewDocument', { source: `${paneInit(paneMenu())};(() => {
+      window.__thrown = [];
+      addEventListener('error', (e) => window.__thrown.push(String(e.error?.stack || e.message)));
+      addEventListener('unhandledrejection', (e) => window.__thrown.push(String(e.reason?.stack || e.reason)));
+      const f = window.fetch; let held = false;
+      window.fetch = async (u, o) => { if (!held && String(u && u.url ? u.url : u).startsWith('/api/data')) { held = true; await new Promise((r) => setTimeout(r, 1500)); } return f(u, o); };
+    })()` });
+    await c.send('Page.navigate', { url: `http://127.0.0.1:${port}/#talk/${Q}` });
+    const soonC = soonIn(c, 30000);
+    await soonC(`history.state?.page === '#overview?th=inbox&t=${Q}' && ${ON_INBOX} && ${IN_BODY(`#q-${q1}`)} && ${FLOAT(Q)} && ${BESIDE}`, 'cold #talk/Q: #overview?th=inbox&t=Q, the card in view, Q\'s card beside it');
+    assert.deepEqual(await c.ev('window.__thrown'), [], 'nothing thrown');
+    await p.send('Page.bringToFront');
+
+    // at 720x800: Q's row keeps the panel open on Inbox, and Q's card shows over it
+    await size(720, 800);
+    await soon('innerWidth === 720', 'at 720');
+    await p.ev("location.hash = '#goals?th=open'");
+    await soon(`location.hash === '#goals?th=open' && ${AT_REST} && !!${ROW(Q)}`, "at 720, Threads, Q's row");
+    await soon(STEADY(`#tl-list [data-tl-open="${Q}"]`), 'the row at rest');
+    await p.click(`#tl-list [data-tl-open="${Q}"]`);
+    await soon(`location.hash === '#goals?th=inbox&t=${Q}' && ${ON_INBOX} && ${FLOAT(Q)} && (() => { const r = ${CARD}.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('#tl-card') === ${CARD}; })()`, "at 720: the panel on Inbox, Q's card shown over it");
+    await p.click('#tl-card [data-tl-close]');
+    await soon(`${CARD}.hidden`, 'closed');
+
+    // at 720x800 on Goals with the panel on Inbox: G's pin stays under the panel
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN} && location.hash === '#goals'`, 'Goals, the panel closed');
+    await p.ev(`document.querySelector('#goals-list [data-subject="goal:${fx.goal}"]').scrollIntoView({ block: 'center' }); void 0`);
+    await soon(SHOWN(PIN(G)), "G's pin");
+    await p.ev(FRAMES);
+    const g = await p.ev(`(() => { const r = ${PIN(G)}.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    assert.ok(g.x > 0 && g.x < 720 && g.y > 0 && g.y < 800, `G's pin in the window: ${JSON.stringify(g)}`);
+    await p.ev("location.hash = '#goals?th=inbox'");
+    await soon(`${ON_PAGE('goals')} && ${ON_INBOX}`, 'at 720, Goals with the panel on Inbox');
+    assert.equal(await p.ev(`!!document.elementFromPoint(${g.x}, ${g.y})?.closest('#threads')`), true, "the element at G's pin's centre is in #threads");
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
+    await size(1440, 900);
+    await soon('innerWidth === 1440', 'at 1440');
+  });
+});
+
+// T_HOME and tlHome, in vm (AC4): a question's home is its open card in the Inbox tab (#th-inbox #questions), never
+// the Answered list; other kinds keep their page's section; both fall back to anything main draws.
+test("a question's home is the Inbox tab", () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const core = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  const at = html.indexOf('function tlHome(');
+  assert.ok(core.length > 500 && at > 0, 'threads-core and tlHome in index.html');
+  const fn = html.slice(at, html.indexOf('\n}\n', at) + 2);
+  const asked = [];
+  const ctx = vm.createContext({ TextEncoder, URL, CSS: { escape: (s) => s }, document: { querySelector: (sel) => { asked.push(sel); return null; } } });
+  vm.runInContext(`${core}\n${fn}\n;globalThis.api = { T_HOME, tlHome };`, ctx);
+  assert.equal(ctx.api.T_HOME.question, 'inbox');
+  assert.equal(ctx.api.tlHome({ kind: 'item', ref: 'question:q-1' }), null);
+  assert.deepEqual(asked, ['#th-inbox #questions [data-subject="question:q-1"]', 'main [data-subject="question:q-1"]']);
+  asked.length = 0;
+  ctx.api.tlHome({ kind: 'item', ref: 'goal:g-1' });
+  assert.deepEqual(asked, ['main #goals [data-subject="goal:g-1"]', 'main [data-subject="goal:g-1"]']);
+  assert.ok(!asked.some((s) => s.includes('answered')), 'never the Answered list');
 });
