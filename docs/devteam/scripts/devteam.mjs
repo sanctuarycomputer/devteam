@@ -10829,6 +10829,85 @@ function autonomyData(now = Date.now()) {
   const weeks = efficiencyWeeks(now).map((w) => autonomyWeek(w.start, now, x));
   return { decisions: { score: { this_week: weeks[11].score, last_week: weeks[10].score }, this_week: weeks[11], last_week: weeks[10], weeks }, trust: autonomyTrust(now), senses: autonomySenses() };
 }
+// ===== the Awareness Score (kit-242) =====
+// One week of it (start: its Monday 00:00 UTC, ms), read at E, the week's last millisecond or now:
+// four parts, each { count, of, share }, and the score. Counted from the log as it stood at E, never
+// from a stored learning record (the record holds no times). E is returned for the suggestions, and
+// dropped before serving. kept: each id's new line as the fold keeps it (the first, in fold order).
+const AW_NONE = () => ({ count: 0, of: 0, share: null });
+const awPart = (count, of, share = of ? round2(count / of) : null) => ({ count, of, share });
+function awarenessWeek(start, now, firstMs, kept = awKeptNew()) {
+  const E = Math.min(start + WEEK - 1, now);
+  const starts_at = new Date(start).toISOString();
+  // a week before the log's first line has nothing to read: no refold for it
+  if (E < firstMs) return { starts_at, score: null, parts: { signals: AW_NONE(), incidents: AW_NONE(), lessons: AW_NONE(), starts: AW_NONE() }, E };
+  const fromIso = starts_at, cut = new Date(E).toISOString(), dayBefore = new Date(E - DAY).toISOString();
+  return withLogAt(cut, () => {
+    // when each item was first cited by a record still citing it at E: its new line (as kept), then its
+    // applied updates in order. A raw set line the fold ignored never counts (it isn't in updates).
+    const cited = new Map();
+    const walk = (o) => {
+      const has = new Set([...(o.evidence ?? []), ...(o.refs ?? [])]);
+      const born = kept.get(o.id);
+      const steps = [{ at: o.created_at, ids: [...(born?.evidence ?? []), ...(born?.refs ?? [])] }, ...(o.updates ?? []).filter((u) => u.evidence || u.refs).map((u) => ({ at: u.at, ids: [...(u.evidence ?? []), ...(u.refs ?? [])] }))];
+      const first = new Map();
+      for (const s of steps) for (const r of s.ids) if (!first.has(r)) first.set(r, s.at);
+      for (const [r, at] of first) if (has.has(r) && !(cited.get(r) <= at)) cited.set(r, at);
+    };
+    for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) walk(o);
+    // a live decision that cites an observation explains what it cites, as explained() reads it; an
+    // orient-noise one also rules on each key it names
+    const rulings = new Map();
+    for (const d of logObjects('decision')) {
+      if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
+      walk(d);
+      if (d.class === 'orient-noise') for (const r of d.refs) if (!logGet(r)) (rulings.get(r) ?? rulings.set(r, []).get(r)).push(d.created_at);
+    }
+    let sOf = 0, sCount = 0;
+    for (const g of recurringGroups().values()) {
+      if (!g.formed_at || g.formed_at < fromIso || g.formed_at > cut) continue;
+      // a ruling covers the sightings at or before it, so one before the first sighting covers none
+      const xs = [...g.items.map((i) => cited.get(i.id)), ...(rulings.get(g.key) ?? []).filter((at) => at >= g.items[0].at)].filter(Boolean).sort();
+      const x = xs[0];
+      // formed in E's last day and not yet explained: it hasn't had its day
+      if (!x && g.formed_at > dayBefore) continue;
+      sOf++;
+      // an explanation from before forming counts as 0 hours
+      if (x && Date.parse(x) - Date.parse(g.formed_at) <= DAY) sCount++;
+    }
+    const incOf = fixedIncidents(E).length;
+    const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').map((k) => k.id);
+    const allStarts = logObjects('act').filter((a) => a.class === 'worker-slots' && String(a.what).startsWith('made '));
+    const given = (a) => (Array.isArray(a.knowledge) ? a.knowledge : []);
+    const used = new Set(allStarts.filter((a) => a.created_at > new Date(E - 28 * DAY).toISOString() && a.created_at <= cut).flatMap(given));
+    const starts = allStarts.filter((a) => a.created_at >= fromIso && a.created_at <= cut);
+    const startsGiven = starts.filter((a) => given(a).length).length;
+    const parts = {
+      signals: awPart(sCount, sOf),
+      incidents: awPart(incOf - incidentDebt(E).length, incOf),
+      lessons: awPart(knowledge.filter((k) => used.has(k)).length, knowledge.length),
+      // with no knowledge in force there was nothing to give
+      starts: awPart(startsGiven, starts.length, starts.length && knowledge.length ? round2(startsGiven / starts.length) : null),
+    };
+    // the mean of the unrounded shares
+    const shares = [[sCount, sOf], [parts.incidents.count, incOf], [parts.lessons.count, knowledge.length], [startsGiven, knowledge.length ? starts.length : 0]].filter(([, of]) => of).map(([c, of]) => c / of);
+    return { starts_at, score: shares.length ? Math.round((100 * shares.reduce((s, v) => s + v, 0)) / shares.length) : null, parts, E };
+  });
+}
+// Each id's new line as the fold keeps it: the first in the fold's order (at, file, line). The folded
+// object holds only current values, so the citations a record was made with are read from here.
+function awKeptNew() {
+  const kept = new Map();
+  const before = (a, b) => a.at < b.at || (a.at === b.at && (a.__file.localeCompare(b.__file) || a.__line - b.__line) < 0);
+  for (const l of readLog().lines) if (l.op === 'new' && (!kept.has(l.id) || before(l, kept.get(l.id)))) kept.set(l.id, l);
+  return kept;
+}
+function awarenessData(now = Date.now()) {
+  const firstMs = readLog().lines.reduce((m, l) => Math.min(m, Date.parse(l.at) || Infinity), Infinity);
+  const kept = awKeptNew();
+  const weeks = efficiencyWeeks(now).map((w) => awarenessWeek(w.start, now, firstMs, kept)).map(({ E, ...w }) => w);
+  return { score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts, weeks, suggestions: [] };
+}
 function writeLearning() {
   fs.mkdirSync(runDir, { recursive: true });
   return withLock(runPath('learning'), () => {
@@ -13213,6 +13292,7 @@ function dashboardDataRead() {
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics,
     efficiency: efficiencyData(metrics, now),
+    awareness: awarenessData(now),
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),

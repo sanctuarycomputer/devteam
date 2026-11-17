@@ -502,6 +502,337 @@ exit 0
     "trials": [],
     "suggestions": []
   },
+  "awareness": {
+    "score": {
+      "this_week": 0,
+      "last_week": null
+    },
+    "parts": {
+      "signals": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      },
+      "incidents": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      },
+      "lessons": {
+        "count": 0,
+        "of": 1,
+        "share": 0
+      },
+      "starts": {
+        "count": 0,
+        "of": 0,
+        "share": null
+      }
+    },
+    "weeks": [
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": null,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      },
+      {
+        "score": 0,
+        "parts": {
+          "signals": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "incidents": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          },
+          "lessons": {
+            "count": 0,
+            "of": 1,
+            "share": 0
+          },
+          "starts": {
+            "count": 0,
+            "of": 0,
+            "share": null
+          }
+        }
+      }
+    ],
+    "suggestions": []
+  },
   "progress": {
     "features": [
       "g1-work"

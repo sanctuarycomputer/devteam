@@ -240,3 +240,80 @@ test('other callers read the clock as before', () => {
   } finally { A.done(); }
 });
 
+
+// One fixture for the tests that read its awareness, built on first use (each build writes a fleet
+// and a few hundred lines); every test that uses it reads the same dashboard-data run.
+let SHARED = null;
+const shared = () => (SHARED ??= (() => { const A = awarenessFixture('aw-weeks'); return { A, d: A.data() }; })());
+process.on('exit', () => SHARED?.A.done());
+const P = (count, of) => ({ count, of, share: of ? Math.round((100 * count) / of) / 100 : null });
+const NONE = P(0, 0);
+// the plan's expected awareness.weeks, [count, of] per part, and the score
+const TABLE = [
+  [[0, 0], [0, 0], [0, 0], [0, 0], null],
+  [[0, 0], [0, 0], [0, 0], [0, 1], null],
+  [[0, 0], [0, 0], [1, 2], [2, 2], 75],
+  [[0, 0], [0, 0], [2, 2], [1, 1], 100],
+  [[0, 0], [0, 0], [2, 2], [0, 0], 100],
+  [[0, 0], [0, 1], [2, 2], [0, 0], 50],
+  [[0, 0], [1, 2], [1, 2], [0, 0], 50],
+  [[1, 1], [1, 2], [0, 2], [0, 0], 50],
+  [[8, 15], [1, 2], [0, 2], [0, 0], 34],
+  [[0, 0], [1, 1], [0, 3], [0, 0], 50],
+  [[0, 0], [0, 1], [1, 3], [1, 2], 28],
+  [[0, 0], [0, 1], [1, 3], [0, 0], 17],
+];
+const expectedWeek = ([sg, inc, les, st, score]) => ({
+  // starts' share is also null with no knowledge in force (week 1's start)
+  parts: { signals: P(...sg), incidents: P(...inc), lessons: P(...les), starts: les[1] ? P(...st) : { ...P(...st), share: null } },
+  score,
+});
+
+test('awareness: twelve weeks, oldest first, ending this Monday', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { d } = shared();
+  const w = d.awareness.weeks;
+  assert.equal(w.length, 12);
+  assert.equal(w[11].starts_at, new Date(M).toISOString());
+  for (let k = 0; k < 12; k++) assert.equal(Date.parse(w[k].starts_at), W(k), `week ${k}`);
+  // E is the week's own clock, used on the server only
+  for (const x of w) assert.deepEqual(Object.keys(x).sort(), ['parts', 'score', 'starts_at']);
+});
+
+test("awareness: each week's parts and score, read at its end", (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { d } = shared();
+  const a = d.awareness;
+  TABLE.forEach((row, k) => {
+    const { parts, score } = a.weeks[k];
+    assert.deepEqual({ parts, score }, expectedWeek(row), `week ${k}`);
+  });
+  assert.deepEqual(a.score, { this_week: 17, last_week: 28 });
+  assert.deepEqual(a.parts, a.weeks[11].parts);
+  assert.deepEqual(a.suggestions, []);
+});
+
+test("awareness: a stored learning record doesn't stand in for the log", (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { A, d } = shared();
+  // the record is there, with its 9s, and week 7 reads the log anyway
+  const lines = fs.readdirSync(path.join(A.old, 'docs/devteam/run/log')).flatMap((f) => fs.readFileSync(path.join(A.old, 'docs/devteam/run/log', f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  assert.equal(lines.find((l) => l.id === A.X.rec7)?.figures.informed.signals_formed, 9);
+  const { parts, score } = d.awareness.weeks[7];
+  assert.deepEqual({ parts, score }, expectedWeek(TABLE[7]));
+});
+
+test('awareness: a week before the log is not folded', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const Fx = fleetFixture('aw-young');
+  try {
+    const hand = handFor(Fx);
+    const at = (f) => M + Math.floor(span() * f);
+    const ks = ['one', 'two', 'three', 'four'].map((w, i) => hand(O, { type: 'knowledge', kind: 'lesson', statement: `Lesson ${w}`, scope: 'project', status: 'accepted' }, at(0.1 + 0.05 * i)));
+    hand(S, { type: 'act', class: 'worker-slots', what: 'made worker t1 in s:t1', refs: ['t1'], knowledge: ks.slice(0, 3) }, at(0.5));
+    const a = json(Fx.ok(Fx.old, ['dashboard-data'])).awareness;
+    for (let k = 0; k < 11; k++) assert.deepEqual({ parts: a.weeks[k].parts, score: a.weeks[k].score }, { parts: { signals: NONE, incidents: NONE, lessons: NONE, starts: NONE }, score: null }, `week ${k}`);
+    assert.deepEqual(a.weeks[11].parts.lessons, P(3, 4));
+    assert.deepEqual(a.weeks[11].parts.starts, P(1, 1));
+  } finally { Fx.done(); }
+});
