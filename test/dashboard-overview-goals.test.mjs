@@ -312,6 +312,9 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   assert.ok((await cls('g1')).includes('blk-full'), 'g1 fully blocked');
   assert.ok((await cls('g2')).includes('blk-partial'), 'g2 partly blocked');
   for (const k of ['g0', 'g3', 'g6', 'upkeep']) assert.ok(!(await cls(k)).some((c) => c.startsWith('blk-')), `${k} not blocked`);
+  // today's head: priority first, then the impact's words
+  assert.equal(await p.ev(`${card('g1')}.querySelector('.card-head .grow').textContent.trim()`), 'priority 1 · moves a number the project watches');
+  assert.equal(await p.ev(`${card('g2')}.querySelector('.card-head .grow').textContent.trim()`), 'priority 2');
   // each goal card: step bar, next line, its design; Mark met only on g3
   for (const k of ['g0', 'g1', 'g2', 'g3', 'g6']) assert.ok(await p.ev(`!!${card(k)}.querySelector('ol.steps')`), `${k} has a step bar`);
   for (const k of ['g0', 'g3', 'g6']) assert.ok(await p.ev(`!!${card(k)}.querySelector('.goal-next')`), `${k} has a next line`);
@@ -357,6 +360,13 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   await soon(`!!${card('g4')}`, 'the met goal\'s card');
   assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal').length`), 1, 'only the met goal');
   assert.match(await p.ev(`${card('g4')}.textContent`), /Met/);
+  // the when is the update that set it met, not the day it was opened
+  assert.equal(await p.ev(`${card('g4')}.querySelector('.card-head .grow').textContent.trim()`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${JSON.stringify(ids.g4)}); return 'met ' + when([...g.updates].reverse().find((u) => u.status === 'met').at); })()`));
+  const dated = await p.ev(`(() => { const R = DATA.ooda.roadmap; const mk = (status, updates) => ({ id: 'g-x', title: 'X', status, created_at: '2026-01-02T10:00:00Z', updates, readings: [], measure: {}, check: { definition: [] } }); const d = document.createElement('div'); const head = (g) => { d.innerHTML = closedGoalCardHtml(g, R, []); return d.querySelector('.card-head .grow').textContent.trim(); }; return { met: head(mk('met', [{ at: '2026-02-01T10:00:00Z', priority: 2 }, { at: '2026-03-04T10:00:00Z', status: 'met' }])), gone: head(mk('abandoned', [{ at: '2026-03-05T10:00:00Z', status: 'abandoned' }])), none: head(mk('met', [])), want: ['2026-03-04T10:00:00Z', '2026-03-05T10:00:00Z'].map(when), opened: when('2026-01-02T10:00:00Z') }; })()`);
+  assert.equal(dated.met, `met ${dated.want[0]}`, 'a met card dates the update that set it met');
+  assert.equal(dated.gone, `let go ${dated.want[1]}`, 'a let-go card dates the update that let it go');
+  assert.equal(dated.none, '', 'no status update: no date, never the opened date');
+  assert.ok(![dated.met, dated.gone].some((x) => x.includes(dated.opened)), 'never the opened date');
   assert.equal(await p.ev(`document.querySelectorAll('#goals [data-hold-id]').length`), 0);
   const at = await p.ev('window.__polls');
   await new Promise((r) => setTimeout(r, 1000));
@@ -371,6 +381,7 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   assert.equal(await p.ev('location.hash'), '#goals?gt=letgo');
   await soon(`document.querySelector('#goals .tabbar [aria-selected="true"]')?.dataset.tab === 'letgo' && !!${card('g5')}`, 'a reload keeps Let go');
   assert.match(await p.ev(`${card('g5')}.textContent`), /Let go/);
+  assert.equal(await p.ev(`${card('g5')}.querySelector('.card-head .grow').textContent.trim()`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${JSON.stringify(ids.g5)}); return 'let go ' + when([...g.updates].reverse().find((u) => u.status === 'abandoned').at); })()`));
   assert.match(await p.ev(`${card('g5')}.textContent`), /processor’s page covers it|processor's page covers it/);
 });
 
