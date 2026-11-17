@@ -258,6 +258,7 @@ const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
 // g2 ready, one ticket blocked and one moving (partial); g3 ready, at its target, one ticket moving
 // (nothing waiting); g4 met; g5 let go; g6 a draft whose design waits on the owner's approval (an open
 // goal-approval question). Three open questions in all: g6's approval and two others (P14).
+const XSS_MEASURE = '<img src=x id=probe-xss>';
 function goalsFixture(base, name = 'overview-goals') {
   const root = bareProject(base, name);
   const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 48), DEVTEAM_PORT_BASE: String(PORTS + 49), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
@@ -272,7 +273,7 @@ function goalsFixture(base, name = 'overview-goals') {
   const OWNER = null;
   const reading = path.join(base, `${name}-g3-reading`);
   fs.writeFileSync(reading, '5\n');
-  const full = (title, priority, check = 'echo 5') => ['goal', 'add', '--title', title, '--outcome', `${title} holds`, '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', check, '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
+  const full = (title, priority, check = 'echo 5', measure = 'self-serve share') => ['goal', 'add', '--title', title, '--outcome', `${title} holds`, '--measure', measure, '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', check, '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
   const ms = JSON.stringify([{ title: 'Most admins pay alone', target: 80, preconditions: [1, 2], tickets: 2 }]);
   const ids = {};
   ids.g0 = mk(['goal', 'add', '--title', 'Faster onboarding', '--outcome', 'new admins set up alone']);
@@ -280,7 +281,8 @@ function goalsFixture(base, name = 'overview-goals') {
   ids.g2 = mk(full('Receipts for every payment', 2));
   ids.g3 = mk(full('Invoices in one click', 3, `cat ${reading}`));
   ids.g6 = mk(full('Refunds without support', 4));
-  ids.g4 = mk(full('Cards on file', 5));
+  // g4's measure is markup, as log text can be: the page shows it as text (never an element)
+  ids.g4 = mk(full('Cards on file', 5, 'echo 5', XSS_MEASURE));
   ids.g5 = mk(full('A hosted billing page', 6));
   for (const g of ['g1', 'g2', 'g3', 'g4', 'g6']) {
     dt(['goal', 'reading', ids[g], '--run']);
@@ -451,6 +453,9 @@ test('goals: tabs, two across, cards and Upkeep', { ...CHROME, timeout: 300000 }
   await soon(`!!${card('g4')}`, 'the met goal\'s card');
   assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal').length`), 1, 'only the met goal');
   assert.match(await p.ev(`${card('g4')}.textContent`), /Met/);
+  // its measure line shows the markup in its description as text, never as an element
+  assert.ok((await p.ev(`${card('g4')}.querySelector('.goal-next').textContent`)).includes(`${XSS_MEASURE}: `), 'the measure description as text');
+  assert.equal(await p.ev(`document.querySelectorAll('#probe-xss').length`), 0, 'no element made from a measure description');
   // the when is the update that set it met, not the day it was opened
   assert.equal(await p.ev(`${card('g4')}.querySelector('.card-head .grow').textContent.trim()`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${JSON.stringify(ids.g4)}); return 'met ' + when([...g.updates].reverse().find((u) => u.status === 'met').at); })()`));
   const dated = await p.ev(`(() => { const R = DATA.ooda.roadmap; const mk = (status, updates) => ({ id: 'g-x', title: 'X', status, created_at: '2026-01-02T10:00:00Z', updates, readings: [], measure: {}, check: { definition: [] } }); const d = document.createElement('div'); const head = (g) => { d.innerHTML = closedGoalCardHtml(g, R, []); return d.querySelector('.card-head .grow').textContent.trim(); }; return { met: head(mk('met', [{ at: '2026-02-01T10:00:00Z', priority: 2 }, { at: '2026-03-04T10:00:00Z', status: 'met' }])), gone: head(mk('abandoned', [{ at: '2026-03-05T10:00:00Z', status: 'abandoned' }])), none: head(mk('met', [])), want: ['2026-03-04T10:00:00Z', '2026-03-05T10:00:00Z'].map(when), opened: when('2026-01-02T10:00:00Z') }; })()`);

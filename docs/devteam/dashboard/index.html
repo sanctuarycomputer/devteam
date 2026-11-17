@@ -3467,7 +3467,7 @@ function closedGoalCardHtml(g, R, openQs) {
   // when it was met or let go: the last update that set its status (none known: no date, never a wrong one)
   const at = [...(g.updates || [])].reverse().find((u) => u.status === g.status)?.at ?? null;
   const rs = g.readings || [], m = g.measure || {};
-  const measure = met && rs.length && typeof m.target === 'number' ? ` ${cap(m.description || 'the measure')}: ${esc(rs[rs.length - 1].value)}${esc(m.unit ? ` ${m.unit}` : '')}, target ${esc(m.target)}${esc(m.unit ? ` ${m.unit}` : '')}.` : '';
+  const measure = met && rs.length && typeof m.target === 'number' ? ` ${esc(cap(m.description || 'the measure'))}: ${esc(rs[rs.length - 1].value)}${esc(m.unit ? ` ${m.unit}` : '')}, target ${esc(m.target)}${esc(m.unit ? ` ${m.unit}` : '')}.` : '';
   return `<div class="c6 card goal goal-closed"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
     ${cardHead('target', `<span class="badge ${met ? 'good' : ''}">${met ? 'Met' : 'Let go'}</span>`, { extra: at ? `${met ? 'met' : 'let go'} ${esc(when(at))}` : '', id: g.id, open: `goal/${g.id}` })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
