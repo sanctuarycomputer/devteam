@@ -14578,6 +14578,46 @@ function gatewayThreadKey() {
   return key;
 }
 /* box end */
+/* upload rules start */
+// Copied from cloud/gateway.mjs (files dropped on the terminal), which the kit can't import; test/attachments.test.mjs holds the two equal.
+const UPLOAD_MAX = 512 * 1024 * 1024; // a file, and so a request: each file is a request of its own
+const UPLOAD_TOTAL = 4 * 1024 * 1024 * 1024;
+const UPLOAD_FREE = 1024 * 1024 * 1024; // left on the disk for the agents, whatever is dropped
+const UPLOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
+const UPLOAD_STALL_MS = 60 * 1000;
+const UPLOAD_NAME = 200;
+const UPLOAD_PART = '.part';
+const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
+const UPLOAD_RULES = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, keepMs: UPLOAD_KEEP_MS, stallMs: UPLOAD_STALL_MS, name: UPLOAD_NAME, part: UPLOAD_PART, folder: UPLOAD_FOLDER };
+// The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
+// so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
+// path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
+function safeUploadName(raw) {
+  const base = String(raw ?? '').split(/[/\\]/).pop().normalize('NFD').replace(/[\p{M}\p{Cc}\p{Cf}]/gu, '');
+  const plain = base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+|[.-]+$/g, '');
+  const dot = plain.lastIndexOf('.');
+  const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
+  // the extension first: a name that's all replaced characters still comes out an image
+  const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
+  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+}
+// These run in the terminal's page too (TERM_DROP has their source), and are tested here.
+// A stored path never needs the quotes; they're for whatever else this is ever handed.
+function shellQuote(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+function dropPaste(paths) {
+  return paths.map(shellQuote).join(' ');
+}
+// What follows the paste: a space, so what the owner types next doesn't run into a path. Not after
+// images alone: Claude Code turns those into attachments, and it has no path left to separate.
+function isDropImage(p) {
+  return /\.(png|jpe?g|gif|webp)$/i.test(p);
+}
+function dropSpace(paths) {
+  return paths.some((p) => !isDropImage(p));
+}
+/* upload rules end */
 // What the gateway signs (gateway.mjs, hubSignature): the route, when, a nonce, and the body's hash.
 const gatewaySigned = (p, ts, nonce, body) => Buffer.from(`devteam-operator-post-v1\n${p}\n${ts}\n${nonce}\n${sha256(body)}`);
 // Why a press's proof isn't the gateway's (null when it is): { path, ts, nonce, sig, body (base64) },

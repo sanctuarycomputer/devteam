@@ -836,6 +836,8 @@ const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
 // five minutes by a timer of its own (BODY_MS). A stalled upload goes sooner (UPLOAD_STALL_MS).
 const REQUEST_MS = 3600 * 1000;
 const BODY_MS = 5 * 60 * 1000;
+// What the kit's own upload routes (devteam.mjs) share with this gateway; a test holds the two copies equal.
+export const UPLOAD_RULES = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, keepMs: UPLOAD_KEEP_MS, stallMs: UPLOAD_STALL_MS, name: UPLOAD_NAME, part: UPLOAD_PART, folder: UPLOAD_FOLDER };
 // The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
 // so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
 // path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
