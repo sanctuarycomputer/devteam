@@ -474,7 +474,9 @@ test('opening threads', { skip: SKIP, timeout: 600000 }, async (t) => {
   await soon(`${atRest} && ${floating(G)}`, 'the panel and the card');
   await blur();
   await p.key('Escape');
-  await soon(`location.hash === '#goals?th=open' && ${card}.hidden && ${isOpen}`, 'the card first');
+  // and routed: the hash and the card change at once, TH.t only once the hashchange has routed; an Escape before
+  // that would close the panel onto the card's t (#goals?t=G)
+  await soon(`location.hash === '#goals?th=open' && ${card}.hidden && ${isOpen} && TH.t === null`, 'the card first, routed');
   await blur();
   await p.key('Escape');
   await soon(`location.hash === '#goals' && !${isOpen}`, 'then the panel');
