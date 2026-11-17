@@ -15,6 +15,7 @@ The Inbox moves out of the nav and into the side panel as its first tab, beside 
 - **Threads on questions.** Their home is the Inbox tab. Their pins are fixed and drawn above the panel, and the floating card sits 10px left of it. Above 900px, Shift+click works inside `#th-inbox`; at 900px and below, the card shows over the panel. Old Inbox-page spots open the tab with no pin.
 - **Typing is kept.** kit-89's `#threads` exceptions (redraw hold, draft keeping, presses) now exclude `#th-inbox`. Escape in an Inbox text field closes nothing.
 - **Reviews open full size above the panel** (`#review-view` at z 25). An artifact viewer opened from a review now sits above that review, at z 26 while one is open. CI's first run at the merged head caught that it had been drawn underneath (`0cfa580`; see `verification.md`).
+- **A peek or the viewer from inside the panel, at 900px and below** (final-1 F1, `9f6997a`). The panel is full width there, so a peek or the viewer opened from it is drawn on top, and closing it returns to the panel on Inbox. Above 900px the peek sits beside the panel, as before.
 - **The /view/ tab** shows one line, "Answer questions on the dashboard.", linking to `/#overview?th=inbox`, with hello's count. The button there opens on Threads (ruling m-20261115-230458641).
 
 ## Added after approve-spec: please check against m-20261116-041710126
