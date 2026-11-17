@@ -257,6 +257,8 @@ test("the dashboard page: the card at the top of the Inbox and in the dock, the 
   const soon = async (expr, what) => until(() => p.ev(expr).catch(() => false), what);
   // drawn with its buttons off, so a card that swaps in under the pointer takes no click: on a second later
   await soon(`!!document.querySelector('#ask-inbox [data-ask-option]')`, 'the card in the Inbox');
+  // #inbox opens the panel on its Inbox tab (kit-100): pressed only once it is at rest, so the click lands on the button
+  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open, at rest');
   assert.equal(await p.ev(`document.querySelector('#ask-inbox [data-ask-option="1"]').disabled`), true, 'its buttons wait');
   await p.click('#ask-inbox [data-ask-option="1"]');
   await new Promise((w) => setTimeout(w, 300));
