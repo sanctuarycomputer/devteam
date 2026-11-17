@@ -797,6 +797,16 @@ test('files: an answer and both thread actions carry the dropped files, real pat
   // with no files, a turn is as before
   assert.equal((await L.api('thread-say', { id: tid, text: 'no files', files: [] })).status, 200);
   assert.equal(turnsOf(L, tid).pop().files, undefined, 'files: [] is no files');
+  // a folder named as ours that links to another of ours is inside the root, so it is taken; what is
+  // recorded is the real path, the file it names, never the path as given (final review 1b F2)
+  const alias = path.join(L.folder(), newFolderName());
+  fs.symlinkSync(path.dirname(png), alias);
+  const viaLink = [{ name: 'Shot 1.png', path: path.join(alias, path.basename(png)), bytes: 1 }];
+  const qid2 = askQuestion(L, 'Which link?');
+  assert.equal((await L.api('answer', { id: qid2, answer: 'Yes', files: viaLink })).status, 200);
+  assert.deepEqual(questionOf(L, qid2).updates.find((u) => u.answer !== undefined).files, [want[0]], 'the answer records the real path');
+  assert.equal((await L.api('thread-say', { id: tid, text: 'via a link', files: viaLink })).status, 200);
+  assert.deepEqual(turnsOf(L, tid).pop().files, [want[0]], 'the turn records the real path');
   // B6: log-check holds every line to the schema
   const ok = L.dt(['log-check']);
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);
@@ -1128,6 +1138,20 @@ test('a turn with files held while the pane shows a menu keeps its paste, and is
   assert.equal(got, `1${turnLine('look at these')} (2 files dropped) \x1b[200~${png.path} ${pdf.path}\x1b[201~ \r${turnLine('and this')}\r`);
 });
 
+test('an answer with files run as the dashboard runs it (DEVTEAM_REPLY_FD) replies first, then reaches the pane with its paste (final review 1b F3)', PANE, async (t) => {
+  const { F, BOX, png, pdf } = dropFixture('drop-reply');
+  t.after(() => F.done());
+  const pane = dropPane(F);
+  await pane.ready();
+  const qid = F.sup(['ask', '--kind', 'owner-decision', '--question', 'Which one?']).split('\n')[0];
+  // the dashboard's runAction: the reply on fd 3, the nudge queued and typed after it
+  const r = spawnSync(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'answer', qid, 'This one', '--files', JSON.stringify([png, pdf])], { cwd: F.old, env: { ...F.env({ ...BOX, DEVTEAM_SUPERVISOR: pane.target }), DEVTEAM_REPLY_FD: '3' }, stdio: ['ignore', 'pipe', 'pipe', 'pipe'], encoding: 'utf8', timeout: 120000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(String(r.output[3]), /"out":"answered /, 'the reply came on fd 3');
+  const got = await newBytes(pane, 0, 1);
+  assert.equal(got, `[devteam answer ${qid} from owner] read it with: devteam.mjs questions --id ${qid} (2 files dropped) \x1b[200~${png.path} ${pdf.path}\x1b[201~ \r`);
+});
+
 test('log-check: files are on the owner\'s own turn and answer, never a supervisor\'s turn or an answer recorded from chat or a thread (task review T5-1)', { timeout: 240000 }, (t) => {
   const { F, png } = dropFixture('drop-log');
   t.after(() => F.done());
@@ -1138,6 +1162,8 @@ test('log-check: files are on the owner\'s own turn and answer, never a supervis
   for (const [what, by, o] of [
     ['a supervisor turn', 'supervisor', { type: 'turn', thread: tid, text: 'here' }],
     ['an answer from chat', 'owner', { type: 'question', op: 'set', id: qid, answer: 'Yes', channel: 'chat', said: 'yes' }],
+    // files are set on a question only with the owner's answer, never on its new line (x-set-only; final review 1b F4)
+    ['a question\'s new line', 'supervisor', { type: 'question', kind: 'owner-decision', question: 'Which one?' }],
   ]) {
     const plain = F.checkWith([by, o]);
     assert.equal(plain.status, 0, `${what} without files: ${plain.said}`);
