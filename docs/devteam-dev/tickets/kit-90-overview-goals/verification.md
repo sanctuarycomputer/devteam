@@ -35,6 +35,14 @@ Command for each row: `bash .superpowers/sdd/plan/rt90.sh test/<file>`. That is 
 | 10. Overview goal rows | same file › every row's 1px border is `--line`, or muted red or amber when blocked; rows side by side have equal heights | as AC1 | as AC1 | `04ba63a7` |
 | Existing tests | Moved to the new markup with the same intent; the changed steps are listed below. Other named files had no markup hits: `plain-questions`, `multirepo-*`, `fleet-park` and `gateway` have none; `ooda-lineage` and `ooda-learning` hits are a lineage string and an href, both passing (10/10 and 5/5 at `b3a7f874`); `test/lib/kit.mjs` and `chain.mjs` hits are CLI kinds. | the rows above; CI | see the local runs | `15d6b999` |
 
+## CI run 44163292008 at `cc4f6080` (failure) and its fixes
+
+Every touched file passed. Three outside files failed; two were caused by the taller Overview and reproduce on the box:
+
+- **`dashboard-threads-sidebar` 1 and 6** (Node 22 and 24). At 720x800 and 390x844 the new Overview is taller than the window, so the document draws a 15px scrollbar (box probe: `innerWidth` 720, `clientWidth` 705). The panel is `--threads-w: 100vw` at 900px and below (the shell's layout block), so its left edge sat at -15. The fix is page CSS outside both shell blocks: at 900px and below, `html` doesn't scroll while the panel is open, since the panel is the whole window there. `398635d3`. Locally: threads-sidebar 8 pass, inbox-panel 12 pass, shell 16, measure 4, overview-goals 10, all 0 fail and 0 skip.
+- **`dashboard-pages` › "settings area"** (Node 22 and 24). The click helper scrolls its button into view. Overview is now 1014px tall at 1440x900, so the first press scrolled it by 114 and the sticky nav's switch moved 0.5px. The place is now read after the first press (Run, which posts nothing). The assertion is unchanged. Added to touches by `m-20261117-201656246-supervisor`. `b850bfc8`. Locally: 6 pass, 0 fail, 0 skip.
+- **`dashboard-inbox-panel` 9** (Node 22 only): a timeout. It passes on the box (12/12) and is no kit-90 code. It is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`). The failed job is rerun if it recurs.
+
 ## What the supervisor asked to have named here
 
 - **The spec and plan amendment `e7d4c79`**, made per the spec's own build clause, with no delta review (`m-20261117-144551912-supervisor`). It made two changes:
