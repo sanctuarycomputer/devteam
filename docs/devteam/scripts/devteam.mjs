@@ -8319,7 +8319,9 @@ function artifactVersions(slug) {
   let truncated = false;
   if (ref) {
     const folder = `${ARTIFACTS_REL}/${slug}`;
-    const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot) ?? '';
+    const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot);
+    // a failed read is a failure (exit 1), never an empty history (exit 3)
+    if (raw === null) die(`${slug}: could not read main's history`);
     const seen = new Set();
     for (const chunk of raw.split('\x01').slice(1)) {
       const [head, ...lines] = chunk.split('\n');
@@ -8341,7 +8343,10 @@ function artifactVersions(slug) {
       const lines = r.stdout.split('\n');
       main = main.filter((_, i) => lines[i] !== undefined && !lines[i].endsWith(' missing'));
     }
-    const nowTree = treeNow(git(treeFolderArgs(ref, slug).now, mainRoot));
+    const nowLs = git(treeFolderArgs(ref, slug).now, mainRoot);
+    // a folder missing on main is an empty answer (""), not a failure: only null is
+    if (nowLs === null) die(`${slug}: could not read main's history`);
+    const nowTree = treeNow(nowLs);
     main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
     truncated = main.length > ARTIFACT_VERSIONS_MAX;
     main = main.slice(0, ARTIFACT_VERSIONS_MAX);
@@ -16127,6 +16132,8 @@ async function cmdDashboard() {
   });
   // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
   const describing = new Map();
+  // /api/artifact-versions runs in flight, by slug: one child process however many ask at once
+  const versioning = new Map();
   const runAction = (args, o = {}) => runOwnerAction(args, { ...o, env: ownerEnv, log });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
@@ -16705,6 +16712,19 @@ async function cmdDashboard() {
       const r = await job;
       if (r.ok) return send(res, 200, 'application/json', r.stdout);
       return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
+    }
+    // An artifact's versions (kit-172): the CLI's list, run in a child process shared by asks for the
+    // same slug. Same-origin only, as /api/view. 404 only when the subcommand says nothing is there.
+    if (req.method === 'GET' && u.pathname === '/api/artifact-versions') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      if (!LINK_ID.test(slug)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad slug' }));
+      let job = versioning.get(slug);
+      if (!job) { job = run(['artifact', 'versions', slug, '--json'], { timeout: 12000 }).finally(() => versioning.delete(slug)); versioning.set(slug, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no versions of ${slug}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the versions could not be read' }));
     }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
