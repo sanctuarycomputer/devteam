@@ -727,6 +727,11 @@ test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
   for (const w of ['fixed CI on main', 'synced the kit', 'ran the retro', 'a CI fix']) assert.ok(hb.text.includes(w), `the day items listed: ${w}`);
   assert.ok(await p.ev(`!!document.querySelector('#drawer-body [data-gp="chores"] a[href="#ticket/chore-01-tidy"]')`), 'the chores in flight');
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body select[data-impact]').length`), 0, 'no impact form on Upkeep\'s peek');
+  // held with no reason, not by the fleet: Held because still shows, saying so
+  await p.ev(`window.__patchData.upkeep = { mode: 'drain', state: 'draining', reason: null, by: 'owner', fleet: false, running: [], chores: [] }; void 0`);
+  await soon(`${ddOf('Status')}?.textContent.includes('Draining')`, 'Upkeep draining, no reason');
+  assert.deepEqual(await p.ev(PEEK_KEYS), ['ID', 'Status', 'Hold', 'Held because', 'What it covers', 'How it changes'], 'Held because whenever it is held');
+  assert.equal(await p.ev(`${ddOf('Held because')}.textContent.trim()`), 'No reason given');
   await p.ev(`window.__patchData.upkeep = { mode: 'run', state: 'running', reason: null, chores: [] }; void 0`);
 
   // g1's peek: its record in, at rest
@@ -830,6 +835,15 @@ test('the Next chip', { ...CHROME, timeout: 300000 }, async (t) => {
   const w = await p.ev(`(() => { const b = document.getElementById('th-body'), cs = getComputedStyle(b); const inner = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight); const cards = [...document.querySelectorAll('#th-inbox #questions > .qcard')].map((c) => ({ w: c.getBoundingClientRect().width, left: c.getBoundingClientRect().left })); return { inner, cards }; })()`);
   for (const c of w.cards) assert.ok(Math.abs(c.w - w.inner) < 1, `a card is the panel body's width: ${c.w} of ${w.inner}`);
   assert.equal(new Set(w.cards.map((c) => Math.round(c.left))).size, 1, 'one column');
+
+  // a secrets card as the next question: it carries the chip and keeps Post, Reply and Can't right now
+  const SQ = 'q-20261117-000000001-supervisor';
+  await p.ev(`(() => { const q0 = DATA.questions[0]; const sq = { ...q0, id: ${JSON.stringify(SQ)}, kind: 'owner-action', question: 'Post the API key', context: null, choices: [], recommendation: null, default: null, links: [], goal: null, rank: null, secrets: [{ name: 'KEY', sink: 'file:secrets/key.txt', to: 'secrets/key.txt', sink_type: 'file', warning: null }], secrets_posted: [] }; window.__patchData.questions = [sq, ...RAW.questions.filter((x) => x.id !== sq.id)]; })(); void 0`);
+  await soon(`NEXT_ID() === ${JSON.stringify(SQ)} && !!document.querySelector('#th-inbox [data-qcard="${SQ}"] .card-head .chip-next')`, 'the secrets card, next, with its chip');
+  const sp = await p.ev(`(() => { const c = document.querySelector('#th-inbox [data-qcard="${SQ}"]'); return { first: c === document.querySelector('#th-inbox #questions > .qcard'), secret: !!c.querySelector('.secrets .secret'), post: c.querySelector('[data-post-secrets]')?.textContent ?? null, reply: c.querySelector('[data-reply]')?.textContent ?? null, cant: c.querySelector('[data-cant]')?.textContent ?? null, textarea: !!c.querySelector('textarea[data-q]') }; })()`);
+  assert.deepEqual(sp, { first: true, secret: true, post: 'Post', reply: 'Reply', cant: 'Can’t right now', textarea: true }, 'the secrets card\'s parts');
+  const chips2 = await p.ev(`[...document.querySelectorAll('.chip-next')].map((c) => c.closest('#th-inbox .qcard')?.dataset.qcard ?? c.closest('#overview .rowline')?.getAttribute('href') ?? 'elsewhere')`);
+  assert.deepEqual(chips2.sort(), [`#q/${encodeURIComponent(SQ)}`, SQ].sort(), 'still two chips: the secrets card and the first Needs you row');
 });
 
 test('the shell blocks are untouched', () => {

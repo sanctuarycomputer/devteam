@@ -4489,7 +4489,7 @@ function openUpkeep() {
     attrRow('ID', `<code>${esc(u.id || 'upkeep')}</code>`, `${KEY_TIPS.ID} Copy ID copies exactly this.`),
     attrRow('Status', `<span class="badge ${u.mode === 'park' ? 'high' : held ? 'medium' : 'good'}">${esc(words)}</span>`),
     attrRow('Hold', holdControl('upkeep', u, { letGo: false })),
-    held ? attrRow('Held because', u.reason ? linkify(u.reason) : u.fleet ? `the fleet is ${u.mode === 'park' ? 'parked' : 'draining'}` : '') : null,
+    held ? attrRow('Held because', u.reason ? linkify(u.reason) : u.fleet ? `the fleet is ${u.mode === 'park' ? 'parked' : 'draining'}` : '<span class="muted">No reason given</span>') : null,
     attrRow('What it covers', esc(UPKEEP_COVERS)),
     attrRow('Chores in flight', chores.length ? chores.map((x) => `<a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>`).join(', ') : ''),
     howItChanges('goal', { id: 'upkeep' }),
