@@ -210,6 +210,9 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(ON_PAGE('loop'), 'Loop');
     await p.ev(`location.hash = '#lesson/${fx.L1}'`);
     await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && !!document.querySelector('#drawer-body a[href="#inbox"]') && getComputedStyle(document.getElementById('drawer')).transform === 'none'`, "the lesson's peek at rest, its Inbox link");
+    // the peek's own read in, and the link still: the peek draws first without it, then again taller with it, the
+    // link moving down (a click on where it was lands on nothing)
+    await soon(`PEEKS.has(peekKey('lesson', ${JSON.stringify(fx.L1)})) && ${STEADY('#drawer-body a[href="#inbox"]')}`, "the lesson's peek drawn with its read, the link still");
     const lessonHash = await p.ev('location.hash');
     await p.click('#drawer-body a[href="#inbox"]');
     await soon(`history.state?.page === '#loop?th=inbox' && ${ON_INBOX} && !document.getElementById('drawer').hidden`, 'the peek open, the panel on Inbox under it');
@@ -234,6 +237,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(modified, { seen: [false, false, false, false], th: null, at: null, hash: '#loop?lt=orient' }, 'a modified click: not prevented, no panel');
     await p.ev('new Promise((r) => setTimeout(() => r(true), 300))');
     assert.equal(await p.ev(IS_OPEN), false, 'still closed');
+    await soon(STEADY('#knowledge a[href="#inbox"]'), "the Loop's Inbox link still");
     await p.click('#knowledge a[href="#inbox"]');
     await soon(`location.hash === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX}`, "the Loop's link: the panel on Inbox over Loop");
     await p.click('#th-close');
