@@ -1,4 +1,4 @@
-// The dashboard's pages under the measure check (dashboard-shell@1, docs/devteam/dashboard/shell.md §9):
+// The dashboard's pages under the measure check (dashboard-shell@1, test/contracts/shell.md §9):
 // each page in PAGES must measure clean at 1440x900, 720x800 and 390x844. The list is added to only
 // by the index.html tickets, each with its own pages, peeks and threads; until the first adds one, a
 // smoke run proves the plumbing on today's Overview without judging it.

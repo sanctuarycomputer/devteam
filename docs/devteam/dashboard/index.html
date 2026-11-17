@@ -44,7 +44,7 @@ try {
   } }
   /* devteam-ui tokens end */
   /* devteam-layout start */
-  /* dashboard-shell@1 (docs/devteam/dashboard/shell.md): the layout both pages share, byte-identical in
+  /* dashboard-shell@1 (test/contracts/shell.md): the layout both pages share, byte-identical in
      index.html and hub.html. Tokens on :root. Every rule styles only inside a .shell element and outside
      any .no-shell region in it (:where(.shell) … :not(:where(.no-shell, .no-shell *))), at the specificity
      of its bare selector: nothing changes on a page until it adopts the shell, region by region. */
@@ -1165,7 +1165,7 @@ try {
 </aside>
 <script>
 /* devteam-shell-js start */
-// dashboard-shell@1 (docs/devteam/dashboard/shell.md): the builders, binders and URL rules both
+// dashboard-shell@1 (test/contracts/shell.md): the builders, binders and URL rules both
 // pages share. Byte-identical in index.html and hub.html; it touches no DOM until a binder is
 // called and uses no page global, so test/dashboard-shell.test.mjs runs it in vm.
 const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1438,7 +1438,7 @@ function saveFilters(page, state) {
 }
 /* devteam-shell-js end */
 /* shell-routes start */
-// The router's table (dashboard-shell@1, shell.md §6): the page ids, each link kind's home page (what a
+// The router's table (dashboard-shell@1, test/contracts/shell.md §6): the page ids, each link kind's home page (what a
 // link opens over on a cold load), file homes by path, and the redirects. The page's own, outside the
 // shared block, so the tickets that change it never touch the block.
 // until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
@@ -3866,7 +3866,7 @@ function showDrawer(html) {
   else if (keep) $('drawer-body').querySelector(keep)?.focus();
   for (const f of after) f();
 }
-// The peek on the shell's frame (shell.md §3, kit-88 spec §2.1): peek-open on the .shell element (<body>)
+// The peek on the shell's frame (test/contracts/shell.md §3, kit-88 spec §2.1): peek-open on the .shell element (<body>)
 // slides the drawer in and fades the scrim. Opening unhides both and forces a style flush first, so the
 // slide starts from the closed place; closing removes peek-open and hides both once the slide ends (its
 // transform transition, or --dur if none runs; at once under reduced motion, --dur 0). A reopen before then
@@ -3910,7 +3910,7 @@ function peekHide({ now = false } = {}) {
   d.addEventListener('transitioncancel', end);
   PEEK_HIDE = { cancel: () => { clearTimeout(timer); clearTimeout(net); d.removeEventListener('transitionrun', run); d.removeEventListener('transitionend', end); d.removeEventListener('transitioncancel', end); PEEK_HIDE = null; } };
 }
-// Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (shell.md §7): Back
+// Closing a peek (×, Escape, the scrim): to the page under it, by closeTarget (test/contracts/shell.md §7): Back
 // over every entry this visit pushed down to the page, else in place to the page in its stamp.
 function closeDrawer() {
   // already sliding out: one close, one history move
@@ -5166,7 +5166,7 @@ document.addEventListener('click', (e) => {
   location.hash = peekFor(v.slice(0, i), v.slice(i + 1));
 });
 let ROUTED = false;
-// The router's history (shell.md §7): HERE is the stamp of what is on screen ({ page, depth, openedHere });
+// The router's history (test/contracts/shell.md §7): HERE is the stamp of what is on screen ({ page, depth, openedHere });
 // ROUTE_COLD is true until the visit's first route.
 let HERE = null;
 let ROUTE_COLD = true;
@@ -6259,7 +6259,7 @@ function tlGoTo(s) {
   }
   tlReveal(s);
 }
-// A subject's page head (shell.md §6): an item's, the page its home element is on (with its Loop tab),
+// A subject's page head (test/contracts/shell.md §6): an item's, the page its home element is on (with its Loop tab),
 // else its kind's home page, else Overview; a page subject's view through the router's redirects
 // (#loop/orient is #loop?lt=orient, #monitoring is #sensors), so views already in the log keep working.
 function subjectHead(s) {

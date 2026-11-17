@@ -28,7 +28,7 @@
   } }
   /* devteam-ui tokens end */
   /* devteam-layout start */
-  /* dashboard-shell@1 (docs/devteam/dashboard/shell.md): the layout both pages share, byte-identical in
+  /* dashboard-shell@1 (test/contracts/shell.md): the layout both pages share, byte-identical in
      index.html and hub.html. Tokens on :root. Every rule styles only inside a .shell element and outside
      any .no-shell region in it (:where(.shell) … :not(:where(.no-shell, .no-shell *))), at the specificity
      of its bare selector: nothing changes on a page until it adopts the shell, region by region. */
@@ -399,7 +399,7 @@
 </div>
 <script>
 /* devteam-shell-js start */
-// dashboard-shell@1 (docs/devteam/dashboard/shell.md): the builders, binders and URL rules both
+// dashboard-shell@1 (test/contracts/shell.md): the builders, binders and URL rules both
 // pages share. Byte-identical in index.html and hub.html; it touches no DOM until a binder is
 // called and uses no page global, so test/dashboard-shell.test.mjs runs it in vm.
 const escHtml = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
