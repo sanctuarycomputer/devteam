@@ -527,6 +527,12 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev(FRAMES);
     assert.equal(await p.ev(`${ON_INBOX} && location.hash === '#overview?th=inbox'`), true, 'Escape in the note box leaves the panel open');
     assert.equal(await p.ev('document.activeElement?.__mine === 1'), true, 'the focus still in the note box');
+    // pin mode on, the focus still in the note box: Escape leaves pin mode, and nothing else
+    await p.ev('tlPinMode(true); void 0');
+    assert.equal(await p.ev('TL.pin'), true, 'pin mode on');
+    await p.key('Escape');
+    await p.ev(FRAMES);
+    assert.deepEqual(await p.ev(`[TL.pin, ${ON_INBOX}, location.hash, document.activeElement?.__mine === 1, document.activeElement?.value]`), [false, true, '#overview?th=inbox', true, 'half a thought'], 'Escape leaves pin mode; the panel open, the focus and words kept');
     // blurred: the held draw lands, and the redrawn box keeps the words
     await p.ev('document.activeElement.blur(); void 0');
     await soon('HELD === null', 'the held draw landed');
@@ -604,7 +610,7 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
 
     // the review: opened full size over the panel; closed, back to the page with the panel on Inbox
     await press(IN(`[data-open-review="${fx.r}"]`), 'Open the review');
-    await soon(`location.hash === '#review/${fx.r}' && !document.getElementById('review-view').hidden`, 'the review open');
+    await soon(`location.hash === '#review/${fx.r}' && !document.getElementById('review-view').hidden && ${IS_OPEN} && ${ON_INBOX}`, 'the review open, the panel still open on Inbox under it');
     const w = await p.ev("[document.getElementById('review-view').getBoundingClientRect().width, document.getElementById('threads').getBoundingClientRect().width]");
     assert.ok(w[0] > w[1], `#review-view wider than the panel: ${JSON.stringify(w)}`);
     await soon("!!document.querySelector('#review-view [data-rv-close]')", "the review's close");

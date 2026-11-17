@@ -5973,8 +5973,9 @@ const tlEl = (id) => document.getElementById(id);
 const inInbox = (el) => !!el?.closest?.('#th-inbox');
 const tlOwn = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
 // A field of the layer's (#tl, the panel outside its Inbox tab): one holds no page redraw and render() keeps no
-// draft from it; a field in #th-inbox, which render() rebuilds, is the page's (kit-100 spec §2.7).
-const layerField = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
+// draft from it; a field in #th-inbox, which render() rebuilds, is the page's (kit-100 spec §2.7). The same split
+// as a press's (tlOwn), so the two can't drift.
+const layerField = tlOwn;
 // a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
 const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -6039,8 +6040,10 @@ function tlPinMode(on) {
   tsRaise(on);
 }
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && inboxTyping(document.activeElement)) return;
   if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
+  // a text field in the Inbox tab: the key is the field's; pin mode left (above) hides nothing typed, but no thread
+  // and not the panel closes under a half-typed answer (kit-100 spec §2.7)
+  else if (e.key === 'Escape' && inboxTyping(document.activeElement)) return;
   else if (e.key === 'Escape' && !!document.activeElement?.closest?.('#tl') && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
   // the focus in the open panel (kit-89 spec §2.9): an in-panel thread back to the list, else the panel closed,
   // whatever else is open (a peek, a floating card)
