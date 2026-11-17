@@ -355,6 +355,9 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     // the pin opens Q's card beside the panel
     await p.click(`#tl-pins [data-tl-pin="${Q}"]`);
     await soon(`${FLOAT(Q)} && ${BESIDE}`, "Q's card open, beside the panel");
+    // at 1440: its right edge 10px left of the panel's (spec §2.6), within 1px
+    const gap = await p.ev(`document.getElementById('threads').getBoundingClientRect().left - 10 - ${CARD}.getBoundingClientRect().right`);
+    assert.ok(Math.abs(gap) <= 1, `the card's right edge is the panel's left less 10px (off by ${gap})`);
     await p.click('#tl-card [data-tl-close]');
     await soon(`${CARD}.hidden`, 'the card closed');
 

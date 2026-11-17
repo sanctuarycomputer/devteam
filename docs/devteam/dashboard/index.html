@@ -6444,8 +6444,9 @@ function tlCardBody(t) {
   }
   tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id] === 'held' && !askShown() ? true : TL.typed[t.id], TL.pane) ?? '';
 }
-// Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
-// on the page (or it has none); a bottom sheet on a narrow screen.
+// Beside its pin, in page coordinates so it scrolls with the page; a thread whose home is the Inbox tab
+// (in-threads, kit-100 spec §2.6) in the window's coordinates instead, fixed as the panel is; in the dock when
+// its subject isn't on the page (or it has none); a bottom sheet on a narrow screen.
 function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
@@ -6455,6 +6456,9 @@ function tlPlaceCard(t) {
   // a thread whose home is the Inbox tab (kit-100 spec §2.6): fixed, in the window's coordinates, shown over the
   // panel at 900px and below; its subject's card (a draft's, found again once a render redrew it)
   const fixed = tlInboxHome(t ?? { subject: TL.draft.subject });
+  // fixed before anything is measured: a card still absolute at its last place can widen the page, and the scrollbar
+  // that brings moves the panel it is placed beside
+  card.classList.toggle('in-threads', fixed);
   let r = null, el = null;
   if (t) { r = tlTargetRect(t.subject); el = r && t.subject?.kind === 'item' ? tlHome(t.subject) : null; }
   else if (TL.draft.el?.isConnected || fixed) { el = TL.draft.el?.isConnected ? TL.draft.el : tlHome(TL.draft.subject); r = tlVisible(el) ? el.getBoundingClientRect() : null; }
@@ -6467,7 +6471,6 @@ function tlPlaceCard(t) {
   // a subject in the Inbox tab: its box clipped to the panel's left edge, so the card opens just outside the panel
   // (named one by one: a DOMRect's sides are getters, which a spread doesn't copy)
   if (r && inInbox(el)) { const panelLeft = $('threads').getBoundingClientRect().left; r = { left: panelLeft, right: panelLeft, top: r.top, bottom: r.bottom, width: 0, height: r.height }; }
-  card.classList.toggle('in-threads', fixed);
   const w = card.offsetWidth || 360;
   let p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, w, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
   if (!p.sheet && !p.dock) p = { ...p, left: Math.max(8, Math.min(p.left, vw - w - 8)) };
@@ -6823,8 +6826,10 @@ const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
 function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter((u) => !u.pending).pop()?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
 // The pins: one numbered disc per subject on the page, at an item's top right corner or at the spot
-// on its section, for open threads only, in page coordinates. Placed again after every redraw, when
-// the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
+// on its section, for open threads only, in page coordinates; a subject inside the fixed panel (the Inbox
+// tab's cards: in-threads, kit-100 spec §2.6) in the window's coordinates. Placed again after every redraw, when
+// the threads change and on a resize (and the Inbox tab's on its scroll, tlReplace); a subject that isn't drawn
+// gets none (the dock still lists it).
 function tlPins() {
   const box = tlEl('tl-pins');
   const pins = tPins(TL.threads).map((g) => {
@@ -7176,10 +7181,13 @@ function thShow() {
 // the page's slide beside the panel has ended: what sits on it (pins, a floating card) placed where it now is
 document.querySelector('.main')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right') tlDraw(); });
 // the Inbox tab's cards move with #th-body's scroll and the panel's slide: what sits on them placed again (kit-100 spec §2.6)
-$('th-body')?.addEventListener('scroll', () => tlReplace(), { passive: true });
 // and with the page's scroll while that tab shows: fixed, they don't move with it, but the scrollbar a scroll comes
-// with can move the panel (a classic scrollbar narrows the window the panel is fixed to)
-addEventListener('scroll', () => { if (TH.th === 'inbox') tlReplace(); }, { passive: true });
+// with can move the panel (a classic scrollbar narrows the window the panel is fixed to). One placing a frame,
+// however many scroll events come in it.
+let TL_REPLACE_RAF = 0;
+const tlReplaceSoon = () => { if (!TL_REPLACE_RAF) TL_REPLACE_RAF = requestAnimationFrame(() => { TL_REPLACE_RAF = 0; tlReplace(); }); };
+$('th-body')?.addEventListener('scroll', tlReplaceSoon, { passive: true });
+addEventListener('scroll', () => { if (TH.th === 'inbox') tlReplaceSoon(); }, { passive: true });
 $('threads')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget) tlReplace(); });
 const thSeen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && el.getClientRects().length > 0; };
 function thFocus(kind) {
