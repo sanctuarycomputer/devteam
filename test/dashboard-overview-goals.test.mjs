@@ -101,7 +101,8 @@ test('heartbeatDays: kit-84\'s days in the heartbeat\'s shape', () => {
   assert.deepEqual(hd(undefined), []);
 });
 
-// The hello-pulse block alone: helloLoad redraws Overview only when the answer changed; ovMosaic formats its days with one formatter and is kept while the activity
+// The hello-pulse block alone: helloLoad applies only the latest ask's answer and redraws Overview only
+// when the answer changed; ovMosaic formats its days with one formatter and is kept while the activity
 // and the day are the same.
 const helloCtx = (globals = {}) => {
   const asks = [], draws = [];
@@ -120,33 +121,37 @@ const helloCtx = (globals = {}) => {
   return { ctx, asks, draws, answer, hello: () => JSON.parse(JSON.stringify(ctx.hello())) };
 };
 
-test('helloLoad: Overview redraws only when the answer changed', async () => {
+test('helloLoad: only the latest ask\'s answer is applied, and Overview redraws only on a change', async () => {
   const { ctx, asks, draws, answer, hello } = helloCtx();
-  const a = ctx.helloLoad();
-  await answer(0, { name: 'new', pulse: { state: 'working' } });
-  await a;
+  // two asks in flight; the later one answers first, then the earlier, slower one lands
+  const a = ctx.helloLoad(), b = ctx.helloLoad();
+  assert.equal(asks.length, 2);
+  await answer(1, { name: 'new', pulse: { state: 'working' } });
   assert.deepEqual(hello(), { name: 'new', pulse: { state: 'working' } });
-  assert.equal(draws.length, 1, 'the answer drew Overview');
+  assert.equal(draws.length, 1, 'the latest answer drew Overview');
+  await answer(0, { name: 'old', pulse: { state: 'waiting' } });
+  await Promise.all([a, b]);
+  assert.deepEqual(hello(), { name: 'new', pulse: { state: 'working' } }, 'a slower, older answer does not overwrite the newer one');
+  assert.equal(draws.length, 1, 'nor draws');
   // the same answer again: no redraw
   const c = ctx.helloLoad();
-  await answer(1, { name: 'new', pulse: { state: 'working' } });
+  await answer(2, { name: 'new', pulse: { state: 'working' } });
   await c;
   assert.equal(draws.length, 1, 'an unchanged answer does not redraw Overview');
   // a changed answer redraws; a failed ask leaves none, and redraws once
   const d = ctx.helloLoad();
-  await answer(2, { name: 'new', pulse: { state: 'waiting' } });
+  await answer(3, { name: 'new', pulse: { state: 'waiting' } });
   await d;
   assert.equal(draws.length, 2, 'a changed answer redraws Overview');
   const e = ctx.helloLoad();
-  await answer(3, null);
+  await answer(4, null);
   await e;
   assert.equal(ctx.hello(), null, 'a failed ask leaves none');
   assert.equal(draws.length, 3, 'which is a change');
   const f = ctx.helloLoad();
-  await answer(4, null);
+  await answer(5, null);
   await f;
   assert.equal(draws.length, 3, 'and failing again is not');
-  assert.equal(asks.length, 5);
 });
 
 test('ovMosaic: one day formatter, and the same mosaic while the activity and the day are unchanged', () => {

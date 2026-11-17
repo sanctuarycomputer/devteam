@@ -5783,14 +5783,17 @@ const NEXT_ID = () => DATA?.questions?.[0]?.id ?? null;
 /* hello-pulse start */
 // /api/hello, as the hub reads it (pulse: state, last_activity, activity): asked on load and with each
 // redraw; a failed ask leaves none, so the pill says unknown (spec §1) and the mosaic is empty.
-// Overview is redrawn only when the answer changed (render draws it on each poll anyway).
-let HELLO = null, HELLO_JSON = 'null';
+// Asks can overlap (each poll, each loadNow): only the latest ask's answer is applied, and Overview is
+// redrawn only when the answer changed (render draws it on each poll anyway).
+let HELLO = null, HELLO_SEQ = 0, HELLO_JSON = 'null';
 async function helloLoad() {
+  const seq = ++HELLO_SEQ;
   let h = null;
   try {
     const r = await fetch('/api/hello', { signal: AbortSignal.timeout(10000) });
     if (r.ok) h = await r.json();
   } catch {}
+  if (seq !== HELLO_SEQ) return;
   h = h && typeof h === 'object' ? h : null;
   const json = JSON.stringify(h);
   if (json === HELLO_JSON) return;
