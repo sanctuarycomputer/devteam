@@ -42,11 +42,11 @@
 
 ## The fixture (`awarenessFixture`, used by Tasks 1 to 4)
 
-Clock: `M` = this Monday 00:00 UTC; `W(k)` = M − (11 − k) × WEEK; `h(k, d, hh)` = W(k) + d days + hh hours; `E(k)` = W(k + 1) − 1 ms for k < 11. Lines are written with `handFor` as in `test/autonomy-data.test.mjs` (copy it): `S` = `supervisor`, `O` = `owner`. Observations are `{ type: 'observation', kind: 'note', subject: 'app', source_key: <key>, detail: '<key> sighting <n>', valence: -1 }`.
+Clock: `M` = this Monday 00:00 UTC; `W(k)` = M − (11 − k) × WEEK; `h(k, d, hh)` = W(k) + d days + hh hours; `E(k)` = W(k + 1) − 1 ms for k < 11. Lines are written with `handFor` as in `test/autonomy-data.test.mjs` (copy it), with two changes. Its prefix map gains `problem: 'p'`: without it a problem's id reads `undefined-…` and `readLog` drops the line (P1-4). And `hand(by, o, ms, { exact: true })` writes at exactly `ms`, with no counter milliseconds, for the edge-time lines `sA`, `sB` and `sC`: the counter's up to 999 ms would push `sA` past E(2) (P1-3). `S` = `supervisor`, `O` = `owner`. Observations are `{ type: 'observation', kind: 'note', subject: 'app', source_key: <key>, detail: '<key> sighting <n>', valence: -1 }`.
 
 **Efficiency weeks** (for Task 4; copy `effFixture`'s `shipped` and `land` from `test/efficiency-data.test.mjs`): three tickets shipped in week 0 and three in week 7. Each ticket is size S, `hours: 1`, with one build spend of $1 (input 100, output 50). Weeks 0 and 7 then both score 100 for efficiency, and every other week is null.
 
-**Signals.** Each signal j has items at F_j − 2 h (S), F_j − 1 h (S) and F_j (O), with F_j = h(8, 1, 11) + j minutes, so its group forms at F_j. `oX` is one observation on key `other:x` at h(8, 0, 1). Every noise ruling is `{ type: 'decision', class: 'orient-noise', authority: 'rung', what: 'noise', refs: [<key>, oX] }` (as `test/ooda-lineage.test.mjs:179` writes one), except `sig:k`'s. "k-cand" means knowledge `{ kind: 'lesson', status: 'candidate', statement: '…', scope: 'project' }` by S, which is not in force.
+**Signals.** Each signal j has items at F_j − 2 h (S), F_j − 1 h (S) and F_j (O), with F_j = h(8, 1, 11) + j minutes, so its group forms at F_j. `oX` is one observation on key `other:x` at h(8, 0, 1). Every noise ruling is `{ type: 'decision', class: 'orient-noise', authority: 'constitution', what: 'noise', refs: [<key>, oX] }`, except `sig:k`'s. `orient-noise` is constitutional, so only `constitution` is live (P1-1). Knowledge's `evidence` can't be set after its new line (`x-authority`), so every case that changes a citation later uses a problem with no fingerprints, `{ type: 'problem', title, severity: 1, realized: true, status: 'open', refs }` by S, whose `refs` the supervisor may set (P1-2). "k-cand" means knowledge `{ kind: 'lesson', status: 'candidate', statement: '…', scope: 'project' }` by S, which is not in force.
 
 | j | key | explanation | week 8 |
 |---|---|---|---|
@@ -55,20 +55,21 @@ Clock: `M` = this Monday 00:00 UTC; `W(k)` = M − (11 − k) × WEEK; `h(k, d, 
 | 2 | sig:c | ruling at F+2h | counts (fails if the ruling rule is dropped) |
 | 3 | sig:d | k-cand cites item 1 at F−1.5h | counts, 0 h |
 | 4 | sig:e | k-cand cites item 1 at F+40h; a problem (no fingerprints) new at F+0.5h with `refs: []`, set `refs: [item 2]` at F+2h | counts (the earliest) |
-| 5 | sig:f | k-cand new at F+1h `evidence: [item 1]`, set `evidence: [item 1, item 2]` at F+40h | counts (a later line doesn't move it) |
-| 6 | sig:g | decision `priority-change`, `rung`, `refs: [item 1]` at F+1h; owner `corrected` at F+5h | not explained |
-| 7 | sig:h | k-cand new at F+1h `[item 1]`; set `evidence: []` at h(8,4,0) | not explained (dropped before E) |
-| 8 | sig:h2 | k-cand new at F+1h `[item 1]`; set `evidence: []` at h(9,1,0) | counts (dropped after E) |
+| 5 | sig:f | problem new at F+1h `refs: [item 1]`, set `refs: [item 1, item 2]` at F+40h | counts (a later line doesn't move it) |
+| 6 | sig:g | decision `orient-noise`, `constitution`, `refs: [item 1]` (no key, so only the citation path) at F+1h; owner `corrected` at F+5h | not explained (live until corrected, so the correction is what flips it, P1-5) |
+| 7 | sig:h | problem new at F+1h `refs: [item 1]`; set `refs: []` at h(8,4,0) | not explained (dropped before E) |
+| 8 | sig:h2 | problem new at F+1h `refs: [item 1]`; set `refs: []` at h(9,1,0) | counts (dropped after E) |
 | 9 | sig:i | ruling at F−0.5h (after the 2nd sighting, before the 3rd) | counts, 0 h (fails with spec-2's from-forming limit) |
 | 10 | sig:j | ruling at F+30h | not within a day |
 | 11 | sig:k | ruling `refs: ['sig:k']` only, at F+1h | not explained (key-only) |
 | 12 | sig:m | ruling at F−3h (before the 1st sighting) | not explained (fails with no lower limit) |
+| 13 | sig:q | problem new at F+1h `refs: []`, set `refs: [item 1]` at F+30h | not within a day (fails if a citation added by an update is dated at the record's creation, P1-6) |
 | — | sig:l | items at E(8)−20h (S), −19h (S), −18h (O); none | left out of `of` (formed in the last day) |
 | — | sig:n | items at E(8)−10h (S), −9h (S), −8h (O); k-cand cites item 1 at E(8)−5h | counts |
 | — | sig:solo | three items by S at h(8,2,1), (8,2,2), (8,2,3) | never forms |
 | — | sig:p | items at h(7,1,9) S, h(7,1,10) S, h(7,1,11) O; k-cand cites item 1 at h(7,1,12) | week 7: counts |
 
-Week 8 signals: of 14 (j0 to j12 and sig:n), count 8 (a, c, d, e, f, h2, i, n), share 0.57.
+Week 8 signals: of 15 (j0 to j13 and sig:n), count 8 (a, c, d, e, f, h2, i, n), share 0.53.
 
 **Incidents.** Each is `{ type: 'problem', title, severity: 2, realized: true, status: 'open', fingerprints: ['fp-<name>'] }` by S. It is set to `status: 'resolved'` (by S, unless stated), and verified by an `{ kind: 'outcome', valence: 1, refs: [p] }` observation.
 - `inc5`: new h(5,1,0), resolved h(5,2,0), verified h(5,3,0); no lesson.
@@ -101,7 +102,7 @@ Week 8 signals: of 14 (j0 to j12 and sig:n), count 8 (a, c, d, e, f, h2, i, n), 
 | 5 | — | 0 [0/1] | 1 [2/2] | — | 50 |
 | 6 | — | 0.5 [1/2] | 0.5 [1/2] (sA excluded at exactly 28 d) | — | 50 |
 | 7 | 1 [1/1] | 0.5 [1/2] | 0 [0/2] | — | 50 |
-| 8 | 0.57 [8/14] | 0.5 [1/2] | 0 [0/2] | — | 36 |
+| 8 | 0.53 [8/15] | 0.5 [1/2] | 0 [0/2] | — | 34 |
 | 9 | — | 1 [1/1] (inc5 > 30 d) | 0 [0/3] | — | 50 |
 | 10 | — | 0 [0/1] (incL > 30 d) | 0.33 [1/3] | 0.5 [1/2] | 28 |
 | 11 | — | 0 [0/1] | 0.33 [1/3] | — [0/0] | 17 |
@@ -176,7 +177,7 @@ Model: strong
 The algorithm for one week:
 - If E < the log's first line, return the empty parts with no `withLogAt`.
 - Otherwise, inside `withLogAt(new Date(E).toISOString(), …)`:
-  - **signals.** Take the groups with `formed_at` in `[S, E]`. Citation times: for each knowledge or problem object, and each live decision with an `o-` ref, walk `[{ at: created_at, evidence, refs }, ...updates]`. Each item gets the `at` of the first entry carrying it, counted only if the object's current `evidence ∪ refs` still carries it. Ruling times: live `orient-noise` decisions with an `o-` ref whose refs name the key, counted only if `created_at ≥ items[0].at`. `x` is the minimum of these. The signal is in `of` unless `formed_at > E − 24 h` and it has no `x`. It is counted when `x − formed ≤ 24 h`.
+  - **signals.** Take the groups with `formed_at` in `[S, E]`. Citation times: for each knowledge or problem object, and each live decision with an `o-` ref, walk its new line and then its applied updates in order. The folded object keeps only current values, so the new line's `evidence` and `refs` come from the log's first `op: 'new'` line with that id (the one the fold kept). The updates are `obj.updates`, applied changes only (P1-6). Each item gets the `at` of the first entry carrying it, counted only if the object's current `evidence ∪ refs` still carries it. Ruling times: live `orient-noise` decisions with an `o-` ref whose refs name the key, counted only if `created_at ≥ items[0].at`. `x` is the minimum of these. The signal is in `of` unless `formed_at > E − 24 h` and it has no `x`. It is counted when `x − formed ≤ 24 h`.
   - **incidents.** `of` = `fixedIncidents(E).length`, and `count` = `of − incidentDebt(E).length`.
   - **lessons.** The accepted knowledge ids, and the starts (`worker-slots`, `what` starting `made `) in `(E − 28 d, E]`.
   - **starts.** The starts in `[S, E]` that have knowledge.
@@ -185,7 +186,7 @@ The algorithm for one week:
   - `awareness: twelve weeks, oldest first, ending this Monday`: 12 entries; `weeks[11].starts_at === M`; 7-day steps.
   - `awareness: each week's parts and score, read at its end`: every cell of the expected table, as `{ count, of, share }`, plus `score`. `score.this_week` and `score.last_week` are 17 and 28. `parts` deep-equals `weeks[11].parts`. Skip under `TOO_SOON`.
   - `awareness: a stored learning record doesn't stand in for the log`: week 7 still reads as in the table despite the record's 9s (Review Focus 4).
-  - `awareness: a week before the log is not folded`: a second fixture whose first line is in week 11 (one accepted fact, by O). Weeks 0 to 10 are all `{ count: 0, of: 0, share: null }` with score null. Week 11's lessons read `0/1`.
+  - `awareness: a week before the log is not folded`: a second fixture whose lines are all in week 11, at `M + span × f`, so the test skips under `TOO_SOON` (P1-10). It has four accepted lessons by O, and one start by S that gives three of them. Weeks 0 to 10 are all `{ count: 0, of: 0, share: null }` with score null. Week 11's lessons read `3/4` and its starts `1/1`. Task 3 adds this fixture's suggestion.
 - [ ] **Step 2: Run** `env -u TMUX node --test --test-concurrency=2 test/awareness-data.test.mjs`. Expected: FAIL, because `awareness` is undefined.
 - [ ] **Step 3: Implement** `awarenessWeek` and `awarenessData`. Sort ties by `at`, then `id` (Review Focus 1). Take the citation walk from `updates`, never from raw lines (Review Focus 2).
 - [ ] **Step 4: Run** the new file, then `test/components.test.mjs`. Expected: the new file passes. G1 fails only on `dashboard-data.txt`, for the new `awareness` block: re-record it with `DEVTEAM_G1_RECORD=1`, check that `git diff test/fixtures` shows only that block, and rerun the file.
@@ -205,16 +206,18 @@ Model: strong
 
 - [ ] **Step 1: Write the failing tests:**
   - `awareness: suggestions, in order and cut at five`: the main fixture's list deep-equals the expected five. `<n>`, `<d>` and the date are computed from the fixture's times with now-bounds, as in Task 1.
-  - `awareness: clashing ids, and no lessons suggestion under a quarter`: a third fixture with:
-    - one accepted lesson given to a start 2 days ago;
-    - signals on `dup:z`, first sighting at h(9,1,9), and `dup/z` at h(9,1,10), each formed by three items from S and O, unexplained;
-    - no incident.
+  - `awareness: exactly a quarter unused gets the lessons suggestion, in the singular`: the second fixture (Task 2) gives exactly `aw-lessons-unused`, with "Look at the lesson no session was given in 4 weeks" / "1 of 4 lessons in force reached no session start in the last 28 days" / "Lessons sessions use: 3 of 4 → 3 of 3 once it is retired". Changing the threshold from ≥ to > drops it (P1-7).
+  - `awareness: clashing ids, singular words, and no lessons suggestion under a quarter`: a third fixture with:
+    - five accepted lessons, four of them given to a start 2 days ago (1 of 5 unused, under a quarter: no lessons suggestion, P1-7);
+    - incident `incY`, resolved at now − 36 h and verified at now − 35 h ("Fixed 1 day ago"), and incident `incT`, resolved at now − 1 h and verified at now − 0.5 h ("Fixed today");
+    - signals on `dup:z` (first sighting at h(9,1,9), its last detail over 120 characters) and `dup/z` (h(9,1,10)), each formed by three items from S and O and unexplained;
+    - a signal on `quiet:x` with empty details, its items at now − 30 h (S), −29 h (S) and −28 h (O).
 
-    Expected suggestions: ids `['aw-signal-dup-z', 'aw-signal-dup-z-2']`, no `aw-lessons-unused`. The word checks: `what` has a detail of more than 120 characters, cut to 120.
+    Expected, in order: `aw-incident-<incY>`, `aw-incident-<incT>`, `aw-signal-dup-z` (its `what` cut to 120 characters of detail), `aw-signal-dup-z-2`, and `aw-signal-quiet-x`, whose `what` is "Find out why this keeps happening (3 times)" and whose `effect` is "First seen 1 day ago; explaining it stops further sightings piling up" (P1-8).
   - `awareness: plain words`: no suggestion's text matches `/informed|orient|debt|devteam|--/i` (R2).
 - [ ] **Step 2: Run** the file. Expected: FAIL (`suggestions` is `[]`).
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** the file and `test/components.test.mjs`. Re-record G1 if only `awareness.suggestions` moved (G1 gets the lessons suggestion: "Look at the lesson no session was given in 4 weeks"), check the diff, and rerun.
+- [ ] **Step 4: Run** the file and `test/components.test.mjs`. Re-record G1 if only `awareness.suggestions` moved, check the diff against the G1 expectations below, and rerun.
 - [ ] **Step 5: Commit** `kit-242: task 3, awareness suggestions`. Task review: `reviews/task-3.md`.
 
 ### Task 4: The Autonomy Score, the server path, and cost
@@ -236,6 +239,18 @@ Model: fast
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the new file and `test/components.test.mjs`. Re-record G1, which should add only `autonomy_score` with all-null scores. Check that `git diff test/fixtures` holds only the `awareness` and `autonomy_score` blocks, and rerun. Time `node docs/devteam/scripts/devteam.mjs dashboard-data > /dev/null` in home (`/data/home/code/devteam-dev`), once with main's script and once with this branch's script run against home (`DEVTEAM_HOME` unchanged). Record both numbers for verification.md (Review Focus 5).
 - [ ] **Step 5: Commit** `kit-242: task 4, autonomy score and the server path`. Task review: `reviews/task-4.md`.
+
+## What G1 holds (P1-9)
+
+G1's log begins at run time, this week, with one accepted fact and the `slow:g1` signal: three sightings from two writers, formed under a day ago and unexplained. It has no start and no incident. So the re-recorded `dashboard-data.txt` gains exactly:
+- `awareness.weeks[0..10]`: every part `{ count: 0, of: 0, share: null }`, score null.
+- `weeks[11]`: signals `[0/0]` null, incidents `[0/0]` null, lessons `{ count: 0, of: 1, share: 0 }`, starts `[0/0]` null, score 0.
+- `score` `{ this_week: 0, last_week: null }`, and `parts` = `weeks[11].parts`.
+- `suggestions`: one, `aw-lessons-unused`, "Look at the lesson no session was given in 4 weeks" / "1 of 1 lesson in force reached no session start in the last 28 days" / "Lessons sessions use: 0 of 1 → 0 of 0 once it is retired".
+- `autonomy_score`: every week's score null, and `this_week` and `last_week` null.
+- The `starts_at` keys are stripped by G1's timeless filter.
+
+Any other difference in the golden is a defect to fix, not to record.
 
 ## Done-when → test map
 
