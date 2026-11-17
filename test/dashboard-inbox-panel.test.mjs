@@ -460,6 +460,171 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await size(1440, 900);
     await soon('innerWidth === 1440', 'at 1440');
   });
+
+  // AC5 (done-when 5), last: it answers questions and changes the counts. Each control on its own fixture question,
+  // pressed in the panel's Inbox tab; each post's body read by a wrap of the page's fetch (chrome.mjs drops CDP events).
+  await t.test('every control from the panel', async () => {
+    const { q1, q2, q3, q4, q5, q6 } = fx.q;
+    const IN = (sel) => `#th-inbox ${sel}`;
+    const PIN = (id) => `document.querySelector('#tl-pins [data-tl-pin="${id}"]')`;
+    // a press on what a selector finds once it is shown, enabled, in view and still (a click takes its centre once)
+    const press = async (sel, what) => {
+      await soon(`${SEEN(sel)} && !document.querySelector(${JSON.stringify(sel)}).disabled`, what);
+      await p.ev(`document.querySelector(${JSON.stringify(sel)}).scrollIntoView({ block: 'center' }); void 0`);
+      await soon(STEADY(sel), `${what}, at rest`);
+      await p.click(sel);
+    };
+    const focusIn = async (sel, what) => {
+      await press(sel, what);
+      await soon(`document.activeElement === document.querySelector(${JSON.stringify(sel)})`, `${what}, focused`);
+    };
+    // the body posted to url for a question (or lesson) id
+    const posted = (url, id) => soon(`window.__posts.find((x) => x.url === ${JSON.stringify(url)} && x.body?.id === ${JSON.stringify(id)})?.body`, `${url} posted for ${id}`);
+    // timed out, it says what the card's error line says
+    const gone = (id) => soon(`!document.querySelector(${JSON.stringify(IN(`[data-qcard="${id}"]`))})`, `${id}'s card left the Inbox`)
+      .catch(async (e) => assert.fail(`${e.message}; its error line: ${JSON.stringify(await p.ev(`document.getElementById('e-${id}')?.textContent ?? null`))}; its posts: ${JSON.stringify(await p.ev(`window.__posts.filter((x) => x.body?.id === '${id}').map((x) => [x.url, x.status, x.out])`))}`));
+    await p.send('Page.bringToFront');
+    await p.ev("location.hash = '#overview?th=inbox'");
+    await soon(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && !!document.getElementById('q-${q1}')`, 'Overview, the panel on Inbox');
+    await p.ev(`(() => { window.__posts = []; const f = window.fetch; window.fetch = (u, o) => { const url = String(u && u.url ? u.url : u).split('?')[0];
+      if (String(o?.method || 'GET').toUpperCase() !== 'POST' || !url.startsWith('/api/')) return f(u, o);
+      const x = { url, body: JSON.parse(o.body || 'null') }; window.__posts.push(x);
+      return f(u, o).then(async (r) => { x.status = r.status; x.out = await r.clone().text(); return r; }); }; })()`);
+
+    // q1: a choice, the standing-rule box, Answer: the rule rides on the answer, the card leaves
+    await press(IN(`[data-qcard="${q1}"] input[data-pick][value="Stripe"]`), "q1's Stripe");
+    await press(IN(`input[data-rulebox="${q1}"]`), "q1's rule box");
+    await soon(`document.querySelector(${JSON.stringify(IN(`input[data-rulebox="${q1}"]`))}).checked`, 'the rule box checked');
+    await press(IN(`[data-answer="${q1}"]`), "q1's Answer");
+    const b1 = await posted('/api/answer', q1);
+    assert.equal(b1.answer, 'Stripe');
+    assert.equal(b1.rule, 'Stripe: the standing answer to questions like “Which processor?”', 'the rule box rides on the answer');
+    await gone(q1);
+    // one redraw after the data says q1 is answered: Q's subject is no longer in the Inbox, so no pin of Q's in the panel
+    await soon(`!RAW.questions.some((q) => q.id === '${q1}')`, 'the data without q1');
+    await p.ev("document.getElementById('questions').firstElementChild.__old = 1; void 0");
+    await soon("!document.getElementById('questions').firstElementChild?.__old", 'a redraw');
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(`tlInboxHome(TL.threads.find((x) => x.id === '${Q}'))`), false, 'Q is no longer Inbox-home');
+    assert.equal(await p.ev(`(() => { const b = ${PIN(Q)}; if (!b || b.hidden || !b.getClientRects().length) return false; const r = b.getBoundingClientRect(), k = document.getElementById('th-inbox').getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return x >= k.left && x <= k.right && y >= k.top && y <= k.bottom; })()`), false, "no pin of Q's inside #th-inbox");
+
+    // q2: words typed into the note box survive a held redraw and a threads poll, focus and caret kept
+    const TA = IN(`textarea[data-q="${q2}"]`);
+    await focusIn(TA, "q2's note");
+    await p.type('half a thought');
+    await soon(`document.querySelector(${JSON.stringify(TA)}).value === 'half a thought'`, 'the words typed');
+    await p.ev(`(() => { const t = document.querySelector(${JSON.stringify(TA)}); t.__mine = 1; t.setSelectionRange(4, 4); })()`);
+    await soonIn(p, 15000)('HELD !== null', 'a redraw arrived and held');
+    // a threads poll, run here: while a draw is held the page reads the threads only with a card open (its 2 s poll),
+    // so the read a landed draw would start is started by hand
+    const seq = await p.ev('TL.have');
+    await p.ev('tlRefresh(); void 0');
+    await soon(`TL.have > ${seq}`, 'a threads poll landed');
+    await p.ev(FRAMES);
+    assert.deepEqual(await p.ev('(() => { const a = document.activeElement; return [a?.__mine === 1, a?.value, a?.selectionStart]; })()'), [true, 'half a thought', 4], 'the same field focused, its words and caret kept');
+    // Escape there is the field's: the panel stays open, on Inbox
+    await p.key('Escape');
+    await p.ev(FRAMES);
+    assert.equal(await p.ev(`${ON_INBOX} && location.hash === '#overview?th=inbox'`), true, 'Escape in the note box leaves the panel open');
+    assert.equal(await p.ev('document.activeElement?.__mine === 1'), true, 'the focus still in the note box');
+    // blurred: the held draw lands, and the redrawn box keeps the words
+    await p.ev('document.activeElement.blur(); void 0');
+    await soon('HELD === null', 'the held draw landed');
+    await soon(`(() => { const t = document.querySelector(${JSON.stringify(TA)}); return !!t && !t.__mine && t.value === 'half a thought'; })()`, 'the redrawn note box holds the words');
+    // the note, sent (q2's Answer with no choice: the words as the answer)
+    await press(IN(`[data-answer="${q2}"]`), "q2's Answer");
+    assert.equal((await posted('/api/answer', q2)).answer, 'half a thought', 'the note sent');
+    await gone(q2);
+
+    // q3, the owner-action: Done
+    await press(IN(`[data-qcard="${q3}"] input[data-pick][value="Done"]`), "q3's Done");
+    await press(IN(`[data-answer="${q3}"]`), "q3's Send");
+    assert.equal((await posted('/api/answer', q3)).answer, 'Done');
+    await gone(q3);
+
+    // the secrets: Post on q4, Reply on q5, Can't right now on q6
+    const SECRET = IN(`#q-${q4} [data-secret]`);
+    await focusIn(SECRET, "q4's secret");
+    await p.type('sk-test-4');
+    await press(IN(`[data-post-secrets="${q4}"]`), "q4's Post");
+    assert.deepEqual(await posted('/api/secret', q4), { id: q4, values: { KEY_4: 'sk-test-4' } }, 'the secret posted');
+    await gone(q4);
+    await focusIn(IN(`textarea[data-q="${q5}"]`), "q5's note");
+    await p.type('use the old key');
+    await press(IN(`[data-reply="${q5}"]`), "q5's Reply");
+    assert.equal((await posted('/api/answer', q5)).answer, 'use the old key', 'the reply');
+    await gone(q5);
+    await press(IN(`[data-cant="${q6}"]`), "q6's Can't right now");
+    assert.equal((await posted('/api/answer', q6)).answer, 'Can’t right now');
+    await gone(q6);
+
+    // Overrule on the defaulted question's Answered card
+    await press(IN('#answered-sum'), 'the Answered list');
+    await soon("document.getElementById('answered-wrap').open", 'the Answered list open');
+    await focusIn(IN(`input[data-overrule="${fx.defaulted}"]`), 'the overrule box');
+    await p.type('9090');
+    await press(IN(`[data-overrule-send="${fx.defaulted}"]`), 'Overrule');
+    assert.equal((await posted('/api/answer', fx.defaulted)).answer, '9090', 'overruled');
+    await soon(`/Overruled: 9090/.test(document.getElementById('answered').textContent)`, 'the overrule said on its card');
+
+    // the lessons: Keep it on L1 with its note, Retire it on L2
+    await focusIn(IN(`textarea[data-know-note="${fx.L1}"]`), "L1's note");
+    await p.type('only for card payments');
+    await press(IN(`[data-know="${fx.L1}"][data-status="accepted"]`), "L1's Keep it");
+    assert.deepEqual(await posted('/api/knowledge', fx.L1), { id: fx.L1, status: 'accepted', note: 'only for card payments' }, 'kept, with the note');
+    await press(IN(`[data-know="${fx.L2}"][data-status="retired"]`), "L2's Retire it");
+    assert.deepEqual(await posted('/api/knowledge', fx.L2), { id: fx.L2, status: 'retired' }, 'retired');
+
+    // the terminal's card: option 1 sends its number
+    const menu = paneMenu();
+    await p.ev("window.__paneReply = { status: 200, body: { ok: true, out: 'answered: 1. Yes' } }; void 0");
+    await press(IN(`#ask-inbox [data-ask="${menu.digest}"] [data-ask-option="1"]`), "the terminal card's option 1");
+    await soon('window.__paneAnswers.length === 1', 'the option posted');
+    assert.deepEqual(await p.ev('window.__paneAnswers[0]'), { digest: menu.digest, option: 1, token: menu.token });
+    await soon(`/Sent to the supervisor's terminal: 1\\. Yes/.test(document.getElementById('ask-inbox').textContent)`, 'the option said sent');
+
+    // Esc (spec §2.9): shown only where the hint says Esc cancels; its click posts exactly { digest, escape: true, token }
+    const esc = paneMenu({ hint: 'Esc to cancel', digest: 'c3'.repeat(20) });
+    await p.ev(`window.__pane = ${JSON.stringify(esc)}; window.__paneReply = { status: 200, body: { ok: true, out: 'answered: Escape' } }; void 0`);
+    await soon(`!!document.querySelector('#ask-inbox [data-ask="${esc.digest}"] [data-ask-esc]')`, 'the Esc button');
+    assert.equal(await p.ev(`document.querySelector('#ask-inbox [data-ask="${esc.digest}"] [data-ask-esc]').textContent`), 'Esc');
+    assert.match(await p.ev(`document.querySelector('#ask-inbox [data-ask="${esc.digest}"]').textContent`), /Your click sends that option's number, or Esc, to the terminal and nothing else\./);
+    await press(IN(`#ask-inbox [data-ask="${esc.digest}"] [data-ask-esc]`), 'Esc');
+    await soon('window.__paneAnswers.length === 2', 'Esc posted');
+    assert.deepEqual(await p.ev('window.__paneAnswers[1]'), { digest: esc.digest, escape: true, token: esc.token }, 'exactly { digest, escape: true, token }');
+    await soon(`/Sent to the supervisor's terminal: Esc/.test(document.getElementById('ask-inbox').textContent)`, 'Esc said sent');
+    for (const [i, hint] of ['Enter to confirm · Esc to exit', 'Esc to cancel · Esc to quit', 'Enter to confirm'].entries()) {
+      const m = paneMenu({ hint, digest: `d${i}`.repeat(20) });
+      await p.ev(`window.__pane = ${JSON.stringify(m)}; void 0`);
+      await soon(`!!document.querySelector('#ask-inbox [data-ask="${m.digest}"] [data-ask-option="1"]:not([disabled])')`, `the card for "${hint}", armed`);
+      assert.equal(await p.ev(`!!document.querySelector('#ask-inbox [data-ask-esc]')`), false, `no Esc button for "${hint}"`);
+      assert.doesNotMatch(await p.ev(`document.querySelector('#ask-inbox [data-ask="${m.digest}"]').textContent`), /or Esc/, `the copy as today for "${hint}"`);
+    }
+    await p.ev('window.__pane = null; void 0');
+
+    // the review: opened full size over the panel; closed, back to the page with the panel on Inbox
+    await press(IN(`[data-open-review="${fx.r}"]`), 'Open the review');
+    await soon(`location.hash === '#review/${fx.r}' && !document.getElementById('review-view').hidden`, 'the review open');
+    const w = await p.ev("[document.getElementById('review-view').getBoundingClientRect().width, document.getElementById('threads').getBoundingClientRect().width]");
+    assert.ok(w[0] > w[1], `#review-view wider than the panel: ${JSON.stringify(w)}`);
+    await soon("!!document.querySelector('#review-view [data-rv-close]')", "the review's close");
+    await soon(STEADY('#review-view [data-rv-close]'), "the review's close at rest");
+    assert.equal(await p.ev("(() => { const r = document.querySelector('#review-view [data-rv-close]').getBoundingClientRect(); return !!document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('#review-view'); })()"), true, 'the review is above the panel');
+    await p.click('#review-view [data-rv-close]');
+    await soon(`location.hash === '#overview?th=inbox' && ${ON_PAGE('overview')} && ${ON_INBOX} && document.getElementById('review-view').hidden`, 'closed: the page, the panel on Inbox');
+  });
+});
+
+// askEscCancels, in vm (AC5, ruling m-20261116-041710126): kit-241's paneEscCancels answers for kit-241's four hints.
+test('askEscCancels gives paneEscCancels\'s answers', () => {
+  const html = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+  const at = html.indexOf('const askEscCancels =');
+  assert.ok(at > 0, 'askEscCancels in index.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`${html.slice(at, html.indexOf('\n', at))}\n;globalThis.f = askEscCancels;`, ctx);
+  assert.deepEqual(['Esc to cancel', 'Enter to confirm · Esc to exit', 'Esc to cancel · Esc to quit', 'Enter to confirm'].map((h) => ctx.f(h)), [true, false, false, false]);
+  assert.equal(ctx.f(undefined), false);
+  assert.equal(ctx.f('enter to confirm · esc TO CANCEL'), true, 'any case');
 });
 
 // T_HOME and tlHome, in vm (AC4): a question's home is its open card in the Inbox tab (#th-inbox #questions), never

@@ -719,7 +719,8 @@ try {
   .qcard.review { border-left-color: var(--blue); }
   /* the review opens as a wide side panel over the page: a slim header, the agent's page filling
      the height, and a compact answer bar whose row list scrolls inside it */
-  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 21; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
+  /* above the Threads panel (22) and its in-panel pins (24), so a review opened from the Inbox tab is full size (kit-100 spec §2.8) */
+  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 25; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
   @media (max-width: 900px) { #review-view:not([hidden]) { width: 100vw; padding: 8px 10px 0; } }
   .rv-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .rv-top h4 { flex: 1; min-width: 0; margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -5243,6 +5244,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on a property's key closes its tooltip, not the drawer
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
+  // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
+  if (!AV && !RV && inboxTyping(document.activeElement)) return;
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
@@ -5593,11 +5596,11 @@ function render(d) {
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
-  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl, #threads')) drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!layerField(t)) drafts[t.dataset.q] = t.value; });
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl, #threads')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl, #threads')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !layerField(el)).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !layerField(el)).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   // only the lessons the supervisor sent you: the rest are about how the agents work, and its own to keep
@@ -5662,8 +5665,10 @@ function render(d) {
   // the records owner-action cards read by peek: again, so one changed elsewhere shows (a retired one stays retired)
   for (const id of [...OA_PEEKS]) { const pk = PEEKS.get(peekKey('lesson', id)); if (pk && !pk.missing && pk.record?.fields?.status !== 'retired') fetchPeek('lesson', id); }
   // last, so every section that holds an input is drawn before its half-typed value comes back
-  for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
-  for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
+  // into the page's copy (the Inbox tab's), never the layer's (a thread's card, kit-89)
+  const pageField = (sel) => [...document.querySelectorAll(sel)].find((el) => !layerField(el));
+  for (const [sel, v] of kept) { const el = pageField(sel); if (el) el.value = v; }
+  for (const sel of keptChecks) { const el = pageField(sel); if (el) el.checked = true; }
   restoreSecretDrafts();
   focusBack(focus);
 }
@@ -5967,6 +5972,11 @@ const tlEl = (id) => document.getElementById(id);
 // Inbox tab (#th-inbox), which is pointed at as a page is (kit-100 spec §2.6).
 const inInbox = (el) => !!el?.closest?.('#th-inbox');
 const tlOwn = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
+// A field of the layer's (#tl, the panel outside its Inbox tab): one holds no page redraw and render() keeps no
+// draft from it; a field in #th-inbox, which render() rebuilds, is the page's (kit-100 spec §2.7).
+const layerField = (el) => !!el?.closest?.('#tl, #threads') && !inInbox(el);
+// a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
+const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
@@ -6029,6 +6039,7 @@ function tlPinMode(on) {
   tsRaise(on);
 }
 window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && inboxTyping(document.activeElement)) return;
   if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
   else if (e.key === 'Escape' && !!document.activeElement?.closest?.('#tl') && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
   // the focus in the open panel (kit-89 spec §2.9): an in-panel thread back to the list, else the panel closed,
@@ -6573,6 +6584,8 @@ const ASK_NOTE_MS = 20000;
 const ASK_ARM_MS = 1000;
 const askShown = () => (ASK.q && ASK.q.digest !== ASK.sent ? ASK.q : null);
 const askArmed = () => Date.now() - ASK.since >= ASK_ARM_MS;
+// Esc cancels this menu: kit-241's paneEscCancels (devteam.mjs) exactly, so the button shows only where the server sends the key
+const askEscCancels = (hint) => { const h = String(hint ?? ''); return /\bEsc to cancel\b/i.test(h) && !/\bEsc to (?:exit|quit)\b/i.test(h); };
 function askHtml() {
   const q = askShown();
   if (!q) return ASK.note && Date.now() - ASK.sentAt < ASK_NOTE_MS ? `<div class="card small ask done"><i class="icon-circle-check" aria-hidden="true"></i> Sent to the supervisor's terminal: <b>${esc(ASK.note)}</b></div>` : '';
@@ -6581,11 +6594,12 @@ function askHtml() {
     <pre class="ask-q">${esc(q.text || '(nothing readable)')}</pre>
     <div class="small muted">${q.kind === 'limit' ? 'Nothing to click here. With account rotation set up, the dashboard restarts it once an account has room; otherwise answer it in the terminal.' : 'This one has no buttons here: answer it in the terminal.'} Messages for the supervisor wait until it is answered; words in a thread never answer it.</div>${err}</div>`;
   const off = ASK.busy || !askArmed() || typeof q.token !== 'string';
+  const escOk = askEscCancels(q.hint);
   return `<div class="card ask" data-ask="${esc(q.digest)}"><div><i class="icon-triangle-alert" aria-hidden="true"></i> <b>The supervisor's terminal is asking</b></div>
     <pre class="ask-q">${esc(q.question || '(no words above the options)')}</pre>
-    <div class="ask-opts">${q.options.map((o) => `<button type="button" class="ghost" data-ask-option="${esc(o.n)}"${off || !(o.n >= 1 && o.n <= 9) ? ' disabled' : ''}>${esc(`${o.n}. ${o.label}`)}</button>`).join('')}</div>
+    <div class="ask-opts">${q.options.map((o) => `<button type="button" class="ghost" data-ask-option="${esc(o.n)}"${off || !(o.n >= 1 && o.n <= 9) ? ' disabled' : ''}>${esc(`${o.n}. ${o.label}`)}</button>`).join('')}${escOk ? `<button type="button" class="ghost" data-ask-esc${off ? ' disabled' : ''}>Esc</button>` : ''}</div>
     ${q.hint ? `<div class="small muted ask-hint">${esc(q.hint)}</div>` : ''}
-    <div class="small muted">Your click sends that option's number to the terminal and nothing else. Words in a thread never answer it; they wait until it is answered.</div>${err}</div>`;
+    <div class="small muted">Your click sends that option's number${escOk ? ', or Esc,' : ''} to the terminal and nothing else. Words in a thread never answer it; they wait until it is answered.</div>${err}</div>`;
 }
 function askDraw() {
   if (ASK.sent && (!ASK.q || ASK.q.digest !== ASK.sent || Date.now() - ASK.sentAt > 30000)) ASK.sent = null;
@@ -6601,7 +6615,7 @@ function askSet(q) {
   ASK.q = next && ASK.q && next.digest === ASK.q.digest && !next.token && ASK.q.token ? { ...next, token: ASK.q.token } : next;
 }
 document.addEventListener('click', async (e) => {
-  const b = e.target.closest?.('[data-ask-option]');
+  const b = e.target.closest?.('[data-ask-option], [data-ask-esc]');
   const digest = b?.closest('[data-ask]')?.dataset.ask;
   const q = askShown();
   // only the question this page is showing now, a second after it appeared
@@ -6610,9 +6624,11 @@ document.addEventListener('click', async (e) => {
   ASK.err = '';
   askDraw();
   try {
-    const r = await fetch('/api/pane-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ digest, option: Number(b.dataset.askOption), token: q.token }) });
+    // Esc (kit-100 spec §2.9): exactly { digest, escape: true, token }, which kit-241's server takes only where Esc cancels
+    const isEsc = b.dataset.askEsc !== undefined;
+    const r = await fetch('/api/pane-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(isEsc ? { digest, escape: true, token: q.token } : { digest, option: Number(b.dataset.askOption), token: q.token }) });
     const j = await r.json().catch(() => ({}));
-    if (r.ok) { ASK.sent = digest; ASK.sentAt = Date.now(); ASK.note = String(j.out || '').replace(/^answered: /, ''); setTimeout(askDraw, ASK_NOTE_MS + 100); }
+    if (r.ok) { ASK.sent = digest; ASK.sentAt = Date.now(); ASK.note = isEsc ? 'Esc' : String(j.out || '').replace(/^answered: /, ''); setTimeout(askDraw, ASK_NOTE_MS + 100); }
     else ASK.err = String(j.error || `the dashboard answered ${r.status}`);
   } catch { ASK.err = 'The dashboard did not answer; look at the terminal before trying again.'; }
   ASK.busy = false;
@@ -7488,9 +7504,10 @@ const PICK_HOLD = 60000, PRESS_HOLD = 3000;
 const HINT_AFTER = 30000;
 let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
 // A field in the thread layer or the Threads panel holds nothing: both are outside what a redraw rebuilds, so the page refreshes (and the counts move) under a half-written turn.
+// The panel's Inbox tab (#th-inbox) is the exception: render() rebuilds it, so its fields hold as a page's do (layerField, kit-100 spec §2.7).
 function holding() {
   const ae = document.activeElement;
-  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl, #threads')) || Date.now() - PRESSED < PRESS_HOLD
+  return COMPOSING || SENDING > 0 || (typingIn(ae) && !layerField(ae)) || Date.now() - PRESSED < PRESS_HOLD
     || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
 }
 async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }

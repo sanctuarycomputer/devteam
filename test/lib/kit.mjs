@@ -902,6 +902,9 @@ export function inboxFixture(root, env) {
   const git = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root, encoding: 'utf8' }).trim();
   write(path.join(root, 'review/page.html'), '<!doctype html><html><head><meta charset="utf-8"><title>Group the items</title></head>\n<body>\n<p>Look.</p>\n</body></html>\n');
   write(path.join(root, 'review/data.json'), `${JSON.stringify({ rows: [{ id: 'g1' }, { id: 'g2' }] })}\n`);
+  // the secrets' file sinks write only gitignored files, so a Post on q4 lands (AC5)
+  const ignore = path.join(root, '.gitignore');
+  write(ignore, `${fs.existsSync(ignore) ? fs.readFileSync(ignore, 'utf8') : ''}.devteam-secrets/\n`);
   git('add', '-A');
   git('commit', '-qm', 'the review page');
   const RATE = ['--stake', '1', '--urgency', '1'];

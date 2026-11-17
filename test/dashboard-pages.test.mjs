@@ -333,16 +333,14 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.equal(await p.ev('location.hash'), `#review/${ids.review}`);
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
   const nRv = await len();
-  // (the close by the element's click: #review-view over the panel is kit-100's Task 5, spec §2.8; until then the
-  // panel lies over the review's ×)
-  await p.ev("document.querySelector('#review-view [data-rv-close]').click(); void 0");
+  await p.click('#review-view [data-rv-close]');
   await onInbox('overview');
   assert.equal(await p.ev("document.querySelector('#review-view').hidden"), true);
   assert.equal(await len(), nRv, '× closes the review by Back: no entry added');
   await load(`#review/${ids.review}`);
   await until(() => p.ev("!document.querySelector('#review-view').hidden"), 'cold: the review');
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
-  await p.ev("document.querySelector('#review-view [data-rv-close]').click(); void 0");
+  await p.click('#review-view [data-rv-close]');
   await onInbox('overview');
   // the panel closed, so the remembered panel (kit-89) doesn't open over the visits below
   await p.click('#th-close');
