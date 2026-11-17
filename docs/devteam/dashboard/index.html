@@ -948,6 +948,8 @@ try {
   .tl-card .ask, #ask-threads .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
   .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
+  .card.goal.blk-full, .ov-goal.blk-full { outline: 2px solid var(--red); outline-offset: -2px; }
+  .card.goal.blk-partial, .ov-goal.blk-partial { outline: 2px dashed var(--red); outline-offset: -2px; }
 </style>
 </head>
 <body class="shell">
@@ -3027,6 +3029,31 @@ function holdState(h) {
   if (h.fleet && ['parked', 'drained'].includes(h.state) && !(FLEET.data && FLEET.data.ready)) return h.state === 'parked' ? 'parking' : 'draining';
   return h.state;
 }
+/* goal-block start */
+// How blocked a goal is: 'full' when every piece of its work waits on the owner (an open question with
+// no default, a hold, a blocked phase, or a planner waiting for a word), 'partial' when some does, null
+// otherwise. Uses nothing but its arguments.
+function goalBlock(goal, data) {
+  if (!goal || goal.status === 'met' || goal.status === 'abandoned') return null;
+  const mode = goal.hold_view && goal.hold_view.mode;
+  if (mode === 'park' || mode === 'let-go') return null;
+  const feats = new Set((((data.ooda || {}).roadmap || {}).goals || []).filter((g) => g.id === goal.id).flatMap((g) => g.features || []));
+  const live = (data.tickets || []).filter((t) => feats.has(t.feature) && !['merged', 'released', 'superseded'].includes(t.stage));
+  const planners = (data.planners || []).filter((p) => (p.goals || []).includes(goal.id));
+  const asks = (data.questions || []).filter((q) => q.status === 'open' && q.default == null);
+  const askIds = new Set(asks.map((q) => q.id));
+  const named = new Set(asks.flatMap((q) => [...(q.blocks || []), ...(q.ticket ? [q.ticket] : [])]));
+  const stuck = new Set(live.filter((t) => askIds.has(t.held_by) || t.held || t.phase === 'blocked' || named.has(t.id)).map((t) => t.id));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of live) if (!stuck.has(t.id) && (t.depends_on || []).some((d) => stuck.has(d))) { stuck.add(t.id); grew = true; }
+  }
+  const waiting = planners.filter((p) => p.waiting && p.waiting.kind !== 'limit').length;
+  const total = live.length + planners.length;
+  const n = stuck.size + waiting;
+  return !total || !n ? null : n === total ? 'full' : 'partial';
+}
+/* goal-block end */
 // A held goal keeps its step; its label says the hold first.
 function goalState(g, R, openQs) {
   const s = goalStateOf(g, R, openQs);
