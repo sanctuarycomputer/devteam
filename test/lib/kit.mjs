@@ -910,7 +910,8 @@ export function inboxFixture(root, env) {
   const RATE = ['--stake', '1', '--urgency', '1'];
   const goal = dt(['goal', 'add', '--title', 'Launch checkout', '--outcome', 'admins pay alone']);
   const goal2 = dt(['goal', 'add', '--title', 'Launch receipts', '--outcome', 'every payment has a receipt']);
-  const q1 = dt(['ask', '--question', 'Which processor?', '--choices', '[{"label":"Stripe"},{"label":"Adyen"}]', '--goal', goal, ...RATE]);
+  // q1 carries what a decision can: a recommendation with its sureness, a choice's effect for users, a default, a kind of decision on the ladder (Next time)
+  const q1 = dt(['ask', '--question', 'Which processor?', '--choices', '[{"label":"Stripe","effect":"Buyers pay with the cards they already use."},{"label":"Adyen"}]', '--recommendation', 'Stripe', '--confidence', '0.8', '--class', 'release-scope', '--reasons', 'below-rung', '--default', 'Stripe', '--goal', goal, ...RATE]);
   const q2 = dt(['ask', '--question', 'Keep the card form on one page?', '--choices', '[{"label":"One page"},{"label":"Split it"}]', ...RATE]);
   const q3 = dt(['ask', '--kind', 'owner-action', '--question', 'Please renew the certificate', '--context', 'It expires next week.', ...RATE]);
   const secret = (n, words) => dt(['ask', '--kind', 'owner-action', '--question', words, '--secrets', JSON.stringify([{ name: `KEY_${n}`, sink: `file:.devteam-secrets/key-${n}` }]), ...RATE]);

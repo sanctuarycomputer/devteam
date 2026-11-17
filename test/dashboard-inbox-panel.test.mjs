@@ -461,6 +461,123 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon('innerWidth === 1440', 'at 1440');
   });
 
+  // AC7 (done-when 7), each item of the mock's Inbox inventory that this fixture draws, asserted inside #th-inbox: q1 is the
+  // decision (recommendation, sureness, effect, default, Next time, Why you), q2 a plain one, q3 the owner-action, q4 to q6 the
+  // secrets, r the review. Not drawn by this fixture: "changed since asked" (test/dashboard-answers.test.mjs), a refused
+  // answer's reason (test/dashboard.test.mjs, test/dashboard-answers.test.mjs), Shift+Enter (test/dashboard.test.mjs,
+  // test/dashboard-answers.test.mjs), the owner-action card's per-record buttons (test/dashboard-owner-action.test.mjs), "Don't use
+  // this sensor" (a sensor's question), the review's changed-since-asked error (a page changed after the ask).
+  // Runs before "every control from the panel", which answers the questions it reads.
+  await t.test('the inventory, in the panel', async () => {
+    const { q1, q2, q3, q4, q5, q6 } = fx.q;
+    const IN = (sel) => `#th-inbox ${sel}`;
+    const card = (id) => IN(`[data-qcard="${id}"]`);
+    const text = (sel) => p.ev(`document.querySelector(${JSON.stringify(sel)})?.textContent ?? null`);
+    const texts = (sel) => p.ev(`[...document.querySelectorAll(${JSON.stringify(sel)})].map((e) => e.textContent.trim())`);
+    const has = (sel) => p.ev(`!!document.querySelector(${JSON.stringify(sel)})`);
+    await p.send('Page.bringToFront');
+    await p.ev("location.hash = '#overview?th=inbox'");
+    await soon(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && !!document.getElementById('q-${q1}') && !!document.getElementById('answered-sum')`, 'Overview, the panel open on Inbox, at rest');
+    await soon(`/Answered \\(3\\)/.test(document.getElementById('answered-sum').textContent)`, 'the Answered summary');
+
+    // the decision card: head and its ⋯ menu (ID, asked, kind), why chips, choices with Recommended / sure / effect
+    assert.equal(await has(card(q1) + ' .card-head details.menu summary'), true, "q1's ⋯ menu");
+    await p.ev(`document.querySelector(${JSON.stringify(card(q1) + ' details.menu summary')}).scrollIntoView({ block: 'center' }); void 0`);
+    await soon(STEADY(card(q1) + ' details.menu summary'), 'the menu button at rest');
+    await p.click(card(q1) + ' details.menu summary');
+    await soon(`document.querySelector(${JSON.stringify(card(q1) + ' details.menu')}).open`, "q1's menu open");
+    const kv = await p.ev(`[...document.querySelectorAll(${JSON.stringify(card(q1) + ' details.menu .kv > *')})].map((e) => e.textContent)`);
+    assert.deepEqual(kv.filter((x, i) => i % 2 === 0), ['ID', 'Asked', 'Kind', 'Order', 'Rated'], `the menu's rows: ${JSON.stringify(kv)}`);
+    assert.equal(kv[1], q1, 'the ID');
+    assert.equal(await has(card(q1) + ' details.menu [data-copy]'), true, 'Copy ID');
+    await p.click(card(q1) + ' details.menu summary');
+    await soon(`!document.querySelector(${JSON.stringify(card(q1) + ' details.menu')}).open`, "q1's menu closed again");
+    assert.ok((await texts(card(q1) + ' .why span')).some((c) => /Launch checkout/.test(c)), 'the why-ranked chips');
+    assert.match(await text(card(q1) + ' .card-head .badge'), /Decision/);
+    assert.match(await text(card(q1) + ' .tag'), /^Recommended · 80% sure$/, 'Recommended with the sure percentage');
+    assert.equal(await has(card(q1) + ' .choice.rec input[value="Stripe"]'), true, 'the recommended choice marked');
+    assert.equal(await text(card(q1) + ' .choice .e'), 'Buyers pay with the cards they already use.', "a choice's effect for users");
+    assert.deepEqual(await p.ev(`[...document.querySelectorAll(${JSON.stringify(card(q1) + ' input[data-pick]')})].map((e) => e.value)`), ['Stripe', 'Adyen', '__other'], 'the choices and Something else');
+    // the note box, the standing-rule box, Next time, the default and deadline line, Why you, Answer
+    assert.match(await p.ev(`document.querySelector(${JSON.stringify(card(q1) + ' textarea[data-q]')}).placeholder`), /Add a note/);
+    assert.match(await text(card(q1) + ' label.rulebox'), /Keep this answer as a standing rule for the whole project/);
+    assert.equal(await has(card(q1) + ` input[data-rulebox="${q1}"][type="checkbox"]`), true);
+    assert.match(await text(card(q1) + ' fieldset.next legend'), /^Next time, for decisions like this \(.+\), the supervisor…$/);
+    assert.deepEqual(await texts(card(q1) + ' fieldset.next label'), ['asks you first', 'asks, with a default (now)', 'decides, then tells you'], 'the rungs, the current one marked');
+    assert.match(await text(card(q1) + ' p.meta'), /^If you don’t answer by .+, the supervisor goes with: Stripe$/, 'the default and its deadline');
+    assert.equal(await text(card(q1) + ` [data-answer="${q1}"]`), 'Answer');
+    assert.match(await text(card(q1) + ' .meta:last-child'), /^Why you: .+\.$/, 'Why you');
+    // a plain decision: Answer, its note box and rule box
+    assert.equal(await text(card(q2) + ` [data-answer="${q2}"]`), 'Answer');
+    assert.equal(await has(card(q2) + ` textarea[data-q="${q2}"]`), true);
+    assert.equal(await has(card(q2) + ` input[data-rulebox="${q2}"]`), true);
+    assert.equal(await has(card(q2) + ' .tag'), false, 'no Recommended mark where none was recommended');
+
+    // the owner-action: Done and Can't right now as the answers, a note, Send, and no standing-rule box
+    assert.deepEqual(await texts(card(q3) + ' .choice b'), ['Done', 'Can’t right now']);
+    assert.equal(await text(card(q3) + ` [data-answer="${q3}"]`), 'Send');
+    assert.equal(await has(card(q3) + ` textarea[data-q="${q3}"]`), true);
+    assert.equal(await has(card(q3) + ' input[data-rulebox]'), false, 'an owner-action has no standing-rule box');
+
+    // the secrets forms: Post, Reply, Can't right now (no sensor here, so no "Don't use this sensor")
+    for (const [id, n] of [[q4, 4], [q5, 5], [q6, 6]]) {
+      assert.equal(await has(card(id) + ` .secrets [data-secret="${id}:KEY_${n}"]`), true, `KEY_${n}'s paste box`);
+      assert.deepEqual(await texts(card(id) + ' .row-inline button'), ['Post', 'Reply', 'Can’t right now'], `${id}'s buttons`);
+      assert.equal(await has(card(id) + ` [data-reply="${id}"]`) && await has(card(id) + ` [data-cant="${id}"]`) && await has(card(id) + ` [data-post-secrets="${id}"]`), true);
+      assert.equal(await has(card(id) + ' [data-dontuse]'), false);
+      assert.equal(await has(card(id) + ` textarea[data-q="${id}"]`), true, 'the reply box');
+    }
+
+    // the review card: Open the review, Send it back (with its reason box)
+    assert.equal(await text(card(fx.r) + ` [data-open-review="${fx.r}"]`), 'Open the review');
+    assert.equal(await text(card(fx.r) + ` [data-decline-open="${fx.r}"]`), 'Send it back');
+    assert.match(await p.ev(`document.querySelector(${JSON.stringify(card(fx.r) + ` [data-decline-form="${fx.r}"] textarea`)}).placeholder`), /What should change\?/, 'the reason box');
+    assert.equal(await text(card(fx.r) + ` [data-decline="${fx.r}"]`), 'Send it back');
+
+    // the lesson cards: Keep it, Retire it, the note box, the technical wording
+    for (const L of [fx.L1, fx.L2]) {
+      assert.equal(await text(IN(`[data-know="${L}"][data-status="accepted"]`)), 'Keep it');
+      assert.equal(await text(IN(`[data-know="${L}"][data-status="retired"]`)), 'Retire it');
+      assert.equal(await has(IN(`textarea[data-know-note="${L}"]`)), true, `${L}'s note box`);
+    }
+    assert.equal(await has(IN('details[data-technical] summary')), true);
+    assert.equal(await text(IN('details[data-technical] summary')), 'The technical wording');
+
+    // the terminal's card: one button per numbered option, then the usage limit's line
+    const menu = paneMenu();
+    await soon(`!!document.querySelector('#ask-inbox [data-ask="${menu.digest}"]')`, "the terminal's card");
+    assert.deepEqual(await texts(IN(`#ask-inbox [data-ask="${menu.digest}"] [data-ask-option]`)), menu.options.map((o) => `${o.n}. ${o.label}`), 'a button per numbered option');
+    assert.match(await text(IN('#ask-inbox .ask-q')), /Do you want to proceed\?/);
+    const limit = { kind: 'limit', digest: 'e5'.repeat(20), text: "You've hit your usage limit. Try again in 2h 5m." };
+    await p.ev(`window.__pane = ${JSON.stringify(limit)}; void 0`);
+    await soon(`!!document.querySelector('#ask-inbox [data-ask-kind="limit"]')`, "the usage limit's card");
+    const lim = await text(IN('#ask-inbox [data-ask-kind="limit"]'));
+    assert.match(lim, /The supervisor is stopped at a usage limit/);
+    assert.match(lim, /You've hit your usage limit\. Try again in 2h 5m\./);
+    assert.match(lim, /Nothing to click here\. With account rotation set up/);
+    assert.equal(await has(IN('#ask-inbox button')), false, 'a usage limit has no buttons');
+    await p.ev(`window.__pane = ${JSON.stringify(menu)}; void 0`);
+    await soon(`!!document.querySelector('#ask-inbox [data-ask="${menu.digest}"] [data-ask-option="1"]:not([disabled])')`, 'the menu back, armed');
+
+    // the Answered list: collapsed with its summary, an answered card in it, Overrule on the defaulted one only
+    assert.equal(await p.ev("document.getElementById('answered-wrap').open"), false, 'collapsed');
+    assert.equal(await p.ev("document.getElementById('th-inbox').contains(document.getElementById('answered-wrap'))"), true);
+    assert.equal(await text(IN('#answered-sum')), 'Answered (3)');
+    await p.ev(`document.getElementById('answered-sum').scrollIntoView({ block: 'center' }); void 0`);
+    await soon(STEADY(IN('#answered-sum')), 'the summary at rest');
+    await p.click(IN('#answered-sum'));
+    await soon("document.getElementById('answered-wrap').open", 'the Answered list open');
+    assert.match(await text(IN(`#answered #a-${fx.answered}`)), /Keep the receipts\?[\s\S]*Yes[\s\S]*answered/, 'an answered card');
+    assert.match(await text(IN(`#answered #a-${fx.defaulted}`)), /Which port\?[\s\S]*went with the default/, 'the defaulted card');
+    assert.equal(await text(IN(`#answered [data-overrule-send="${fx.defaulted}"]`)), 'Overrule');
+    assert.equal(await has(IN(`#answered input[data-overrule="${fx.defaulted}"]`)), true);
+    assert.equal(await has(IN(`#answered #a-${fx.answered} [data-overrule-send]`)), false, 'Overrule only on the defaulted one');
+    assert.equal(await has(IN(`#answered #a-${fx.withdrawn} [data-overrule-send]`)), false);
+    assert.match(await text(IN(`#answered #a-${fx.withdrawn}`)), /withdrawn by the supervisor/);
+    await p.click(IN('#answered-sum'));
+    await soon("!document.getElementById('answered-wrap').open", 'the Answered list collapsed again');
+  });
+
   // AC9 (done-when 9): the artifact viewer, /view/artifact/<slug>, has no Inbox data and no render(): its panel registers
   // the same tabs, the Inbox tab shows hello's count and one line to the dashboard's Inbox; its button opens Threads
   // (ruling m-20261115-230458641-supervisor). A fixture and a tab of its own.
