@@ -14628,6 +14628,56 @@ function laptopUploadsDir() {
   return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
 }
 const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR || '/data/uploads' : laptopUploadsDir());
+// Why a real path is not a dropped file (null when it is): exactly <root>/<folder>/<name>, a folder
+// named as ours and a name as one is stored, never a .part, and a regular file. Equal, not merely
+// inside the root: a link from one folder to another stored file names a file that was never dropped
+// there. The GET below serves only what this passes, and an answer's or a turn's files are held to it.
+function droppedFileProblem(realPath, realRoot) {
+  const folder = path.basename(path.dirname(realPath));
+  const name = path.basename(realPath);
+  if (realPath !== path.join(realRoot, folder, name)) return 'not in a folder at the top of the root';
+  if (!UPLOAD_FOLDER.test(folder)) return 'not in a folder named as ours';
+  if (name === UPLOAD_PART || name !== safeUploadName(name)) return 'not a name a dropped file is stored under';
+  try { if (!fs.lstatSync(realPath).isFile()) return 'not a file'; } catch (e) { return e.code ?? e.message; }
+  return null;
+}
+// How a stored file is served back, as the gateway serves it (its uploadType, copied): these four as
+// images, every other file (HTML and SVG among them) as bytes to save, never to render.
+const UPLOAD_IMAGES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+function uploadType(name) {
+  const ext = path.extname(name);
+  return Object.hasOwn(UPLOAD_IMAGES, ext) ? { type: UPLOAD_IMAGES[ext], attachment: false } : { type: 'application/octet-stream', attachment: true };
+}
+// GET /upload/<folder>/<name> (HEAD too) on the laptop's dashboard, after its Host check and relay
+// refusal: a dropped file, back to the dashboard's own page (spec §5). Matched on the raw path, so
+// nothing URL parsing folds (.., %2e, %2F) can name another file. A page on another site can't read
+// it: its browser says so in Sec-Fetch-Site. A request with none (curl, the owner's own tools) is served.
+async function serveLaptopUpload(req, res, rawPath, send) {
+  const none = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
+  if (uploadsOnBox()) return send(res, 404, 'text/plain; charset=utf-8', 'on a box the gateway serves dropped files');
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'dropped files only to this dashboard\'s own page');
+  const m = /^\/upload\/([^/]+)\/([^/]+)$/.exec(rawPath);
+  if (!m || !UPLOAD_FOLDER.test(m[1]) || m[2] === UPLOAD_PART || m[2] !== safeUploadName(m[2])) return none();
+  let fh = null;
+  try {
+    const root = await fs.promises.realpath(uploadsRoot());
+    const real = await fs.promises.realpath(path.join(root, m[1], m[2]));
+    // the very file named, not one a link inside the folder points at
+    if (real !== path.join(root, m[1], m[2]) || droppedFileProblem(real, root)) return none();
+    fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile()) { await fh.close(); return none(); }
+    const { type, attachment } = uploadType(m[2]);
+    res.writeHead(200, { 'content-type': type, ...(attachment ? { 'content-disposition': `attachment; filename="${m[2]}"` } : {}), 'content-length': st.size, 'x-content-type-options': 'nosniff', 'content-security-policy': 'sandbox', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' });
+    if (req.method === 'HEAD') { await fh.close(); return res.end(); }
+    // pipeline: a reader who goes mid-file closes the file too
+    pipeline(fh.createReadStream(), res, () => {});
+  } catch {
+    await fh?.close().catch(() => {});
+    return res.headersSent ? res.destroy() : none();
+  }
+}
 // The limits, which a test may lower (and the floor of free disk raise) only while boxFilesOff()
 // holds: a test's throwaway HOME. Nowhere else does the environment change them, nor ever loosen one.
 function uploadLimits() {
@@ -16391,6 +16441,8 @@ async function cmdDashboard() {
         return void req.destroy();
       }
     }
+    // a dropped file, back to this page: before the routes below, which parse the URL
+    if ((req.method === 'GET' || req.method === 'HEAD') && req.url.startsWith('/upload/')) return await serveLaptopUpload(req, res, req.url, send);
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.

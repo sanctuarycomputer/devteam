@@ -1966,8 +1966,9 @@ export function createGateway(opts = {}) {
     try {
       const root = await fs.promises.realpath(uploadsRoot);
       const real = await fs.promises.realpath(path.join(uploadsRoot, m[1], m[2]));
-      // the separator too: without it, <root>-evil/… would count as inside
-      if (!real.startsWith(root + path.sep)) return none();
+      // exactly the file named, not merely inside the root: a link in a folder to another stored file,
+      // or out to <root>-evil/…, names a file never dropped there (task review T3-1)
+      if (real !== path.join(root, m[1], m[2])) return none();
       fh = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
       const st = await fh.stat();
       if (!st.isFile()) { await fh.close(); return none(); }

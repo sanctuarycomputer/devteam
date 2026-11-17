@@ -67,20 +67,20 @@ const newFolderName = (day = new Date().toISOString().slice(0, 10)) => `${day}-$
 // One request, any shape: a body sent whole, in chunks (no Content-Length: chunked), or held back
 // (`hold`: what's declared never comes). Resolves with the answer, or how the connection ended, or
 // { timedOut } after `within` ms. Headers set to null are left out.
-function request(port, route, { headers = {}, body = null, chunks = null, gapMs = 50, hold = false, within = 20000 } = {}) {
+function request(port, route, { method = 'POST', headers = {}, body = null, chunks = null, gapMs = 50, hold = false, within = 20000 } = {}) {
   return new Promise((resolve) => {
     const h = {};
     for (const [k, v] of Object.entries(headers)) if (v !== null && v !== undefined) h[k] = v;
     if (body !== null) h['content-length'] = String(Buffer.byteLength(body));
     const t0 = Date.now();
-    const r = http.request({ host: '127.0.0.1', port, path: route, method: 'POST', headers: h, agent: false });
+    const r = http.request({ host: '127.0.0.1', port, path: route, method, headers: h, agent: false });
     let done = false;
     const finish = (v) => { if (done) return; done = true; clearTimeout(timer); r.destroy(); resolve({ ms: Date.now() - t0, ...v }); };
     const timer = setTimeout(() => finish({ timedOut: true }), within);
     r.on('response', (res) => {
       const bufs = [];
       res.on('data', (b) => bufs.push(b));
-      res.on('end', () => { const text = Buffer.concat(bufs).toString('utf8'); let json = null; try { json = JSON.parse(text); } catch {} finish({ status: res.statusCode, headers: res.headers, text, json }); });
+      res.on('end', () => { const bytes = Buffer.concat(bufs); const text = bytes.toString('utf8'); let json = null; try { json = JSON.parse(text); } catch {} finish({ status: res.statusCode, headers: res.headers, text, body: text, bytes, json }); });
       res.on('error', (e) => finish({ error: e.code ?? e.message }));
     });
     r.on('error', (e) => finish({ error: e.code ?? e.message }));
@@ -111,7 +111,9 @@ async function laptop(t, extraEnv = {}) {
   const folder = () => path.join(home, '.devteam', 'uploads', expectedFolder(root));
   const own = { host: `127.0.0.1:${port}`, origin: `http://127.0.0.1:${port}`, 'sec-fetch-site': 'same-origin' };
   const post = (name, body, headers = {}, how = {}) => request(port, `/upload?name=${encodeURIComponent(name)}`, { headers: { ...own, ...headers }, body, ...how });
-  return { base, root, port, home, folder, post, stop: () => dash.stop(), out: () => dash.out() };
+  // a GET as the dashboard's own page sends one: same-origin, and no Origin
+  const get = (route, headers = {}, method = 'GET') => request(port, route, { method, headers: { host: own.host, 'sec-fetch-site': 'same-origin', ...headers } });
+  return { base, root, port, home, folder, post, get, stop: () => dash.stop(), out: () => dash.out() };
 }
 const LAPTOP = { timeout: 240000 };
 
@@ -490,14 +492,14 @@ test('box serve: no session is 401 (a navigation goes to sign-in), and another s
   assert.equal((await gw.req('GET', at, { headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-dest': 'image', 'sec-fetch-mode': 'no-cors' } })).status, 200);
 });
 
-test('box serve: a path that isn\'t a stored file in a folder of ours is 404, whatever it\'s dressed as (C4)', async (t) => {
-  const gw = await boxGateway(t);
-  const up = await boxUpload(gw, 'a.txt', Buffer.from('a'));
-  assert.equal(up.status, 200, up.text);
-  const folder = path.basename(path.dirname(up.json.path));
-  const dir = path.dirname(up.json.path);
-  assert.equal((await gw.req('GET', servedAt(up.json.path))).status, 200, 'the real one is served');
-  // put there by hand: a .part, a name safeUploadName would change, and a nested file
+// C4's cases, the same on both servers: beside a stored file (`stored`), files put there by hand that
+// no stored name could be, and links from its folder out of the root, to a sibling whose path starts
+// with the root's own, and to stored files under the root itself (`other`, in another folder, and
+// `stored` in its own): a file is served only at exactly <root>/<folder>/<name> (task review T3-1).
+// Returns the paths that must be 404.
+function unservedCases(root, stored, other) {
+  const dir = path.dirname(stored);
+  const folder = path.basename(dir);
   fs.writeFileSync(path.join(dir, '.part'), 'half');
   fs.writeFileSync(path.join(dir, 'A B.png'), 'odd');
   // names the raw path spells exactly (it is never decoded), so only the name rule stops them
@@ -506,23 +508,93 @@ test('box serve: a path that isn\'t a stored file in a folder of ours is 404, wh
   fs.writeFileSync(path.join(dir, '-x.txt'), 'odd');
   fs.mkdirSync(path.join(dir, 'sub'));
   fs.writeFileSync(path.join(dir, 'sub', 'x.txt'), 'nested');
-  fs.mkdirSync(path.join(gw.uploadsDir, 'not-ours'));
-  fs.writeFileSync(path.join(gw.uploadsDir, 'not-ours', 'a.txt'), 'not ours');
-  // two links out: to a file elsewhere, and to a sibling whose path starts with the root's own
+  fs.mkdirSync(path.join(root, 'not-ours'));
+  fs.writeFileSync(path.join(root, 'not-ours', 'a.txt'), 'not ours');
   fs.symlinkSync('/etc/hosts', path.join(dir, 'hosts.txt'));
-  const evil = path.join(`${gw.uploadsDir}-evil`, folder);
+  const evil = path.join(`${root}-evil`, folder);
   fs.mkdirSync(evil, { recursive: true });
   fs.writeFileSync(path.join(evil, 'x.txt'), 'evil');
   fs.symlinkSync(path.join(evil, 'x.txt'), path.join(dir, 'x.txt'));
-  const paths = [
+  fs.symlinkSync(other, path.join(dir, 'other.txt'));
+  fs.symlinkSync(stored, path.join(dir, 'same.txt'));
+  return [
     '/upload/../x', '/upload/%2e%2e/%2e%2e/etc/passwd', `/upload/${folder}/..%2F..%2Fetc%2Fpasswd`, `/upload/${folder}%2Fa.txt`, '/upload/not-ours/a.txt', '/upload/2026-01-01-zzzzzzzzzzzzzzzzzzzzzzzz/a.txt',
     `/upload/${folder}/a.txt%2F`, `/upload/${folder}/.part`, `/upload/${folder}/sub/x.txt`, `/upload/${folder}/sub`, `/upload/${folder}/A%20B.png`, `/upload/${folder}/Upper.PNG`, `/upload/${folder}/-x.txt`, `/upload/${folder}`, `/upload/${folder}/`, '/upload/',
-    `/upload/${folder}/hosts.txt`, `/upload/${folder}/x.txt`, `/upload/${folder}/missing.txt`, `/upload/./${folder}/a.txt`, `/upload//${folder}/a.txt`,
+    `/upload/${folder}/hosts.txt`, `/upload/${folder}/x.txt`, `/upload/${folder}/other.txt`, `/upload/${folder}/same.txt`, `/upload/${folder}/missing.txt`, `/upload/./${folder}/a.txt`, `/upload//${folder}/a.txt`,
   ];
-  for (const p of paths) {
+}
+
+test('box serve: a path that isn\'t a stored file in a folder of ours is 404, whatever it\'s dressed as (C4)', async (t) => {
+  const gw = await boxGateway(t);
+  const up = await boxUpload(gw, 'a.txt', Buffer.from('a'));
+  assert.equal(up.status, 200, up.text);
+  const other = await boxUpload(gw, 'b.txt', Buffer.from('b'));
+  assert.equal(other.status, 200, other.text);
+  assert.equal((await gw.req('GET', servedAt(up.json.path))).status, 200, 'the real one is served');
+  for (const p of unservedCases(gw.uploadsDir, up.json.path, other.json.path)) {
     const r = await gw.req('GET', p);
     assert.equal(r.status, 404, `${p}: ${r.status} ${r.body.slice(0, 80)}`);
     assert.equal((await gw.req('HEAD', p)).status, 404, `HEAD ${p}`);
+  }
+});
+
+test('laptop serve: a stored file comes back to the dashboard\'s own page with its type, and never renders (C1, the laptop half)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  for (const want of SERVED) {
+    const bytes = want.name === 'a.html' ? Buffer.from('<script>alert(1)</script>') : want.name === 'a.svg' ? Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>') : crypto.randomBytes(5000);
+    const up = await L.post(want.name, bytes);
+    assert.equal(up.status, 200, up.text);
+    assert.equal(path.basename(up.json.path), want.name);
+    assertServed(await L.get(servedAt(up.json.path)), want, bytes, want.name);
+    if (want.name === 'a.png') {
+      const head = await L.get(servedAt(up.json.path), {}, 'HEAD');
+      assertServed(head, want, null, 'HEAD');
+      assert.equal(head.bytes.length, 0, 'HEAD: no body');
+      assert.equal(head.headers['content-length'], String(bytes.length), 'HEAD: the size');
+    }
+  }
+});
+
+test('laptop serve: another site is 403, the owner\'s own tools are served, and on a box the route is off (C3)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const up = await L.post('a.png', Buffer.from('png'));
+  assert.equal(up.status, 200, up.text);
+  const at = servedAt(up.json.path);
+  for (const site of ['cross-site', 'same-site']) {
+    const r = await L.get(at, { 'sec-fetch-site': site });
+    assert.equal(r.status, 403, `${site}: ${r.text}`);
+    assert.ok(r.text.trim().length > 0, `${site}: a reason`);
+    assert.equal((await L.get(at, { 'sec-fetch-site': site }, 'HEAD')).status, 403, `HEAD ${site}`);
+  }
+  // curl, or the owner's own tools: neither header
+  const bare = await L.get(at, { 'sec-fetch-site': null });
+  assert.equal(bare.status, 200, bare.text);
+  assert.equal(bare.text, 'png');
+  const evil = await L.get(at, { host: `evil.example:${L.port}` });
+  assert.equal(evil.status, 403, evil.text);
+  // on a box: a file in the box's folder, which the dashboard must not serve (the gateway does)
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attach-box-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const folder = newFolderName();
+  fs.mkdirSync(path.join(dir, folder));
+  fs.writeFileSync(path.join(dir, folder, 'a.png'), 'png');
+  const B = await laptop(t, { DEVTEAM_GATEWAY: '1', DEVTEAM_UPLOADS_DIR: dir });
+  const off = await B.get(`/upload/${folder}/a.png`);
+  assert.equal(off.status, 404, off.text);
+  assert.equal((await B.get(`/upload/${folder}/a.png`, {}, 'HEAD')).status, 404, 'HEAD on a box');
+});
+
+test('laptop serve: a path that isn\'t a stored file in a folder of ours is 404, whatever it\'s dressed as (C4, the laptop half)', LAPTOP, async (t) => {
+  const L = await laptop(t);
+  const up = await L.post('a.txt', Buffer.from('a'));
+  assert.equal(up.status, 200, up.text);
+  const other = await L.post('b.txt', Buffer.from('b'));
+  assert.equal(other.status, 200, other.text);
+  assert.equal((await L.get(servedAt(up.json.path))).status, 200, 'the real one is served');
+  for (const p of unservedCases(L.folder(), up.json.path, other.json.path)) {
+    const r = await L.get(p);
+    assert.equal(r.status, 404, `${p}: ${r.status} ${r.text.slice(0, 80)}`);
+    assert.equal((await L.get(p, {}, 'HEAD')).status, 404, `HEAD ${p}`);
   }
 });
 
