@@ -8347,7 +8347,7 @@ function draftArtifacts(landed = landedArtifacts()) {
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
-// main has, and records the owner's word as an owner act (docs/superpowers/specs/2026-11-09-public-artifacts-design.md).
+// main has, and records the owner's word as an owner act (the public-artifacts design).
 // The project's name is part of every public URL, so it is set explicitly: the folder-name fallback
 // helloBody uses would move every link on a re-clone.
 const PUBLIC_PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
