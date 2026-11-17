@@ -28,6 +28,18 @@ Notes:
 
 Reviews: spec-1 CHANGES, spec-2 APPROVE; plan-1 CHANGES, plan-2 APPROVE; task-1 to task-6 APPROVE (task 2 after one fix round, task-2-2). An in-session whole-branch review at 2a9f191 found B-1 (Important: on the laptop, uploads at once didn't count each other against the total and free-disk floor), B-2 (Minor), B-3, B-4 and B-5; all fixed at a704a06 and confirmed by a scoped re-review.
 
+## After final review pass 1
+
+final-1 (1a) and final-1b were both CHANGES at db0cd68, with the same blocker: no test failed when `realpath` was dropped.
+- **Fixes:**
+  - **091f5ec:** a linked-folder case in B3 (answer, thread-new, thread-say) and in both servers' unserved cases, and the sweep shown not to follow it. Also the laptop upload request timeout (final-1 F3).
+  - **eca8472:** tests for final-1b F2 (an accepted link records the real path), F3 (the queued nudge keeps its paste, through `DEVTEAM_REPLY_FD`) and F4 (`files` stays set-only on a question).
+  - final-1b F5 is documented in the spec's Rulings (fails closed).
+- **Mutations:** each is now red. At all three sites: realpath swapped for `path.resolve` or `path.join`. Also: the upload's timer clear removed, the body timer removed, the given path recorded instead of the real one, `paste` dropped from the queued nudge, `files` removed from `x-set-only`.
+- **CI:** GitHub `test` run 44012366868 at e1c006303fd93fa3343f60abe00cf7165dfb33cd, every job green (`devteam.mjs gate ci -- gh run watch 44012366868 --exit-status`, exit 0, 294 s; `gh run view … --json conclusion` = `success`). `box-image` at the same head: `success`.
+- **db0cd68's red run:** run 44005751166 had two jobs fail, in `dashboard-threads-sidebar` and `kit.test` incidents, neither in the diff. A rerun of the failed jobs was green.
+- **Local:** `test/attachments.test.mjs` 32 pass, 1 skip, twice, at eca8472.
+
 ## Rulings
 
 - `m-20261117-003346949-supervisor`: approve-spec at `792afd99`.
