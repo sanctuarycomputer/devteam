@@ -12619,6 +12619,19 @@ function collectMetrics(since) {
       const m = measureOf(g);
       add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
+    // An owner-read goal has no reading until the owner's yes, so goal-at-target never sees it. Once
+    // every live ticket of its features has merged, the work it waits on is done (planning.md §1):
+    // ask. Quiet while a goal-met question about it is open, or once one asked after the last merge
+    // was answered, until more of its work merges.
+    for (const g of live) {
+      if (g.kind === 'upkeep' || measureOf(g).source !== 'owner' || goalAtTarget(g)) continue;
+      const feats = new Set(goalFeatures(g.id));
+      const work = [...tickets().values()].filter((t) => feats.has(t.feature) && isActive(t));
+      if (!work.length || work.some((t) => !mergeShaFor(t.id))) continue;
+      const last = Math.max(...work.map((t) => Number(mergedAt(t.id)) || 0));
+      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && Date.parse(q.asked_at) > last)))) continue;
+      add('medium', 'goal-work-merged', g.id, `"${g.title}" has all ${plural(work.length, 'ticket')} merged and is read by the owner, who hasn't been asked: it stays running until they say it is met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (it asks the goal's measure question)`);
+    }
     // only once the supervisor has rated one: a project that hasn't taken up the rating sees nothing
     const firstRated = all.filter((q) => q.stake != null || q.urgency != null).map((q) => q.asked_at).sort()[0];
     if (firstRated) for (const q of open.filter((x) => (x.stake == null || x.urgency == null) && x.asked_at > firstRated)) add('medium', 'question-unrated', q.id, q.question.slice(0, 120), `rate it: rate ${q.id} --stake 1-3 --urgency 1-3 (supervisor.md §6)`);

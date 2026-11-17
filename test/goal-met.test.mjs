@@ -220,3 +220,32 @@ test("the owner's yes is bound to the goal as asked, and a hand-written line can
     assert.match(run(old, ['log-check']).out + run(old, ['log-check']).err, /supervisor may not set goal\.status/, 'log-check names the hand-written status line');
   } finally { F.done(); }
 });
+
+test('an owner goal whose work has all merged is found, since it has no reading for goal-at-target', () => {
+  const F = fleetFixture('met-owner-merged');
+  const { old, ok } = F;
+  try {
+    const ask = 'Have you opened a live proposal?';
+    const G = readyGoal(F, { source: 'owner', question: ask, target: 1, direction: 'up', unit: 'attested' });
+    ok(old, ['feature', 'add', 'props', '--json', JSON.stringify({ title: 'Proposals', goals: [G], stories: [{ id: 'PR-S1', text: 'a proposal opens', release: 'v1.0.0' }] })], SUP);
+    const tk = (id, touches) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'props', component: 'props', kind: 'build', size: 'S', risk: 'normal', serves: ['PR-S1'], depends_on: [], touches: [touches], done_when: ['a proposal page opens'] })], SUP);
+    tk('props-01-page', 'src/page/**');
+    tk('props-02-gate', 'src/gate/**');
+    const merged = (id, file) => { write(path.join(old, file), `${id}\n`); F.g(['add', '-A'], old); F.g(['commit', '-qm', `${id}: work`], old); F.g(['push', '-q', 'origin', 'main'], old); };
+    const found = () => findings(F, 'goal-work-merged');
+    assert.deepEqual(found(), [], 'no work merged: nothing to ask');
+    merged('props-01-page', 'src/page/a.js');
+    assert.deepEqual(found(), [], 'half merged: not yet');
+    merged('props-02-gate', 'src/gate/a.js');
+    const [f] = found();
+    assert.equal(f?.subject, G, 'all merged, never asked: found');
+    assert.equal(f.severity, 'medium');
+    assert.match(f.suggestion, new RegExp(`ask --class goal-met --goal ${G} --recommendation yes`));
+    assert.deepEqual(findings(F), [], 'no reading, so goal-at-target stays quiet');
+    const Q = ok(old, ['ask', '--class', 'goal-met', '--goal', G, '--recommendation', 'yes'], SUP);
+    assert.deepEqual(found(), [], 'quiet while it is open');
+    ok(old, ['answer', Q, 'No']);
+    assert.deepEqual(found(), [], 'a No asked after the last merge stands');
+    ok(old, ['log-check']);
+  } finally { F.done(); }
+});
