@@ -8297,6 +8297,58 @@ function artifactTreeOkSync(id, slug) {
   if (ok) artifactTrees.add(key);
   return ok;
 }
+// An artifact's versions, newest first: its drafts (a worktree's copy that differs from main's), then
+// main's version (landed) and the ones before it (earlier), from the walk artifactTreeOk makes, so
+// every tree listed is one /artifact/tree/ serves. Only trees with an artifact.json, each once at its
+// newest commit; main's capped at ARTIFACT_VERSIONS_MAX versions, counted after those filters. Null
+// when there is nothing at all.
+const ARTIFACT_VERSIONS_MAX = 200;
+function artifactVersions(slug) {
+  const drafts = draftArtifacts().filter((a) => a.slug === slug)
+    .sort((a, b) => String(b.updated_at ?? '').localeCompare(String(a.updated_at ?? '')))
+    .map((a) => {
+      const root = draftWorktree(a.at);
+      // a plain folder under .worktrees/ has no checkout of its own: git would walk up to main's
+      const top = root ? git(['rev-parse', '--show-toplevel'], root) : null;
+      let commit = null;
+      try { commit = top && fs.realpathSync(top) === root ? git(['rev-parse', 'HEAD'], root) : null; } catch {}
+      return { kind: 'draft', at: a.at, worktree: a.at, commit, time: a.updated_at, fp: a.fp, url: `/artifact/wt/${a.at}/${slug}/` };
+    });
+  const ref = mainRef();
+  let main = [];
+  let truncated = false;
+  if (ref) {
+    const folder = `${ARTIFACTS_REL}/${slug}`;
+    const raw = git(['log', '--format=%x01%H %cI', '--raw', '--no-abbrev', '-t', '-m', '--first-parent', '--no-renames', ref, '--', folder], mainRoot) ?? '';
+    const seen = new Set();
+    for (const chunk of raw.split('\x01').slice(1)) {
+      const [head, ...lines] = chunk.split('\n');
+      const [commit, time] = head.split(' ');
+      let tree = null;
+      for (const l of lines) {
+        const m = /^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/.exec(l);
+        if (m && m[5] === folder && m[2] === '040000') { tree = m[4]; break; }
+      }
+      if (!tree || /^0+$/.test(tree) || seen.has(tree)) continue;
+      seen.add(tree);
+      main.push({ tree, commit, time });
+    }
+    // only servable: a tree without artifact.json at its top (from before the manifest) is left out
+    if (main.length) {
+      const r = spawnSync('git', ['cat-file', '--batch-check'], { cwd: mainRoot, encoding: 'utf8', input: `${main.map((e) => `${e.tree}:artifact.json`).join('\n')}\n`, maxBuffer: 64 * 1024 * 1024 });
+      // a failed check is a failure (exit 1), never "nothing there" (exit 3)
+      if (r.status !== 0) die(`${slug}: its versions could not be checked (git cat-file)`);
+      const lines = r.stdout.split('\n');
+      main = main.filter((_, i) => lines[i] !== undefined && !lines[i].endsWith(' missing'));
+    }
+    const nowTree = treeNow(git(treeFolderArgs(ref, slug).now, mainRoot));
+    main = main.map((e) => ({ kind: e.tree === nowTree ? 'landed' : 'earlier', at: `tree:${e.tree}`, tree: e.tree, commit: e.commit, time: e.time, url: `/artifact/tree/${e.tree}/${slug}/` }));
+    truncated = main.length > ARTIFACT_VERSIONS_MAX;
+    main = main.slice(0, ARTIFACT_VERSIONS_MAX);
+  }
+  if (!drafts.length && !main.length) return null;
+  return { slug, versions: [...drafts, ...main], truncated };
+}
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -8494,7 +8546,16 @@ function cmdArtifact() {
     if (flags.json) return json(r);
     return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact versions <slug>: its drafts, main's version, then earlier ones by date; the dashboard's
+  // /api/artifact-versions runs it. Exit 3: nothing there, which the route tells apart from a failure
+  if (sub === 'versions') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '')) die('usage: artifact versions <slug> [--json]');
+    const r = artifactVersions(slugName) ?? die(`${slugName}: no versions`, 3);
+    if (flags.json) return json(r);
+    return out(r.versions.map((v) => (v.kind === 'draft' ? `draft ${v.worktree} ${v.time}` : `${v.kind} ${v.tree.slice(0, 12)} ${v.commit.slice(0, 12)} ${v.time}`)).join('\n'));
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact versions <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -21699,6 +21760,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
+  artifact versions <slug> [--json]   an artifact's versions: its drafts, main's, then earlier ones by date (the dashboard's /api/artifact-versions reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
