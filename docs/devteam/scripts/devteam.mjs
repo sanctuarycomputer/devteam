@@ -14737,13 +14737,19 @@ async function serveLaptopUpload(req, res, rawPath, send) {
     return res.headersSent ? res.destroy() : none();
   }
 }
+// As the gateway: Node's limit on a whole request is five minutes, too short for a big file on a slow
+// line, and it is one setting for the server. So the dashboard's is the upload's (UPLOAD_REQUEST_MS),
+// and every other body keeps those five minutes by a timer of its own (UPLOAD_BODY_MS). A stalled
+// upload goes sooner (UPLOAD_STALL_MS).
+const UPLOAD_REQUEST_MS = 3600 * 1000;
+const UPLOAD_BODY_MS = 5 * 60 * 1000;
 // The limits, which a test may lower (and the floor of free disk raise) only while boxFilesOff()
 // holds: a test's throwaway HOME. Nowhere else does the environment change them, nor ever loosen one.
 function uploadLimits() {
-  const lim = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, stallMs: UPLOAD_STALL_MS, keepMs: UPLOAD_KEEP_MS };
+  const lim = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, stallMs: UPLOAD_STALL_MS, keepMs: UPLOAD_KEEP_MS, bodyMs: UPLOAD_BODY_MS };
   if (!boxFilesOff()) return lim;
   const n = (k) => { const v = process.env[k]; return typeof v === 'string' && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : null; };
-  for (const [key, env] of [['max', 'DEVTEAM_UPLOAD_MAX'], ['total', 'DEVTEAM_UPLOAD_TOTAL'], ['stallMs', 'DEVTEAM_UPLOAD_STALL_MS']]) if (n(env) !== null) lim[key] = Math.min(lim[key], n(env));
+  for (const [key, env] of [['max', 'DEVTEAM_UPLOAD_MAX'], ['total', 'DEVTEAM_UPLOAD_TOTAL'], ['stallMs', 'DEVTEAM_UPLOAD_STALL_MS'], ['bodyMs', 'DEVTEAM_UPLOAD_BODY_MS']]) if (n(env) !== null) lim[key] = Math.min(lim[key], n(env));
   if (n('DEVTEAM_UPLOAD_FREE') !== null) lim.free = Math.max(lim.free, n('DEVTEAM_UPLOAD_FREE'));
   return lim;
 }
@@ -16492,7 +16498,12 @@ async function cmdDashboard() {
     const why = again ? `the same question still shows after the key, with the cursor where it was (it ignored the digit, or took it and was asked again), so no Enter was sent; answer what shows now in the terminal or on the card` : !lines ? 'the terminal could not be read after the key' : draft !== null && draft.endsWith(String(option)) ? `the question went as the key was sent, and "${option}" is now in the terminal's input box` : null;
     return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
+  const bodyMs = uploadLimits().bodyMs;
   const server = http.createServer(async (req, res) => {
+    // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
+    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+    bodyTimer.unref();
+    req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
@@ -16501,6 +16512,7 @@ async function cmdDashboard() {
     if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
     // a file dropped on the page: before every other route, and before a byte of its body is read
     if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
+      clearTimeout(bodyTimer);
       try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), send); } catch (e) {
         process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
         if (!res.headersSent && !res.destroyed) return send(res, 500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
@@ -16914,6 +16926,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
+  server.requestTimeout = UPLOAD_REQUEST_MS;
   server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }

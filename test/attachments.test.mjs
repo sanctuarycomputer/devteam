@@ -101,7 +101,7 @@ async function laptop(t, extraEnv = {}) {
   const home = path.join(base, 'home');
   fs.mkdirSync(home);
   const env = { ...process.env, HOME: home, DEVTEAM_BOX: 'off', DEVTEAM_HUB_PORT: String(PORTS + 60), DEVTEAM_PORT_BASE: String(PORTS + 61), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
-  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_GATEWAY', 'DEVTEAM_UPLOADS_DIR', 'DEVTEAM_UPLOAD_MAX', 'DEVTEAM_UPLOAD_TOTAL', 'DEVTEAM_UPLOAD_FREE', 'DEVTEAM_UPLOAD_STALL_MS', 'TMUX', 'TMUX_PANE']) delete env[k];
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'DEVTEAM_GATEWAY', 'DEVTEAM_UPLOADS_DIR', 'DEVTEAM_UPLOAD_MAX', 'DEVTEAM_UPLOAD_TOTAL', 'DEVTEAM_UPLOAD_FREE', 'DEVTEAM_UPLOAD_STALL_MS', 'DEVTEAM_UPLOAD_BODY_MS', 'TMUX', 'TMUX_PANE']) delete env[k];
   for (const [k, v] of Object.entries(extraEnv)) { if (v === undefined) delete env[k]; else env[k] = v; }
   let dash = null;
   t.after(async () => { await dash?.stop(); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
@@ -223,6 +223,34 @@ test('laptop upload: the cap while streaming, and the stall timer (A7, the test-
   assert.deepEqual(ourFolders(L.folder()), before);
 });
 
+// A body sent by hand, a chunk every `everyMs` for `chunks` chunks; or, with `hold`, one chunk and then
+// nothing. Resolves with the answer, or how the connection ended.
+function dripped(L, route, headers, { chunks = 1, everyMs = 100, hold = false }) {
+  return new Promise((resolve) => {
+    const size = hold ? 100 : chunks * 10;
+    const r = http.request({ host: '127.0.0.1', port: L.port, path: route, method: 'POST', agent: false, headers: { host: `127.0.0.1:${L.port}`, origin: `http://127.0.0.1:${L.port}`, 'sec-fetch-site': 'same-origin', 'content-length': String(size), ...headers } });
+    r.on('response', (res) => { const bufs = []; res.on('data', (b) => bufs.push(b)); res.on('end', () => resolve({ status: res.statusCode, text: Buffer.concat(bufs).toString('utf8') })); res.on('error', (e) => resolve({ error: e.code ?? e.message })); });
+    r.on('error', (e) => resolve({ error: e.code ?? e.message }));
+    let sent = 0;
+    const next = () => { if (r.destroyed) return; sent++; if (hold || sent < chunks) { r.write(Buffer.alloc(10, 0x61)); if (!hold) setTimeout(next, everyMs); } else r.end(Buffer.alloc(10, 0x61)); };
+    next();
+  });
+}
+
+test('laptop upload: a body still moving past the five minutes every other route keeps is taken (final review F3, the test-only override)', LAPTOP, async (t) => {
+  // those five minutes lowered to 300 ms; the stall timer (60 s) is as it is
+  const L = await laptop(t, { DEVTEAM_UPLOAD_BODY_MS: '300' });
+  const started = Date.now();
+  const up = await dripped(L, '/upload?name=slow.bin', {}, { chunks: 15, everyMs: 100 });
+  assert.ok(Date.now() - started > 900, 'the upload took longer than the body timer');
+  assert.equal(up.status, 200, JSON.stringify(up));
+  assert.equal(JSON.parse(up.text).size, 150);
+  // any other body that is still coming at the timer is cut, as before
+  const held = await Promise.race([dripped(L, '/api/answer', { 'content-type': 'application/json' }, { hold: true }), new Promise((w) => setTimeout(() => w({ timedOut: true }), 3000))]);
+  assert.ok(!held.timedOut, 'another route\'s body still coming is cut within 3 s');
+  assert.ok(held.error || held.status >= 400, JSON.stringify(held));
+});
+
 test('laptop upload: the override is ignored without DEVTEAM_BOX=off (A7)', { ...LAPTOP, skip: ON_A_BOX && 'a box: without DEVTEAM_BOX=off the route is off; CI runs it' }, async (t) => {
   const L = await laptop(t, { DEVTEAM_BOX: undefined, DEVTEAM_UPLOAD_MAX: '1024' });
   const r = await L.post('a.bin', crypto.randomBytes(2048));
@@ -258,10 +286,19 @@ test('laptop upload: the sweep removes old, empty and cut-off folders of ours, a
   const fresh = seed(newFolderName(), ['y.txt'], 60);
   const freshPart = seed(newFolderName(), [R.part], 0);
   const notOurs = seed('not-ours', ['z.txt'], R.keepMs / 1000 + 60);
+  // a folder named as ours that is a link out of the root, to a folder the sweep would take if it were ours:
+  // the sweep removes neither the link nor anything it points at (final review F1)
+  const away = `${root}-away`;
+  fs.mkdirSync(away);
+  for (const f of ['x.txt', R.part]) { fs.writeFileSync(path.join(away, f), 'away'); fs.utimesSync(path.join(away, f), now - R.keepMs / 1000 - 60, now - R.keepMs / 1000 - 60); }
+  fs.utimesSync(away, now - R.keepMs / 1000 - 60, now - R.keepMs / 1000 - 60);
+  const linked = newFolderName('2026-01-01');
+  fs.symlinkSync(away, path.join(root, linked));
   const r = await L.post('next.txt', Buffer.from('next'));
   assert.equal(r.status, 200, r.text);
   const made = path.basename(path.dirname(r.json.path));
-  assert.deepEqual(fs.readdirSync(root).sort(), [first, fresh, freshPart, freshEmpty, made, notOurs].sort());
+  assert.deepEqual(fs.readdirSync(root).sort(), [first, fresh, freshPart, freshEmpty, made, notOurs, linked].sort());
+  assert.deepEqual(fs.readdirSync(away).sort(), [R.part, 'x.txt'].sort(), 'the sweep followed a linked folder');
   for (const gone of [old, stalePart, empty]) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
 });
 
@@ -576,7 +613,15 @@ function unservedCases(root, stored, other) {
   fs.symlinkSync(path.join(evil, 'x.txt'), path.join(dir, 'x.txt'));
   fs.symlinkSync(other, path.join(dir, 'other.txt'));
   fs.symlinkSync(stored, path.join(dir, 'same.txt'));
+  // a folder named as ours that is itself a link out of the root, to a plain file with a safe name:
+  // only the realpath of the whole path sees it is outside (final review F1)
+  const away = `${root}-away`;
+  fs.mkdirSync(away);
+  fs.writeFileSync(path.join(away, 'x.txt'), 'away');
+  const linked = `${folder.slice(0, 11)}${crypto.randomBytes(12).toString('hex')}`;
+  fs.symlinkSync(away, path.join(root, linked));
   return [
+    `/upload/${linked}/x.txt`,
     '/upload/../x', '/upload/%2e%2e/%2e%2e/etc/passwd', `/upload/${folder}/..%2F..%2Fetc%2Fpasswd`, `/upload/${folder}%2Fa.txt`, '/upload/not-ours/a.txt', '/upload/2026-01-01-zzzzzzzzzzzzzzzzzzzzzzzz/a.txt',
     `/upload/${folder}/a.txt%2F`, `/upload/${folder}/.part`, `/upload/${folder}/sub/x.txt`, `/upload/${folder}/sub`, `/upload/${folder}/A%20B.png`, `/upload/${folder}/Upper.PNG`, `/upload/${folder}/-x.txt`, `/upload/${folder}`, `/upload/${folder}/`, '/upload/',
     `/upload/${folder}/hosts.txt`, `/upload/${folder}/x.txt`, `/upload/${folder}/other.txt`, `/upload/${folder}/same.txt`, `/upload/${folder}/missing.txt`, `/upload/./${folder}/a.txt`, `/upload//${folder}/a.txt`,
@@ -678,11 +723,20 @@ test('box upload: the gateway\'s first sweep removes old, empty and cut-off fold
   const fresh = seed(newFolderName(), ['y.txt'], 60);
   const freshPart = seed(newFolderName(), [R.part], 0);
   const notOurs = seed('not-ours', ['z.txt'], R.keepMs / 1000 + 60);
+  // a folder named as ours that is a link out of the root, to a folder the sweep would take if it were ours:
+  // the sweep removes neither the link nor anything it points at (final review F1)
+  const away = `${root}-away`;
+  fs.mkdirSync(away);
+  for (const f of ['x.txt', R.part]) { fs.writeFileSync(path.join(away, f), 'away'); fs.utimesSync(path.join(away, f), now - R.keepMs / 1000 - 60, now - R.keepMs / 1000 - 60); }
+  fs.utimesSync(away, now - R.keepMs / 1000 - 60, now - R.keepMs / 1000 - 60);
+  const linked = newFolderName('2026-01-01');
+  fs.symlinkSync(away, path.join(root, linked));
   const r = await boxUpload(gw, 'next.txt', Buffer.from('next'));
   assert.equal(r.status, 200, r.text);
   const made = path.basename(path.dirname(r.json.path));
   // the one difference from the laptop (§3 step 6): only one gateway writes its root, so any .part or empty folder at its first scan was cut off
-  assert.deepEqual(fs.readdirSync(root).sort(), [fresh, made, notOurs].sort());
+  assert.deepEqual(fs.readdirSync(root).sort(), [fresh, made, notOurs, linked].sort());
+  assert.deepEqual(fs.readdirSync(away).sort(), [R.part, 'x.txt'].sort(), 'the sweep followed a linked folder');
   for (const gone of [old, stalePart, empty, freshEmpty, freshPart]) assert.ok(!fs.existsSync(path.join(root, gone)), gone);
 });
 
@@ -771,6 +825,10 @@ test('files: a path that isn\'t a dropped file in this machine\'s folder is refu
   const link = path.join(folder, 'link.txt');
   fs.symlinkSync(outside, link);
   const ours = path.join(root, newFolderName());
+  // a folder named as ours that is itself a link out of the root, to a plain file with a safe name:
+  // only the realpath of the whole path sees it is outside (final review F1)
+  const linkedFolder = path.join(root, newFolderName());
+  fs.symlinkSync(path.dirname(mk(path.join(L.base, 'away', 'x.txt'))), linkedFolder);
   const cases = [
     `${folder}${'/..'.repeat(folder.split('/').length - 1)}/etc/passwd`,
     '/etc/hosts',
@@ -785,13 +843,14 @@ test('files: a path that isn\'t a dropped file in this machine\'s folder is refu
     mk(path.join(root, 'not-ours', 'x.txt')),
     // a sibling named with the root's name as a prefix: a startsWith without the separator would pass it
     mk(path.join(`${root}-evil`, path.basename(folder), 'x.txt')),
+    path.join(linkedFolder, 'x.txt'),
   ];
   const qid = askQuestion(L);
   const tid = newThread(L);
   const before = logLineCount(L);
   for (const p of cases) {
     const files = [{ name: 'x.txt', path: p, bytes: 1 }];
-    for (const [name, body] of [['answer', { id: qid, answer: 'Yes', files }], ['thread-say', { id: tid, text: 'look', files }]]) {
+    for (const [name, body] of [['answer', { id: qid, answer: 'Yes', files }], ['thread-say', { id: tid, text: 'look', files }], ['thread-new', { title: 'T', text: 'look', files }]]) {
       const r = await L.api(name, body);
       assert.equal(r.status, 400, `${name} ${p}: ${r.text}`);
       assert.ok(r.json?.error?.includes(p), `${name} ${p}: the error names it: ${r.text}`);
