@@ -1,0 +1,21 @@
+# Task 1 review, pass 1
+
+- Reviewer: task-1 reviewer (fresh subagent, claude-opus)
+- Reviewed: 291a01a (Task 1, dfe3b0e..291a01a)
+- delta-3 F1: not yet in scope (Task 3)
+
+Spec compliance: ❌ goalBlock's logic follows spec §4 (both review focuses hold), but the blocked outlines are not the spec's rules.
+Quality: goalBlock is small, pure and mirrors helloPulse; the vm test is real, but three of §4's rules have no check that can fail (mutations survive).
+
+| Id | Severity | Rule | Where | Finding | Disposition |
+|---|---|---|---|---|---|
+| T1-1 | Important | spec.md:55; global constraint "Blocked outlines exactly" | docs/devteam/dashboard/index.html:951-952 | `.blk-full` is `outline: 2px solid var(--red)` and `.blk-partial` is `outline: 2px dashed var(--red)`. The spec and the constraint require `border-color: color-mix(in srgb, var(--red) 45%, var(--line))` for full and `border-color: color-mix(in srgb, var(--amber) 55%, var(--line))` for partial. Partial is red, not amber, and the 2px outline sits on top of the 1px `--line` border that spec §1 and done-when 10 test (whose colour has to be the muted red or amber). The implementer's report calls these "solid red outline"/"dashed", so this was a choice, not a typo. Fix: use the two border-color rules verbatim, and add a check that reads them (for example, a source assertion in this test). |  |
+| T1-2 | Important | spec.md:51 ("such a question's `blocks` or `ticket` names it (S16)"); constraint "every rule has a check that can fail" | index.html:3045; test/dashboard-overview-goals.test.mjs | Nothing tests the `q.ticket` branch. Mutation: with `...(q.ticket ? [q.ticket] : [])` removed, the test still passes (rc=0, 1/1). Real data names tickets through `ticket` (in the G1 fixture, the open question has `ticket: "g1-01-a"` and `blocks: []`). Fix: add a case with an open, no-default question whose `ticket` names a ticket that has no `held_by`, giving `'full'`/`'partial'`. |  |
+| T1-3 | Important | spec.md:51 ("a question that is open in `questions`"); constraint "every rule has a check that can fail" | index.html:3043; test | Nothing tests the open-status filter: every fixture question is open. Mutation: with `q.status === 'open' &&` removed, the test still passes (rc=0). Without the filter, an answered question that keeps `blocks`/`ticket` would mark a goal blocked for ever. Fix: add a case with a question that has `status: 'answered'` (no default) and blocks/holds `a`, `b` moving, giving `null`. |  |
+| T1-4 | Minor | spec.md:50 (stage not merged, released or superseded) | test | Only `merged` is exercised. Mutation: with `released`/`superseded` dropped from the stage list, the test still passes. One more stage in the merged-ticket case would cover it. |  |
+| T1-5 | Minor | spec.md:52 | index.html:3039 | The `mode === 'let-go'` branch is unreachable apart from `status === 'abandoned'` (goalMode returns 'let-go' only for abandoned), so its mutation survives. It is harmless and kept as a guard. |  |
+| T1-6 | Suggestion | spec.md:51 ("every ticket that depends on one that can't, however far down", as helloPulse) | index.html:3046-3049 | The depends_on closure runs over this goal's live tickets only. A g1 ticket that depends on a stuck ticket of another goal counts as moving. helloPulse runs over every ticket. The spec doesn't settle the cross-goal case, so this needs a call rather than a change (focus 2, a question on another goal's ticket not marking this one, still holds either way). The goal's features come only from `roadmap.goals[].features`, not from the union that the page's `goalFeatures` uses. For non-parked active goals the two are equivalent (devteam.mjs:11735), so this is fine. |  |
+
+Checked and holding: the shell blocks (`devteam-layout` 46-206, `devteam-shell-js` 1169-1441) have no hunks. goalBlock reads no globals (it runs in an empty vm context). Focus 1: with no tickets and a planner at a prompt, the result is `'full'` (one unit, stuck), and with the goal absent from roadmap.goals it is still `'full'`. Focus 2: a question that blocks `z` on f2 leaves g1 `null`. Mutations on dropping `blocks`, dropping the `phase` check, the limit filter and the two-level closure all fail the test, as they should.
+
+Verdict: CHANGES 291a01a3fcda7d26344e73b1b8b6f6fa18014a57
