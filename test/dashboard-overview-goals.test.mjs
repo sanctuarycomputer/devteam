@@ -640,6 +640,8 @@ test('overview: header, sections, numbers, autonomy, goals, needs you, commit hi
   assert.deepEqual(qs.map((q) => q.chip), [1, 0, 0]);
   assert.equal(await p.ev(`${OV}.querySelectorAll('.chip-next').length`), 1, 'one Next chip on Overview');
   assert.equal(await p.ev('NEXT_ID()'), order[0]);
+  // in the whole document, two: this row's and the Inbox tab's card for NEXT_ID() (drawn while the tab is shut)
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('.chip-next')].map((c) => c.closest('#overview .rowline') ? 'row' : c.closest('#th-inbox .qcard')?.dataset.qcard ?? 'elsewhere')`), ['row', order[0]], 'two Next chips in the document');
   assert.equal(await p.ev(`${OV}.querySelector('.chip-next').textContent`), 'Next');
 
   // Commit history: no caption, the section's body wide, a column a week (12 for hello's 84 days)
@@ -680,6 +682,154 @@ test('overview: no goals and no questions say None, and no Next chip', { ...CHRO
   assert.equal(await p.ev(`document.querySelectorAll('.chip-next').length`), 0, 'no Next chip in the page');
   assert.equal(await p.ev('NEXT_ID()'), null);
   assert.match(await p.ev(`${OV}.querySelector('.ov-head .sum').textContent`), /^0 questions · 0 tickets in flight$/);
+});
+
+// the peek's first properties list (its own rows; Computed is the second) and its section cards
+const PEEK_KEYS = "[...(document.querySelector('#drawer-body section.attrs > dl.props')?.children ?? [])].filter((x) => x.tagName === 'DT').map((x) => x.textContent.trim())";
+const PEEK_SECTS = "[...document.querySelectorAll('#drawer-body > .psect')].map((s) => ({ gp: s.dataset.gp ?? null, head: s.querySelector('.card-head').textContent.trim() }))";
+const ddOf = (key) => `[...document.querySelectorAll('#drawer-body section.attrs dt')].find((x) => x.textContent.trim() === ${JSON.stringify(key)})?.nextElementSibling`;
+const AT_REST = "(() => { const d = document.getElementById('drawer'); return !d.hidden && getComputedStyle(d).transform === 'none' && !d.getAnimations().some((a) => a.transitionProperty === 'transform'); })()";
+const GOAL_KEYS = ['ID', 'Status', 'Hold', 'Priority', 'Why it matters', 'Milestones', 'Measured by', 'Opened', 'How it changes'];
+
+test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goal-peek-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids } = goalsFixture(base, 'goal-peek');
+  const { p, soon, port, go } = await openOn(later, root, env, { init: { data: DATA_PATCH(), hello: { pulse: pulseFixture() } } });
+  const served = await checkSeeded(port, ids);
+  const J = JSON.stringify;
+  const GP = await (async () => { await go('#goals'); return p.ev('JSON.parse(JSON.stringify(GOAL_PEEK))'); })();
+  assert.deepEqual(Object.keys(GP), ['goal', 'upkeep']);
+  assert.equal(GP.goal[0], 'steps', 'the step bar first');
+  assert.deepEqual(GP.upkeep, ['heartbeat', 'chores']);
+  assert.deepEqual(await p.ev('[...GOAL_PEEK.goal, ...GOAL_PEEK.upkeep].filter((id) => typeof GOAL_PEEK_SECTIONS[id] !== \'function\')'), [], 'a builder per id');
+
+  // Upkeep's card on Goals opens Upkeep's peek (not a "not found" one)
+  await soon(`!!document.querySelector('#goals .card.goal.upkeep .heartbeat')`, 'Upkeep\'s card');
+  await p.click('#goals .card.goal.upkeep .heartbeat');
+  await soon(`location.hash === '#goal/upkeep' && DRAWER.kind === 'goal' && ${PEEK_KEYS}.includes('What it covers')`, 'Upkeep\'s peek from its card');
+  assert.deepEqual(await p.ev(PEEK_KEYS), ['ID', 'Status', 'Hold', 'What it covers', 'How it changes'], 'running, no chores: no Held because, no Chores in flight');
+  assert.match(await p.ev(`${ddOf('What it covers')}.textContent`), /^Chores, CI fixes, research, retros, kit syncs and the improvement loop’s trials and proposals\.?$|^Chores, CI fixes, research, retros, kit syncs and the improvement loop's trials and proposals\.?$/);
+  // held with a reason, a chore in flight
+  await p.ev(`window.__patchData.upkeep = { mode: 'park', state: 'parked', reason: 'the box is moving', by: 'owner', fleet: false, running: [], chores: [{ id: 'chore-01-tidy', title: 'tidy the worktrees', stage: 'building', phase: 'build' }] }; void 0`);
+  await soon(`${PEEK_KEYS}.includes('Held because')`, 'Upkeep held');
+  assert.deepEqual(await p.ev(PEEK_KEYS), ['ID', 'Status', 'Hold', 'Held because', 'What it covers', 'Chores in flight', 'How it changes']);
+  assert.match(await p.ev(`${ddOf('Held because')}.textContent`), /the box is moving/);
+  assert.match(await p.ev(`${ddOf('Status')}.textContent`), /Parked/);
+  assert.deepEqual(await p.ev(`[...${ddOf('Hold')}.querySelectorAll('button')].map((b) => [b.textContent, b.getAttribute('aria-pressed')])`), [['Run', 'false'], ['Drain', 'false'], ['Park', 'true']], 'Run, Drain, Park; no Let go');
+  assert.ok(await p.ev(`!!${ddOf('Chores in flight')}.querySelector('a[href="#ticket/chore-01-tidy"]')`));
+  assert.ok(await p.ev(`!!${ddOf('How it changes')}.querySelector('[data-thread-on]')`), 'Upkeep\'s How it changes: Start a thread');
+  const us = await p.ev(PEEK_SECTS);
+  assert.deepEqual(us.map((s) => s.gp), GP.upkeep, 'the upkeep sections, in GOAL_PEEK.upkeep\'s order');
+  const hb = await p.ev(`(() => { const s = document.querySelector('#drawer-body [data-gp="heartbeat"]'); return { cells: s.querySelectorAll('.heartbeat > i').length, text: s.textContent }; })()`);
+  assert.equal(hb.cells, 14, 'the heartbeat');
+  for (const w of ['fixed CI on main', 'synced the kit', 'ran the retro', 'a CI fix']) assert.ok(hb.text.includes(w), `the day items listed: ${w}`);
+  assert.ok(await p.ev(`!!document.querySelector('#drawer-body [data-gp="chores"] a[href="#ticket/chore-01-tidy"]')`), 'the chores in flight');
+  assert.equal(await p.ev(`document.querySelectorAll('#drawer-body select[data-impact]').length`), 0, 'no impact form on Upkeep\'s peek');
+  await p.ev(`window.__patchData.upkeep = { mode: 'run', state: 'running', reason: null, chores: [] }; void 0`);
+
+  // g1's peek: its record in, at rest
+  const g1 = served.ooda.goals.find((g) => g.id === ids.g1);
+  const dec = g1.impact.decision;
+  const key = `imp:${dec}`;
+  await go(`#goal/${encodeURIComponent(ids.g1)}`);
+  await soon(`${PEEK_KEYS}.includes('Opened') && !document.querySelector('#drawer-body .loading') && !!document.querySelector('[data-correct="${key}"]')`, 'g1\'s peek with its record');
+  await soon(AT_REST, 'the peek at rest');
+  const keys = await p.ev(PEEK_KEYS);
+  assert.deepEqual(keys.slice(0, GOAL_KEYS.length), GOAL_KEYS, `the property keys in order: ${keys.join(', ')}`);
+  assert.ok(keys.includes('Title') && keys.indexOf('Title') > keys.indexOf('How it changes'), 'the other stored rows after');
+  assert.ok(await p.ev(`!!${ddOf('How it changes')}.querySelector('[data-thread-on="goal:${ids.g1}"]')`), 'How it changes keeps Start a thread');
+  assert.ok(await p.ev(`!!${ddOf('Why it matters')}.querySelector('[data-correct="${key}"]')`), 'Why it matters is the impact block');
+  const sects = await p.ev(PEEK_SECTS);
+  assert.equal(sects[sects.length - 1].head, 'History', 'History last');
+  assert.equal(sects[sects.length - 1].gp, null);
+  const gps = sects.slice(0, -1).map((s) => s.gp);
+  assert.ok(gps.every(Boolean), `every other section from the goal-peek block: ${J(sects)}`);
+  assert.deepEqual(gps, GP.goal.filter((id) => gps.includes(id)), 'in GOAL_PEEK.goal\'s order');
+  for (const id of ['steps', 'readings', 'progress']) assert.ok(gps.includes(id), `g1 has ${id}`);
+  assert.equal(gps[0], 'steps', 'the step bar first');
+  assert.equal(await p.ev(`document.querySelector('#drawer-body [data-gp="steps"] ol.steps').outerHTML`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${J(ids.g1)}); const R = DATA.ooda.roadmap; return goalSteps(goalStepData(g, goalState(g, R, DATA.questions || []), R)); })()`), 'the same step bar as the goal\'s card');
+  assert.equal(await p.ev(`!!document.querySelector('#drawer-body [data-gp="steps"] .goal-next')`), await p.ev(`(() => { const g = DATA.ooda.goals.find((x) => x.id === ${J(ids.g1)}); return !!goalState(g, DATA.ooda.roadmap, DATA.questions || []).next; })()`), 'and its next step, when it has one');
+  // Hold: Run, Drain, Park, Let go
+  assert.deepEqual(await p.ev(`[...${ddOf('Hold')}.querySelectorAll('button')].map((b) => b.textContent)`), ['Run', 'Drain', 'Park', 'Let go']);
+
+  // Why it matters: Wrong?, pick 2, a reason, Send: correct on the IMPACT DECISION's id (P15)
+  await p.click(`[data-correct="${key}"]`);
+  await soon(`!document.querySelector('[data-correct-form="${key}"]').hidden`, 'the correction form open');
+  await p.ev(`(() => { const s = document.querySelector('select[data-impact="${key}"]'); s.value = '2'; s.dispatchEvent(new Event('change', { bubbles: true })); const r = document.querySelector('input[data-reason="${key}"]'); r.focus(); r.value = 'only one admin pays'; r.dispatchEvent(new Event('input', { bubbles: true })); })(); void 0`);
+  await p.click(`[data-correct-send="${key}"]`);
+  await soon(`window.__posts.some((x) => x.url === '/api/correct')`, 'the correction posted');
+  assert.deepEqual(await p.ev(`window.__posts.filter((x) => x.url === '/api/correct').map((x) => x.body)`), [{ id: dec, reason: 'only one admin pays', impact: 2 }], 'correct on g1\'s impact decision, with impact 2 and the reason');
+  assert.notEqual(dec, ids.g1);
+  await soon('SAVING === 0', 'the correction saved');
+  await p.ev('document.activeElement?.blur(); void 0');
+
+  // Let go: Confirm let go, which survives polls and a redraw from scratch (page memory, not the DOM)
+  const LG = `document.querySelector('#drawer-body [data-hold-id="${ids.g1}"][data-mode="let-go"]')`;
+  await soon(AT_REST, 'the peek at rest');
+  await p.click(`#drawer-body [data-hold-id="${ids.g1}"][data-mode="let-go"]`);
+  await soon(`${LG}?.textContent === 'Confirm let go'`, 'Confirm let go');
+  assert.equal(await p.ev(`window.__posts.filter((x) => x.url === '/api/goal-decide').length`), 0, 'nothing posted yet');
+  const at = await p.ev('window.__polls');
+  await new Promise((r) => setTimeout(r, 1000));
+  await soon(`window.__polls >= ${at + 2}`, 'polls');
+  assert.equal(await p.ev(`${LG}.textContent`), 'Confirm let go', 'still Confirm let go after polls');
+  await p.ev(`(() => { LAST_HTML = ''; document.getElementById('drawer-body').innerHTML = ''; openGoal(DRAWER.id); })(); void 0`);
+  assert.deepEqual(await p.ev(`[${LG}.textContent, ${LG}.classList.contains('confirm')]`), ['Confirm let go', true], 'still Confirm let go after a redraw from scratch');
+  await p.click(`#drawer-body [data-hold-id="${ids.g1}"][data-mode="let-go"]`);
+  await soon(`window.__posts.some((x) => x.url === '/api/goal-decide')`, 'the let-go posted');
+  assert.deepEqual(await p.ev(`window.__posts.filter((x) => x.url === '/api/goal-decide').map((x) => x.body)`), [{ id: ids.g1, verdict: 'let-go' }], 'today\'s hold body');
+  // the press done (a navigation while it is out asks to leave), and the server agreed
+  await soon('SAVING === 0', 'the let-go saved');
+  await soon(`DATA.ooda.goals.find((g) => g.id === ${J(ids.g1)}).status === 'abandoned'`, 'g1 let go');
+
+  // a let-go goal: only Restore (parked)
+  await go(`#goal/${encodeURIComponent(ids.g5)}`);
+  await soon(`${PEEK_KEYS}.includes('Opened') && !!${ddOf('Hold')}`, 'g5\'s peek');
+  assert.deepEqual(await p.ev(`[...${ddOf('Hold')}.querySelectorAll('button')].map((b) => b.textContent)`), ['Restore (parked)']);
+  // no impact form on any other peek
+  await go(`#ticket/${encodeURIComponent(ids.t1a)}`);
+  await soon(`DRAWER.kind === 'ticket' && !!document.querySelector('#drawer-body section.attrs')`, 'a ticket\'s peek');
+  assert.equal(await p.ev(`document.querySelectorAll('#drawer-body select[data-impact]').length`), 0, 'no impact form on a ticket\'s peek');
+  await go('#goal/upkeep');
+  await soon(`${PEEK_KEYS}.includes('What it covers')`, 'Upkeep\'s peek');
+  assert.equal(await p.ev(`document.querySelectorAll('#drawer-body select[data-impact]').length`), 0, 'no impact form on Upkeep\'s peek');
+});
+
+test('the Next chip', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-next-chip-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids } = goalsFixture(base, 'next-chip');
+  const { p, soon, port, go } = await openOn(later, root, env, { init: { data: DATA_PATCH(), hello: { pulse: pulseFixture() } } });
+  await checkSeeded(port, ids);
+  await go('#overview?th=inbox');
+  await soon(`!document.getElementById('th-inbox').hidden && document.querySelectorAll('#th-inbox #questions > .qcard').length === 3 && !!document.querySelector('#overview .sec')`, 'the Inbox tab over Overview');
+  const next = await p.ev('NEXT_ID()');
+  const order = await p.ev('DATA.questions.map((q) => q.id)');
+  assert.equal(next, order[0]);
+  // the tab draws the cards in d.questions' order (S11)
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#th-inbox #questions > .qcard')].map((c) => c.dataset.qcard)`), order);
+  // exactly two chips in the whole document: the first card's and Overview's first Needs you row's
+  const chips = await p.ev(`[...document.querySelectorAll('.chip-next')].map((c) => ({ t: c.textContent, card: c.closest('#th-inbox .qcard')?.dataset.qcard ?? null, row: c.closest('#overview .rowline')?.getAttribute('href') ?? null }))`);
+  assert.equal(chips.length, 2, `two Next chips in the document: ${JSON.stringify(chips)}`);
+  assert.deepEqual(chips.map((c) => c.t), ['Next', 'Next']);
+  assert.deepEqual(chips.filter((c) => c.card).map((c) => c.card), [next], 'on the card for NEXT_ID()');
+  assert.deepEqual(chips.filter((c) => c.row).map((c) => c.row), [`#q/${encodeURIComponent(next)}`], 'on Overview\'s first Needs you row');
+  assert.equal(await p.ev(`document.querySelector('#th-inbox [data-qcard="${next}"] .card-head .chip-next') === document.querySelector('#th-inbox [data-qcard="${next}"] .chip-next')`), true, 'in the card\'s head');
+  // the card's parts as before
+  const parts = await p.ev(`(() => { const c = document.querySelector('#th-inbox [data-qcard="${next}"]'); return { choices: [...c.querySelectorAll('.choices .choice b')].map((b) => b.textContent), textarea: !!c.querySelector('textarea[data-q="${next}"]'), answer: c.querySelector('[data-answer="${next}"]')?.textContent ?? null, head: !!c.querySelector('.card-head details.menu'), h4: c.querySelector('h4')?.textContent ?? '' }; })()`);
+  const want = await p.ev(`(() => { const q = DATA.questions[0]; return [...choicesOf(q).map((c) => c.label), ...(['owner-action', 'goal-approval'].includes(q.kind) ? [] : ['Something else'])]; })()`);
+  assert.ok(want.length >= 2);
+  assert.deepEqual(parts.choices, want, 'its choices');
+  assert.ok(parts.textarea, 'its textarea');
+  assert.ok(['Answer', 'Send'].includes(parts.answer), `its Answer: ${parts.answer}`);
+  assert.ok(parts.head && parts.h4, 'its head and question');
+  // one column, the panel body's width
+  const w = await p.ev(`(() => { const b = document.getElementById('th-body'), cs = getComputedStyle(b); const inner = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight); const cards = [...document.querySelectorAll('#th-inbox #questions > .qcard')].map((c) => ({ w: c.getBoundingClientRect().width, left: c.getBoundingClientRect().left })); return { inner, cards }; })()`);
+  for (const c of w.cards) assert.ok(Math.abs(c.w - w.inner) < 1, `a card is the panel body's width: ${c.w} of ${w.inner}`);
+  assert.equal(new Set(w.cards.map((c) => Math.round(c.left))).size, 1, 'one column');
 });
 
 test('the shell blocks are untouched', () => {

@@ -2345,6 +2345,9 @@ const rankRow = (q) => [
   // every rating it has carried, so a question quietly rated down leaves a trail
   ...((q.rating_history || []).length ? [['Rated', q.rating_history.map((h) => esc(`${h.asked ? 'When asked' : `${when(h.at)}, ${who(h.by)}`}: ${[h.stake ? `stake ${h.stake}` : '', h.urgency ? `urgency ${h.urgency}` : '', h.settles !== undefined ? `settles ${h.settles}` : ''].filter(Boolean).join(', ')}`)).join('<br>')]] : []),
 ];
+// The Next chip (kit-90 spec §6): on the Inbox card for the question `next` names (DATA.questions[0]), never
+// on a thread's copy; Overview's first Needs you row carries the other.
+const nextChip = (q) => (q.id === NEXT_ID() ? '<span class="chip-next">Next</span>' : '');
 function questionCard(q, o, reasonText, copy = false) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
   // copy: the same card in a thread (t-q-<id>): its own radio groups and error line, so the Inbox's
@@ -2369,7 +2372,7 @@ function questionCard(q, o, reasonText, copy = false) {
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
     <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="${pre}q-${esc(q.id)}" data-qcard="${esc(q.id)}"${copy ? '' : subj('question', q.id, qplain(q.question, q.links))}>
-      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
+      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `${copy ? '' : nextChip(q)}<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${movedText(q) ? `<p class="moved" data-links-moved><i class="icon-triangle-alert" aria-hidden="true"></i> ${esc(movedText(q))}</p>` : ''}
       ${rankWhy(q)}
       ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
@@ -2619,7 +2622,7 @@ function reviewCard(q, o, reasonText) {
   const declineOpen = !!drafts[q.id];
   return `
     <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}" data-qcard="${esc(q.id)}"${subj('question', q.id, qplain(q.question, q.links))}>
-      ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
+      ${cardHead(KIND_ICON.review, `${nextChip(q)}<span class="badge low">Review</span>`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${rankWhy(q)}
       ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
@@ -3158,15 +3161,19 @@ function goalStepData(g, s, R) {
   return { step: s.step, built: p.work, met: p.outcome };
 }
 const goalStepsOf = (g, s, R) => { const d = goalStepData(g, s, R); return d ? goalSteps(d) : ''; };
-// The toggle: Run, Drain, Park, and Let go (Restore once let go). Let go asks to confirm in place.
+// The toggle: Run, Drain, Park, and Let go (Restore once let go). Let go asks to confirm in place; the
+// confirm is page memory (id → until when), so a redraw of the peek draws it again rather than dropping it.
+const HOLD_CONFIRM = new Map();
+const holdConfirming = (id) => (HOLD_CONFIRM.get(id) ?? 0) > Date.now();
 function holdControl(id, h, { letGo = true, status = null, restoring = false } = {}) {
   if (status === 'met') return '';
   if (restoring) return `<div class="holdbar"><span class="muted small">Restoring: it comes back parked…</span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   if (status === 'abandoned') return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold"><button type="button" data-hold-id="${esc(id)}" data-mode="restore">Restore (parked)</button></span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   const cur = h?.mode || 'run';
   const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the fleet switch in the sidebar to resume it</span>' : '';
-  const btn = (m, label) => `<button type="button" data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
-  return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
+  const btn = (m, label, cls = '') => `<button type="button"${cls ? ` class="${cls}"` : ''} data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
+  const sure = holdConfirming(id);
+  return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', sure ? 'Confirm let go' : 'Let go', sure ? 'confirm' : '') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
 }
 // Upkeep's card on Goals: its hold word, always on (or held), the last days' heartbeat, the chores in
 // flight; its hold control is in its peek.
@@ -3667,6 +3674,7 @@ const KEY_TIPS = {
   Week: 'The week it covers.', Figures: 'The week\'s counts.', 'What it decided': 'Lessons, acts and decisions that came from it.', 'Write-up': 'The retro\'s file.',
   To: 'Who it was sent to.', Re: 'The message it answers.', Sha: 'The commit it refers to.', 'For goal': 'The goal it plans for.', 'Tickets so far': 'Tickets in its draft so far.', 'Waiting on you': 'Questions it is waiting on you for.', 'Asked the supervisor': 'Messages it sent the supervisor with no reply yet.',
   Version: 'The ref the file is shown at.', Commits: 'How many commits changed it.', Reads: 'What it reads.', Triage: 'When a new error is sorted.', 'Last run': 'When it last ran, and how it went.', Today: 'What it read today.', 'Invalid lines': 'Lines it could not read.',
+  'Measured by': 'What says it is met.', Opened: 'When it was created, and by whom.', 'Held because': 'Why it is held, while it is.', 'What it covers': 'The work it holds.', 'Chores in flight': 'Its chores not merged yet.',
   Checks: 'What it requests and what counts as up.', Uptime: 'The share of checks that passed.', 'Response time': 'p50 and p95 latency.', 'Last check': 'When it last checked.', Certificate: 'The TLS certificate, if any.',
 };
 // none of the three: no tip (and the peek test's "every key has a tooltip" fails)
@@ -3730,6 +3738,7 @@ const ATTR = {
   },
   goal: {
     order: ['title', 'outcome', 'status', 'priority', 'horizon', 'measure', 'milestones', 'preconditions', 'non_goals'],
+    label: { measure: 'Measured by' },
     fmt: {
       measure: (m) => `${esc(m.description ?? '')}${m.target != null ? `: <b>${esc(m.target)}</b>${unitOf(m.unit)}` : ''}${m.direction ? ` <span class="muted">(${m.direction === 'down' ? 'lower' : 'higher'} is better)</span>` : ''}`,
       milestones: (v, c) => `<ol>${v.map((m, i) => `<li>${mlink(c.id, i + 1, m.title)}${m.target != null ? `: ${esc(m.target)}` : ''}${m.by ? ` by ${fmtDay(m.by)}` : ''}</li>`).join('')}</ol>`,
@@ -3780,8 +3789,10 @@ function storedRows(type, fields, docType, ctx, prefix = '') {
 // object's peek (undefined while it loads); pick: the part of the record that is this object (a story
 // inside its feature, with prefix 'stories[].' for its tooltips); computed: [label, html, tip] rows
 // worked out from other records; ctx: what formatters may need; kind and rec: the peek's kind and the
-// record How it changes reads (howItChanges).
-function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false, kind = DRAWER.kind, rec = null }) {
+// record How it changes reads (howItChanges). rename: { label: new label } for its own rows (a goal's
+// Created reads Opened); front: [label, row, replace] entries drawn right after the ID in that order, each
+// its own row of that label (moved up) or, when it has none or replace is set, the row given.
+function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false, kind = DRAWER.kind, rec = null, rename = {}, front = [] }) {
   const r = peek?.record ?? null;
   const fields = r ? (pick ? pick(r.fields) : r.fields) : null;
   const c = { id, record: r, set_by: r?.set_by ?? {}, ...ctx };
@@ -3789,7 +3800,13 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
   const stored = fields ? storedRows(type, fields, docType ?? type, c, prefix)
     : noRecord ? [] : [attrRow('Record', `<span class="muted">${peek === undefined ? 'loading…' : peek?.transient ? 'could not load it just now' : 'not in the log'}</span>`)];
   const idTipped = `${idTip ?? (tipFor('_', 'id') || KEY_TIPS.ID)} Copy ID copies exactly this.`;
-  const own = [attrRow('ID', `<code>${esc(id)}</code>`, idTipped), ...stored, ...made, howItChanges(kind, { id, ...(rec || {}), record: r })].filter(Boolean);
+  let own = [attrRow('ID', `<code>${esc(id)}</code>`, idTipped), ...stored, ...made, howItChanges(kind, { id, ...(rec || {}), record: r })].filter(Boolean)
+    .map((x) => (Object.hasOwn(rename, x[0]) ? [rename[x[0]], x[1], keyTip(rename[x[0]])] : x));
+  if (front.length) {
+    const take = (l) => { const i = own.findIndex((x) => x[0] === l); return i < 0 ? null : own.splice(i, 1)[0]; };
+    const lead = front.map(([l, row, replace]) => { const had = take(l); return replace ? row : had ?? row; }).filter(Boolean);
+    own = [own[0], ...lead, ...own.slice(1)];
+  }
   const comp = computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).filter(Boolean);
   return `<section class="attrs">${props(own)}${comp.length ? `<h4 class="attrs-h">Computed</h4>${props(comp)}` : ''}</section>`;
 }
@@ -4429,7 +4446,61 @@ function impactBlock(g) {
     <button class="ghost" data-correct="${esc(key)}">${i.by === 'owner' ? 'Change it' : 'Wrong?'}</button>
     <div class="row-inline" hidden data-correct-form="${esc(key)}"><select data-impact="${esc(key)}" aria-label="What it is">${[4, 3, 2, 1].map((n) => `<option value="${n}"${n === i.level ? ' selected' : ''}>${n}: ${esc(DATA.ooda.impact_words[n])}</option>`).join('')}</select><input type="text" data-reason="${esc(key)}" placeholder="Why (the supervisor keeps it as a lesson)"><button class="ghost" data-correct-send="${esc(key)}">Send</button><span class="err" id="e-${esc(key)}"></span></div>`;
 }
+/* goal-peek start */
+// The section cards under a goal's properties, and under Upkeep's (kit-90 spec §5): GOAL_PEEK names them
+// in order, GOAL_PEEK_SECTIONS[id](g, ctx) draws each (a section card, or '' when it has nothing). The goal's
+// History stays last, outside this block. recurring-upkeep adds Recurring, Built-in and Proposals to upkeep
+// by editing only this block. ctx: what openGoal worked out (s, R, p, feats, items, readings, marks, unit,
+// problems, calls); for Upkeep, { u, days }.
+const GOAL_PEEK = {
+  goal: ['steps', 'readings', 'tldr', 'problems', 'decisions', 'progress'],
+  upkeep: ['heartbeat', 'chores'],
+};
+// each card names its id (data-gp), so the order can be read off the page
+const gpCard = (id, html) => String(html || '').replace(/<div class="card psect"/g, `<div class="card psect" data-gp="${id}"`);
+const GOAL_PEEK_SECTIONS = {
+  steps: (g, c) => { const bar = goalStepsOf(g, c.s, c.R); return bar || c.s.next ? gpCard('steps', psect('Steps', `${bar}${c.s.next ? `<p class="goal-next measure">${c.s.next}</p>` : ''}`)) : ''; },
+  readings: (g, c) => gpCard('readings', psect('Readings', c.readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: c.readings }], { marks: c.marks, unit: c.unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')),
+  tldr: (g, c) => gpCard('tldr', designBlock(c.p?.design)),
+  problems: (g, c) => (c.problems.length ? gpCard('problems', psect('Problems that threaten it', c.problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join(''))) : ''),
+  decisions: (g, c) => (c.calls.length ? gpCard('decisions', psect('Decisions and acts', `<ol class="tl">${c.calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>`)) : ''),
+  progress: (g, c) => (c.feats.length ? gpCard('progress', psect('Progress', progressBlock(c.items))) : ''),
+  // Upkeep: the last days' heartbeat, then each day's items, newest first; the chores in flight
+  heartbeat: (g, c) => {
+    const days = heartbeatDays(c.days);
+    if (!days.length) return '';
+    const busy = days.filter((d) => d.items.length || d.failed).reverse();
+    return gpCard('heartbeat', psect('Heartbeat', `${heartbeat(days)}${busy.length ? `<ul class="hb-days">${busy.map((d) => `<li><b>${fmtDay(d.day)}</b>${d.failed ? ' <span class="badge high">failed</span>' : ''}${d.items.length ? `: ${d.items.map(esc).join('; ')}` : ''}</li>`).join('')}</ul>` : '<p class="muted">Quiet: nothing ran in these days.</p>'}`));
+  },
+  chores: (g, c) => { const cs = c.u.chores || []; return cs.length ? gpCard('chores', psect('Chores in flight', `<ul>${cs.map((x) => `<li><a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>${x.title ? ` ${esc(x.title)}` : ''} <span class="muted">· ${esc(STAGE_WORDS[x.stage] || x.stage || '')}</span></li>`).join('')}</ul>`)) : ''; },
+};
+/* goal-peek end */
+const UPKEEP_COVERS = 'Chores, CI fixes, research, retros, kit syncs and the improvement loop’s trials and proposals.';
+// Upkeep's peek (#goal/upkeep; spec §5): its hold (no Let go), why it is held, what it covers, its chores in
+// flight and How it changes; then GOAL_PEEK.upkeep's sections.
+function openUpkeep() {
+  drawerFor('goal', 'upkeep');
+  const u = DATA.upkeep;
+  if (!u) return notFound('goal', 'upkeep', null, 'This dashboard\'s data has no Upkeep.', { noRecord: true });
+  const words = HOLD_STATE_WORDS[holdState(u)] || u.state || 'running';
+  const held = (u.mode || 'run') !== 'run';
+  const chores = u.chores || [];
+  const rows = [
+    attrRow('ID', `<code>${esc(u.id || 'upkeep')}</code>`, `${KEY_TIPS.ID} Copy ID copies exactly this.`),
+    attrRow('Status', `<span class="badge ${u.mode === 'park' ? 'high' : held ? 'medium' : 'good'}">${esc(words)}</span>`),
+    attrRow('Hold', holdControl('upkeep', u, { letGo: false })),
+    held ? attrRow('Held because', u.reason ? linkify(u.reason) : u.fleet ? `the fleet is ${u.mode === 'park' ? 'parked' : 'draining'}` : '') : null,
+    attrRow('What it covers', esc(UPKEEP_COVERS)),
+    attrRow('Chores in flight', chores.length ? chores.map((x) => `<a class="linkish" href="#ticket/${encodeURIComponent(x.id)}">${esc(x.id)}</a>`).join(', ') : ''),
+    howItChanges('goal', { id: 'upkeep' }),
+  ].filter(Boolean);
+  const ctx = { u, days: DATA.upkeep_days };
+  showDrawer(`<h2 id="drawer-title">Upkeep</h2>
+    <section class="attrs">${props(rows)}</section>
+    ${GOAL_PEEK.upkeep.map((sid) => GOAL_PEEK_SECTIONS[sid](u, ctx)).join('')}`);
+}
 function openGoal(id) {
+  if (id === 'upkeep') return openUpkeep();
   drawerFor('goal', id);
   const g = (DATA.ooda.goals || []).find((x) => x.id === id);
   const p = peekOf('goal', id);
@@ -4450,10 +4521,26 @@ function openGoal(id) {
   const readings = (g.readings || []).map((x) => [Date.parse(x.at), x.value]);
   const marks = [...(g.forecast?.milestones || []).map((m) => ({ value: m.target, label: `${m.title} (${m.target}${unit})` })), ...(g.measure?.target != null ? [{ value: g.measure.target, label: `target ${g.measure.target}${unit}`, strong: true }] : [])];
   const items = filterTickets(DATA.progress, `goal:${id}`);
+  // the properties in the done-when's order (spec §5): Hold is the control (with why it is held), Why it
+  // matters the impact block; the record's own Status, Priority, Milestones and Measured by move up (from
+  // the dashboard's copy of the goal while the record loads)
+  const reason = g.hold_view?.reason ?? p?.record?.fields?.hold?.reason ?? null;
+  const hold = holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring });
+  const fmt = ATTR.goal.fmt;
+  const front = [
+    ['Status', attrRow('Status', esc(g.status ?? ''))],
+    ['Hold', attrRow('Hold', hold || reason ? `${hold}${reason && g.hold_view?.mode !== 'run' ? `<div class="muted">${linkify(reason)}</div>` : ''}` : ''), true],
+    ['Priority', attrRow('Priority', g.priority != null ? esc(g.priority) : '')],
+    ['Why it matters', attrRow('Why it matters', impactBlock(g), 'How much the goal matters to the project, 1 to 4, judged by the supervisor against the strategy. It orders your Inbox, never the work: the goal\'s priority does that. If it is wrong, say what it is: your value stands.'), true],
+    ['Milestones', attrRow('Milestones', (g.milestones || []).length ? fmt.milestones(g.milestones, { id }) : '')],
+    ['Measured by', attrRow('Measured by', g.measure?.description ? fmt.measure(g.measure) : '')],
+    ['Opened', null],
+    ['How it changes', null],
+  ];
+  const ctx = { s, R, p, feats, items, readings, marks, unit, problems, calls };
   showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
-    ${attrs({ id, peek: p, type: 'goal', ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
+    ${attrs({ id, peek: p, type: 'goal', rename: { Created: 'Opened' }, front, ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
       ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
-      ['Why it matters', impactBlock(g), 'How much the goal matters to the project, 1 to 4, judged by the supervisor against the strategy. It orders your Inbox, never the work: the goal\'s priority does that. If it is wrong, say what it is: your value stands.'],
       ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
       ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
       ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
@@ -4461,14 +4548,7 @@ function openGoal(id) {
       ['Your verdicts', verdicts.length ? `<ul>${verdicts.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on its design, oldest first.'],
       ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
     ] })}
-    ${goalStepsOf(g, s, R)}
-    ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
-    ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
-    ${psect('Readings', readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>')}
-    ${designBlock(p?.design)}
-    ${problems.length ? psect('Problems that threaten it', problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join('')) : ''}
-    ${calls.length ? psect('Decisions and acts', `<ol class="tl">${calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>`) : ''}
-    ${feats.length ? psect('Progress', progressBlock(items)) : ''}
+    ${GOAL_PEEK.goal.map((sid) => GOAL_PEEK_SECTIONS[sid](g, ctx)).join('')}
     ${historySection(p, id)}`);
 }
 function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
@@ -7900,7 +7980,19 @@ document.addEventListener('click', async (ev) => {
   if (hb) {
     const id = hb.dataset.holdId, mode = hb.dataset.mode;
     const errId = `hold-${id}`;
-    if (mode === 'let-go' && !hb.classList.contains('confirm')) { hb.classList.add('confirm'); hb.textContent = 'Confirm let go'; setTimeout(() => { hb.classList.remove('confirm'); hb.textContent = 'Let go'; }, 6000); return; }
+    // Let go, then Confirm let go: the confirm in page memory (HOLD_CONFIRM), so a redraw keeps it
+    if (mode === 'let-go' && !holdConfirming(id)) {
+      HOLD_CONFIRM.set(id, Date.now() + 6000);
+      hb.classList.add('confirm'); hb.textContent = 'Confirm let go';
+      setTimeout(() => {
+        if (holdConfirming(id)) return; // confirmed again since: that one's timer resets it
+        HOLD_CONFIRM.delete(id);
+        for (const b of document.querySelectorAll(`[data-hold-id="${CSS.escape(id)}"][data-mode="let-go"]`)) { b.classList.remove('confirm'); b.textContent = 'Let go'; }
+        redraw();
+      }, 6050);
+      return;
+    }
+    HOLD_CONFIRM.delete(id);
     hb.classList.remove('confirm');
     press(`g:${id}`, {
       build: () => (['let-go', 'restore'].includes(mode) ? { action: 'goal-decide', body: { id, verdict: mode } } : { action: 'goal-hold', body: { id, mode } }),
