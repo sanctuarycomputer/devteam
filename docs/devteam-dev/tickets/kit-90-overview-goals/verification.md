@@ -1,7 +1,9 @@
 # kit-90-overview-goals: verification
 
-- Code head verified: `d4a1d0f9` (branch `ticket/kit-90-overview-goals`, origin/main merged at `ff262b5`, v0.64.4). It is `15d6b999` plus done-when 3's reload at Met (`04ba63a7`) and the two CI fixes below (`398635d3`, `b850bfc8`).
-- CI: run [44168579236](https://github.com/sanctuarycomputer/devteam/actions/runs/44168579236) at `d4a1d0f9`: **success** on attempt 2, every job, recorded with `devteam.mjs gate ci -- gh run watch 44168579236 --exit-status`. Attempt 1 failed only `kit (24, chrome 2/2)`, on `dashboard-inbox-panel` 9 ("the review open, the panel still open on Inbox under it", timed out). That test is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`), and the failed job was rerun as ruled. More on it below.
+- Code head verified: `01230e93` (branch `ticket/kit-90-overview-goals`, origin/main merged at `ff262b5`, v0.64.4). It is `15d6b999` plus done-when 3's reload at Met (`04ba63a7`), the two CI fixes below (`398635d3`, `b850bfc8`) and final-1's fixes (`b6e2b88f`..`01230e93`, below).
+- CI: run [44188200962](https://github.com/sanctuarycomputer/devteam/actions/runs/44188200962) at `01230e93`: **success** on attempt 1, every job (gate ci passed in 310.4s), recorded with `devteam.mjs gate ci -- gh run watch 44188200962 --exit-status`.
+- Earlier CI: run [44168579236](https://github.com/sanctuarycomputer/devteam/actions/runs/44168579236) at `d4a1d0f9`: **success** on attempt 2.
+- That run (44168579236) at `d4a1d0f9`: every job green on attempt 2, recorded with `devteam.mjs gate ci -- gh run watch 44168579236 --exit-status`. Attempt 1 failed only `kit (24, chrome 2/2)`, on `dashboard-inbox-panel` 9 ("the review open, the panel still open on Inbox under it", timed out). That test is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`), and the failed job was rerun as ruled. More on it below.
 - Earlier CI: run [44163292008](https://github.com/sanctuarycomputer/devteam/actions/runs/44163292008) at `cc4f6080`: failure. Its fixes are in the next section.
 - On the box, only the touched files were run, one at a time. They ran through `gate test` on `/usr/local/bin/node` (Node 22, Chrome present) with their own HOME, TMUX and every `DEVTEAM_*` unset (`.superpowers/sdd/plan/rt90.sh`). Every run had 0 skipped. The full suite is CI's.
 
@@ -45,6 +47,19 @@ Every touched file passed. Three outside files failed; two were caused by the ta
 - **`dashboard-inbox-panel` 9** (Node 22 only): a timeout. It passes on the box (12/12) and is no kit-90 code. It is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`). The failed job is rerun if it recurs.
 - **More on `dashboard-inbox-panel` 9.** It failed in 2 of the 4 Chrome jobs that ran it across both runs, once on Node 22 and once on Node 24. None of the last 24 failed CI runs on main or other branches had it. On the box it passes at normal speed: 12/12, and 3/3 on the narrowed pattern. With the CPU throttled 6x, the "Open the review" press failed to open the review in 1 of 7 kit-90 runs, and it opened in 3 of 3 main runs. A trace on one throttled run showed a data load rewriting the whole Inbox (`render` → `$('questions').innerHTML`, not new in kit-90) inside the press. The cause isn't proven. The supervisor was told (`m-20261117-211948359`).
 
+## Final review 1 (CHANGES at `102b6437`) and its fixes
+
+- **F1 (Important), `b6e2b88f`.** A met goal's card wrote its measure description without `esc`, which was stored XSS. Now it is `esc(cap(…))`. The fixture's met goal has `<img src=x id=probe-xss>` as its measure, added through the real `goal add`. The test asserts the measure shows as text and that no `#probe-xss` element exists; it fails without the fix. All 60 new interpolations were checked, and this was the only unescaped log text.
+- **F2 (Minor), `d342a49f`.** The render cost the supervisor asked about.
+  - The first render costs the same as main's.
+  - The mosaic uses one shared `Intl.DateTimeFormat` and reuses its HTML while the activity and the day are unchanged. `helloLoad` redraws Overview only when the answer changed. Both live in a `hello-pulse` marker block, with vm tests.
+  - `renderOverview` went from 8–14 ms twice a poll to 1–3 ms once a poll. `ovMosaic` went from 6–10 ms to about 0.1 ms.
+  - On this fixture main's `render()` averages 44–65 ms, with the same 60–100 ms spikes, in `renderOoda` and `renderProgress`, which kit-90 does not change. kit-90's own share is now about 2 ms.
+- **F3 (Minor), `f8d54531`.** A goal card's `planner on …` link, its "stuck on a prompt" badge and its registry line are asserted. Each assertion fails if its part is removed.
+- **F4 (Minor), `45da205b`.** `helloLoad` applies only the latest request's answer. The vm test answers two requests out of order.
+- **F5 (Suggestion), `01230e93`.** Settings area scrolls Run into view without pressing it, reads the place, presses Run and asserts the switch didn't move. A 6px shift on Run fails it.
+- Local runs at `01230e93`, each 0 fail and 0 skip: `dashboard-overview-goals` 12, `dashboard-shell` 16, `dashboard-pages` 6, `dashboard-measure` 4, `dashboard-inbox-panel` 12, `dashboard-threads-sidebar` 8.
+
 ## What the supervisor asked to have named here
 
 - **The spec and plan amendment `e7d4c79`**, made per the spec's own build clause, with no delta review (`m-20261117-144551912-supervisor`). It made two changes:
@@ -82,3 +97,4 @@ Every touched file passed. Three outside files failed; two were caused by the ta
 | 3 | `task-3.md` APPROVE `0da7ab4` | T3-1 fixed `fed3d20` (covered by task-4's package) |
 | 4 | `task-4.md` APPROVE `6482a31` | T4-1..3 fixed `548085e`, `efbd4c8` (covered by task-5's package) |
 | 5 | `task-5.md` CHANGES, `task-5-2.md` APPROVE `f3be0c2c` | T5-1, T5-2, T5-4 fixed `f3be0c2c`; T5-3 in AC7 above |
+| Final | `final-1.md` CHANGES `102b6437`; `final-2.md` (pass 2) | F1..F5 fixed `b6e2b88f`..`01230e93` |
