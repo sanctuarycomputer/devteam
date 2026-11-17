@@ -808,6 +808,19 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await p.ev('document.activeElement.blur(); void 0');
     await soon('HELD === null', 'the held draw landed');
     await soon(`(() => { const t = document.querySelector(${JSON.stringify(TA)}); return !!t && !t.__mine && t.value === 'half a thought'; })()`, 'the redrawn note box holds the words');
+    // a peek open beside the panel (the lesson's evidence link), the focus in the note box: Escape is the field's, the peek
+    // stays (spec §2.7)
+    await press(IN('a[href^="#observation/"]'), "the lesson's evidence link");
+    await soon("location.hash.startsWith('#observation/') && peekIsOpen() && getComputedStyle(document.getElementById('drawer')).transform === 'none'", 'the peek open beside the panel');
+    const peekHash = await p.ev('location.hash');
+    await focusIn(TA, "q2's note, the peek open");
+    await p.key('Escape');
+    await p.ev(FRAMES);
+    await p.ev('new Promise((r) => setTimeout(() => r(true), 300))');
+    assert.deepEqual(await p.ev(`[location.hash, peekIsOpen(), ${ON_INBOX}, document.activeElement === document.querySelector(${JSON.stringify(TA)}), document.activeElement?.value]`), [peekHash, true, true, true, 'half a thought'], 'Escape in the note box: the peek and the panel stay, the focus and words kept');
+    await press('#drawer-close', "the peek's ×");
+    await soon("location.hash === '#overview?th=inbox' && document.getElementById('drawer').hidden", 'the peek closed');
+    await soon(`${ON_INBOX} && document.querySelector(${JSON.stringify(TA)})?.value === 'half a thought'`, 'the panel on Inbox, the words kept');
     // the note, sent (q2's Answer with no choice: the words as the answer)
     await press(IN(`[data-answer="${q2}"]`), "q2's Answer");
     assert.equal((await posted('/api/answer', q2)).answer, 'half a thought', 'the note sent');
