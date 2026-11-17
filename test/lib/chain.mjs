@@ -91,7 +91,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(bad, /precondition 1 is in milestones 1 and 2/);
     must(['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Cards on file', target: 40, by: '2027-01-31', preconditions: [1], tickets: 4 }, { title: 'Self-serve prices', target: 80, preconditions: [2], tickets: 6 }])], { role: 'sup' });
     assert.doesNotMatch(must(['goal', 'check', G]), /^  milestones:/m);
-    assert.match(must(['goal', 'forecast', G]), /1\. Cards on file: 40 % by 2027-01-31; about 4 tickets, unplanned; 1 waves to here at 5 slots[\s\S]*no measured rate yet/);
+    assert.match(must(['goal', 'forecast', G]), /1\. Cards on file: 40 % by 2027-01-31; about 4 tickets, unplanned; 1 waves to here at 8 slots[\s\S]*no measured rate yet/);
     const A1 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify(design)], { role: 'sup' });
     assert.match(json(must(['questions', '--id', A1, '--json']))[0].context, /Forecast \(computed\)/, 'the approval carries the forecast');
     assert.match(dt(['answer', A1, 'Approve']).err, /goal decide/, 'answered only as a goal decision');
@@ -3269,6 +3269,29 @@ http.createServer((req, res) => {
       assert.equal(m.phase_usd.blocked, 0.22, 'and to the phase the ticket was in then');
       assert.equal(m.phase_usd['final-review'], 0.02, "the reviewer's to final review, not the supervisor");
       assert.equal(m.phase_usd.supervisor, 4, "the main checkout's sessions are the supervisor's");
+      // efficiency: ticket work only (the supervisor's $4 is overhead), and waiting is a cost
+      const tick = Object.entries(m.phase_usd).filter(([k]) => !['supervisor', 'planning', 'review'].includes(k));
+      const waitUsd = tick.filter(([k]) => ['awaiting-word', 'blocked', 'parked', 'starting'].includes(k)).reduce((a, [, v]) => a + v, 0);
+      assert.equal(m.efficiency.wait_usd_pct, Math.round((100 * waitUsd) / tick.reduce((a, [, v]) => a + v, 0)), 'the blocked dollars count as waiting; the supervisor\'s do not count at all');
+      assert.ok(Array.isArray(m.efficiency.mis_rated) && Array.isArray(m.mis_rated), 'mis-rated tickets are listed, empty or not');
+      assert.deepEqual(Object.keys(m.efficiency.first_pass_rejection), ['spec', 'plan', 'final']);
+      for (const st of Object.values(m.reviews.by_stage)) assert.ok(Array.isArray(st.top_blocking_rules) && st.top_blocking_rules.every((x) => x.rule && x.count > 0), 'each stage says what its first passes block on');
+      // waiting-heavy and review-churn speak only with enough evidence, and then exactly when their condition holds
+      assert.ok(!m.findings.some((f) => f.kind === 'waiting-heavy'), `too few merged tickets (${m.tickets_merged}) for waiting-heavy`);
+      const env1 = { m: process.env.DEVTEAM_EFFICIENCY_MIN_MERGED, p: process.env.DEVTEAM_CHURN_MIN_PASSES };
+      process.env.DEVTEAM_EFFICIENCY_MIN_MERGED = '1';
+      process.env.DEVTEAM_CHURN_MIN_PASSES = '1';
+      try {
+        const m1 = json(must(['metrics', '--json']));
+        assert.equal(m1.findings.some((f) => f.kind === 'waiting-heavy'), m1.tickets_merged >= 1 && m1.efficiency.wait_hours_pct > 50, `waiting-heavy fires exactly when over half of ticket hours wait (${m1.efficiency.wait_hours_pct}%)`);
+        for (const stage of ['spec', 'plan']) {
+          const st = m1.reviews.by_stage[stage];
+          assert.equal(m1.findings.some((f) => f.kind === 'review-churn' && f.subject === `${stage} review`), !!st && st.rejection_rate > 0.6, `review-churn at ${stage} exactly when over 60% of first passes were rejected (${st?.rejection_rate})`);
+        }
+        assert.ok(m1.efficiency.hours_per_point === null || m1.efficiency.hours_per_point > 0, 'hours per point from merged tickets\' cycles');
+      } finally {
+        for (const [k, v] of [['DEVTEAM_EFFICIENCY_MIN_MERGED', env1.m], ['DEVTEAM_CHURN_MIN_PASSES', env1.p]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+      }
       assert.equal(m.cost.tokens.output, 1000 + 1000 + 70);
       assert.deepEqual(Object.keys(m.cost.unpriced_models), ['gpt-x']);
       assert.ok(m.findings.some((f) => f.kind === 'unpriced-model' && /gpt-x/.test(f.subject)), 'tokens with no price are said, not dropped');
@@ -3752,8 +3775,9 @@ http.createServer((req, res) => {
 
   step('dashboard: Library and the artifact viewer', () => {
     const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
-    assert.match(html, /href="#library"/);
-    assert.match(html, /<section id="library">/);
+    // the nav is drawn from the page registry (kit-87): Library is registered in the Project group
+    assert.match(html, /\['library', 'Library', 'project', 'library'\]/);
+    assert.match(html, /<section id="library"[\s>]/);
     assert.match(html, /id="artifact-view"/);
     assert.match(html, /<iframe id="av-frame"[^>]* sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer">/);
     assert.ok(!/artifact[^\n]*allow-same-origin/.test(html), 'the viewer never shares the dashboard origin');
@@ -4221,10 +4245,10 @@ http.createServer((req, res) => {
       fs.appendFileSync(ownerFile, act('owner', pub));
       must(['log-check']);
       for (const [by, body, re] of [
-        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish and pane-answer only/],
+        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish, pane-answer, goal-order, owner-setting only/],
         ['owner', { ...pub, class: 'pane-answer' }, /a pane-answer act says what was answered and names no artifact/],
         ['supervisor', { class: 'pane-answer', what: 'answered it myself' }, /pane-answer is the owner's/],
-        ['owner', { ...pub, proof: { nonce: 'x' } }, /proof is the gateway's signature on the owner's pane-answer act/],
+        ['owner', { ...pub, proof: { nonce: 'x' } }, /proof is the gateway's signature on the owner's pane-answer or owner-setting act/],
         ['owner', { ...pub, tree: undefined }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'unpublish' }, /publish with its tree or unpublish without one/],
         ['owner', { ...pub, what: 'shout', tree: undefined }, /publish with its tree or unpublish without one/],

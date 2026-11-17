@@ -258,6 +258,59 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # The operator's commands (operator.md): the image's kit, for every repo in ~/code and any other the
 # machine has recorded. box-recover brings back what was up before a restart (the list devteam-dev
 # keeps), each repo by its own kit's recover, in tmux session home as sup-<repo>.
+# Tap ☰ at the left of tmux's status bar: scroll, and every window on the box, each a tap away. A phone
+# can't fit every tab in the bar, nor scroll tmux without a wheel (the gateway's page turns swipes into one).
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-tmux-menu
+#!/bin/sh
+c="$1"
+tab=$(printf '\t')
+# the pane the menu's scroll items act on: the tapping client's own, never another client's
+pane=$(tmux display-message -p -c "$c" '#{pane_id}')
+# tmux draws no menu taller than the client and says nothing: fit the list to its height
+h=$(tmux display-message -p -c "$c" '#{client_height}')
+case "$h" in ''|*[!0-9]*) h=24 ;; esac
+# nor wider: labels are cut to the client's width (the menu's frame takes 4 columns, its keys 4)
+w=$(tmux display-message -p -c "$c" '#{client_width}')
+case "$w" in ''|*[!0-9]*) w=80 ;; esac
+cut=$((w - 8)); [ "$cut" -gt 34 ] && cut=34; [ "$cut" -lt 6 ] && cut=6
+# the scroll rows and their separator, and a separator and "More windows…" kept back in case it is cut
+room=$((h - 2 - 4 - 2))
+# the home session's windows first, then each project's agents under its name
+list=$(tmux list-windows -a -F "#{session_name}${tab}#{window_index}${tab}#{window_name}${tab}#{window_id}" |
+  awk -F"$tab" '$1=="home"{print} $1!="home"{o=o $0 "\n"} END{printf "%s", o}')
+# too many for the screen: the home session and each project's supervisor only
+count=$(printf '%s\n' "$list" | awk -F"$tab" -v OFS="$tab" '$4!="" && $3!="dashboard"{s[$1]=1; n++} END{for (k in s) if (k!="home") n++; print n+0}')
+only_sup=0
+[ "$count" -gt "$room" ] && only_sup=1
+set -- display-menu -c "$c" -t "$pane" -T "#[align=centre] Box " -x 0 -y S \
+  "Scroll up a page" u "copy-mode -u" \
+  "Scroll down a page" d "send-keys -X page-down" \
+  "Stop scrolling" q "send-keys -X cancel" \
+  ""
+used=0
+cut_short=0
+last=""
+while IFS="$tab" read -r s _ n id; do
+  [ -n "$id" ] && [ -n "$n" ] && [ "$n" != dashboard ] || continue
+  [ "$only_sup" = 1 ] && [ "$s" != home ] && case "$n" in sup-*) ;; *) continue ;; esac
+  case "$s" in home) tag="" ;; devteam-*) tag=$(echo "$s" | sed -E 's/^devteam-//; s/-[0-9a-f]{6}$//') ;; *) tag="$s" ;; esac
+  need=1
+  [ "$s" != "$last" ] && [ -n "$last" ] && need=2
+  [ $((used + need)) -gt "$room" ] && { cut_short=1; break; }
+  [ "$need" = 2 ] && set -- "$@" "-#[align=centre]$(printf '%s' "$tag" | sed 's/#/##/g')" "" ""
+  last="$s"
+  used=$((used + need))
+  # a window's name is anyone's on the box, and tmux expands #(...) in a menu label: show it
+  # literally; a leading - would make it a disabled item, so it gets a space first
+  label=$(printf '%s' "$n" | sed 's/^sup-/* /' | cut -c1-"$cut" | sed 's/#/##/g; s/^-/ -/')
+  set -- "$@" "$label" "" "switch-client -c '$c' -t '$id'"
+done <<LIST
+$list
+LIST
+# anything left out stays a tap away: tmux's own window tree, full screen
+[ "$only_sup" = 1 ] || [ "${cut_short:-0}" = 1 ] && set -- "$@" "" "More windows…" m "choose-tree -Zw"
+exec tmux "$@"
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
 #!/bin/sh
 exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs recover --machine --in "$HOME/code" --session home --was-up "$HOME/.devteam-supervisors.boot" "$@"
@@ -338,7 +391,9 @@ find "$HOME/tmp" -mindepth 1 -maxdepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now; its mark
 # (supervisor-pane-role) goes with it.
-find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# Only inside each repo's own .git (a worktree's locks live in its repo's .git/worktrees/), never a
+# walk of every worktree and node_modules: that took minutes on a box with many checkouts.
+for g in "$HOME"/code/*/.git "$HOME"/code/*/*/.git; do [ -d "$g" ] && find "$g" -name '*.lock' -type f -delete 2>/dev/null; done
 # so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
 rm -f "$HOME"/.pg/*/postmaster.pid
 rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devteam/run/supervisor-pane-role
@@ -349,6 +404,17 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane "$HOME"/code/*/docs/devtea
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 # Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
 grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
+# a phone's screen (under 80 columns): short tabs and no status-right; every screen gets the ☰ menu
+# (box-tmux-menu) to scroll and reach any window
+grep -q MouseDown1StatusLeft .tmux.conf || cat >> .tmux.conf <<'TMUX'
+set -g status-left '#[reverse] ☰ #[default] '
+set -g status-left-length 5
+set -g window-status-separator ''
+set -g status-right '#{?#{e|<:#{client_width},80},,"#{=21:pane_title}" %H:%M %d-%b-%y}'
+set -g window-status-format '#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }'
+set -g window-status-current-format '#[reverse]#{?#{e|<:#{client_width},80}, #I #{=7:#{s/^sup-//:window_name}} , #I:#W#F }#[default]'
+bind -n MouseDown1StatusLeft run-shell -b "box-tmux-menu '#{client_name}'"
+TMUX
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
@@ -541,7 +607,7 @@ ENV DEVTEAM_IMAGE_HUB=4320
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
 # stamp rebuilds nothing.
-ARG DEVTEAM_RELEASE=v0.55.0
+ARG DEVTEAM_RELEASE=v0.63.0
 ENV DEVTEAM_KIT_RELEASE=$DEVTEAM_RELEASE \
     DEVTEAM_BOX_TOOLS="claude-code=$CLAUDE_CODE_VERSION claude-swap=$CLAUDE_SWAP_VERSION gh=$GH_VERSION ttyd=$TTYD_VERSION mise=$MISE_VERSION uv=$UV_VERSION"
 

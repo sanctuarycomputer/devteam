@@ -251,3 +251,22 @@ test('cross-repo planning: footprints overlap only within a repo; a story across
     assert.doesNotMatch(runIn(old, ['validate', '--strict']).out, /story SYNC-S1 is served in/);
   } finally { F.done(); }
 });
+
+test('ready marks a touches overlap only within one repo: the same paths in another link are apart', () => {
+  const F = multiFixture('overlap-repos');
+  const { old, g, okIn, ticket } = F;
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' };
+  try {
+    ticket('console-01-a');
+    ticket('console-02-b', { touches: ['src/x.js'] });
+    ticket('companion-01-c', { touches: ['src/x.js'] });
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    okIn(w, ['phase', 'build', '--task', 'T1'], W);
+    const r = json(okIn(old, ['ready', '--json']));
+    assert.ok(r.active.includes('console-01-a'));
+    assert.deepEqual(r.ready.find((x) => x.id === 'console-02-b')?.overlaps_active, ['console-01-a'], 'same repo, overlapping touches');
+    assert.ok(r.ready.find((x) => x.id === 'companion-01-c'), 'the companion ticket is ready');
+    assert.equal(r.ready.find((x) => x.id === 'companion-01-c').overlaps_active, undefined, 'the same path in another repo is no overlap');
+  } finally { F.done(); }
+});

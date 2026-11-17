@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- The dashboard shell's fixture (dashboard-shell@1, docs/devteam/dashboard/shell.md): a page built only
+     from the shell's two blocks, which test/dashboard-shell.test.mjs cuts from index.html and puts in the
+     three slots below before loading it. The measure check (test/lib/measure.mjs) must pass on it at
+     1440x900, 720x800 and 390x844, and each of its checks must fail on a broken copy. #fenced is a .no-shell
+     region: nothing in the block styles it. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dashboard shell fixture</title>
+<style>
+/* slot: devteam-ui tokens */
+/* slot: devteam-layout */
+  html, body { margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); }
+  button { font: inherit; color: inherit; }
+</style>
+</head>
+<body class="shell peek-open">
+<div class="main">
+<header class="pagebar"><h1 id="title">Board</h1><span class="extra"></span><button type="button" class="tt" id="inbox">Inbox <span class="n hot">2</span> <span class="n">3</span></button></header>
+<main class="page" id="view"></main>
+</div>
+<div class="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="A record"><div class="drawer-head"><h2>kit-1</h2><span class="end"><button type="button" aria-label="Close">×</button></span></div><div class="drawer-body" id="peek"></div></aside>
+<script>
+/* slot: devteam-shell-js */
+const TABS = [{ id: 'active', label: 'Active', count: 4 }, { id: 'met', label: 'Met', count: 1, waiting: true }, { id: 'later', label: 'Later', disabled: true }, { id: 'letgo', label: 'Let go', count: 0 }];
+const ROWS = [['kit-10', 'The tenth', '10'], ['kit-2', 'The second', '2'], ['kit-1', 'The first', '1']];
+const DAYS = Array.from({ length: 14 }, (_, i) => ({ day: new Date(Date.UTC(2026, 10, 2 + i)).toISOString().slice(0, 10), items: i % 3 ? Array(i % 5).fill('chore merged') : [], failed: i === 8 }));
+const head = (title, end = '') => `<div class="card-head"><span class="grow">${escHtml(title)}</span>${end}</div>`;
+const more = '<button type="button" class="end" aria-label="More">⋯</button>';
+document.getElementById('view').innerHTML = `${tabBar({ tabs: TABS, selected: 'active' })}
+<div style="height:16px"></div>
+<div class="g12" id="pair">
+  <div class="c6 card" id="left">${head('The first goal', more)}<p>One short line of running text.</p>${goalSteps({ step: 3, built: { frac: 0.4, text: '4 of 10 points' }, met: null })}<div class="foot">Opened Nov 2</div></div>
+  <div class="c6 card" id="right">${head('Upkeep', more)}<p>Running text that goes on for a while, long enough to wrap onto more than one line at every width, so this card's content is taller than its neighbour's and the grid has to stretch the shorter one to match.</p>${heartbeat(DAYS)}<div class="foot">Always on</div></div>
+  <div class="c4 card small" id="small">${head('A small card')}<p>Small.</p></div>
+  <div class="c8 card flush" id="props-card">${head('Properties')}${props([['ID', '<code>kit-1</code>', 'What Copy ID copies'], ['Status', 'Building'], ['Waits on', 'kit-0']])}</div>
+  <div class="c12 card flush" id="table-card">${head('Tickets', `<span class="end">${ROWS.length}</span>`)}${dbTable(['Ticket', 'Title', 'Points'], ROWS, { sort: { col: 2, dir: 1 } })}</div>
+</div>
+<div class="no-shell" id="fenced"><div class="card"><div class="card-head">Not yet ported</div><span class="pill">a pill</span> <span class="seg"><button type="button">a</button></span></div></div>`;
+document.getElementById('peek').innerHTML = `${props([['ID', '<code>kit-1</code>'], ['Status', statusPill('building')], ['Fleet', fleetSwitch({ scope: 'project', mode: 'run' })], ['Pulse', '<span class="dot red pulse"></span> blocked']])}<div class="card">${head('History')}<p>Opened, then planned.</p></div>`;
+window.__ready = true;
+</script>
+</body>
+</html>

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/log.schema.json",
   "title": "devteam log line",
-  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: a question's later lines add only its status and reason, the supervisor's rating (stake, urgency, settles, settles_if) and the owner's own fields; x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check (a line from a newer kit, with a type or a top-level field this schema doesn't know, is set aside and reported, never an error: it grants nothing), and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft, or with approved naming an owner-answered goal-change question for that goal not used before.",
+  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: a question's later lines add only its status and reason, the supervisor's rating (stake, urgency, settles, settles_if) and the owner's own fields; x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check (a line from a newer kit, with a type or a top-level field this schema doesn't know, is set aside and reported, never an error: it grants nothing), and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft, or with approved naming an owner-answered goal-change question for that goal not used before, or one proposing a goal order that sets this goal's priority to its place in that order, once.",
   "type": "object",
   "required": [
     "v",
@@ -278,6 +278,10 @@
                 "type": "string",
                 "maxLength": 200,
                 "description": "The machine a fleet op ran on, so the moved fleet's supervisor knows whether it is on the old machine or the new one."
+              },
+              "move": {
+                "const": true,
+                "description": "The fleet op is a move to another machine (fleet park|drain --move): only then is the host claim released. Absent, the op is a pause on this machine (throttling spend, waiting on the owner or on information)."
               }
             },
             "required": [
@@ -337,7 +341,7 @@
           },
           "approved": {
             "type": "string",
-            "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set.",
+            "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set. An answer to a question proposing a goal order (change.order) authorises one set of priority per goal that order writes, each exactly its place.",
             "x-tip": "The goal-change question whose answer authorised the supervisor's latest change."
           },
           "carried": {
@@ -469,12 +473,13 @@
             ]
           },
           "risk": {
-            "description": "high gets two reviewers and a full plan read; normal is approved from its TL;DR and plan review.",
+            "description": "high gets two reviewers and a full plan read; normal is approved from its TL;DR and plan review (or, on the lighter review depth's trial, the supervisor's own full read of the plan: quality.md §3).",
             "enum": [
               "normal",
               "high"
             ]
           },
+          "uncertainty": { "description": "low: well-trodden work, like work done before; high: new ground (an unfamiliar library, API or domain, an unclear cause). With size and risk it says how much care the ticket needs; merges check every rating against what happened (metrics mis-rated).", "enum": ["low", "high"] },
           "serves": {
             "description": "The stories it helps deliver.",
             "type": "array",
@@ -1585,8 +1590,20 @@
           },
           "change": {
             "type": "object",
-            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is).",
-            "x-tip": "The exact change to the goal it proposed; your answer authorised that and nothing else."
+            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is). On a goal-change question about no goal, instead: order, the goal order it proposes (goal order --approved applies exactly it: the goals named 1..n, the live goals left out after them in their order).",
+            "properties": {
+              "order": {
+                "description": "The goals, in the order proposed: two or more, each once.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^g-"
+                },
+                "minItems": 2,
+                "uniqueItems": true
+              }
+            },
+            "x-tip": "The exact change it proposed, to one goal or to the goals' order; your answer authorised that and nothing else."
           },
           "review": {
             "description": "A review question's pinned files (process/supervisor.md): the agent's page, its optional data and the result's optional schema, read at one commit, each with its sha256 and size; data counts its rows and the rows with a proposal. The owner's process re-hashes them before it accepts a result. A review is answered with its result (answer --review-result) or sent back (answer --decline), never with free text or a default.",
@@ -1900,7 +1917,7 @@
         ]
       },
       "act": {
-        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of two classes only. artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs) is the record of what the owner made public, with artifact and, for a publish, tree. pane-answer (written when the owner clicks an option on the dashboard's card) is the record of the owner answering a question a tool asked in the supervisor's terminal: what holds the dialog's first line (another account's artifact by its id, never its link), the option chosen, the keys sent and the dialog's digest, or that the key may not have landed; on a cloud box, proof holds the gateway's signature for the click. Each is a record, never a call: trust, decisions and corrections leave them out, and only the owner writes those classes.",
+        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of four classes only. goal-order (devteam.mjs goal order, from the owner's terminal or the dashboard) is the record of the owner putting the goals in order; its refs are the goals whose priority it set. artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs) is the record of what the owner made public, with artifact and, for a publish, tree. pane-answer (written when the owner clicks an option, or Esc, on the dashboard's card) is the record of the owner answering a question a tool asked in the supervisor's terminal: what holds the dialog's first line (another account's artifact by its id, never its link), the option chosen, or Escape, the keys sent and the dialog's digest, or that the key may not have landed; on a cloud box, proof holds the gateway's signature for the click. owner-setting (devteam.mjs owner-setting, which the dashboard's Settings page runs on Save) is the owner asking for one of the supervisor's own settings (max_active_tickets, max_active_per_component), with key and value (null is no limit); the supervisor lands it in its settings chore with settings set, whose settings-edit act names the request in for, and on a cloud box proof holds the gateway's signature for the Save. Each is a record, never a call: trust, decisions and corrections leave them out, and only the owner writes those classes.",
         "type": "object",
         "properties": {
           "class": {
@@ -2032,9 +2049,27 @@
             "x-tip": "The artifact you published or took down."
           },
           "proof": {
-            "description": "On the owner's pane-answer act, on a cloud box only: the gateway's signature for the press that answered (the dashboard's port, when, a nonce taken once, the signature, and the signed body, which names the question's digest and the option). On a laptop nothing is signed and there is none.",
+            "description": "On the owner's pane-answer or owner-setting act, on a cloud box only: the gateway's signature for the press that answered or the Save (the dashboard's port, when, a nonce taken once, the signature, and the signed body, which names the question's digest and the option chosen, or Escape, or the setting's key and value). On a laptop nothing is signed and there is none.",
             "type": "object",
             "x-tip": "The gateway's signature for your click."
+          },
+          "key": {
+            "description": "On the owner's owner-setting act and the supervisor's settings-edit act: the setting asked for or changed.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "x-tip": "The setting."
+          },
+          "value": {
+            "description": "On the owner's owner-setting act and the supervisor's settings-edit act: the value asked for or set, a whole number from 1 to 20, or null for no limit.",
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "maximum": 20,
+            "x-tip": "The value; empty is no limit."
+          },
+          "for": {
+            "description": "On the supervisor's settings-edit act: the owner's owner-setting act it lands, when it lands one.",
+            "type": "string",
+            "x-tip": "The request this carried out."
           },
           "tree": {
             "description": "On the owner's artifact-publish act with what publish: the git tree id of the artifact's folder on main that the gateway checked byte for byte and serves. Absent on an unpublish.",

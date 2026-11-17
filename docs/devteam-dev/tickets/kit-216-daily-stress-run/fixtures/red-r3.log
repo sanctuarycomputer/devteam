@@ -1,0 +1,17 @@
+timed out: test/b.test.mjs after 300 s (last test finished: waits)
+# test/a.test.mjs (run 1)
+TAP version 13
+ok 1 - something
+1..1
+
+
+summary: 2 files, concurrency 4
+test/a.test.mjs  1.0  ok (run 1)
+test/b.test.mjs  2.0  ok (run 1)
+test/a.test.mjs  1.1  failed (exit 1) (run 2)
+test/b.test.mjs  2.1  ok (run 2)
+test/a.test.mjs  1.2  ok (run 3)
+test/b.test.mjs  300.1  timed out, near timeout (run 3)
+timed out: test/b.test.mjs after 300 s (last test finished: waits)
+failed: test/a.test.mjs (failed (exit 1), run 2)
+failed: test/b.test.mjs (timed out, run 3)

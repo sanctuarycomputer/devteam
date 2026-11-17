@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PORTS, bareProject, dashboardOnFreePort } from './lib/kit.mjs';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const REASON = 'the mock <b>moved</b>';
 const MOVED_TITLE = 'The moving mock';
@@ -52,7 +52,8 @@ const soonIn = (p, ms = 15000, server = null) => async (expr, what) => {
 
 test('answers: a refusal stays on its card, and a moved link disables Answer', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-answers-'));
-  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 58), DEVTEAM_PORT_BASE: String(PORTS + 59), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'answers');
@@ -61,11 +62,11 @@ test('answers: a refusal stays on its card, and a moved link disables Answer', {
   const Q1 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
   const Q2 = dt(['ask', '--question', 'Which colour?', '--choices', '[{"label":"Red"},{"label":"Blue"}]'], SUP);
   const { dash, port } = await dashboardOnFreePort(root, env);
-  t.after(() => dash.stop());
+  later(() => dash.stop());
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
