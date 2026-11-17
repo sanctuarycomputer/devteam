@@ -472,6 +472,8 @@ test('the box\'s tmux refuses a kill-server aimed at the box, and honours a priv
       [['-S', boxSock, 'if', '-F', '1', 'kill-server'], {}, 'run by if'],
       [['-S', boxSock, 'if-shell', 'true', 'new -d; kill-server'], {}, 'in if-shell\'s command string'],
       [['-S', boxSock, 'confirm-before', '-p', 'sure?', 'kill-server'], {}, 'run by confirm-before'],
+      [['-S', boxSock, 'set-hook', '-g', 'client-detached', 'kill-server'], {}, 'set as a hook'],
+      [['-S', boxSock, 'bind-key', 'X', 'kill-server'], {}, 'bound to a key'],
     ];
     for (const [args, extra, what] of refused) {
       const r = wrap(args, extra);
@@ -480,7 +482,7 @@ test('the box\'s tmux refuses a kill-server aimed at the box, and honours a priv
       assert.ok(boxUp(), `${what}: the box's server lives`);
     }
     // kill-server as a word that is no command (a target, a format) goes to tmux
-    for (const args of [['has-session', '-t', 'kill-server'], ['display-message', '-p', 'kill-server'], ['list-windows', '-t', '=home', '-F', 'kill-server']]) {
+    for (const args of [['has-session', '-t', 'kill-server'], ['display-message', '-p', 'kill-server'], ['list-windows', '-t', '=home', '-F', 'kill-server'], ['if-shell', 'true', 'display -p x', ';', 'display-message', '-p', 'kill-server']]) {
       const r = wrap(['-S', boxSock, ...args]);
       assert.equal(r.status, real(['-S', boxSock, ...args]).status, args.join(' '));
       assert.ok(!r.stderr.includes('refused'), args.join(' '));
@@ -565,9 +567,9 @@ const minuteTurn = () => {
   assert.equal(d[first + 1], 'while :; do');
   assert.equal(d[first + 2], '  sleep 60');
   const body = d.slice(first + 3, d.indexOf('done &', first));
-  const defs = [...fn('note'), ...fn('hub_window'), ...fn('start_operator'), ...fn('start_dashboards'), ...fn('start_recover'), ...fn('note_srv')];
+  const defs = [...fn('note'), ...fn('hub_window'), ...fn('start_operator'), ...fn('start_dashboards'), d.find((l) => l.startsWith('owed=')), ...fn('start_recover'), ...fn('note_srv')];
   // one turn: what the loop does each minute, with the pid as the last turn left it
-  return [...defs, 'up="$HOME/.devteam-supervisors"', 'srv=$(cat "$HOME/.srv" 2>/dev/null)', 'recover_owed=$(cat "$HOME/.owed" 2>/dev/null)', 'for once in 1; do', ...body, 'done', 'echo "$srv" > "$HOME/.srv"', 'echo "$recover_owed" > "$HOME/.owed"', 'wait']
+  return [...defs, 'up="$HOME/.devteam-supervisors"', 'srv=$(cat "$HOME/.srv" 2>/dev/null)', 'for once in 1; do', ...body, 'done', 'echo "$srv" > "$HOME/.srv"', 'wait']
     .join('\n').replaceAll('/usr/local/bin/box-recover', `${loopFakes}/box-recover`).replaceAll('/usr/local/bin/node', `${loopFakes}/node`);
 };
 test('the minute loop brings back a lost tmux server as a boot does, from the list it had, and never overwrites that list', () => {
@@ -722,15 +724,18 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   state({ pid: 905, home: ['bash'] });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'none started');
-  assert.equal(read(path.join(h, '.owed')).trim(), '1', 'owed');
+  const owed = path.join(h, '.box', 'recover.owed');
+  assert.ok(fs.existsSync(owed), 'owed');
   assert.ok(!read(path.join(h, '.flocks')).includes('-w'), 'the loop never waits on the lock');
   state({ pid: 905, home: ['operator', 'hub'], panes: '' });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'still held: still owed');
-  assert.equal(read(path.join(h, '.owed')).trim(), '1');
+  assert.ok(fs.existsSync(owed));
   turn();
   assert.equal(recovers(), before + 1, 'the lock free: it runs');
-  assert.equal(read(path.join(h, '.owed')).trim(), '');
+  assert.ok(!fs.existsSync(owed), 'paid');
+  turn();
+  assert.equal(recovers(), before + 1, 'and only once');
   fs.writeFileSync(`${up}.boot`, '');
 
   // the box starts stopping during a restore: what is under way finishes, box-recover doesn't start

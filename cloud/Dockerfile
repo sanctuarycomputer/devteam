@@ -269,8 +269,10 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 # 2026-11-16, twice, a test's kill-server, meant for a server of its own, ran in a pane and stopped the
 # whole box. DEVTEAM_ALLOW_KILL_SERVER=1 lets a deliberate one through (the box's own stop does). The
 # socket is worked out as tmux does: -S; -L under the tmpdir; $TMUX; default. kill-server counts as the
-# command first, after a ;, and anywhere after if-shell or confirm-before, which run the command they
-# are given. Not caught: kill-session, or kill-server typed at tmux's : prompt or put in a key binding.
+# command first, after a ;, and anywhere after a command that is handed one as a word (if-shell,
+# confirm-before, set-hook, display-menu, choose-tree, command-prompt, bind-key, source-file). Not
+# caught: kill-session, kill-server typed at tmux's : prompt or inside a file source-file reads, or a
+# tmux earlier on PATH than this one (a mise or project install).
 # Everything else goes straight to tmux, arguments untouched: every tmux call the kit makes runs this.
 RUN dpkg-divert --local --rename --divert /usr/bin/tmux.distrib --add /usr/bin/tmux
 COPY --chmod=755 <<'EOF' /usr/bin/tmux
@@ -291,15 +293,16 @@ for a do
     o='' at=1
   fi
   # a command's name: the first word, the first after a ; (not send-keys' text, a target), and any
-  # word once if-shell or confirm-before (which run a command given as a word) has come
+  # word up to the next ; once a command that takes a command as a word has come (if-shell,
+  # confirm-before, set-hook, a menu, a prompt, a binding, source-file)
   if [ -n "$any" ]; then case $a in *kill-ser*) k=1 ;; esac
   elif [ -n "$at" ]; then
     case $a in
       kill-ser|kill-serv|kill-serve|kill-server|kill-ser\;|kill-serv\;|kill-serve\;|kill-server\;) k=1 ;;
-      if|if-*|confirm|confirm-*) any=1 ;;
+      if|if-*|confirm|confirm-*|set-hook|hook|display-menu|menu|choose-*|command-prompt|bind|bind-key|source|source-file) any=1 ;;
     esac
   fi
-  case $a in *\;) at=1 ;; *) at= ;; esac
+  case $a in *\;) at=1 any= ;; *) at= ;; esac
 done
 if [ -n "$TMUX_TMPDIR" ] && [ -n "$TMUX" ] && [ -z "$s$l" ]; then
   case ${TMUX%%,*} in "${TMUX_TMPDIR%/}"/*) ;; *) unset TMUX TMUX_PANE ;; esac
@@ -647,19 +650,21 @@ start_dashboards() {
 }
 # start_recover [wait]: box-recover, in the background, into ~/.box/recover.log, one at a time, so a
 # restore never races the boot's. With wait (the boot) it waits its turn; without (the minute loop)
-# it returns 1 when a run is under way, starts nothing, and the loop tries again the next minute
-# (recover_owed), so no queue of waiting runs builds up while the box has no tmux server.
+# it starts nothing when a run is under way. Either way a run that didn't happen leaves
+# ~/.box/recover.owed, and the loop tries again the next minute, so no queue of waiting runs builds
+# up while the box has no tmux server, and none is lost.
+owed="$HOME/.box/recover.owed"
 start_recover() {
-  if [ "$1" = wait ]; then f='-w 3600'; else flock -n "$HOME/.box/recover.lock" true 2>/dev/null || return 1; f=-n; fi
-  ( flock $f 9 || { note "box-recover: another run held it; this one did not run"; exit 1; }; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" &
+  if [ "$1" = wait ]; then f='-w 3600'; else flock -n "$HOME/.box/recover.lock" true 2>/dev/null || { : > "$owed"; return 1; }; f=-n; fi
+  ( flock $f 9 || { : > "$owed"; note "box-recover: another run held it; this one did not run, the next minute tries again"; exit 1; }; /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) 9> "$HOME/.box/recover.lock" &
 }
 start_dashboards
 # The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
 # resumed on its old conversation can reach for a command from before the deploy, and every supervisor
 # waits on it. Safe to run again, so the operator running it too changes nothing. In the background:
 # the terminal comes up meanwhile. It reads the list saved above; the loop below keeps it current.
+rm -f "$owed"
 start_recover wait
-recover_owed=
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
 # tmux not answering (a call timing out) leaves everything as it was. First, a lost tmux server: on
@@ -698,7 +703,7 @@ while :; do
     start_operator lost
     timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
     start_dashboards
-    [ -e "$HOME/.box/stopping" ] || start_recover || recover_owed=1
+    [ -e "$HOME/.box/stopping" ] || { rm -f "$owed"; start_recover; }
     note_srv
     continue
   fi
@@ -707,7 +712,7 @@ while :; do
     note "the operator's window is gone (tmux server $srv): bringing it back"
     start_operator lost
   fi
-  [ -n "$recover_owed" ] && start_recover && recover_owed=
+  if [ -e "$owed" ]; then rm -f "$owed"; start_recover; fi
   timeout 20 tmux list-windows -t =home -F '#{window_name}' 2>/dev/null | grep -qx hub || hub_window
   panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
