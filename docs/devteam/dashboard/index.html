@@ -816,9 +816,10 @@ try {
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
   .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
   .av-pins .tl-pin { pointer-events: auto; }
-  /* the viewer: the stage is the whole tab, and nothing else of the dashboard shows */
+  /* the viewer: the stage is the whole tab below a --bar-h band for the Inbox button (kit-89 spec §2.8), and nothing
+     else of the dashboard shows */
   .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
-  .viewer #artifact-view:not([hidden]) { inset: 0; border: 0; border-radius: 0; box-shadow: none; }
+  .viewer #artifact-view:not([hidden]) { inset: var(--bar-h) 0 0; border: 0; border-radius: 0; box-shadow: none; }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
@@ -831,7 +832,8 @@ try {
   .tl-marked { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
   .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
-  .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
+  /* a floating card whose subject has no box on screen: the bottom right corner (kit-89 spec §2.6) */
+  .tl-card.in-dock { position: fixed; right: 16px; bottom: 16px; }
   .tl-card.sheet { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; }
   .tl-head { display: flex; align-items: center; gap: 6px; }
   .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -852,18 +854,62 @@ try {
   .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
-  .tl-dock { position: fixed; right: 16px; bottom: 16px; z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-  .tl-pill { border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
-  .tl-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); vertical-align: middle; }
-  .tl-panel { width: 320px; max-height: 60vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
-  .tl-dock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
-  .tl-dock-head button { margin-top: 0; }
-  button.tl-row { display: flex; align-items: center; gap: 8px; width: 100%; height: auto; margin: 0; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px; color: var(--fg); font-weight: 400; }
-  button.tl-row:hover { background: var(--hover); opacity: 1; }
-  .tl-row .tl-r { display: flex; flex-direction: column; min-width: 0; flex: 1; }
-  .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-  .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
-  .tl-resolved summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
+  /* the in-panel thread (kit-89 spec §2.4): the one card, moved into #th-card-slot, static, the slot's width,
+     no frame of its own and no height of its own (the slot scrolls); its title and × are the pane's row and the
+     panel's ×, its Resolve / Reopen stay */
+  .tl-card.in-panel { position: static; z-index: auto; width: auto; max-height: none; border: 0; border-radius: 0; box-shadow: none; padding: 0; background: none; }
+  .tl-card.in-panel #tl-c-title, .tl-card.in-panel [data-tl-close] { display: none; }
+  .th-back { display: flex; align-items: center; gap: 6px; margin: 0 0 4px; }
+  .th-back .icon-btn { margin: 0; flex: none; }
+  .th-back .th-bt { min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* a floating card in the corner sits beside the open panel, never under it; at 900px and below, where the
+     open panel covers the page, every floating card hides until it closes (spec §2.6) */
+  @media (min-width: 901px) { .shell.threads-open .tl-card.in-dock { right: calc(var(--threads-w) + 16px); } }
+  @media (max-width: 900px) { .shell.threads-open #tl .tl-card { display: none; } }
+  /* the Threads panel (kit-89): the block's frame (.threads, .threads-head, .threads-body, .thread-list) styles
+     it; here only what the block leaves to the page. The tab bar fills the head up to its three buttons */
+  #th-tabs { display: flex; flex: 1; min-width: 0; }
+  .threads-head .end .icon-btn { margin: 0; }
+  .th-filter { margin: 0 0 6px; }
+  .th-filter .seg { display: flex; width: 100%; }
+  .th-filter .seg button { flex: 1; }
+  .th-filter .n { color: var(--muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
+  .thread-list { list-style: none; margin: 0; padding: 0; }
+  /* a row (the mock's .titem): its mark, where its subject is with its pin's number, the time since, the headline */
+  button.th-row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 2px 10px; align-items: start; width: 100%; height: auto; margin: 0; padding: 10px 6px; text-align: left; background: none; border: 0; border-radius: 0; color: var(--fg); font-weight: 400; }
+  button.th-row:hover { background: var(--hover); opacity: 1; }
+  button.th-row.on { background: color-mix(in srgb, var(--blue) 8%, transparent); }
+  .th-row .th-st { grid-column: 1; grid-row: 1; }
+  .th-row .th-s { grid-column: 2; grid-row: 1; min-width: 0; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .th-row .th-tm { grid-column: 3; grid-row: 1 / span 2; font-size: 11.5px; color: var(--muted); }
+  .th-row .th-w { grid-column: 2; grid-row: 2; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+  .th-row.st-you .th-w { font-weight: 600; }
+  /* the three states: ready to accept a green check, your move a filled blue dot, waiting a hollow grey one */
+  .th-st.you, .th-st.wait { display: block; width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; box-sizing: border-box; }
+  .th-st.you { background: var(--blue); }
+  .th-st.wait { border: 1.5px solid var(--muted); }
+  .th-st.ok { display: block; color: var(--green-fg); font-size: 12px; line-height: 1; margin-top: 2px; font-style: normal; }
+  .pinchip { display: inline-block; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; vertical-align: middle; }
+  /* the Inbox button's thread count, coloured by the most pressing state; the button hides while the panel is open */
+  .tt .n.th.ok { color: var(--green-fg); }
+  .tt .n.th.you { color: var(--blue-fg); }
+  .tt .n.th.wait { color: var(--muted); }
+  :where(.shell).threads-open .pagebar .tt, :where(.shell).threads-open #tt-peek { visibility: hidden; }
+  /* with the artifact viewer up (kit-89 spec §2.7; av-open, set by openArtifact and openPreview): the Inbox button
+     floats above it at its own place (the window's top right, --header-pad in; its top .tt's, by ttPeekPlace), over
+     a peek too (the viewer is on top: after kit-88's rule, and more specific), and .tt is hidden; the panel opens
+     above the viewer and its scrim. At 900px and below the viewer (inset 8px) has its own bar there: no mirror */
+  .shell.av-open:not(.threads-open) #tt-peek, .shell.av-open.peek-open:not(.threads-open) #tt-peek { right: var(--header-pad); z-index: 24; visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  @media (min-width: 901px) { .shell.av-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
+  @media (max-width: 900px) { .shell.av-open #tt-peek { display: none; } }
+  .shell.av-open .threads { z-index: 23; }
+  /* the viewer narrowed by the open panel above 900px is kit-141's; the page only sets how much */
+  @media (min-width: 901px) { :where(.shell).threads-open { --av-right: calc(var(--threads-w) + 16px); } }
+  /* the /view/ tab (spec §2.8): the button at the window's top right, centred in a --bar-h band above the stage,
+     at every width; the panel above the stage */
+  .viewer #tt-peek { display: inline-flex; top: calc(var(--bar-h) / 2); right: var(--header-pad); transform: translateY(-50%); z-index: 24; }
+  .viewer .shell:not(.threads-open) #tt-peek { visibility: visible; opacity: 1; pointer-events: auto; transition: opacity var(--dur) var(--ease), visibility 0s; }
+  .viewer .threads { z-index: 23; }
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   /* what the supervisor's terminal asks: its words as the terminal has them, one button an option */
@@ -872,9 +918,9 @@ try {
   .ask-hint { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 6px; }
   .ask-opts { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
   .ask-opts button { margin: 0; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 36px; }
-  .tl-card .ask, .tl-panel .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
-  .tl-card .ask-q, .tl-panel .ask-q { max-height: 120px; }
-  @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
+  .tl-card .ask, #ask-threads .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
+  .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
+  @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
 </style>
 </head>
 <body class="shell">
@@ -1085,15 +1131,13 @@ try {
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
-  <div id="tl-dock" class="tl-dock">
-    <div id="tl-panel" class="tl-panel" hidden>
-      <div class="tl-dock-head"><b>Threads</b><span class="grow"></span><button type="button" class="ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something to start a thread: for a phone, or for a long look around">Pin</button><button type="button" class="ghost" data-tl-new>New thread</button></div>
-      <div id="ask-dock"></div>
-      <div id="tl-list"></div>
-    </div>
-    <button type="button" id="tl-pill" class="ghost tl-pill" aria-expanded="false"><i class="icon-messages-square" aria-hidden="true"></i> Threads</button>
-  </div>
 </div>
+<!-- the Threads panel (kit-89 spec §2.1): on <body>, outside .app, so the /view/ tab has it too. Its head: the
+     tabs, then Pin, New thread and ×; its body: the selected tab's pane, and the slot the in-panel card lives in -->
+<aside class="threads" id="threads" aria-label="Threads">
+  <div class="threads-head"><div id="th-tabs"></div><span class="end"><button type="button" class="ghost icon-btn" id="tl-pinbtn" aria-pressed="false" aria-label="Pin" title="Point at something to start a thread: for a phone, or for a long look around"><i class="icon-map-pin" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" data-tl-new aria-label="New thread" title="New thread"><i class="icon-plus" aria-hidden="true"></i></button><button type="button" class="ghost icon-btn" id="th-close" aria-label="Close Threads"><i class="icon-x" aria-hidden="true"></i></button></span></div>
+  <div class="threads-body" id="th-body"><div id="th-pane"></div><div id="th-card-slot" class="no-shell"></div></div>
+</aside>
 <script>
 /* devteam-shell-js start */
 // dashboard-shell@1 (docs/devteam/dashboard/shell.md): the builders, binders and URL rules both
@@ -1434,7 +1478,8 @@ function showPage(id, { keepScroll = false } = {}) {
 }
 // The page an element is on: its section's data-page, else Overview.
 const sectionPage = (el) => el?.closest?.('main.page > section[data-page]')?.dataset.page ?? 'overview';
-$('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
+// The Inbox button opens the Threads panel (kit-89 spec §2.2); the Inbox page is the nav's.
+$('inbox-btn').addEventListener('click', () => thGo({ th: 'open', focus: true }));
 // The top-right button beside an open peek (kit-88 spec §2.1): the sticky page bar can't lift .tt above the
 // scrim, so #tt-peek on <body> mirrors it: its content (ids dropped, so none is on the page twice), its
 // label and title, copied whenever .tt changes; its click is .tt's. CSS shows one or the other.
@@ -1459,6 +1504,8 @@ $('inbox-btn').addEventListener('click', () => { location.hash = '#inbox'; });
 function ttPeekPlace() {
   const tt = document.querySelector('.pagebar .tt'), mirror = $('tt-peek');
   if (!tt || !mirror) return;
+  // .tt not drawn (the /view/ tab hides .app): the page's CSS places it (kit-89 spec §2.8)
+  if (!tt.getClientRects().length) { if (mirror.style.top) mirror.style.top = ''; return; }
   const top = `${Math.round(tt.getBoundingClientRect().top * 100) / 100}px`;
   if (mirror.style.top !== top) mirror.style.top = top;
 }
@@ -1475,7 +1522,7 @@ const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
 // The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>] or
-// /view/preview/<name>, one artifact or preview on the stage, the thread layer and the dock over it,
+// /view/preview/<name>, one artifact or preview on the stage, the thread layer and the Threads panel over it,
 // and nothing else: no sections, no routes, no /api/data.
 const VIEWER = (() => {
   const m = /^\/view\/(artifact|preview)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
@@ -3845,7 +3892,8 @@ function closeDrawer() {
   peekHide();
   lastFocus?.focus?.();
   const c = closeTarget(history.state);
-  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
+  // back to the entry below, which has its own head: the panel's th and t from under the peek go with it (kit-89 §2.5)
+  if (c.go) { TH_CARRY = history.state?.page ?? null; TH_CARRY_FROM = location.hash; history.go(c.go); } else goHead(c.replace, { replace: true });
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
@@ -4994,6 +5042,8 @@ async function openPreview(raw) {
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // the Inbox button floats above the stage (kit-89 spec §2.7)
+  document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -5014,6 +5064,8 @@ function openArtifact(raw) {
   showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // the Inbox button floats above the stage (kit-89 spec §2.7)
+  document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
 }
@@ -5028,12 +5080,20 @@ function closeArtifact() {
   $('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
   if (!RV) document.body.classList.remove('overlay-open');
+  document.body.classList.remove('av-open');
   if (!peekIsOpen() && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
   avFocus?.focus?.();
   return true;
 }
-// a viewer tab has nothing to go back to: it never closes
-function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
+// a viewer tab has nothing to go back to: it never closes. Back to the entry below, which has its own head: the
+// panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5)
+function leaveArtifact() {
+  if (VIEWER) return;
+  if (!AV_FROM) return void (location.hash = '#library');
+  TH_CARRY = history.state?.page ?? null;
+  TH_CARRY_FROM = location.hash;
+  history.back();
+}
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => {
   const f = tsFrame(), src = f.getAttribute('src');
@@ -5090,8 +5150,31 @@ function stampEntry() {
   ROUTE_COLD = false;
   HERE = history.state;
 }
+// Every route draws the Threads panel from the page head in force after the rest (thRoute), whichever way it went
+// (kit-89 spec §2.5): freshness read before the entry is stamped; once stamped (in routeHead, before any link is
+// opened, so a talk/ route reads the head with them) a peek closed carries its page's th and t, and on a fresh entry
+// the remembered panel is applied; then the panel decided, drawn and remembered. A route run inside routeHead (a
+// redirect's stamped replace) has done all of it already.
+let ROUTE_N = 0;
+// TH_MADE: the head thGo is about to assign (an entry it makes isn't fresh); TH_FRESH: an entry's freshness, read
+// before its stamp ({ hash, fresh }); TH_CARRY: the page head under a peek being closed by going back
+// TH_CARRY_FROM: the peek's hash it was taken on (a history move that stays on it carries nothing)
+let TH_MADE = null, TH_FRESH = null, TH_CARRY = null, TH_CARRY_FROM = null;
 function route() {
+  thFreshness();
+  const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
+  TH_FRESH = null;
+  const carry = TH_CARRY;
+  TH_CARRY = null;
+  const n = ++ROUTE_N;
+  routeHead({ fresh, carry });
+  if (n !== ROUTE_N) return;
+  thRoute();
+}
+function routeHead({ fresh = false, carry = null } = {}) {
   stampEntry();
+  if (carry) thCarry(carry);
+  if (fresh) thRemember();
   const raw = location.hash.slice(1);
   const p = parseHead(location.hash, SHELL_ROUTES);
   // leaving a talk/ entry (a route to any other head) closes the card it opened
@@ -5132,10 +5215,13 @@ function route() {
 }
 // The drawer hidden, as when the route moves on (closeDrawer also closes its entry): it slides out
 function hideDrawer() { if (!$('drawer').hidden) { peekHide(); DRAWER = { kind: null, id: null }; LAST_HTML = ''; } }
-window.addEventListener('hashchange', () => { if (DATA) route(); });
+// (a peek's carry is for the route its close lands on, never a later one: dropped if that route doesn't run)
+window.addEventListener('hashchange', () => { if (DATA) route(); else TH_CARRY = null; });
 // A move through history fires popstate at once and queues its hashchange, so a link followed in
 // between (a quick click after Back) would be stamped from the entry Back left, a depth too deep, and
 // its close would go back past the page. HERE follows each entry here, as it changes.
+// (the Threads code reads an entry's freshness first, before the stamp hides it: kit-89 spec §2.5)
+window.addEventListener('popstate', () => { thFreshness(); if (TH_CARRY && location.hash === TH_CARRY_FROM) TH_CARRY = null; });
 window.addEventListener('popstate', () => { if (!ROUTE_COLD) stampEntry(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -5143,7 +5229,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on a property's key closes its tooltip, not the drawer
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
-  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer();
+  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
@@ -5495,11 +5581,11 @@ function render(d) {
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
-  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl')) drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl, #threads')) drafts[t.dataset.q] = t.value; });
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl, #threads')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl, #threads')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   // only the lessons the supervisor sent you: the rest are about how the agents work, and its own to keep
@@ -5861,9 +5947,11 @@ const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'art
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null, route: null };
+const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pressed: null, route: null };
 const tlEl = (id) => document.getElementById(id);
-const tlOwn = (el) => !!el?.closest?.('#tl');
+// The layer's own: #tl and the Threads panel (a press there held, its focus leaving redraws it, its clicks
+// let through the Shift-point capture, no pin over it, its fields hold no page redraw).
+const tlOwn = (el) => !!el?.closest?.('#tl, #threads');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
@@ -5872,7 +5960,10 @@ function tlSection(el) {
   const h = sec.querySelector('h2');
   return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || T_SECTIONS[sec.id] || '').trim() };
 }
+// What is under a point, past the layer's own; over the Threads panel nothing (it overlays the page below
+// 900px, and the page behind it is not what the owner points at): the panel is never a thread target.
 function tlHitAt(x, y) {
+  if (document.elementFromPoint(x, y)?.closest?.('#threads')) return null;
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
   return el ? tSubjectAt(el, x, y, tlSection) : null;
 }
@@ -5910,7 +6001,7 @@ function tlHide() {
   document.documentElement.classList.remove('tl-aiming');
   for (const id of ['tl-cursor', 'tl-hl', 'tl-chip']) tlEl(id).hidden = true;
 }
-// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the dock's Pin
+// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the panel's Pin
 // button again.
 function tlPinMode(on) {
   TL.pin = on;
@@ -5922,7 +6013,10 @@ function tlPinMode(on) {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
-  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+  else if (e.key === 'Escape' && !!document.activeElement?.closest?.('#tl') && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+  // the focus in the open panel (kit-89 spec §2.9): an in-panel thread back to the list, else the panel closed,
+  // whatever else is open (a peek, a floating card)
+  else if (e.key === 'Escape' && TH.th && !!document.activeElement?.closest?.('#threads')) { e.stopImmediatePropagation(); if (thCurrent()) thBack(); else thGo({ focus: true }); }
   // Shift over a frame (spec §4): the parent sees the key while it has the focus, and raises the
   // overlay, so the pointer over the frame is the layer's. The lens tells it when the frame has it.
   else if (e.key === 'Shift' && tsOn() && !typingIn(document.activeElement)) tsRaise(true);
@@ -6118,9 +6212,22 @@ async function tlRoute(id) {
   if (!t) return;
   // a spot in a framed page (an artifact, a preview): today's, the stage opened on it by its own head
   if (t.subject?.kind === 'artifact' || t.subject?.kind === 'preview') return void tlOpen(id);
-  const head = subjectHead(t.subject);
+  // a thread with no subject drawn (kit-89 spec §2.5): the panel open on it, over the page the link was
+  // clicked on (cold: talk's home), the recorded page head given th and t; the router's part draws it
+  if (tlInPanel(t)) {
+    const p = parseHead(thHead(), SHELL_ROUTES);
+    history.replaceState(withPage(history.state, headFor({ page: p.page, state: { ...p.state, th: TH_LISTS.includes(p.state.th) ? p.state.th : 'open', t: id } })), '');
+    HERE = history.state;
+    TL.route = id;
+    return void thRoute();
+  }
+  // its subject's page head, the panel's th kept and t added (kit-89 spec §2.5)
+  const cur = parseHead(thHead(), SHELL_ROUTES), sp = parseHead(subjectHead(t.subject), SHELL_ROUTES);
+  const head = headFor({ page: sp.page, state: { ...sp.state, ...(TH_LISTS.includes(cur.state?.th) ? { th: cur.state.th } : {}), t: id } });
   history.replaceState(withPage(history.state, head), '');
   HERE = history.state;
+  // the page head changed after the router's part drew the panel from the old one
+  thRoute();
   showHead(parseHead(head, SHELL_ROUTES), { keepScroll: t.subject?.kind === 'item' || !!tlRowOf(t.subject) });
   await tlOpen(id, false);
   TL.route = id;
@@ -6280,12 +6387,20 @@ function tlPlaceCard(t) {
   const card = tlEl('tl-card');
   // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
   if (TL.pressed && card.contains(TL.pressed)) return;
+  // in the panel it is the slot's: nothing to place
+  if (card.classList.contains('in-panel')) { card.classList.remove('sheet', 'in-dock'); card.style.left = ''; card.style.top = ''; return; }
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
   else if (tlRowOf(TL.draft.subject)) r = tlTargetRect(TL.draft.subject);
   else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
-  const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
+  // beside its pin in the window left of the open panel (above 900px; below, the panel covers the page and the
+  // card hides), never under the panel: tPlace is given the window narrowed by --threads-w (at least 640, since the
+  // sheet is the whole window's), and the card is then kept inside that narrowed window
+  const vw = innerWidth - (TH.th && innerWidth > 900 ? thWidth() : 0);
+  const w = card.offsetWidth || 360;
+  let p = r ? (innerWidth < 640 ? { sheet: true } : tPlace(r, w, card.offsetHeight || 420, Math.max(640, vw), innerHeight)) : { sheet: innerWidth < 640, dock: true };
+  if (!p.sheet && !p.dock) p = { ...p, left: Math.max(8, Math.min(p.left, vw - w - 8)) };
   card.classList.toggle('sheet', !!p.sheet);
   card.classList.toggle('in-dock', !p.sheet && !!p.dock);
   card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
@@ -6312,8 +6427,25 @@ function tlCard() {
   if (TL.open && !t) { if (TL.have <= TL.openAt) return; TL.open = null; }
   if (!t) { clearInterval(TL.polling); TL.polling = null; }
   if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; return; }
+  // in the panel or floating (kit-89 spec §2.4): the one card moved only when its place changes, since
+  // re-appending it would blur what it holds; in the panel it is part of the panel, not a dialog
+  const inPanel = t ? tlInPanel(t) : !TL.draft.subject;
+  if (inPanel !== card.classList.contains('in-panel')) {
+    (inPanel ? $('th-card-slot') : tlEl('tl')).append(card);
+    card.classList.toggle('in-panel', inPanel);
+    if (inPanel) card.removeAttribute('role'); else card.setAttribute('role', 'dialog');
+  }
   // an unsent draft is kept per subject, so words left on one goal don't appear on another
   const key = t ? t.id : `new:${tKey(TL.draft.subject) ?? 'none'}`;
+  const was = card.dataset.key || '';
+  // a thread being started keeps its card as it is (the composer, its focus and caret): the draft becomes the
+  // pending thread (and tlSend's onOk renames that to the id the server gave it), words typed meanwhile going with it
+  if (was !== key && card.querySelector('#tl-c-text') && was.startsWith('new:') && key.startsWith('pending-')) {
+    card.dataset.key = key;
+    const words = tlEl('tl-c-text').value;
+    lsDel(tlDraftKey(was));
+    if (words) tlDraftSet(key, words);
+  }
   if (card.dataset.key !== key) {
     // the first words make the draft a thread, and the card its own: the composer keeps the focus
     const writing = document.activeElement?.id === 'tl-c-text';
@@ -6332,7 +6464,7 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlMarkRow(); tlCard(); tlDock(); tlPins(); askDraw(); }
+function tlDraw() { tlMarkRow(); tlCard(); thDraw(); tlPins(); askDraw(); }
 // The open thread's Settings row is marked (.tl-marked) while its card is open: Settings draws the mark.
 function tlMarkRow() {
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
@@ -6342,7 +6474,7 @@ function tlMarkRow() {
   drawSettings();
 }
 // What the supervisor's terminal is asking (a tool that wants a person's yes), as /api/threads has
-// it: at the top of the Inbox, in the dock and on the open thread's card, where the owner was
+// it: at the top of the Inbox, at the top of the Threads panel's list and on the open thread's card, where the owner was
 // talking. A menu the kit read whole gets a button an option: a click posts the question's digest,
 // the option's number and the token this page was given for that question; the server reads the
 // terminal again and sends that digit only. Anything else that is up (a dialog with no numbers, one
@@ -6379,7 +6511,7 @@ function askDraw() {
   if (ASK.sent && (!ASK.q || ASK.q.digest !== ASK.sent || Date.now() - ASK.sentAt > 30000)) ASK.sent = null;
   const html = askHtml();
   // only when it changed: a card rewritten on every poll would drop a press on a button
-  for (const id of ['ask-inbox', 'ask-dock', 'tl-c-ask']) { const el = document.getElementById(id); if (el && ASK_DRAWN.get(el) !== html) { ASK_DRAWN.set(el, html); el.innerHTML = html; } }
+  for (const id of ['ask-inbox', 'ask-threads', 'tl-c-ask']) { const el = document.getElementById(id); if (el && ASK_DRAWN.get(el) !== html) { ASK_DRAWN.set(el, html); el.innerHTML = html; } }
 }
 // The question as a read of the threads has it: another one (or the same one back) arms its buttons a second later.
 function askSet(q) {
@@ -6424,9 +6556,14 @@ async function tlRefresh() {
     tlRelay();
     TL.pane = !!j.supervisor?.pane;
     askSet(j.supervisor?.question);
+    const first = !TL.have;
     TL.have = n;
+    // the first read, or one that brings in a t the route named before the threads had it: the Threads part of
+    // the route runs again, now that the t can be decided (spec §2.5)
+    if (first || (TH.t && TH.opened !== TH.t && TL.threads.some((x) => x.id === TH.t)) || (TH.ask && TH.t === TH.ask.t && n > TH.ask.seq)) thRoute();
   } catch { return; }
   tlDraw();
+  thAdopt();
 }
 // The threads drawn: the server's, with the owner's pending presses laid over them; a press the
 // server's threads show is dropped.
@@ -6440,21 +6577,27 @@ function tlRelay() {
 // the dock), even over a #talk/ entry, closes in place. A viewer tab, which never routes, drops the hash.
 function tlClose() {
   const own = TL.route !== null && TL.route === TL.open;
+  // the route's thread (t in the page head in force): closing it takes t away, a new entry (kit-89 spec §2.5)
+  const routed = !!TH.t && TH.t === TL.open && !location.hash.startsWith('#talk/');
   TL.open = null;
   TL.draft = null;
   TL.resolving = false;
   TL.route = null;
   tlDraw();
+  if (routed) return void thGo({ th: TH.th, t: null });
   if (!location.hash.startsWith('#talk/')) return;
   if (VIEWER) return void history.replaceState(history.state, '', `${location.pathname}${location.search}`);
   if (!own) return;
   const c = closeTarget(history.state);
-  if (c.go) history.go(c.go); else goHead(c.replace, { replace: true });
+  // in place: the page head under it without the card's t (kit-89 spec §2.5), so the same link opens it again
+  if (c.go) history.go(c.go); else goHead(thWithout(c.replace), { replace: true });
 }
 async function tlOpen(id, go = true) {
   if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
   const t = TL.threads.find((x) => x.id === id);
   if (!t) return;
+  // a thread with no subject drawn opens in the panel, by the route (kit-89 spec §2.4)
+  if (tlInPanel(t)) return void thGo({ th: TH.th || 'open', t: id });
   TL.draft = null;
   TL.open = id;
   TL.route = null;
@@ -6502,10 +6645,13 @@ function tlSend() {
       ta.value = '';
       tlBytes();
       if (!t) { TL.draft = null; TL.open = p.thread; TL.openAt = TL.seq; }
+      // a + draft in the panel becomes its thread in the URL once the threads have it (thAdopt)
+      if (!t && !draft?.subject) TH.adopt = p.thread;
       tlRelay();
       tlDraw();
     },
     undo: () => {
+      if (TH.adopt === p.thread || (p.real && TH.adopt === p.real)) TH.adopt = null;
       TL.pend = TL.pend.filter((x) => x !== p);
       if (!t && TL.open === p.thread) { TL.open = null; TL.draft = draft; }
       tlRelay();
@@ -6519,7 +6665,14 @@ function tlSend() {
       p.confirmed = true;
       if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
       TL.typed[p.real] = /(^|\n)recorded and held/.test(out.out || '') ? 'held' : /supervisor's pane/.test(out.out || '');
-      if (TL.open === p.thread && p.real !== p.thread) TL.open = p.real;
+      if (TL.open === p.thread && p.real !== p.thread) {
+        TL.open = p.real;
+        // the card is this thread's under its id now, as it is: words typed since Send (kept under the pending
+        // key) carry over, and the composer keeps them, its caret and the focus (kit-89 spec §4)
+        const card = tlEl('tl-card');
+        if (card.dataset.key === p.thread) { const words = tlEl('tl-c-text')?.value ?? ''; card.dataset.key = p.real; lsDel(tlDraftKey(p.thread)); if (words) tlDraftSet(p.real, words); }
+      }
+      if (TH.adopt === p.thread) TH.adopt = p.real;
       tlRelay();
       tlRefresh();
     },
@@ -6558,24 +6711,37 @@ document.addEventListener('click', (e) => {
   const pin = e.target.closest('[data-tl-pin]');
   if (pin) return void tlOpen(pin.dataset.tlPin, false);
   const row = e.target.closest('[data-tl-open]');
-  if (row) { tlEl('tl-panel').hidden = true; tlEl('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
-  if (e.target.closest('#tl-pill')) { const panel = tlEl('tl-panel'); panel.hidden = !panel.hidden; tlEl('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
-  if (e.target.closest('[data-tl-new]')) { tlEl('tl-panel').hidden = true; TL.open = null; TL.draft = { subject: null, title: '', el: null }; tlDraw(); return void tlEl('tl-c-text')?.focus(); }
-  if (e.target.closest('#tl-pinbtn')) return void tlPinMode(!TL.pin);
+  if (row) return void thOpenRow(row.dataset.tlOpen);
+  if (e.target.closest('[data-tl-back]')) return void thBack();
+  // + : a draft with no subject, in the panel (in memory: the URL doesn't change), focused on its composer
+  if (e.target.closest('[data-tl-new]')) {
+    TL.open = null;
+    TL.resolving = false;
+    TL.draft = { subject: null, title: '', el: null };
+    tlDraw();
+    // a + pressed with the panel closed (a script's click) opens it, and the composer is focused once it shows
+    if (!TH.th) return void thGo({ th: 'open', t: null, focus: 'composer' });
+    thDraw({ view: true });
+    return void tlEl('tl-c-text')?.focus();
+  }
+  // at 900px and below the panel covers the page: Pin closes it first, so there is a page to point at
+  if (e.target.closest('#tl-pinbtn')) { if (!TL.pin && TH.th && innerWidth <= 900) thGo({}); return void tlPinMode(!TL.pin); }
+  if (e.target.closest('#th-close')) return void thGo({ focus: true });
+  const thf = e.target.closest('[data-thf]');
+  if (thf) return void thGo({ th: thf.dataset.thf, focus: true });
   if (e.target.closest('[data-tl-close]')) return void tlClose();
   if (e.target.closest('[data-tl-send]')) return void tlSend();
 });
 addEventListener('resize', () => tlDraw());
-// A dot for a reply not seen, named for a screen reader.
-const TL_DOT = '<span class="tl-dot" role="img" aria-label="a reply you haven&#39;t seen"></span>';
-// The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
+// The panel's list and tabs are rewritten on a refresh, and a pin taken away, only when nothing in them is focused or pressed:
 // a rewrite would drop the focus, or the click a press is half of.
 const tlHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
 window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) || e.target?.closest?.('#av-pins') ? e.target : null; }, true);
 // after the click this release makes; then what the press held back is drawn
-for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); }, 0), true);
-document.addEventListener('focusout', (e) => { if (tlOwn(e.target) || e.target?.closest?.('#av-pins')) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
-// When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
+for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; thDraw(); tlPins(); }, 0), true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target) || e.target?.closest?.('#av-pins')) setTimeout(() => { thDraw(); tlPins(); }, 0); }, true);
+// When the owner last looked at each thread, in this browser only. The card still marks it (tlSeen); nothing
+// reads it for the list, whose marks follow the server's rule (kit-89 spec §2.3).
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
 function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter((u) => !u.pending).pop()?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
@@ -6612,24 +6778,387 @@ function tlPinsInto(box, pins, held) {
     if (b.innerHTML !== x.html) b.innerHTML = x.html;
   }
 }
-// The dock: a pill with the open threads' count and a dot for a reply not seen; opened, every open
-// thread, newest activity first, numbered as its pin, with where its subject is; then the last 50
-// resolved, each reopenable from its card.
-function tlDock() {
-  const open = TL.threads.filter((t) => t.status === 'open');
-  const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
-  const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
-  // set only when it changed: a pill rewritten on every poll would drop a press on it
-  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}${askShown() ? ' <span class="badge high">terminal asking</span>' : ''}`;
-  if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
-  if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRowOf(t.subject)?.el === null;
-  const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
+// ---- the Threads panel (kit-89 spec §2.1-§2.3) ----
+// TH: the panel's state as the page head in force has it (th: 'open' | 'resolved' | null, t: a thread id or
+// null), what was last drawn (tabs, pane), and where a press in the panel or on the Inbox button asked the
+// focus to go once the route has drawn (focus: 'tab' | 'thf' | 'inbox' | 'back' | 'row' | 'composer' | null; focusRow: the
+// thread whose row 'row' means), the thread the route last opened (opened: a t gone closes it), and a + draft's
+// thread waiting for its id in the threads (adopt).
+const TH = { th: null, t: null, tabs: null, pane: null, focus: null, focusRow: null, opened: null, adopt: null, ask: null };
+const TH_LISTS = ['open', 'resolved'];
+const TH_TITLES = { supervisor: "The supervisor's terminal: the follow-on goal", shell: 'A plain shell at the repo root: the follow-on goal' };
+// An open thread's one state, by kit-84's rule (the hub's threads: { you, waiting, ready }), so the button
+// here and the hub's tab agree: ready to accept, else your move (the supervisor spoke last, or no turns),
+// else waiting on the supervisor. The owner's pending presses are laid over TL.threads, so a send moves it.
+const tState = (t) => (t.ready ? 'ready' : t.waiting === 'owner' ? 'you' : 'wait');
+function tCounts(threads) {
+  const c = { open: 0, you: 0, ready: 0, wait: 0 };
+  for (const t of threads) if (t.status === 'open') { c.open++; c[tState(t)]++; }
+  return c;
+}
+// The Inbox button's thread count: one class for the most pressing state, its number and its words.
+function tButton(c) {
+  if (c.ready) { const w = `${c.ready} ready to accept${c.you ? `, ${c.you} your move` : ''}`; return { cls: 'ok', n: c.ready + c.you, title: w, label: w }; }
+  if (c.you) { const w = `${c.you} your move`; return { cls: 'you', n: c.you, title: w, label: w }; }
+  if (c.open) { const w = `${c.open} waiting on the supervisor`; return { cls: 'wait', n: c.open, title: w, label: w }; }
+  return { cls: null, n: 0, title: '', label: '' };
+}
+const TH_MARK = { ready: ['ok', 'Ready to accept'], you: ['you', 'Your move'], wait: ['wait', 'Waiting on the supervisor'] };
+// The time since a thread's last activity, short.
+function thAgo(iso) {
+  const m = Math.floor((Date.now() - Date.parse(iso)) / 60000);
+  if (!(m >= 0)) return '';
+  return m < 1 ? 'now' : m < 60 ? `${m}m` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+// An item subject no longer drawn anywhere, or a Settings or Efficiency row that isn't.
+const thGone = (t) => (t.subject?.kind === 'item' && !tlHome(t.subject)) || tlRowOf(t.subject)?.el === null;
+// A row: one button. Its mark (open only), where its subject is with its pin's number (an open thread whose
+// subject is drawn), the time since, and its title. No line under it (spec §2.3).
+function thRow(t, nums) {
+  const st = t.status === 'open' ? tState(t) : null;
+  const [cls, words] = st ? TH_MARK[st] : [];
+  const mark = !st ? '' : st === 'ready' ? `<i class="th-st ok icon-check" role="img" aria-label="${words}" title="${words}"></i>` : `<span class="th-st ${cls}" role="img" aria-label="${words}" title="${words}"></span>`;
+  const gone = thGone(t);
+  const n = st && !gone ? nums.get(t.id) : null;
+  const where = t.subject ? `${tWhere(t.subject)}${gone ? ' · subject gone' : ''}` : '';
+  const on = TL.open === t.id;
+  return `<li><button type="button" class="th-row${st ? ` st-${st}` : ''}${on ? ' on' : ''}" data-tl-open="${esc(t.id)}"${on ? ' aria-current="true"' : ''}>${mark}<span class="th-s">${n ? `<span class="pinchip">${n}</span>` : ''}<span class="th-where">${esc(where)}</span></span><span class="th-tm">${esc(thAgo(t.activity_at))}</span><span class="th-w">${esc(t.title)}</span></button></li>`;
+}
+// The Threads pane: what the terminal asks (#ask-threads, askDraw's), Open / Resolved, then the list: every
+// open thread, newest activity first, or the last 50 resolved, newest first.
+function thListHtml() {
+  // a thread shown in the panel: in place of the split and the list, the back arrow and its title (the card
+  // itself is in #th-card-slot, which no pane draw touches)
+  const cur = thCurrent();
+  if (cur) return `<div class="th-back"><button type="button" class="ghost icon-btn" data-tl-back aria-label="Back to the threads" title="Back to the threads"><i class="icon-arrow-left" aria-hidden="true"></i></button><span class="th-bt">${esc(cur.title)}</span></div>`;
+  const which = TH.th === 'resolved' ? 'resolved' : 'open';
+  const open = TL.threads.filter((t) => t.status === 'open').sort((a, b) => b.activity_at.localeCompare(a.activity_at));
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
-  const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
-    + (resolved.length ? `<details class="tl-resolved"${tlEl('tl-list').querySelector('.tl-resolved')?.open ? ' open' : ''}><summary>Resolved (${resolved.length})</summary>${resolved.map(row).join('')}</details>` : '');
-  // only when it changed, and not under a press or the focus on a row (the next draw does it)
-  if (list !== TL.list && !tlHeld(tlEl('tl-list'))) { TL.list = list; tlEl('tl-list').innerHTML = list; }
+  const nums = new Map(tPins(TL.threads).flatMap((g) => g.ids.map((id) => [id, g.n])));
+  const seg = `<div class="th-filter"><span class="seg" role="group" aria-label="Which threads">${[['open', 'Open', open.length], ['resolved', 'Resolved', resolved.length]].map(([k, w, n]) => `<button type="button" data-thf="${k}" aria-pressed="${k === which}">${w} <span class="n">${n}</span></button>`).join('')}</span></div>`;
+  const rows = which === 'open' ? open : resolved;
+  const body = !TL.have ? '<p class="empty">Reading the threads…</p>'
+    : rows.length ? `<ul class="thread-list" id="tl-list">${rows.map((t) => thRow(t, nums)).join('')}</ul>`
+    : `<p class="empty">${which === 'open' ? 'No open threads. Hold Shift and click anything on the page, or start one with +.' : 'Nothing resolved yet.'}</p>`;
+  return `<div id="ask-threads"></div>${seg}${body}`;
+}
+threadsTabs.register({ id: 'threads', label: 'Threads', count: () => tCounts(TL.threads).you || null, render: (el) => { el.innerHTML = thListHtml(); } });
+threadsTabs.register({ id: 'supervisor', label: 'Supervisor', disabled: true });
+threadsTabs.register({ id: 'shell', label: 'Shell', disabled: true });
+// The button: its thread count (none with no open thread) and its words, each written only when it changed,
+// so a press on it survives every poll. #tt-peek copies its content, label and title.
+function thButton() {
+  const tt = document.querySelector('.pagebar .tt');
+  if (!tt) return;
+  const b = tButton(tCounts(TL.threads));
+  let n = tt.querySelector('.n.th');
+  if (!b.cls) n?.remove();
+  else {
+    if (!n) { n = document.createElement('span'); tt.append(n); }
+    const cls = `n th ${b.cls}`;
+    if (n.className !== cls) n.className = cls;
+    if (n.textContent !== String(b.n)) n.textContent = String(b.n);
+  }
+  // the red count's number (inboxTitle's: the open questions and the lessons sent to the owner), so the name says what
+  // the button shows (the /view/ tab has no DATA: its red count is hello's inbox, in the button)
+  const q = DATA ? (DATA.questions || []).length + (DATA.ooda?.knowledge ?? []).filter(ownerLesson).length : (parseInt(document.getElementById('inbox-btn-n')?.textContent, 10) || 0);
+  const parts = [...(q ? [`${q} open question${q === 1 ? '' : 's'}`] : []), ...(b.label ? [b.label] : [])];
+  const label = parts.length ? `Inbox: ${parts.join(', ')}` : 'Inbox';
+  const title = b.title || 'Open questions';
+  if (tt.getAttribute('aria-label') !== label) tt.setAttribute('aria-label', label);
+  if (tt.getAttribute('title') !== title) tt.setAttribute('title', title);
+}
+// The button, the tabs and the pane. A change of view (view: the route, a control in the panel) draws the
+// tabs and the pane at once; a refresh (a poll, the 10 s render, a count) writes each only when its HTML
+// changed and nothing in it is focused or pressed (tlHeld), so a focus or a press survives it.
+function thDraw({ view = false } = {}) {
+  thButton();
+  const tabs = $('th-tabs'), pane = $('th-pane');
+  if (!tabs || !pane) return;
+  const th = tabBar({ tabs: threadsTabs.list().map((t) => ({ ...t, waiting: t.id === 'threads' })), selected: 'threads' });
+  if (th !== TH.tabs && (view || !tlHeld(tabs))) {
+    TH.tabs = th;
+    tabs.innerHTML = th;
+    for (const [id, title] of Object.entries(TH_TITLES)) tabs.querySelector(`[data-tab="${id}"]`)?.setAttribute('title', title);
+  }
+  let html;
+  try { html = thListHtml(); } catch (e) { console.error(e); html = `error: ${e}`; }
+  if (html !== TH.pane && (view || !tlHeld(pane))) { TH.pane = html; threadsTabs.render('threads', pane); askDraw(); }
+}
+bindTabBar($('th-tabs'), { onSelect: () => thDraw({ view: true }) });
+// The page head in force: the entry's own, or under a link head (a peek, the viewer, a preview, a review,
+// talk/) the page head under it, history.state.page.
+function thHead() {
+  const p = parseHead(location.hash, SHELL_ROUTES);
+  if (p.link === undefined) return headFor(p);
+  return typeof history.state?.page === 'string' ? history.state.page : '#overview';
+}
+// A Threads change: the page head in force with th and t set (none: closed). On a page head a new entry
+// (the router draws it); under a link head the stamp's page changed in place (withPage), the link left open,
+// and the panel drawn. t left out: a floating thread's t is kept (its card is beside the page, not in the
+// panel), an in-panel one's dropped. focus: a press in the panel or on the Inbox button, so the focus follows
+// the change (or the kind of place to put it: 'composer').
+function thGo({ th = null, t, focus = false } = {}) {
+  if (t === undefined) t = TH.t && !thInPanelId(TH.t) ? TH.t : null;
+  const leaving = !t && !!TH.t && thInPanelId(TH.t);
+  TH.focus = typeof focus === 'string' ? focus : !focus ? null : !th ? 'inbox' : t && thInPanelId(t) ? 'back' : leaving ? 'row' : TH.th ? 'thf' : 'tab';
+  TH.focusRow = TH.t;
+  // the /view/ tab has no routes: the panel's state is in memory (spec §2.8)
+  if (VIEWER) { TH.th = th; TH.t = th ? t : null; return void thRouted(); }
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES);
+  const state = { ...p.state };
+  delete state.th;
+  delete state.t;
+  if (th) state.th = th;
+  if (t) state.t = t;
+  const next = headFor({ page: p.page, state });
+  if (next === head) return void thRoute();
+  if (parseHead(location.hash, SHELL_ROUTES).link !== undefined) {
+    // under a talk/ head a change of t replaces the talk/ entry with the page head (stamped): one card, one thread
+    if (location.hash.startsWith('#talk/') && (t || null) !== (p.state.t || null)) return void goHead(next, { replace: true });
+    history.replaceState(withPage(history.state, next), '', location.href);
+    HERE = history.state;
+    return void thRoute();
+  }
+  TH_MADE = next;
+  goHead(next);
+}
+// The router's part (kit-89 spec §2.5): the page head in force decided (bad values dropped, an unknown t dropped,
+// th=open added for an in-panel t), the panel drawn from it as a change of view, then remembered. The first read
+// of the threads runs this again (never the whole route), so what needs the threads waits for them.
+function thRoute() {
+  if (VIEWER) return;
+  thDecide();
+  const p = parseHead(thHead(), SHELL_ROUTES);
+  TH.th = TH_LISTS.includes(p.state?.th) ? p.state.th : null;
+  TH.t = typeof p.state?.t === 'string' ? p.state.t : null;
+  thRouted();
+  thStore();
+}
+const THREADS_KEY = 'devteam.threads.open';
+const TH_ID = /^[a-z0-9][a-z0-9-]{0,79}$/;
+// The threads and the page are read: whether a t is known, in the panel or floating, can be decided.
+const thReady = () => TL.have > 0 && !!DATA;
+// The page head in force changed in place, stamped: the entry's own head (hash and stamp), or under a link head
+// the page under it (withPage), the link left as it is.
+function thReplace(next) {
+  if (parseHead(location.hash, SHELL_ROUTES).link === undefined) history.replaceState(withPage(history.state, next), '', next);
+  else history.replaceState(withPage(history.state, next), '');
+  HERE = history.state;
+}
+// A t the threads don't have is unknown only once a read begun after it was named has landed (a thread made a
+// moment ago may not be in the last one): until then it is kept, and the read asked for.
+function thUnknown(t) {
+  if (!TH.ask || TH.ask.t !== t) { TH.ask = { t, seq: TL.seq }; tlRefresh(); return false; }
+  return TL.have > TH.ask.seq;
+}
+function thDecide() {
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined) return;
+  const s = { ...p.state };
+  // bad values (the block's parseHead keeps any): th open or resolved, t a thread id
+  if (s.th !== undefined && !TH_LISTS.includes(s.th)) delete s.th;
+  if (s.t !== undefined && !TH_ID.test(s.t)) delete s.t;
+  // a t named before the first read: that read decides it
+  if (s.t && !TL.have && TH.ask?.t !== s.t) TH.ask = { t: s.t, seq: 0 };
+  if (s.t && thReady()) {
+    const t = TL.threads.find((x) => x.id === s.t);
+    if (t) { TH.ask = null; if (!s.th && tlInPanel(t)) s.th = 'open'; }
+    else if (thUnknown(s.t)) { TH.ask = null; delete s.t; }
+  }
+  const next = headFor({ page: p.page, state: s });
+  if (next !== head) thReplace(next);
+}
+// Remembered (devteam.threads.open): th, and t with it only for a thread shown in the panel; nothing while the
+// threads are unread or the t is still being asked about. A throwing store does nothing.
+function thStore() {
+  if (!thReady() || (TH.t && TH.ask?.t === TH.t)) return;
+  try {
+    if (!TH.th) return void localStorage.removeItem(THREADS_KEY);
+    const v = { th: TH.th };
+    if (TH.t && thInPanelId(TH.t)) v.t = TH.t;
+    localStorage.setItem(THREADS_KEY, JSON.stringify(v));
+  } catch {}
+}
+function thStored() {
+  let v;
+  try { v = JSON.parse(localStorage.getItem(THREADS_KEY) || 'null'); } catch { return null; }
+  if (!v || typeof v !== 'object' || !TH_LISTS.includes(v.th)) return null;
+  return typeof v.t === 'string' && TH_ID.test(v.t) ? { th: v.th, t: v.t } : { th: v.th };
+}
+// A fresh entry (a cold load, a nav click, a link) whose page head in force carries neither th nor t: the
+// remembered keys written into it (a page head's hash; under a link head, the page under it).
+function thRemember() {
+  if (VIEWER) return;
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined || p.state.th !== undefined || p.state.t !== undefined) return;
+  const v = thStored();
+  if (v) thReplace(headFor({ page: p.page, state: { ...p.state, ...v } }));
+}
+// Read before an entry is stamped (the router, and popstate, which comes first): an entry with no state is fresh
+// unless it is the one thGo just made.
+// A page head without its t.
+function thWithout(head) {
+  const p = parseHead(head, SHELL_ROUTES);
+  if (p.link !== undefined || p.state.t === undefined) return head;
+  const s = { ...p.state };
+  delete s.t;
+  return headFor({ page: p.page, state: s });
+}
+function thFreshness() {
+  if (history.state && typeof history.state.page === 'string') return;
+  TH_FRESH = { hash: location.hash, fresh: !(TH_MADE !== null && location.hash === TH_MADE) };
+  TH_MADE = null;
+}
+// A peek closed by going back: the entry below shows the panel as it was under the peek (its th and t), stamped.
+function thCarry(page) {
+  const head = thHead();
+  const p = parseHead(head, SHELL_ROUTES), c = parseHead(page, SHELL_ROUTES);
+  if (p.link !== undefined || c.link !== undefined || p.page !== c.page) return;
+  const s = { ...p.state };
+  delete s.th;
+  delete s.t;
+  if (c.state.th !== undefined) s.th = c.state.th;
+  if (c.state.t !== undefined) s.t = c.state.t;
+  const next = headFor({ page: p.page, state: s });
+  if (next !== head) thReplace(next);
+}
+// TH as the route has it: its thread opened (or the one it opened closed), then the panel drawn.
+function thRouted() {
+  const open = TL.open, draft = TL.draft;
+  thApply();
+  if (TL.open !== open || TL.draft !== draft) { tlMarkRow(); tlCard(); tlPins(); }
+  thShow();
+}
+// The route's t (kit-89 spec §2.4, §2.5): the thread it names opens, in the panel or floating beside its
+// subject; a t gone closes the card it opened (never one a pin or a Shift+click opened). Nothing is decided
+// before the first read of the threads (and, on the dashboard, its first data): a t is kept as it is.
+function thApply() {
+  if (!TL.have || (!DATA && !VIEWER)) return;
+  if (TH.t) {
+    if (!TL.threads.some((x) => x.id === TH.t)) return;
+    // a + draft (or the thread it is becoming) shown over the route's thread stays: only a t this route hasn't
+    // opened yet takes its place
+    const over = TH.opened === TH.t && TL.open !== TH.t && !!thCurrent();
+    TH.opened = TH.t;
+    if (TL.open !== TH.t && !over) { TL.draft = null; TL.open = TH.t; TL.openAt = -1; TL.resolving = false; }
+  } else {
+    if (TH.opened && TL.open === TH.opened) { TL.open = null; TL.resolving = false; }
+    TH.opened = null;
+  }
+  // a + draft is the panel's: it goes when the panel closes
+  if (!TH.th && !TL.open && TL.draft && !TL.draft.subject) TL.draft = null;
+}
+function thShow() {
+  const moved = document.body.classList.contains('threads-open') !== !!TH.th;
+  const wasIn = $('threads').contains(document.activeElement);
+  document.body.classList.toggle('threads-open', !!TH.th);
+  thDraw({ view: true });
+  // the page moved over (at once with no motion): its pins and a floating card placed again; again when its slide ends
+  if (moved) { tlPins(); tlCard(); }
+  const f = TH.focus;
+  TH.focus = null;
+  const lost = wasIn && !$('threads').contains(document.activeElement);
+  // a focus left inside a panel that closed goes to the Inbox button the owner can see (spec §2.9)
+  if (!TH.th && (wasIn || $('threads').contains(document.activeElement))) thFocus('inbox');
+  else if (f && (f !== 'inbox' || !TH.th)) thFocus(f);
+  // a focus the draw took away (a floating row clicked, Back): the current thread's row, else the selected tab (spec §4)
+  else if (TH.th && lost) thFocus('current');
+}
+// the page's slide beside the panel has ended: what sits on it (pins, a floating card) placed where it now is
+document.querySelector('.main')?.addEventListener('transitionend', (e) => { if (e.target === e.currentTarget && e.propertyName === 'margin-right') tlDraw(); });
+const thSeen = (el) => { if (!el) return false; const c = getComputedStyle(el); return c.display !== 'none' && c.visibility !== 'hidden' && el.getClientRects().length > 0; };
+function thFocus(kind) {
+  const tab = () => $('th-tabs').querySelector('[role="tab"][aria-selected="true"]')?.focus();
+  const rowOf = (id) => (id ? $('th-pane').querySelector(`[data-tl-open="${CSS.escape(id)}"]`) : null);
+  if (kind === 'tab') return void tab();
+  if (kind === 'thf') return void $('th-pane').querySelector(`[data-thf="${TH.th}"]`)?.focus();
+  if (kind === 'back') return void $('th-pane').querySelector('[data-tl-back]')?.focus();
+  if (kind === 'composer') return void tlEl('tl-c-text')?.focus();
+  if (kind === 'row' || kind === 'current') { const r = rowOf(kind === 'row' ? TH.focusRow : TL.open); return void (r ? r.focus() : tab()); }
+  thFocusBack();
+}
+// Escape with the focus on the page (outside the panel and the card), after the viewer, a review and a peek
+// (kit-89 spec §2.9): a floating card closed first (as its ×), then the panel, the focus to the Inbox button.
+// Escape typed in a field on the page is the field's.
+function thEscapePage() {
+  const ae = document.activeElement;
+  if (typingIn(ae) || tlOwn(ae)) return;
+  const card = tlEl('tl-card');
+  if (card && !card.hidden && card.parentElement?.id === 'tl') return void tlClose();
+  if (TH.th) thGo({ focus: true });
+}
+// The focus back from the panel: the Inbox button the owner can see (#tt-peek over a peek or the viewer, else .tt),
+// else the peek's or the viewer's close (spec §2.9).
+function thFocusBack() {
+  const to = [$('tt-peek'), document.querySelector('.pagebar .tt'), $('av-close'), $('drawer-close')].find(thSeen);
+  to?.focus();
+}
+// --threads-w in pixels (380 above 900px)
+const thWidth = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--threads-w')) || 380;
+// Panel or floating (kit-89 spec §2.4), by whether the subject is drawn anywhere the dashboard draws, never by
+// whether its page is shown: no subject, an item with no element (gone), a page subject whose section doesn't
+// exist. In the /view/ tab, also a subject not this stage's (a dashboard item or page, another artifact or
+// preview): that tab has no page to go to.
+function tlInPanel(t) {
+  const s = t?.subject;
+  if (!s) return true;
+  if (VIEWER) return !(s.kind === VIEWER.kind && (s.kind === 'artifact' ? s.slug : s.name) === VIEWER.name);
+  if (s.kind === 'item') return !tlHome(s);
+  if (s.kind === 'page') { const id = String(s.view ?? '').replace(/^#/, '').split(/[/?]/)[0]; return !document.querySelector(`main section[id="${CSS.escape(id)}"]`) && !Object.hasOwn(SHELL_ROUTES.redirects, id); }
+  return false;
+}
+const thInPanelId = (id) => { const t = TL.threads.find((x) => x.id === id); return !!t && tlInPanel(t); };
+// What the panel shows in place of its list: an in-panel thread open, or a + draft (titled New thread).
+function thCurrent() {
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (t) return tlInPanel(t) ? t : null;
+  return !TL.open && TL.draft && !TL.draft.subject ? { id: null, title: 'New thread' } : null;
+}
+// The back arrow (and Escape in the panel), one press to the list: a + draft (never an entry), or the thread it
+// is becoming before the URL has it, let go in place; then the route's in-panel thread, if the + was pressed over
+// one, left by a new entry, the focus on its row; else the focus on the selected tab.
+function thBack() {
+  if (thCurrent() && TL.open !== TH.t) {
+    TL.draft = null;
+    TL.open = null;
+    TL.resolving = false;
+    TH.adopt = null;
+    tlDraw();
+  }
+  if (TH.t && thInPanelId(TH.t)) return void thGo({ th: TH.th || 'open', t: null, focus: true });
+  thDraw({ view: true });
+  thFocus('tab');
+}
+// A row: an in-panel thread opens in the pane (a Threads change); a floating one goes to its subject, one new
+// entry: its page head (as tlGoTo finds it, the Loop's tab with it) with t and, above 900px, the panel's th,
+// then the subject scrolled into view; on an artifact or a preview, the stage as today.
+function thOpenRow(id) {
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t) return;
+  if (tlInPanel(t)) return void thGo({ th: TH.th || 'open', t: id, focus: true });
+  const s = t.subject;
+  if (VIEWER || (s.kind !== 'item' && s.kind !== 'page')) return void tlOpen(id);
+  const p = parseHead(subjectHead(s), SHELL_ROUTES);
+  const state = { ...p.state };
+  delete state.th;
+  if (TH.th && innerWidth > 900) state.th = TH.th;
+  state.t = id;
+  const head = headFor({ page: p.page, state });
+  if (location.hash !== head) { addEventListener('hashchange', () => tlReveal(s), { once: true }); TH_MADE = head; location.hash = head; return; }
+  thRoute();
+  tlReveal(s);
+}
+// A + draft sent: once the threads have its id, it is the panel's thread in the URL, a new entry (so Back goes
+// to the list the + was pressed on), the focus left where it is (spec §2.4).
+function thAdopt() {
+  const id = TH.adopt;
+  if (!id || String(id).startsWith('pending-') || !TL.raw.some((x) => x.id === id)) return;
+  TH.adopt = null;
+  if (TL.open === id && TH.th && TH.t !== id) thGo({ th: TH.th, t: id });
 }
 // a section opened or closed, or the Loop's tab changed, moves what the pins sit on
 document.addEventListener('toggle', () => tlPins(), true);
@@ -6659,9 +7188,13 @@ function tlAct(action, body) {
       if (err) err.textContent = '';
       TL.pend.push(p);
       TL.resolving = false;
-      if (status === 'resolved') TL.open = null;
+      // a floating card closes; a thread in the panel stays shown, with Reopen, until the owner goes back (spec §4)
+      const floating = status === 'resolved' && !(t && tlInPanel(t) && t.id === TL.open);
+      if (floating) TL.open = null;
       tlRelay();
       tlDraw();
+      // the card the route opened (its t in the page head in force) closed: t taken away, a new entry (spec §2.5)
+      if (floating && t && TH.t === t.id && !location.hash.startsWith('#talk/')) thGo({ th: TH.th, t: null });
     },
     undo: () => { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'resolved') TL.open = wasOpen; tlRelay(); tlDraw(); },
     onOk: () => { p.confirmed = true; tlRefresh(); },
@@ -6830,10 +7363,10 @@ const typingIn = (el) => !!el && (el.tagName === 'TEXTAREA' || el.isContentEdita
 const PICK_HOLD = 60000, PRESS_HOLD = 3000;
 const HINT_AFTER = 30000;
 let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
-// A field in the thread layer holds nothing: the layer is outside what a redraw rebuilds, so the page refreshes under a half-written turn.
+// A field in the thread layer or the Threads panel holds nothing: both are outside what a redraw rebuilds, so the page refreshes (and the counts move) under a half-written turn.
 function holding() {
   const ae = document.activeElement;
-  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl')) || Date.now() - PRESSED < PRESS_HOLD
+  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl, #threads')) || Date.now() - PRESSED < PRESS_HOLD
     || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
 }
 async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }
@@ -6860,6 +7393,7 @@ function drawOrHold(d, force = false) {
       HELD = d;
       HELD_SINCE ||= Date.now();
       inboxTitle(overlaid(d));
+      thDraw();
       if (Date.now() - HELD_SINCE > HINT_AFTER) $('held').hidden = false;
       return;
     }
@@ -6870,6 +7404,7 @@ function drawOrHold(d, force = false) {
     render(shown);
     if (first) route();
     inboxTitle(shown);
+    thDraw();
     // the thread layer, which the redraw doesn't touch: the open card as this data has its questions
     // (one answered elsewhere shows answered now, not at the next read), its pins on what was just
     // drawn, then its threads again
@@ -7309,11 +7844,14 @@ async function viewerArtifact() {
 // Nothing else.
 async function viewerBoot() {
   document.documentElement.classList.add('viewer');
+  // the Inbox button, above the stage: placed by the page's CSS now that .tt isn't drawn (kit-89 spec §2.8)
+  ttPeekPlace();
   if (VIEWER.kind === 'preview') { if (showPreview(VIEWER.name, await previewInfo(VIEWER.name)) === 'reload') return; }
   else await viewerArtifact();
   document.title = `${$('av-title').textContent} · devteam`;
-  // the instance's name, and for a preview whether it answers, as the dashboard's tick last found it
-  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
+  // the instance's name, the Inbox's red count (the button's; #tt-peek copies it), and for a preview whether it
+  // answers, as the dashboard's tick last found it
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (!r.ok) return; const h = await r.json(); $('av-project').textContent = h.name ?? ''; $('inbox-btn-n').textContent = Number.isInteger(h.inbox) && h.inbox > 0 ? String(h.inbox) : ''; if (typeof thButton === 'function') thButton(); if (TS.kind === 'preview') { const row = Array.isArray(h.previews) ? h.previews.find((x) => x?.name === TS.name) : null; TS.up = typeof row?.up === 'boolean' ? row.up : null; tsBar(); } } catch {} };
   hello();
   setInterval(hello, 30000);
   // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
