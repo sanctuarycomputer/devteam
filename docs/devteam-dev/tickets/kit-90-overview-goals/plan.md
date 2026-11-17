@@ -146,3 +146,10 @@
 - `m-20261116-000030161-supervisor` (graph-20): also wait on `kit-242`; draw the Autonomy row from the data tickets' shape; Bugs merged inside Numbers; one delta review, then re-approval.
 - `m-20261116-000703166-supervisor`: re-approved spec and plan at d7e00ec, no extra pass; the first task review (reviews/task-1.md) confirms delta-3's F1 explicitly (the shape check at the four score paths against the G1 golden), and every task review brief names it until it is confirmed.
 - `m-20261117-144551912-supervisor`: no delta review for e7d4c79 (autonomy_score's % at `this_week`; `kit-174`'s `spark` reused): both were allowed; verification.md names both for the final reviewer.
+- `m-20261117-011905947-supervisor` (the owner's rule, thread `t-20261117-004321752`): no new file or folder in the kit repo outside `test/` without the owner's yes; `m-20261117-011950247-supervisor`: this ticket's records are covered and go under `docs/devteam-dev/tickets/kit-90-overview-goals/`.
+- `m-20261117-144245424-supervisor`: every dependency merged (kit-100, kit-98, kit-173, kit-242); merge origin/main, re-check spec and plan, then build.
+- `m-20261117-151250010-supervisor`: `test/dashboard-shell.test.mjs` joins the touches (goals and overview off the no-shell list; goalStepper asserted gone).
+- `m-20261117-152227607-supervisor`: `test/next-step.strategy.test.mjs` and `test/dashboard-peek.test.mjs` join the touches; each assertion moves to the new markup with the same intent; both named in verification.md.
+- `m-20261117-160508016-supervisor`: Overview's sections follow the shell contract's `.sec > .lbl + .sec-b` (`test/contracts/shell.md:57`); spec line 26 amended, cited in verification.md.
+- `m-20261117-171642439-supervisor`: the Library preview flake goes to kit-283-ci-flakes; left alone; a CI failure of it is rerun and cited.
+- `m-20261117-201656246-supervisor`: `test/dashboard-pages.test.mjs` joins the touches; the panel's no-scroll at 900px and below and settings area's read-after-the-press are fine, as the taller Overview caused both, and the PR body says so; the inbox-panel 9 flake goes to kit-283; its failed job is rerun and cited.
