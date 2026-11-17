@@ -5,7 +5,7 @@
 
 | Id | Severity | Rule | Where | Finding | Disposition |
 |---|---|---|---|---|---|
-| P2-1 | Suggestion | | plan.md T5 `filesFlag`, T6 `typeNow` | P10 is marked fixed, but two of its parts are still missing from the plan. (a) A bare `--files` (`flags.files === true`) goes to `attachedFiles(flagStr('files'))`, and `flagStr` returns `undefined` for `true` (devteam.mjs line 109). Unless `attachedFiles` guards first, `JSON.parse(undefined)` throws a SyntaxError with a stack trace instead of giving the §6 refusal. It still exits non-zero and writes nothing. (c) The plan doesn't say to delete the named `devteam-drop-*` buffer when `paste-buffer` fails, so a failed paste can leave a buffer on the supervisor's server. Neither weakens a check. Each is one line in the implementation. | |
+| P2-1 | Suggestion | | plan.md T5 `filesFlag`, T6 `typeNow` | P10 is marked fixed, but two of its parts are still missing from the plan. (a) A bare `--files` (`flags.files === true`) goes to `attachedFiles(flagStr('files'))`, and `flagStr` returns `undefined` for `true` (devteam.mjs line 109). Unless `attachedFiles` guards first, `JSON.parse(undefined)` throws a SyntaxError with a stack trace instead of giving the §6 refusal. It still exits non-zero and writes nothing. (c) The plan doesn't say to delete the named `devteam-drop-*` buffer when `paste-buffer` fails, so a failed paste can leave a buffer on the supervisor's server. Neither weakens a check. Each is one line in the implementation. | fixed in build: T5 refuses a bare --files with the spec's words; T6 deletes the named buffer when paste-buffer fails |
 
 ## Pass-1 findings
 
