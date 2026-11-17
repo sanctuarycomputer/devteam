@@ -504,3 +504,27 @@ test("autonomy score: rounds to nearest, and this week and last week are weeks 1
   assert.equal(s.this_week, 90);
   assert.equal(s.last_week, 30);
 });
+
+// final-1 F1-1, F1-2: this week's E is now, not the week's end (a signal formed an hour ago hasn't
+// had its day), and the score is the mean of the unrounded shares (2/3 is 0.666…, not 0.67).
+test('awareness: this week is read as of now, and the score uses unrounded shares', (t) => {
+  if (span() < 4 * HOUR) return t.skip('under 4 hours into this week has no room for its lines');
+  const Fx = fleetFixture('aw-now');
+  try {
+    const hand = handFor(Fx);
+    const now = Date.now();
+    const ks = Array.from({ length: 3 }, (_, i) => hand(O, { type: 'knowledge', kind: 'lesson', statement: `Lesson ${i + 1}`, scope: 'project', status: 'accepted' }, M + Math.floor(span() * 0.05 * (i + 1))));
+    // three starts, two given a lesson each
+    [[ks[0]], [ks[1]], null].forEach((k, i) => hand(S, { type: 'act', class: 'worker-slots', what: `made worker t${i + 1} in s:t${i + 1}`, refs: [`t${i + 1}`], ...(k ? { knowledge: k } : {}) }, now - (50 - 10 * i) * MIN));
+    // one incident fixed and verified, with no lesson
+    const p = hand(S, { type: 'problem', title: 'the fresh outage', severity: 2, realized: true, status: 'open', fingerprints: ['fp-fresh'] }, now - 3.5 * HOUR);
+    hand(S, { type: 'problem', op: 'set', id: p, status: 'resolved' }, now - 3 * HOUR);
+    hand(S, { type: 'observation', kind: 'outcome', subject: 'app', detail: `the fix for ${p} held`, valence: 1, refs: [p] }, now - 2.5 * HOUR);
+    const obs = (n) => ({ type: 'observation', kind: 'note', subject: 'app', source_key: 'fresh:x', detail: `fresh:x sighting ${n}`, valence: -1 });
+    hand(S, obs(1), now - 3 * HOUR); hand(S, obs(2), now - 2 * HOUR); hand(O, obs(3), now - HOUR);
+    const w = json(Fx.ok(Fx.old, ['dashboard-data'])).awareness.weeks[11];
+    assert.deepEqual(w.parts, { signals: NONE, incidents: { count: 0, of: 1, share: 0 }, lessons: { count: 2, of: 3, share: 0.67 }, starts: { count: 2, of: 3, share: 0.67 } });
+    // round(100 × (0 + 2/3 + 2/3) / 3) = round(44.44); rounded shares would give 45, and E at the week's end 33
+    assert.equal(w.score, 44);
+  } finally { Fx.done(); }
+});
