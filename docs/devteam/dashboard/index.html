@@ -920,6 +920,15 @@ try {
   @media (min-width: 901px) { .shell.av-open:not(.threads-open) .pagebar .tt { visibility: hidden; } }
   @media (max-width: 900px) { .shell.av-open #tt-peek { display: none; } }
   .shell.av-open .threads { z-index: 23; }
+  /* at 900px and below the panel and a peek or the viewer each take the full width, so the one opened last is on top
+     (kit-100 final-1 F1): a peek or the viewer opened over the open panel marks it (th-under-peek, th-under-av), and
+     while that one is up the panel goes under the scrim, its fixed pins and floating card with it. The panel opening
+     clears both marks. Above 900px nothing changes: the peek sits beside the panel, and the rule above stands */
+  @media (max-width: 900px) {
+    .shell.th-under-peek.peek-open .threads, .shell.th-under-av.av-open .threads { z-index: 19; }
+    .shell.th-under-peek.peek-open .tl-pin.in-threads, .shell.th-under-av.av-open .tl-pin.in-threads,
+    .shell.th-under-peek.peek-open .tl-card.in-threads, .shell.th-under-av.av-open .tl-card.in-threads { visibility: hidden; }
+  }
   /* the viewer narrowed by the open panel above 900px is kit-141's; the page only sets how much */
   @media (min-width: 901px) { :where(.shell).threads-open { --av-right: calc(var(--threads-w) + 16px); } }
   /* the /view/ tab (spec §2.8): the button at the window's top right, centred in a --bar-h band above the stage,
@@ -3867,6 +3876,8 @@ function peekShow() {
   if (PEEK_HIDE) PEEK_HIDE.cancel();
   const d = $('drawer'), s = $('scrim');
   if (d.hidden || s.hidden) { d.hidden = false; s.hidden = false; void d.offsetWidth; }
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1); a redraw changes nothing
+  if (!document.body.classList.contains('peek-open')) document.body.classList.toggle('th-under-peek', document.body.classList.contains('threads-open'));
   document.body.classList.add('peek-open');
   document.body.style.overflow = 'hidden';
   ttPeekPlace();
@@ -5065,6 +5076,8 @@ async function openPreview(raw) {
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
+  if (!document.body.classList.contains('av-open')) document.body.classList.toggle('th-under-av', document.body.classList.contains('threads-open'));
   // the Inbox button floats above the stage (kit-89 spec §2.7)
   document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
@@ -5087,6 +5100,8 @@ function openArtifact(raw) {
   showArtifact(slug, at, { note, fp, mainFp });
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
+  // opened over the open panel, it is on top of it at 900px and below (final-1 F1)
+  if (!document.body.classList.contains('av-open')) document.body.classList.toggle('th-under-av', document.body.classList.contains('threads-open'));
   // the Inbox button floats above the stage (kit-89 spec §2.7)
   document.body.classList.add('av-open');
   document.body.style.overflow = 'hidden';
@@ -7191,6 +7206,8 @@ function thShow() {
   const moved = document.body.classList.contains('threads-open') !== !!TH.th;
   const wasIn = $('threads').contains(document.activeElement);
   document.body.classList.toggle('threads-open', !!TH.th);
+  // opened, it is over a peek or the viewer already up (final-1 F1)
+  if (moved && TH.th) document.body.classList.remove('th-under-peek', 'th-under-av');
   thDraw({ view: true });
   // the page moved over (at once with no motion): its pins and a floating card placed again; again when its slide ends
   if (moved) { tlPins(); tlCard(); }

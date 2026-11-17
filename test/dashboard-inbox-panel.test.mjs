@@ -578,6 +578,73 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon("!document.getElementById('answered-wrap').open", 'the Answered list collapsed again');
   });
 
+  // At 900px and below the panel and a peek each take the full width, so the one opened last is on top (the design's
+  // Threads sidebar; final-1 F1): a link in the Inbox tab opens its peek, or the viewer, over the panel, and closing it
+  // (×, Escape, Back) gives the panel on Inbox as it was. The other way round, a panel opened from a peek is over it.
+  await t.test('a peek or the viewer from the Inbox tab, at 900px and below', async () => {
+    await p.send('Page.bringToFront');
+    const LINK = '#th-inbox a[href^="#observation/"]';
+    // the element at a box's centre is inside sel
+    const TOP = (sel, box = sel) => `(() => { const b = document.querySelector(${JSON.stringify(box)})?.getBoundingClientRect(); if (!b || !b.width) return false; return !!document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)?.closest(${JSON.stringify(sel)}); })()`;
+    const PEEK_AT_REST = "(!document.getElementById('drawer').hidden && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none')";
+    const AS_IT_WAS = `location.hash === '#goals?th=inbox' && ${ON_PAGE('goals')} && document.getElementById('drawer').hidden && ${ON_INBOX} && ${TOP('#threads')}`;
+    // the lesson card's evidence link, in the Inbox tab: its peek, on top
+    const openPeek = async (what) => {
+      await soon(`${ON_INBOX} && !!document.querySelector(${JSON.stringify(LINK)})`, `${what}: the lesson's evidence link`);
+      await p.ev(`document.querySelector(${JSON.stringify(LINK)}).scrollIntoView({ block: 'center' }); void 0`);
+      await soon(STEADY(LINK), `${what}: the link at rest`);
+      await p.click(LINK);
+      await soon(`location.hash.startsWith('#observation/') && ${PEEK_AT_REST}`, `${what}: the peek open, at rest`);
+      assert.equal(await p.ev(TOP('#drawer')), true, `${what}: the peek is on top at its centre, over the panel`);
+    };
+    for (const [w, h] of [[720, 800], [390, 844]]) {
+      await size(w, h);
+      await soon(`innerWidth === ${w}`, `at ${w}`);
+      await p.ev("location.hash = '#goals?th=inbox'");
+      await soon(`location.hash === '#goals?th=inbox' && ${ON_PAGE('goals')} && ${ON_INBOX}`, `at ${w}: Goals, the panel on Inbox`);
+      await openPeek(`at ${w}, ×`);
+      await soon(STEADY('#drawer-close'), 'the peek\'s × at rest');
+      await p.click('#drawer-close');
+      await soon(AS_IT_WAS, `at ${w}: × closed the peek, the panel on Inbox`);
+      await openPeek(`at ${w}, Escape`);
+      await p.key('Escape');
+      await soon(AS_IT_WAS, `at ${w}: Escape closed the peek, the panel on Inbox`);
+      await openPeek(`at ${w}, Back`);
+      await back();
+      await soon(AS_IT_WAS, `at ${w}: Back closed the peek, the panel on Inbox`);
+    }
+    // the viewer, from an #artifact/ link in the Inbox tab (the test draws the anchor: the routing is the page's), at 720
+    // (once: a second viewer in one visit is the frame-history quirk dashboard-peek.test.mjs works around)
+    await size(720, 800);
+    await soon('innerWidth === 720', 'at 720');
+    await soon(AS_IT_WAS, 'at 720, the panel on Inbox');
+    await p.ev("(() => { const a = document.createElement('a'); a.id = 'probe-art'; a.href = '#artifact/main/inbox-probe'; a.textContent = 'an artifact'; document.getElementById('th-inbox').prepend(a); a.scrollIntoView({ block: 'center' }); })()");
+    await soon(STEADY('#probe-art'), 'the artifact link at rest');
+    await p.click('#probe-art');
+    await soon("location.hash === '#artifact/main/inbox-probe' && !document.getElementById('artifact-view').hidden", 'the viewer open');
+    await soon(STEADY('#av-close'), "the viewer's × at rest");
+    assert.equal(await p.ev(TOP('#artifact-view')), true, 'the viewer is on top at its centre, over the panel');
+    assert.equal(await p.ev(TOP('#av-close')), true, "the viewer's × is on top");
+    await p.key('Escape');
+    await soon(`document.getElementById('artifact-view').hidden && ${AS_IT_WAS}`, 'Escape closed the viewer, the panel on Inbox');
+    await p.ev("document.getElementById('probe-art').remove(); void 0");
+    // a panel opened from a peek: over the peek; closed, the peek is on top again
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
+    await p.ev(`location.hash = '#lesson/${fx.L1}'`);
+    await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && ${PEEK_AT_REST} && PEEKS.has(peekKey('lesson', ${JSON.stringify(fx.L1)})) && !!document.querySelector('#drawer-body a[href="#inbox"]')`, "the lesson's peek with its read, its Inbox link");
+    await soon(STEADY('#drawer-body a[href="#inbox"]'), 'the link still');
+    await p.click('#drawer-body a[href="#inbox"]');
+    await soon(`${ON_INBOX} && ${PEEK_AT_REST} && ${TOP('#threads')}`, 'the panel opened from the peek, on top');
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN} && ${PEEK_AT_REST} && ${TOP('#drawer')}`, 'the panel closed: the peek on top');
+    // (left by a page's hash, as the nav and the roads leave theirs: × here walks back through the panel's entries)
+    await p.ev("location.hash = '#overview'");
+    await soon("location.hash === '#overview' && document.getElementById('drawer').hidden", 'Overview, the peek closed');
+    await size(1440, 900);
+    await soon('innerWidth === 1440', 'at 1440');
+  });
+
   // AC9 (done-when 9): the artifact viewer, /view/artifact/<slug>, has no Inbox data and no render(): its panel registers
   // the same tabs, the Inbox tab shows hello's count and one line to the dashboard's Inbox; its button opens Threads
   // (ruling m-20261115-230458641-supervisor). A fixture and a tab of its own.
