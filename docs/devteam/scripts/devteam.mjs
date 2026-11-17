@@ -10553,32 +10553,36 @@ function orientClusters() {
   return res.sort((a, b) => b.count - a.count);
 }
 // Recurring signals left unexplained for more than a day, oldest first: what Orient owes.
-function orientationDebt() {
-  const now = Date.now();
+function orientationDebt(now = Date.now()) {
   return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
     .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
 }
-// Resolved incidents nobody learned from, oldest first: fixed and verified (an outcome cites the
-// incident) in the last 30 days, with no knowledge citing it in its evidence and no live noise
-// ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is nothing to
-// keep (a corrected ruling owes it again). Resolved when the last change setting its status said so.
-// One whose status the owner set is the owner's call, and owes nothing.
-function incidentDebt() {
-  const now = Date.now();
-  // a lesson the owner retired taught nothing, so the incident is owed one again
-  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
-  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+// Incidents fixed in the last 30 days, oldest first: resolved (the last change setting its status
+// said so), verified (an outcome cites the incident) and resolved within 30 days of now. One whose
+// status the owner set is the owner's call, and owes nothing. What incidentDebt and the Awareness
+// Score's incidents part (kit-242) both count from.
+function fixedIncidents(now = Date.now()) {
   const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
-  return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
+  return incidentList().filter((p) => p.status === 'resolved' && !ownerHolds(p, 'status')).flatMap((p) => {
     const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
     // verified only: an unverified resolution (valence 0, seen too few times) proved nothing to learn from
     const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id) && (o.valence ?? 0) > 0).pop();
-    if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
+    return !outcome || now - Date.parse(at) > 30 * DAY ? [] : [{ p, resolved_at: at, outcome }];
+  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
+// Fixed incidents nobody learned from, oldest first: no knowledge citing it in its evidence and no
+// live noise ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is
+// nothing to keep (a corrected ruling owes it again).
+function incidentDebt(now = Date.now()) {
+  // a lesson the owner retired taught nothing, so the incident is owed one again
+  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
+  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+  return fixedIncidents(now).filter(({ p }) => !taught.has(p.id)).map(({ p, resolved_at: at, outcome }) => {
     const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
     const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
     const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
-    return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
-  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+    return { id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] };
+  });
 }
 // ===== the weekly learning record (the OODA spec §6) =====
 
@@ -10611,6 +10615,24 @@ function withLogAt(cut, fn) {
 // can do, a review, and defining or approving a goal).
 const DECISION_KINDS = ['owner-decision', 'one-way-door', 'proposal', 'trust', 'clarification'];
 const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthority(c));
+// Every group a signal recurs on, before what explains it is taken out (signalGroups takes it out
+// first): the observations bar a few kinds, and the corrections, each item { id, at, who }, sorted by
+// at and then id so equal times order the same on every read. formed_at: the at of the item that
+// first made it recurring, the first from the third on where the items so far come from two writers
+// or fall on two days; null when it never did. learningFigures counts the formed ones; the Awareness
+// Score (kit-242) times them from formed_at.
+function recurringGroups() {
+  const groups = new Map();
+  const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [], formed_at: null }).get(key)).items.push(item);
+  for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+  for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
+  for (const g of groups.values()) {
+    g.items.sort((a, b) => a.at.localeCompare(b.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const who = new Set(), days = new Set();
+    for (const [j, i] of g.items.entries()) { who.add(i.who); days.add(dateOnly(i.at)); if (j >= 2 && (who.size >= 2 || days.size >= 2)) { g.formed_at = i.at; break; } }
+  }
+  return groups;
+}
 // One week's figures (counts, never shares) and the records each counts, from the log as it stood
 // at the week's end. "In the week" is the named time falling in it.
 function learningFigures(week, merges = mergeTimes()) {
@@ -10622,12 +10644,13 @@ function learningFigures(week, merges = mergeTimes()) {
     const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').sort(byTime).map((k) => k.id);
     // recurring signals as Orient forms them, before what explains them is taken out
     const { ids, keys } = explained();
-    const groups = new Map();
-    const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
-    for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
-    for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
-    const signals = [...groups.values()].filter((g) => g.items.length >= 3 && (new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2))
-      .map((g) => { const by = g.items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id); return { key: g.key, ids: g.items.map((i) => i.id), explained: by.length > 0, by }; });
+    // listed in the fold's order (observations, then corrections), as the records written so far list them
+    const pos = new Map([...logObjects('observation'), ...calls()].map((o, i) => [o.id, i]));
+    const signals = [...recurringGroups().values()].filter((g) => g.formed_at).map((g) => {
+      const items = [...g.items].sort((a, b) => pos.get(a.id) - pos.get(b.id));
+      const by = items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id);
+      return { key: g.key, ids: items.map((i) => i.id), explained: by.length > 0, by };
+    });
     const starts = logObjects('act').filter((a) => a.class === 'worker-slots' && inW(a.created_at) && String(a.what).startsWith('made ')).sort(byTime).map((a) => ({ id: a.id, given: Array.isArray(a.knowledge) ? a.knowledge : [] }));
     const all = calls().sort(byTime);
     const weekCalls = all.filter((c) => inW(c.created_at));
@@ -12298,8 +12321,22 @@ function smallerModel(key, priced) {
 const modelWords = (key) => { const m = parseModelKey(key); return m ? `${m.family[0].toUpperCase()}${m.family.slice(1)} ${m.version.replace(/-/g, '.')}` : 'that model'; };
 /* model families end */
 // A suggestion's id: stable while its condition holds, never from a rank or a date, and safe as a
-// thread subject (suggestion:<id>).
-const effId = (kind, subject) => `eff-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+// thread subject (suggestion:<id>). Two subjects can make one id (a:b and a/b, or a cut at 110), and
+// the id names a thread, so a list's later clash takes -2, -3 and so on, cut to stay within 110; a
+// suffixed id can itself be taken (x-2 as a subject), so each is checked against every id so far.
+/* suggestion ids start */
+const suggestionId = (prefix, kind, subject) => `${prefix}-${kind}-${subject}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 110);
+function uniqueIds() {
+  const taken = new Set();
+  return (id) => {
+    let out = id;
+    for (let n = 2; taken.has(out); n++) out = id.slice(0, 110 - `-${n}`.length) + `-${n}`;
+    taken.add(out);
+    return out;
+  };
+}
+const effId = (k, s) => suggestionId('eff', k, s);
+/* suggestion ids end */
 const dollars = (x) => `$${Number.isInteger(x) ? x : x.toFixed(2)}`;
 // Decide: up to five suggestions whose condition holds this week, by estimated dollars (the design's
 // five kinds). ids are this week's tickets, ids12 the 12 weeks', [start, end) this week.
@@ -12365,13 +12402,14 @@ function efficiencySuggestions(m, { items, walk, ids, ids12, start, end, POINTS 
   }
   return out.sort((a, b) => b.usd - a.usd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).slice(0, 5);
 }
-function efficiencyData(m) {
+function efficiencyData(m, now = Date.now()) {
   const { cycles, ticketUsd, perPoint, items, POINTS } = m[METRICS_INTERNALS];
   const weekIds = [];
   const walk = ticketReviewWalk();
   const defects = logObjects('observation').filter((o) => o.kind === 'escaped-defect').map((o) => Date.parse(o.created_at));
   const r2 = (x) => +x.toFixed(2);
-  const weeks = efficiencyWeeks(Date.now()).map(({ start, end }) => {
+  const W12 = efficiencyWeeks(now);
+  const weeks = W12.map(({ start, end }) => {
     // the week's tickets: merged in it with spend recorded, the set perPoint counts
     const done = cycles.filter((c) => { const t = mergedAt(c.id); return t >= start && t < end && ticketUsd[c.id] !== undefined; });
     weekIds.push(done.map((c) => c.id));
@@ -12397,7 +12435,7 @@ function efficiencyData(m) {
   return { weeks, best, score: { this_week: weeks[11].score, last_week: weeks[10].score }, parts: weeks[11].parts,
     observe: { phase_hours: m.phase_hours, phase_usd: m.phase_usd, by_model: m.cost.by_model, tokens: m.cost.tokens, tokens_by_phase: tokensByPhase(items.filter((x) => x.at >= (Date.parse(m.since ?? '') || 0))) },
     waste: efficiencyWaste(m), trials: efficiencyTrials(perPoint),
-    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: Date.parse(weeks[11].starts_at), end: Date.parse(weeks[11].starts_at) + WEEK, POINTS }) };
+    suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
 function collectMetrics(since) {
@@ -13153,6 +13191,8 @@ function dashboardData() {
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
 }
 function dashboardDataRead() {
+  // one clock for the parts that read the 12 weeks, so they agree on which week is this one
+  const now = Date.now();
   const settings = loadSettings();
   const metrics = collectMetrics(0);
   const sub = activeTickets();
@@ -13172,11 +13212,11 @@ function dashboardDataRead() {
     questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics,
-    efficiency: efficiencyData(metrics),
+    efficiency: efficiencyData(metrics, now),
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
-    autonomy: autonomyData(),
+    autonomy: autonomyData(now),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
     // every kit setting, in words; never a credential (settingsAll)
