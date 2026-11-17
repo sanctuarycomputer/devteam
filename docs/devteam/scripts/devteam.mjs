@@ -15668,7 +15668,12 @@ const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test
 // in use is what the kernel can't drop, memory.current less the page cache it can (memory.stat's
 // file, less its shmem, which lives in tmpfs and /dev/shm and can't be dropped). With no cap (no
 // cgroup, or memory.max "max"), the host's /proc/meminfo: MemTotal less MemAvailable.
+// Some platforms stop the container at its cap by memory.current, page cache and all, long before
+// the kernel would drop that cache (a Render box, 2026-11-17: killed five times in an hour at 31 of
+// 32 GB, 11 GB of it cache, while this read 17): where DEVTEAM_MEMORY_COUNTS_CACHE is 1 (the box
+// image sets it), in use is memory.current in full, and cache says how much of it is page cache.
 // DEVTEAM_CGROUP and DEVTEAM_MEMINFO point both elsewhere (tests).
+const memoryCountsCache = () => process.env.DEVTEAM_MEMORY_COUNTS_CACHE === '1';
 function machineMemory() {
   try {
     const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
@@ -15677,7 +15682,9 @@ function machineMemory() {
     if (max > 0 && current !== null) {
       const stat = readText(path.join(cg, 'memory.stat')) ?? '';
       const field = (k) => Number(new RegExp(`^${k} (\\d+)$`, 'm').exec(stat)?.[1] ?? 0);
-      return { inUse: Math.max(0, current - Math.max(0, field('file') - field('shmem'))), max, source: 'cgroup' };
+      const cache = Math.min(current, Math.max(0, field('file') - field('shmem')));
+      if (memoryCountsCache()) return { inUse: current, max, source: 'cgroup', cache };
+      return { inUse: current - cache, max, source: 'cgroup' };
     }
     const info = readText(process.env.DEVTEAM_MEMINFO ?? '/proc/meminfo');
     const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
@@ -15689,6 +15696,9 @@ function machineMemory() {
 const GiB = (b) => (b / 1073741824).toFixed(1);
 const MEMORY_CEILING_DEFAULT = 0.8;
 const memoryCeilingProblem = (v) => (typeof v === 'number' && v >= 0.5 && v <= 0.95 ? null : `settings.machine_memory_ceiling is ${JSON.stringify(v) ?? String(v)}: it is the share of the machine's memory at which new workers stop starting, a number from 0.5 to 0.95 (default ${MEMORY_CEILING_DEFAULT}); until it is, ${MEMORY_CEILING_DEFAULT} applies`);
+// , 11.0 GB of it page cache: said wherever the kit counts the cache, so a number over the ceiling
+// on a quiet box reads as the cache it is
+const cacheWords = (m) => (m?.cache !== undefined ? `, ${GiB(m.cache)} GB of it page cache` : '');
 // The machine's memory at or over the supervisor's ceiling: { words, … }, or null when under it or
 // when nothing says (never a block where the kit can't read memory). An invalid ceiling counts as
 // the default, so no value widens what a supervisor may start.
@@ -15696,7 +15706,7 @@ function memoryFull(s = loadSettings()) {
   const ceiling = memoryCeilingProblem(s.machine_memory_ceiling) ? MEMORY_CEILING_DEFAULT : s.machine_memory_ceiling;
   const m = machineMemory();
   if (!m || m.inUse < ceiling * m.max) return null;
-  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%), at or over its ${Math.round(ceiling * 100)}% ceiling` };
+  return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
@@ -15710,7 +15720,8 @@ function machineLine(last) {
   const low = free < 20971520 || Math.floor((free * 100) / (total + 1)) < 15 ? ' LOW' : '';
   const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
   const m = machineMemory();
-  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
+  // the number memoryFull reads: with the page cache where the platform counts it
+  const mem = m?.source === 'cgroup' ? `${GiB(m.inUse)} GB in use of ${GiB(m.max)} GB${m.cache !== undefined ? ` (${GiB(m.cache)} GB of it page cache)` : ''}` : m ? `${GiB(m.max - m.inUse)} GB free of ${GiB(m.max)} GB` : `${GiB(os.freemem())} GB free of ${GiB(os.totalmem())} GB`;
   // the CPUs it may use, and how much of the last minute every task stood waiting for one
   const [quota, period] = (readText(path.join(cg, 'cpu.max')) ?? '').trim().split(/\s+/);
   const cpus = quota && quota !== 'max' && Number(period) > 0 ? String(Number((Number(quota) / Number(period)).toPrecision(6))) : String(os.cpus().length || '?');
@@ -15899,15 +15910,20 @@ function cmdAccountsTick() {
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
   // would only stop again, and it is still there for a later tick.
-  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), 1 at or over it. A
+  // Up to 3 a tick while the machine's memory is under its ceiling (or unread), and none at or over
+  // it: memory is read again before each one, as a new start reads it, so a box near its cap waits
+  // for room instead of coming back all at once (every fleet on a restarted box relaunches together,
+  // and one a tick each took a 32 GB box from 1 to 18 GB in three minutes, then past its cap). A
   // resume runs its repo's worktree_setup before its window exists, and that can take most of the
   // 100 s: a later relaunch whose repo has one starts only with the full 100 s left, so it is never
   // cut short into a spent attempt; it waits for the next tick instead.
   if (!state.active_no_room) {
     const gone = sessionsToRelaunch(launchOf, held);
-    const cap = gone.length ? (memoryFull() ? 1 : 3) : 0;
-    for (const { name, launch } of gone) {
-      const did = relaunchGone(name, launch, budget(cap, tries && tries < cap && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
+    const settings = gone.length ? loadSettings() : null;
+    for (const [i, { name, launch }] of gone.entries()) {
+      const full = memoryFull(settings);
+      if (full) { out(`left ${plural(gone.length - i, 'gone session')} down for now: ${full.words}`); break; }
+      const did = relaunchGone(name, launch, budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
       else if (did) tries += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }

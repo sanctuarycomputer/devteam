@@ -181,6 +181,10 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   const r = machine(['machine', 'status'], { DEVTEAM_CGROUP: cg });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^machine: disk .*; memory 4\.0 GB in use of 8\.0 GB; cpus 2 \(all waiting 13% of the last minute\); load /m);
+  // a platform that stops the box by memory.current, cache and all (the box image says so): all of
+  // it, the number the memory ceiling reads, and how much is cache
+  const counts = { DEVTEAM_CGROUP: cg, DEVTEAM_MEMORY_COUNTS_CACHE: '1' };
+  assert.match(machine(['machine', 'status'], counts).stdout, /^machine: disk .*; memory 6\.0 GB in use of 8\.0 GB \(2\.0 GB of it page cache\); cpus 2 /m);
   // no caps (a laptop, or a cgroup that says max): the machine's own numbers
   fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
@@ -189,6 +193,8 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
   const meminfo = path.join(cg, 'meminfo');
   fs.writeFileSync(meminfo, 'MemTotal:       8388608 kB\nMemFree:          524288 kB\nMemAvailable:    3145728 kB\n');
   assert.match(machine(['machine', 'status'], { DEVTEAM_CGROUP: cg, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
+  // with no cap the setting changes nothing: MemAvailable already counts what the kernel can drop
+  assert.match(machine(['machine', 'status'], { ...counts, DEVTEAM_MEMINFO: meminfo }).stdout, /^machine: disk .*; memory 3\.0 GB free of 8\.0 GB; cpus /m);
 });
 
 // Every read the operator is allowed, against a repo with something in it: the log, git status and

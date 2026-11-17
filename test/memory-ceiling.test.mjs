@@ -75,6 +75,17 @@ test('a new worker waits while the machine\'s memory is over the ceiling; a resu
     fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${14 * G}\nfile ${8 * G}\nshmem ${6 * G}\n`);
     assert.match(run(old, ['worker', 'ch-02-b'], M).err, /at 26\.0 of 32\.0 GB \(81%\), at or over its 80% ceiling/);
 
+    // a platform that stops the box at its cap by memory.current, page cache and all
+    // (DEVTEAM_MEMORY_COUNTS_CACHE=1, from the box image): the cache counts, and the words say how much
+    fs.writeFileSync(path.join(cg, 'memory.current'), `${31 * G}\n`);
+    fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${17 * G}\nfile ${11 * G}\nshmem ${G}\n`);
+    const counts = { ...M, DEVTEAM_MEMORY_COUNTS_CACHE: '1' };
+    assert.match(run(old, ['worker', 'ch-02-b'], counts).err, /at 31\.0 of 32\.0 GB \(97%, 10\.0 GB of it page cache\), at or over its 80% ceiling: start this worker/);
+    assert.match(findings(counts).find((f) => f.kind === 'memory-full')?.detail ?? '', /^the machine's memory is at 31\.0 of 32\.0 GB \(97%, 10\.0 GB of it page cache\)/);
+    assert.equal(starts().length, 3, 'nothing started');
+    // unset, or any value but 1: the cache the kernel can drop is left out (21 of 32 GB, under)
+    for (const v of [undefined, '0', '', 'yes']) assert.ok(!findings({ ...M, ...(v === undefined ? {} : { DEVTEAM_MEMORY_COUNTS_CACHE: v }) }).some((f) => f.kind === 'memory-full'), `${JSON.stringify(v)}: under`);
+
     // under the ceiling: starts, and idle-capacity is back
     use(20 * G);
     ok(old, ['worker', 'ch-02-b'], M);

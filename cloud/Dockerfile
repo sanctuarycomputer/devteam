@@ -735,6 +735,11 @@ EOF
 # dashboard whose hub port it names leaves that port alone. It comes with the boot that starts the
 # hub, so no image tells dashboards to step back without serving the hub itself.
 ENV DEVTEAM_IMAGE_HUB=4320
+# The platform stops this container when its memory reaches the cap, counting the page cache the
+# kernel could still drop (2026-11-17: five restarts in an hour at 31 of 32 GB, 11 GB of it cache,
+# while the kit counted 17). So the kit's memory ceiling, and machine status, count it too. ENV, like
+# the hub's port: the boot, dev's sessions and every dashboard get it (as_dev keeps the environment).
+ENV DEVTEAM_MEMORY_COUNTS_CACHE=1
 
 # What this image is, for the gateway's /box.json and box-status: the kit release it was cut at (the
 # release-prep PR sets it, and box-pins verify checks it) and the tools' pins above. Last, so a new
