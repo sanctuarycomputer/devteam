@@ -278,6 +278,57 @@ test('laptop upload: past the total kept, the next upload is 507 (A10)', LAPTOP,
   assert.match(r.json?.error ?? '', /already holds/);
 });
 
+// An upload whose body is sent by hand: the declared size and a first chunk now, the rest when the
+// test says. Nothing is written while it's held, so nothing touches the .part's mtime.
+function heldUpload(L, name, size) {
+  let r;
+  const answer = new Promise((resolve) => {
+    r = http.request({ host: '127.0.0.1', port: L.port, path: `/upload?name=${encodeURIComponent(name)}`, method: 'POST', agent: false, headers: { host: `127.0.0.1:${L.port}`, origin: `http://127.0.0.1:${L.port}`, 'sec-fetch-site': 'same-origin', 'content-length': String(size) } });
+    r.on('response', (res) => { const bufs = []; res.on('data', (b) => bufs.push(b)); res.on('end', () => { const text = Buffer.concat(bufs).toString('utf8'); let json = null; try { json = JSON.parse(text); } catch {} resolve({ status: res.statusCode, text, json }); }); res.on('error', (e) => resolve({ error: e.code ?? e.message })); });
+    r.on('error', (e) => resolve({ error: e.code ?? e.message }));
+  });
+  let status = null;
+  answer.then((a) => { status = a.status ?? a.error; });
+  r.write(Buffer.alloc(1, 0x61));
+  return { answer, status: () => status, rest: () => r.end(Buffer.alloc(size - 1, 0x62)) };
+}
+
+test('laptop upload: uploads at once count each other against the total, and the sweep leaves a folder being received (Edge cases, B-1, T2-2)', LAPTOP, async (t) => {
+  const SIZE = 1000, TOTAL = 3000, N = 4;
+  const L = await laptop(t, { DEVTEAM_UPLOAD_TOTAL: String(TOTAL) });
+  const root = L.folder();
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  fs.chmodSync(root, 0o700);
+  // fresh folders of ours, each with an empty file: they count 0 bytes and stay, but each costs the
+  // sweep some reads, so uploads that start together are all in it at once
+  const seeded = new Set();
+  for (let i = 0; i < 300; i++) { const n = newFolderName(); fs.mkdirSync(path.join(root, n), { mode: 0o700 }); fs.writeFileSync(path.join(root, n, 'e.txt'), ''); seeded.add(n); }
+  const receivingNow = () => ourFolders(root).filter((n) => !seeded.has(n) && fs.existsSync(path.join(root, n, R.part)));
+  // all at once, each declaring its size and held after its first byte: together past the total
+  const ups = Array.from({ length: N }, (_, i) => heldUpload(L, `u${i}.bin`, SIZE));
+  await until(() => receivingNow().length + ups.filter((u) => u.status() !== null).length === N, 'each upload to be receiving or answered');
+  const refused = ups.filter((u) => u.status() !== null);
+  assert.ok(refused.length >= 1, `${N} uploads of ${SIZE} bytes at once were all taken under a total of ${TOTAL}`);
+  for (const u of refused) assert.equal(u.status(), 507, JSON.stringify(await u.answer));
+  assert.match((await refused[0].answer).json?.error ?? '', /already holds/);
+  const taking = ups.filter((u) => u.status() === null);
+  assert.ok(taking.length * SIZE <= TOTAL, `${taking.length} taken at once`);
+  // the folders being received look cut off (a .part untouched for an hour), and an upload's sweep
+  // runs over them: the live map keeps them
+  const inFlight = receivingNow();
+  const hourAgo = Date.now() / 1000 - 3600;
+  for (const n of inFlight) { fs.utimesSync(path.join(root, n, R.part), hourAgo, hourAgo); fs.utimesSync(path.join(root, n), hourAgo, hourAgo); }
+  const sweeper = await L.post('sweep.txt', Buffer.from('x'));
+  assert.equal(sweeper.status, 507, sweeper.text);
+  for (const n of inFlight) assert.ok(fs.existsSync(path.join(root, n, R.part)), `the sweep removed ${n}, a folder being received`);
+  for (const u of taking) u.rest();
+  for (const u of taking) { const a = await u.answer; assert.equal(a.status, 200, JSON.stringify(a)); assert.equal(a.json.size, SIZE); }
+  // what's kept never passed the total
+  let stored = 0;
+  for (const n of ourFolders(root)) for (const f of fs.readdirSync(path.join(root, n))) stored += fs.statSync(path.join(root, n, f)).size;
+  assert.ok(stored <= TOTAL, `${stored} bytes kept, over ${TOTAL}`);
+});
+
 test('laptop upload: a failure after the body is read is still answered, 500, and stores nothing (A7, step 8)', LAPTOP, async (t) => {
   const L = await laptop(t);
   assert.equal((await L.post('first.txt', Buffer.from('x'))).status, 200);
@@ -345,9 +396,12 @@ function authenticator() {
 // the owner's session. Its instance P (DEVTEAM_PORT_BASE, the first of its block) has nothing
 // listening: a request the gateway proxies there gets 502. Its uploads root is <base>/uploads, 0750.
 const freePort = () => new Promise((resolve, reject) => { const v = http.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
+// A port the OS gives now and that stays bound: the gateway listens on this very socket later
+// (listen(handle)), so no other process can take the port in between.
+const boundPort = () => new Promise((resolve, reject) => { const v = http.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => resolve({ port: v.address().port, held: v })); });
 async function boxGateway(t, extra = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-attach-gw-'));
-  const port = await freePort();
+  const { port, held } = await boundPort();
   const publicUrl = `http://box.localhost:${port}`;
   const inst = (p) => `http://${p}.box.localhost:${port}`;
   const term = `http://term.box.localhost:${port}`;
@@ -358,7 +412,7 @@ async function boxGateway(t, extra = {}) {
   const uploadsDir = path.join(base, 'uploads');
   fs.mkdirSync(uploadsDir, { mode: 0o750 });
   const g = G.createGateway({ publicUrl, dir: path.join(base, 'gw'), ttydPort: await freePort(), ttydPage, uploadsDir, log: (m) => logs.push(m), ...extra });
-  await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+  await new Promise((r, j) => { g.server.once('error', j); g.server.listen(held, r); });
   t.after(async () => { g.server.closeAllConnections?.(); await new Promise((r) => g.server.close(r)); fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';

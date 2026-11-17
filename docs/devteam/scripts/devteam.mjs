@@ -14658,7 +14658,7 @@ function laptopUploadsDir() {
   const real = fs.realpathSync(mainRoot);
   return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
 }
-const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR || '/data/uploads' : laptopUploadsDir());
+const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR ?? '/data/uploads' : laptopUploadsDir());
 // Why a path is not a dropped file (null when it is): exactly <root>/<folder>/<name>, a folder named
 // as ours and a name as one is stored, never a .part, and a regular file. A check of shape only, on a
 // path already resolved (realpath) against the root's real path: it never follows a link itself. A
@@ -14807,9 +14807,10 @@ async function receiveLaptopUpload(req, res, rawName, send) {
   try { root = laptopUploadsDir(); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
   const why = uploadRootOk(root, { make: true });
   if (why) return refuse(503, `this machine has no folder for dropped files: ${why}`);
-  const pending = [...uploadsReceiving.values()].reduce((a, b) => a + b, 0);
   let kept;
   try { kept = await sweepLaptopUploads(root, uploadsReceiving, lim); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  // after the sweep, and with no await between this sum and the set below: uploads at once each count the others
+  const pending = [...uploadsReceiving.values()].reduce((a, b) => a + b, 0);
   if (kept + pending + want > lim.total) return refuse(507, `this machine already holds as many dropped files as it keeps (${Math.floor(lim.total / 1048576)} MB); they go after ${Math.round(lim.keepMs / 86400000)} days`);
   const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
   const folder = path.join(root, id);
@@ -17146,7 +17147,10 @@ function typeNow(target, line, paste = null) {
   if (!files) ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
   else {
     const buf = `devteam-drop-${process.pid}-${++dropSeq}`;
-    ok = tmux(['send-keys', '-t', target, '-l', `${line} `]) && sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+    // the paths loaded first, the line typed only then: a load that fails leaves nothing in the input
+    // box, so a held line typed again later isn't typed after a copy of itself
+    ok = sh('tmux', ['load-buffer', '-b', buf, '-'], { input: dropPaste(files), stdio: ['pipe', 'pipe', 'ignore'] }) !== null;
+    if (ok && !tmux(['send-keys', '-t', target, '-l', `${line} `])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
     if (ok && !tmux(['paste-buffer', '-p', '-d', '-b', buf, '-t', target])) { tmux(['delete-buffer', '-b', buf]); ok = false; }
     ok = ok && (!dropSpace(files) || tmux(['send-keys', '-t', target, '-l', ' '])) && tmux(['send-keys', '-t', target, 'Enter']);
   }
