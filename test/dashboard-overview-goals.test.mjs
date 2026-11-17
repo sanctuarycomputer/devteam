@@ -101,6 +101,80 @@ test('heartbeatDays: kit-84\'s days in the heartbeat\'s shape', () => {
   assert.deepEqual(hd(undefined), []);
 });
 
+// The hello-pulse block alone: helloLoad redraws Overview only when the answer changed; ovMosaic formats its days with one formatter and is kept while the activity
+// and the day are the same.
+const helloCtx = (globals = {}) => {
+  const asks = [], draws = [];
+  const ctx = vm.createContext({
+    ...globals,
+    DATA: {}, AbortSignal: { timeout: () => undefined }, esc: (x) => String(x),
+    renderOverview: () => draws.push(1),
+    // each ask waits until the test answers it: answer(i, body) or answer(i, null) for a failed ask
+    fetch: () => new Promise((resolve, reject) => asks.push({ resolve, reject })),
+  });
+  vm.runInContext(`${block(INDEX, 'hello-pulse')}\nthis.helloLoad = helloLoad; this.hello = () => HELLO; this.ovMosaic = ovMosaic;`, ctx);
+  const answer = async (i, body) => {
+    if (body === null) asks[i].reject(new Error('down')); else asks[i].resolve({ ok: true, json: async () => body });
+    for (let k = 0; k < 5; k++) await new Promise((r) => setImmediate(r));
+  };
+  return { ctx, asks, draws, answer, hello: () => JSON.parse(JSON.stringify(ctx.hello())) };
+};
+
+test('helloLoad: Overview redraws only when the answer changed', async () => {
+  const { ctx, asks, draws, answer, hello } = helloCtx();
+  const a = ctx.helloLoad();
+  await answer(0, { name: 'new', pulse: { state: 'working' } });
+  await a;
+  assert.deepEqual(hello(), { name: 'new', pulse: { state: 'working' } });
+  assert.equal(draws.length, 1, 'the answer drew Overview');
+  // the same answer again: no redraw
+  const c = ctx.helloLoad();
+  await answer(1, { name: 'new', pulse: { state: 'working' } });
+  await c;
+  assert.equal(draws.length, 1, 'an unchanged answer does not redraw Overview');
+  // a changed answer redraws; a failed ask leaves none, and redraws once
+  const d = ctx.helloLoad();
+  await answer(2, { name: 'new', pulse: { state: 'waiting' } });
+  await d;
+  assert.equal(draws.length, 2, 'a changed answer redraws Overview');
+  const e = ctx.helloLoad();
+  await answer(3, null);
+  await e;
+  assert.equal(ctx.hello(), null, 'a failed ask leaves none');
+  assert.equal(draws.length, 3, 'which is a change');
+  const f = ctx.helloLoad();
+  await answer(4, null);
+  await f;
+  assert.equal(draws.length, 3, 'and failing again is not');
+  assert.equal(asks.length, 5);
+});
+
+test('ovMosaic: one day formatter, and the same mosaic while the activity and the day are unchanged', () => {
+  // count the formatters the page makes and the days they format, and set the clock
+  let made = 0, formatted = 0, now = Date.parse('2026-11-17T12:00:00Z');
+  const RealDTF = Intl.DateTimeFormat;
+  const { ctx } = helloCtx({
+    Intl: { DateTimeFormat: function (...a) { made++; const f = new RealDTF(...a); return { format: (d) => { formatted++; return f.format(d); } }; } },
+    Date: class extends Date { constructor(...a) { if (a.length) super(...a); else super(now); } static now() { return now; } },
+  });
+  const act = Array.from({ length: 84 }, (_, i) => (i * 7) % 5);
+  const m1 = ctx.ovMosaic(act);
+  assert.equal((m1.match(/<i/g) || []).length, 84, '84 cells');
+  assert.match(m1, /title="Nov 17: \d+ commits?"/, 'today last, by the shared formatter');
+  assert.ok(made <= 1, `one formatter at most: ${made}`);
+  assert.equal(formatted, 84, 'a day formatted per cell');
+  assert.equal(ctx.ovMosaic([...act]), m1, 'the same activity, the same mosaic');
+  assert.equal(formatted, 84, 'not formatted again');
+  const act2 = [...act]; act2[83] += 1;
+  assert.notEqual(ctx.ovMosaic(act2), m1, 'a changed activity draws anew');
+  assert.equal(formatted, 168);
+  now += 864e5;
+  const m3 = ctx.ovMosaic(act2);
+  assert.equal(formatted, 252, 'a new day draws anew');
+  assert.match(m3, /title="Nov 18: /);
+  assert.ok(made <= 1, `still one formatter: ${made}`);
+});
+
 // The score-of block alone: SCORE_TILES (label → path → the place of its %), scoreAt and scoreOf
 const scoreCtx = () => {
   const ctx = vm.createContext({});

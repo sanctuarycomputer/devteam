@@ -5780,16 +5780,22 @@ function scoreOf(rec, at = 'score.this_week') {
 /* score-of end */
 // The open question devteam.mjs next names: the first in /api/data's order. Its row and card carry the Next chip.
 const NEXT_ID = () => DATA?.questions?.[0]?.id ?? null;
+/* hello-pulse start */
 // /api/hello, as the hub reads it (pulse: state, last_activity, activity): asked on load and with each
 // redraw; a failed ask leaves none, so the pill says unknown (spec §1) and the mosaic is empty.
-let HELLO = null;
+// Overview is redrawn only when the answer changed (render draws it on each poll anyway).
+let HELLO = null, HELLO_JSON = 'null';
 async function helloLoad() {
   let h = null;
   try {
     const r = await fetch('/api/hello', { signal: AbortSignal.timeout(10000) });
     if (r.ok) h = await r.json();
   } catch {}
-  HELLO = h && typeof h === 'object' ? h : null;
+  h = h && typeof h === 'object' ? h : null;
+  const json = JSON.stringify(h);
+  if (json === HELLO_JSON) return;
+  HELLO = h;
+  HELLO_JSON = json;
   if (DATA) renderOverview();
 }
 // "2 min ago", as the hub says it
@@ -5801,16 +5807,24 @@ function ovAgo(iso) {
 }
 const BUGS_MERGED_TIP = 'A production error traced to a merged change, or one you reported. Shown once the project has a production sensor.';
 const AUTONOMY_SCORE_TIP = 'The mean of the Trust, Efficiency and Awareness Scores, weighted equally; – until all three exist';
-// Commit history: hello's commits a day, oldest first, as a column a week and a row a day
+// Commit history: hello's commits a day, oldest first, as a column a week and a row a day. One day
+// formatter, made on first use; the mosaic is kept while the activity and the day are the same.
+let OV_DAY_FMT = null, OV_MOSAIC = { key: null, html: '' };
 function ovMosaic(activity) {
   const xs = Array.isArray(activity) ? activity.map((x) => (Number.isFinite(x) && x > 0 ? x : 0)) : [];
+  const key = `${new Date().toDateString()}|${JSON.stringify(xs)}`;
+  if (OV_MOSAIC.key === key) return OV_MOSAIC.html;
+  OV_DAY_FMT ??= new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
   const max = Math.max(0, ...xs), n = xs.length;
   const cells = xs.map((x, i) => {
-    const day = new Date(Date.now() - (n - 1 - i) * 864e5).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    const day = OV_DAY_FMT.format(new Date(Date.now() - (n - 1 - i) * 864e5));
     return `<i${x ? ` class="l${Math.max(1, Math.ceil((4 * x) / max))}"` : ''} title="${esc(`${day}: ${x} commit${x === 1 ? '' : 's'}`)}"></i>`;
   }).join('');
-  return `<div class="mosaic" role="img" aria-label="Commits a day, the last ${Math.ceil(n / 7)} weeks" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(n / 7))}, minmax(0, 1fr))">${cells}</div>`;
+  const html = `<div class="mosaic" role="img" aria-label="Commits a day, the last ${Math.ceil(n / 7)} weeks" style="grid-template-columns:repeat(${Math.max(1, Math.ceil(n / 7))}, minmax(0, 1fr))">${cells}</div>`;
+  OV_MOSAIC = { key, html };
+  return html;
 }
+/* hello-pulse end */
 // Overview: the header (name, summary, status pill), then the ruled sections: Status, Numbers,
 // Autonomy, Goals, Needs you, Commit history. Each part is written only when it changed.
 const OV_DRAWN = new WeakMap();
