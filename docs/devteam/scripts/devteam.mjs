@@ -2774,18 +2774,53 @@ const repoReadable = (name) => { if (name === 'home') return true; const l = own
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
-// Whether a ticket keeps its records in home (its repo link's records is "home"): spec, plan,
-// verification and reviews on home's ticket/<id>, in home's project folder, while its code is on
-// its repo's ticket/<id>. Read from main's committed settings, like the routing above, so a
-// working tree's edit changes nothing until it lands. A view: never touches a checkout.
-function recordsInHome(t) {
+// Whether a ticket's repo link says records "home". Read from main's committed settings, like the
+// routing above, so a working tree's edit changes nothing until it lands.
+function recordsHomeSetting(t) {
   const name = t ? repoOfTicketLink(t) : 'home';
   if (name === 'home') return false;
   const s = committedComponents();
   const l = ownEntry(s.links, name);
   return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.records === 'home';
 }
-const recordsInHomeId = (id) => recordsInHome(tickets().get(id));
+// The ticket folders in a project's tickets/ at a ref: one ls-tree per log read, not one cat-file
+// per ticket (a dashboard asks for every ticket).
+const ticketFoldersAt = (ref, rel, g) => new Set(ref ? (g(['ls-tree', '--name-only', `${ref}:${rel}/tickets`]) ?? '').split('\n').filter(Boolean) : []);
+const homeTicketFolders = (ref) => memo(`homeTicketFolders:${ref}`, () => ticketFoldersAt(ref, projectRel, git));
+const linkTicketFolders = (R) => memo(`linkTicketFolders:${R.name}`, () => ticketFoldersAt(R.mainRef(), R.projectRel, R.git));
+// A ticket of a records-"home" link whose records were left in the link, written before the link
+// said "home": home has no folder for it (main, local or origin ticket/<id>; a records branch with
+// no commit yet has none), and the link has <project>/tickets/<id>/ at `at` (the commit judged),
+// else its ticket branch, else its main. Such a ticket is read as records "repo" until home has
+// some; then home wins. A link this machine can't read has none left in it. Refs only, memoized
+// per log read, so a dashboard re-decides on its next read.
+function recordsLeftInRepo(t, at) {
+  if (!t || !recordsHomeSetting(t)) return false;
+  const name = repoOfTicketLink(t);
+  if (!repoReadable(name)) return false;
+  return memo(`leftInRepo:${t.id}:${at ?? ''}`, () => {
+    if (homeTicketFolders(mainRef()).has(t.id)) return false;
+    const own = `${projectRel}/tickets/${t.id}`;
+    if ([`refs/heads/ticket/${t.id}`, `refs/remotes/origin/ticket/${t.id}`].some((r) => resolveCommit(r) && git(['cat-file', '-e', `${r}:${own}`]) !== null)) return false;
+    const R = repo(name);
+    const ref = at ?? R.ticketBranchRef(t.id) ?? R.mainRef();
+    if (!ref) return false;
+    return ref === R.mainRef() ? linkTicketFolders(R).has(t.id) : R.git(['cat-file', '-e', `${ref}:${R.projectRel}/tickets/${t.id}`]) !== null;
+  });
+}
+// Whether a ticket keeps its records in home (its repo link's records is "home", and none were left
+// in the link): spec, plan, verification and reviews on home's ticket/<id>, in home's project
+// folder, while its code is on its repo's ticket/<id>. Reads refs, never a working tree. `at` is
+// the link commit a command judges; views pass none (the link's ticket branch, else its main).
+function recordsInHome(t, { at } = {}) { return recordsHomeSetting(t) && !recordsLeftInRepo(t, at); }
+const recordsInHomeId = (id, opts) => recordsInHome(tickets().get(id), opts);
+// Said once per process per ticket (merge and check-pr run checkTicket inside them).
+const leftWarned = new Set();
+function warnLeftInRepo(t, R) {
+  if (leftWarned.has(t.id)) return;
+  leftWarned.add(t.id);
+  warn(`${t.id}: records read from ${R.name} (${R.projectRel}/tickets/${t.id}/), left from before links.${R.name}.records was "home"; move them to home's ${projectRel}/tickets/${t.id}/ once merged`);
+}
 // The repo that holds a ticket's records: home for records in home, else the ticket's own (an act).
 const recordsRepo = (id) => (recordsInHomeId(id) ? repo('home') : repoOfTicketId(id));
 // Home's ticket/<id>, where a records-in-home ticket's records are: the local branch (the worker's
@@ -4312,6 +4347,8 @@ const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.en
 // A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
 // A records-in-home ticket's are home's, whatever repo a caller passes: an exact sha as given, a
 // branch name resolved again in home (a caller's ref is the link's), and no ref (merged) home's main.
+// A command that judged a commit passes its decision (src.inHome), so the reviews come from where
+// the rest of its records did; else the views form decides.
 // A dashboard request reads every ticket's records several times (deriveStatus and collectMetrics
 // each run more than once, and metrics reads them for reviewStats and reviewPasses): while one runs,
 // each ticket's folder is read once (reviewMemo, set by dashboardData) and reviewReads counts reads.
@@ -4319,12 +4356,12 @@ let reviewMemo = null;
 let reviewReads = 0;
 const ticketReviews = (id, src) => {
   if (!reviewMemo) return ticketReviewsRead(id, src);
-  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}`}`;
+  const k = `${id}\0${src === WORKTREE ? 'worktree' : `${src.ref ?? ''}\0${src.repo?.name ?? ''}\0${src.inHome ?? ''}`}`;
   if (!reviewMemo.has(k)) { reviewReads++; reviewMemo.set(k, ticketReviewsRead(id, src)); }
   return reviewMemo.get(k);
 };
 const ticketReviewsRead = (id, src) => {
-  if (recordsInHomeId(id)) {
+  if (src.inHome ?? recordsInHomeId(id)) {
     const ref = src.ref ? (FULL_SHA.test(src.ref) ? src.ref : homeRecordsRef(id)) : mainRef();
     return ref ? reviewRecordsIn({ ref }, `tickets/${id}/reviews`) : [];
   }
@@ -4605,7 +4642,7 @@ function recordsBranchFails(id, recSha) {
 }
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
-function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg }) {
+function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: recordsArg, inHome }) {
   const t = tickets().get(id);
   if (!t) return [`no ticket ${id}`];
   const fails = [];
@@ -4616,11 +4653,16 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
   let src = WORKTREE;
   // Records in home: the records are home's at recSha (merge pins it; else home's ticket/<id>, the
   // local branch, else origin's), the code the link's at sha. Never home's working tree.
-  const H = recordsInHome(t);
   let recSha = null;
   if (R.commonDir) {
     sha = headIn(R, shaArg);
     if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
+  }
+  // Decided once, at the head judged (or as merge and check-pr decided it), and used for every
+  // records read below: records left in the link are read there, as under records "repo".
+  const H = inHome ?? recordsInHome(t, { at: sha });
+  if (recordsHomeSetting(t) && !H) warnLeftInRepo(t, R);
+  if (R.commonDir) {
     if (H) {
       // records: undefined reads home's ticket/<id>; null is merge's "none pinned" (it says why)
       const ref = recordsArg === undefined ? homeRecordsRef(id) : recordsArg;
@@ -4643,7 +4685,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     const rows = verText.split('\n').filter((l) => /^\|/.test(l.trim()) && !/^\|\s*-/.test(l.trim())).length - 1;
     if (rows < (t.done_when ?? []).length) fails.push(`verification has ${Math.max(rows, 0)} row(s) for ${t.done_when.length} done-when(s)`);
   }
-  const reviews = ticketReviews(id, src);
+  // A WORKTREE src goes on without H: a link ticket never reaches it (linkRepo always has commonDir
+  // and projectInRepo), and a home ticket's records setting is false, so the views form agrees.
+  const reviews = ticketReviews(id, src === WORKTREE ? src : { ...src, inHome: H });
   // An unnamed record counts for nothing; it fails the ticket only while it is the latest in its
   // track (a later, named pass in the same track supersedes it).
   const superseded = (r) => reviews.some((o) => o !== r && o.stage === r.stage && o.variant === r.variant && o.pass > r.pass);
@@ -4912,7 +4956,7 @@ function artifactRule(sha) {
   }
   return fails;
 }
-function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home'), records, inHome }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   // A ticket's PR is in its own repo; plan and chore PRs are always home's.
   if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
@@ -4941,7 +4985,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
     if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
   }
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records }), ...depsFails(branch.slice('ticket/'.length), R)];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge, records, inHome }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -5125,8 +5169,8 @@ function cmdReviewWorktree() {
   seedWorktree(wt, { repo: R });
   out(wt);
   // records in home: a detached checkout of home's ticket/<id> beside it, whose full sha the
-  // reviewer writes in its record's "- Records:" line
-  if (recordsInHomeId(id)) {
+  // reviewer writes in its record's "- Records:" line; decided at the sha reviewed
+  if (recordsInHomeId(id, { at: sha })) {
     const ref = homeRecordsRef(id);
     const rsha = ref ? resolveCommit(ref) : null;
     if (!rsha) warn(`no records for ${id} in home (home's ticket/${id}), so no records checkout was made`);
@@ -5146,9 +5190,14 @@ function cmdCheckPr() {
   fetchMain(R);
   // a records-in-home ticket's records are on home's ticket/<id>: as origin has it now
   const tid = /^(?:refs\/heads\/)?ticket\/(.+)$/.exec(headRef)?.[1];
-  // judged as origin has them (never a local branch that may not be pushed); none there: none
-  const records = R.name !== 'home' && tid && recordsInHomeId(tid) ? (gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0 ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
-  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, ...(records !== undefined ? { records } : {}) });
+  // judged as origin has them (never a local branch that may not be pushed); none there: none.
+  // Fetched before deciding, so home records pushed from another clone count (home wins); decided
+  // once, at the head.
+  const homeSet = R.name !== 'home' && !!tid && tickets().has(tid) && recordsHomeSetting(tickets().get(tid));
+  const fetched = homeSet && gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${tid}:refs/remotes/origin/ticket/${tid}`]).status === 0;
+  const inHome = homeSet ? recordsInHomeId(tid, { at: sha }) : undefined;
+  const records = inHome ? (fetched ? `refs/remotes/origin/ticket/${tid}` : null) : undefined;
+  const fails = checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R, inHome, ...(records !== undefined ? { records } : {}) });
   // none on origin: say so (checkTicket leaves the why to its caller when told none is pinned)
   if (records === null) fails.push(`no records for ${tid} in home: home's ticket/${tid} is not on origin; push it`);
   report(fails, `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
@@ -5607,10 +5656,12 @@ function cmdMerge() {
   const mainBranch0 = S.main_branch;
   R.git(['fetch', '--quiet', 'origin', mainBranch0]);
   if (R.resolveCommit(`origin/${mainBranch0}`) && R.git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
-  // records in home: one pinned home commit, checked here and landed below
-  const inHome = !!id && tickets().has(id) && recordsInHomeId(id);
+  // records in home: one pinned home commit, checked here and landed below. Decided once, at the
+  // head, after fetching home's ticket/<id>, so records pushed from another clone count (home wins)
+  if (id && tickets().has(id) && recordsHomeSetting(tickets().get(id))) gitRun(['fetch', '--quiet', 'origin', `+refs/heads/ticket/${id}:refs/remotes/origin/ticket/${id}`]);
+  const inHome = !!id && tickets().has(id) && recordsInHomeId(id, { at: sha });
   const rec = inHome ? pinRecords(id) : null;
-  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(inHome ? { records: rec.sha ?? null } : {}) });
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R, ...(id && tickets().has(id) ? { inHome } : {}), ...(inHome ? { records: rec.sha ?? null } : {}) });
   if (rec?.problems) fails.push(...rec.problems);
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
@@ -8298,7 +8349,7 @@ function draftArtifacts(landed = landedArtifacts()) {
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
 // ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
 // The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
-// main has, and records the owner's word as an owner act (docs/superpowers/specs/2026-11-09-public-artifacts-design.md).
+// main has, and records the owner's word as an owner act (the public-artifacts design).
 // The project's name is part of every public URL, so it is set explicitly: the folder-name fallback
 // helloBody uses would move every link on a re-clone.
 const PUBLIC_PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
