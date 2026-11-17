@@ -213,6 +213,27 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.equal(await p.ev(ON_PAGE('loop')), true, 'still Loop');
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
+
+    // the Loop's "waiting for you in the Inbox": a modified click is the browser's (no preventDefault, no panel);
+    // a plain one opens the tab over Loop
+    await p.ev("location.hash = '#loop?lt=orient'");
+    await soon(`location.hash === '#loop?lt=orient' && ${ON_PAGE('loop')} && !document.body.classList.contains('peek-open') && !${IS_OPEN} && !!document.querySelector('#knowledge a[href="#inbox"]')?.getClientRects().length`, "Orient, the Loop's Inbox link");
+    const modified = await p.ev(`(() => { const a = document.querySelector('#knowledge a[href="#inbox"]'), seen = [];
+      // after the page's handlers (window, bubbling): what they did, then the default stopped so nothing navigates
+      const look = (e) => { seen.push(e.defaultPrevented); e.preventDefault(); };
+      addEventListener('click', look);
+      for (const k of ['ctrlKey', 'metaKey', 'shiftKey', 'altKey']) a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, [k]: true }));
+      removeEventListener('click', look);
+      // (a Shift+click is also the thread layer's: any draft it began is dropped)
+      if (TL.draft) tlClose();
+      return { seen, th: TH.th, at: INBOX_AT, hash: location.hash }; })()`);
+    assert.deepEqual(modified, { seen: [false, false, false, false], th: null, at: null, hash: '#loop?lt=orient' }, 'a modified click: not prevented, no panel');
+    await p.ev('new Promise((r) => setTimeout(() => r(true), 300))');
+    assert.equal(await p.ev(IS_OPEN), false, 'still closed');
+    await p.click('#knowledge a[href="#inbox"]');
+    await soon(`location.hash === '#loop?lt=orient&th=inbox' && ${ON_PAGE('loop')} && ${ON_INBOX}`, "the Loop's link: the panel on Inbox over Loop");
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
     await p.ev("location.hash = '#overview'");
     await soon(`location.hash === '#overview' && ${ON_PAGE('overview')} && !document.body.classList.contains('peek-open') && !${IS_OPEN}`, 'Overview');
 
@@ -259,7 +280,6 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     const soon1 = soonIn(q1, 30000);
     await soon1(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && ${IN_BODY(`#q-${fx.q.q3}`)}`, 'cold: #overview?th=inbox, the card in view in #th-body');
     assert.deepEqual(await q1.ev('window.__thrown'), [], 'nothing thrown');
-    await q1.close();
   });
 
   // AC3, first part (done-when 3)

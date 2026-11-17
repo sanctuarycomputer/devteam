@@ -6095,9 +6095,9 @@ document.addEventListener('click', (e) => {
   if (!a || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   e.preventDefault();
   const qid = a.dataset.answeredGo;
-  // the list opened first, so the card has a box to scroll to
+  // the list opened first, so the card has a box to scroll to (a render keeps it open)
   $('answered-wrap').open = true;
-  inboxGo({ scrollTo: `#a-${CSS.escape(qid)}`, then: (card) => { $('answered-wrap').open = true; card.querySelector('[data-overrule]')?.focus({ preventScroll: true }); } });
+  inboxGo({ scrollTo: `#a-${CSS.escape(qid)}`, then: (card) => card.querySelector('[data-overrule]')?.focus({ preventScroll: true }) });
 });
 // Any other in-page link to the Inbox (the Loop's "waiting for you in the Inbox", the lesson peek's "Keep or retire
 // it in the Inbox"): its tab over the page shown, never a #inbox hop, which would redirect to Overview (kit-100 spec
@@ -6110,11 +6110,13 @@ document.addEventListener('click', (e) => {
 });
 // The panel's Inbox tab over the page in force (kit-100 spec §2.4): thGo({ th: 'inbox' }), then scrollTo, an element
 // in #th-inbox, brought into view inside #th-body once the tab shows and the element is drawn (thRouted and the
-// render after: the next render() at most), and then(el) run on it. A road taken since replaces it.
+// render after: the next render() at most), and then(el) run on it. Any other Threads change (thGo) drops it, so a
+// target never found can't scroll a later visit to the Inbox.
 let INBOX_AT = null;
 function inboxGo({ scrollTo = null, then = null } = {}) {
-  INBOX_AT = scrollTo ? { sel: scrollTo, then } : null;
   thGo({ th: 'inbox' });
+  // set after thGo, which drops any target; its route, if a hashchange, comes later and finds this one
+  INBOX_AT = scrollTo ? { sel: scrollTo, then } : null;
   inboxAt();
 }
 function inboxAt({ rendered = false } = {}) {
@@ -6941,6 +6943,8 @@ function thHead() {
 // panel), an in-panel one's dropped. focus: a press in the panel or on the Inbox button, so the focus follows
 // the change (or the kind of place to put it: 'composer').
 function thGo({ th = null, t, focus = false } = {}) {
+  // a pending Inbox road's target is inboxGo's own: any Threads change drops it (inboxGo sets its own after)
+  INBOX_AT = null;
   if (t === undefined) t = TH.t && !thInPanelId(TH.t) ? TH.t : null;
   const leaving = !t && !!TH.t && thInPanelId(TH.t);
   TH.focus = typeof focus === 'string' ? focus : !focus ? null : !th ? 'inbox' : t && thInPanelId(t) ? 'back' : leaving ? 'row' : TH.th ? 'thf' : 'tab';
