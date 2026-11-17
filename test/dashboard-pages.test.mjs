@@ -10,7 +10,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { PORTS, bareProject, dashboardOnFreePort, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
-const NAV = [['Project', ['Overview', 'Inbox', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Sensors', 'Health', 'Retros', 'Self Improvement']]];
+const NAV = [['Project', ['Overview', 'Goals', 'Progress', 'Board', 'Library']], ['Autonomy', ['Trust', 'Efficiency', 'Sensors', 'Health', 'Retros', 'Self Improvement']]];
 const SKIP = canDrive ? false : 'needs Chrome and a Node with WebSocket';
 
 // One project, its dashboard and a Chrome tab on it. With records, the project has what the
@@ -194,9 +194,11 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   const redirects = JSON.parse(await p.ev('JSON.stringify(SHELL_ROUTES.redirects)'));
   const mon = Object.keys(redirects).find((k) => k === 'monitoring');
   assert.equal(redirects[mon], 'sensors', 'the table sends monitoring to sensors');
-  assert.equal(redirects['overview?th=inbox'], 'inbox', 'the table sends overview?th=inbox to inbox');
-  assert.equal(redirects['board?th=inbox'], 'inbox', 'the table has the board?th=inbox entry');
-  for (const [head, page] of [[`#${mon}`, redirects[mon]], ['#overview?th=inbox', redirects['overview?th=inbox']], ['#board?goal=g&th=inbox', redirects['board?th=inbox']]]) {
+  assert.equal(redirects.inbox, 'overview?th=inbox', 'the table sends #inbox to the Inbox tab over Overview');
+  assert.equal(redirects.questions, 'overview?th=inbox', 'the table sends #questions likewise');
+  assert.ok(!Object.keys(redirects).some((k) => k.endsWith('?th=inbox')), 'no <page>?th=inbox entry: that is the page with the panel on Inbox');
+  // (the redirect's click-through to the panel is exercised once the panel draws the Inbox, kit-100 T2 and on)
+  for (const [head, page] of [[`#${mon}`, redirects[mon]]]) {
     // Overview the newest entry (none ahead of it), so the click's one entry shows in history.length
     await go('#goals');
     await onPage('goals');

@@ -388,7 +388,7 @@ test('pages and Threads tabs register once; a throwing tab shows its error', () 
 });
 
 test("the router's table: page ids and link kinds disjoint, and every legacy head goes to its home page", () => {
-  assert.deepEqual([...R.pages].sort(), ['board', 'efficiency', 'goals', 'health', 'inbox', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
+  assert.deepEqual([...R.pages].sort(), ['board', 'efficiency', 'goals', 'health', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
   for (const p of R.pages) { assert.doesNotMatch(p, /[/?]/); assert.ok(!Object.hasOwn(R.links, p), `${p} is not a link kind`); }
   // every link kind today's route() reads
   const route = INDEX.slice(INDEX.indexOf('function route()'), INDEX.indexOf('function hideDrawer()'));
@@ -409,23 +409,26 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
   assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).home, 'library');
   assert.equal(S.parseHead('#nothing-here/x', R).home, 'overview', 'anything else over overview');
   // today's section anchors are page heads, and the two that move redirect
-  for (const s of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
+  for (const s of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#monitoring', R))), { page: 'sensors', state: {}, redirected: true });
   // until kit-93: Health is a page of its own, and Governance has none yet (it is over overview)
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#health', R))), { page: 'health', state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#governance', R))), { page: 'overview', state: {} });
-  // until kit-100: every page's Threads tab is the Inbox page
-  for (const p of R.pages) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${p}?th=inbox`, R))), { page: 'inbox', state: {}, redirected: true }, `${p}?th=inbox`);
+  // the Inbox is the Threads panel's first tab (kit-100): no page, the old heads redirect to it, and `?th=inbox` is a plain state
+  const plain = (x) => JSON.parse(JSON.stringify(x));
+  assert.ok(!R.pages.includes('inbox'));
+  assert.deepEqual(plain(S.parseHead('#inbox', R)), { page: 'overview', state: { th: 'inbox' }, redirected: true });
+  assert.deepEqual(plain(S.parseHead('#questions', R)), { page: 'overview', state: { th: 'inbox' }, redirected: true });
+  for (const p of R.pages) assert.deepEqual(plain(S.parseHead(`#${p}?th=inbox`, R)), { page: p, state: { th: 'inbox' } });
+  assert.ok(!Object.keys(R.redirects).some((k) => k.endsWith('?th=inbox')));
   // the old Loop tab subjects are permanent redirects
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/orient', R))), { page: 'loop', state: { lt: 'orient' }, redirected: true });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/observe', R))), { page: 'loop', state: {}, redirected: true });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('', R))), { page: 'overview', state: {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#questions', R))), { page: 'inbox', state: {}, redirected: true }, "today's Inbox list anchor (until kit-100)");
 });
 
 test('parseHead and headFor round-trip every page head and link head', () => {
-  const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#inbox'];
-  // ?th=inbox on a page redirects to the Inbox page (until kit-100), so it is not a round-trip head
+  const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#overview?th=inbox', '#board?goal=g-1&th=inbox'];
   for (const p of R.pages) heads.push(`#${p}`, `#${p}?th=open&t=t-20261115-1`);
   for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
   heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');

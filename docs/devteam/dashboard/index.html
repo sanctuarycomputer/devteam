@@ -938,6 +938,8 @@ try {
     <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
   </div>
 </aside>
+<!-- the Inbox count's holder until kit-100 T2 gives its readers inboxCount() and removes it (it was the nav item's) -->
+<span id="n-questions" class="count" hidden></span>
 <div class="main">
 <header class="pagebar"><h1 id="page-title">Overview</h1><span class="extra"></span><button class="ghost tt" id="inbox-btn" type="button" title="Open questions"><i class="icon-inbox" aria-hidden="true"></i>Inbox <span class="n q" id="inbox-btn-n"></span></button></header>
 <main class="page waiting">
@@ -1418,7 +1420,7 @@ function saveFilters(page, state) {
 // shared block, so the tickets that change it never touch the block.
 // until kit-93: health is its own page (it folds into Sensors) and governance is not a page yet (a
 // governance file's home below then opens over Overview); kit-93 swaps both
-const SHELL_ROUTES_PAGES = ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
+const SHELL_ROUTES_PAGES = ['overview', 'goals', 'progress', 'board', 'library', 'trust', 'efficiency', 'sensors', 'health', 'retros', 'loop', 'settings'];
 const SHELL_ROUTES = {
   pages: SHELL_ROUTES_PAGES,
   links: {
@@ -1433,9 +1435,8 @@ const SHELL_ROUTES = {
     monitoring: 'sensors',
     // permanent: the old Loop tab subjects open the Loop page (and its tab)
     'loop/observe': 'loop', 'loop/orient': 'loop?lt=orient', 'loop/decide': 'loop?lt=decide', 'loop/act': 'loop?lt=act',
-    // until kit-100: today's Inbox list anchor, and every page's Threads "Inbox" tab, are the Inbox page
-    questions: 'inbox',
-    ...Object.fromEntries(SHELL_ROUTES_PAGES.map((p) => [`${p}?th=inbox`, 'inbox'])),
+    // the Inbox is the Threads panel's first tab (kit-100): its old heads open it over Overview
+    inbox: 'overview?th=inbox', questions: 'overview?th=inbox',
   },
 };
 /* shell-routes end */
@@ -1448,9 +1449,9 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 // Each page is today's section (its data-page); render() still draws every section on every read,
 // shown or not, so nothing a page holds is lost while another shows. A page's nav count is today's
 // element, which render() fills (PAGE_COUNT_ID: the count each nav item carries).
-const PAGE_COUNT_ID = { inbox: 'n-questions', goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
+const PAGE_COUNT_ID = { goals: 'n-goals', progress: 'n-progress', board: 'n-active', library: 'n-library', trust: 'n-trust', efficiency: 'n-efficiency', sensors: 'n-sensors', health: 'n-findings', retros: 'n-retros', loop: 'n-knowledge' };
 for (const [id, title, group, icon] of [
-  ['overview', 'Overview', 'project', 'layout-dashboard'], ['inbox', 'Inbox', 'project', 'inbox'], ['goals', 'Goals', 'project', 'target'],
+  ['overview', 'Overview', 'project', 'layout-dashboard'], ['goals', 'Goals', 'project', 'target'],
   ['progress', 'Progress', 'project', 'chart-line'], ['board', 'Board', 'project', 'kanban'], ['library', 'Library', 'project', 'library'],
   ['trust', 'Trust', 'autonomy', 'shield-check'], ['efficiency', 'Efficiency', 'autonomy', 'zap'], ['sensors', 'Sensors', 'autonomy', 'activity'], ['health', 'Health', 'autonomy', 'heart-pulse'],
   ['retros', 'Retros', 'autonomy', 'history'], ['loop', 'Self Improvement', 'autonomy', 'repeat'], ['settings', 'Settings', 'settings', 'settings'],
@@ -5207,9 +5208,6 @@ function routeHead({ fresh = false, carry = null } = {}) {
   hideDrawer();
   // a page head: its page; an unknown or empty head, or a redirect, is replaced in place (#overview, #monitoring → #sensors)
   if (p.link !== undefined) return;
-  // th=inbox with other keys: the same <page>?th=inbox entry of the table, by the parsed page
-  const thInbox = `${p.page}?th=inbox`;
-  if (!p.redirected && p.state.th === 'inbox' && Object.hasOwn(SHELL_ROUTES.redirects, thInbox)) return void goHead(`#${String(SHELL_ROUTES.redirects[thInbox]).replace(/^#/, '')}`, { replace: true });
   if (p.redirected || raw.split('?')[0] !== p.page) history.replaceState(history.state, '', headFor(p));
   showHead(p);
 }
