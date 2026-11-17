@@ -12,7 +12,7 @@
 - Test first, in the new `test/artifact-versions.test.mjs`. It uses a `threadsFixture` with real git history and a real dashboard.
   - T1 checks the subcommand's JSON (spec A1, A2, A5, A7, and A6's exit 3).
   - T2 adds the route, and checks that the endpoint's answer equals the CLI's and that every listed url is served under the sandbox (A3, A4, A6).
-- Then mutations M1–M5 in verification, and CI `test.yml` green at the head as the gate.
+- Then mutations M1–M6 in verification, and CI `test.yml` green at the head as the gate.
 - Risks:
   - a draft folder without its own `.git` reporting main's HEAD (guarded by `--show-toplevel`, A2);
   - a cap on commits instead of on versions (A7);
@@ -49,7 +49,7 @@
 
 1. **A draft in a plain folder under `.worktrees/`** (no `.git`, as the existing tests make drafts): its `commit` must be `null`, not main's HEAD. Tested in T1 (A2).
 2. **A revert to an older tree:** listed once, at its newest commit. Tested in T1 (A5b, A7).
-3. **A folder deleted on main:** there is no `landed`, but history is kept and still served. Tested in T1 (A5c) and T2 (served).
+3. **A folder deleted on main:** there is no `landed`, but history is kept and still served. Tested in T1 (A5c, listed) and T2 (A5c, each url served 200).
 4. **A `sec-fetch-site` header missing:** must still answer 200 (curl, the gateway's loopback). Tested in T2 (A6).
 5. **Paths with spaces or odd names in an artifact folder** don't matter, since only the folder's own `040000` line is parsed. The parse must match the path exactly (`=== folder`), not a prefix, or `viewer-mock-2` would leak into `viewer-mock`. Tested in T1: A1 lands a sibling `viewer-mock-2` once, and it must not appear.
 
@@ -77,12 +77,12 @@
     - `mock(n)` gives VIEWER_MOCK-shaped files whose `index.html` contains `v${n}`.
   - Tests, with the spec's assertions:
     - `'versions: landed then earlier by date, each with its commit and time'` (A1):
-      - Land v1. Make an unrelated commit (a file outside `artifacts/`). Land v2. Land a sibling `viewer-mock-2` once. Land v3.
+      - Land v1. Make an unrelated commit (a file outside `artifacts/`). Land v2 **and a sibling `viewer-mock-2` in the same commit** (so the pathspec keeps the commit, and only an exact-path match keeps the sibling's `040000` line out). Land v3.
       - `versions` deep-equals `[landed v3, earlier v2, earlier v1]` on `kind`, `tree`, `commit`, `at` (`tree:${tree}`) and `url` (`/artifact/tree/${tree}/viewer-mock/`).
       - Each `time === F.g(['log','-1','--format=%cI',commit], F.old)`, and the times are non-increasing.
-      - No entry's commit is the unrelated commit or `viewer-mock-2`'s, and `truncated === false`.
+      - No entry's commit is the unrelated commit; no entry's `tree` is `viewer-mock-2`'s folder tree (`rev-parse <v2 commit>:<ARTIFACTS_REL>/viewer-mock-2`); there are exactly 3 entries; `truncated === false`.
     - `'versions: the draft first, with its worktree and its own commit'` (A2), exactly as in the spec's A2:
-      - `demo-01-draft` is a `git init` checkout with one commit. Its `commit` equals `rev-parse HEAD` there.
+      - `demo-01-draft` is a `git init` checkout with one commit, made with `F.g(['-c','user.email=t@example.com','-c','user.name=t','commit','-qm','wt'], wt)` (CI has no git identity). Its `commit` equals `rev-parse HEAD` there.
       - `demo-02-plain` is a plain folder, back-dated an hour with `fs.utimesSync`. Its `commit` is `null`.
       - The drafts are ordered newest first. Touching `demo-02-plain` to now+60 s flips the order.
       - A copy equal to main's gives no draft. Removing the worktrees gives no drafts.
@@ -99,10 +99,10 @@
 - [ ] **Step 3: Implement `artifactVersions(slug)`**
   - Drafts:
     - `draftArtifacts().filter((a) => a.slug === slug)`, sorted by `updated_at` descending.
-    - For each draft, `root = draftWorktree(a.at)`. Then `commit = git(['rev-parse','--show-toplevel'], root) === root ? git(['rev-parse','HEAD'], root) : null`. Compare real paths: `draftWorktree` returns the real path, so compare it with the `realpathSync` of the toplevel.
+    - For each draft, `root = draftWorktree(a.at)`. Then `top = git(['rev-parse','--show-toplevel'], root)`; `commit = top && fs.realpathSync(top) === root ? git(['rev-parse','HEAD'], root) : null`. `git()` returns null on failure (no HEAD, not a repo), so a null `top` is `commit: null` and never reaches `realpathSync`. `draftWorktree` returns the real path, so the comparison is real path to real path.
   - Main's entries:
     - `ref = mainRef()`. If there is a ref, run one `git log --format=%x01%H %cI --raw --no-abbrev -t -m --first-parent --no-renames <ref> -- <ARTIFACTS_REL>/<slug>`.
-    - Split it on `\x01`. In each chunk, the header is `<sha> <iso>`. Find the line whose path is exactly the folder and whose mode is `040000`, and take its new tree. Skip the chunk when there is no such line or the new tree is all zeros.
+    - Split it on `\x01`. In each chunk, the header is `<sha> <iso>`. Find the raw line whose path is exactly the folder (`=== \`${ARTIFACTS_REL}/${slug}\``, never a prefix) and whose **new (second) mode** is `040000` (`/^:(\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) \S+\t(.*)$/`, mode `m[2]`, new tree `m[4]`; the creating commit's old mode is `000000`), and take its new tree. Skip the chunk when there is no such line or the new tree is all zeros.
     - Dedupe by tree, keeping the first (newest).
   - Filter to trees with `artifact.json`, using one `spawnSync('git', ['cat-file','--batch-check'], { cwd: mainRoot, input: trees.map((t) => `${t}:artifact.json`).join('\n') + '\n' })`. A line ending in ` missing` drops that tree.
   - `nowTree = treeNow(git(treeFolderArgs(ref, slug).now, mainRoot))`.
@@ -146,7 +146,7 @@
 - [ ] **Step 1: Write the failing tests.**
   - Start a dashboard on a free port, as `dashboard.test.mjs:1165` does: `startDashboard(F.old, F.env({}), ['--port', String(port)])`, then `until(... /dashboard on http:\/\/127\.0\.0\.1:${port}\b/ ...)`.
   - Add `apiVersions(B, slug, headers)`.
-  - In A1, A2 and A5, assert after each CLI read that `await (await fetch(\`${B}/api/artifact-versions?slug=${slug}\`)).json()` deep-equals `cliVersions`. Start the dashboard in each of those tests.
+  - In A1, A2, A5 and A7, assert after each CLI read that `await (await fetch(\`${B}/api/artifact-versions?slug=${slug}\`)).json()` deep-equals `cliVersions`. Start the dashboard in each of those tests. In A5(c), after the folder is deleted on main, also `fetch(B + url)` for every listed entry and assert 200 with that version's `index.html` text (spec A5c, "each url is still served 200").
   - New test `'a listed version is served read-only at its url, under the artifact sandbox'` (A3, A4):
     - Use A1's history plus `demo-01-draft`.
     - For each entry:
@@ -184,5 +184,6 @@ Run each mutation, see the named test go red, and revert it. Record each red out
 | M3 | skip the `artifact.json` filter | A5a |
 | M4 | delete the route's `sec-fetch-site` check | A6 (403) |
 | M5 | build every tree `url` as `/artifact/main/<slug>/` | A3 (wrong bytes for v1, v2) |
+| M6 | in `artifactCsp`, drop `sandbox allow-scripts` (a mutation of existing serving code, only to show A4 bites) | A4 |
 
 Then merge `origin/main` and push. Record `devteam.mjs gate ci -- gh run watch <run> --exit-status`, redirected to a file, never piped. Cite `gh run view <run> --json conclusion` at the head.
