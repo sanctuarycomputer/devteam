@@ -12,7 +12,7 @@ A new `awarenessData(now)` in `devteam.mjs` reads the 12 weeks from `efficiencyW
 
 Every clock inside the week reads E. `orientationDebt()` and `incidentDebt()` read `Date.now()` today, and `withLogAt` doesn't move that clock. Both get a `now` argument that defaults to `Date.now()`, and this ticket passes E. The other callers (`cmdOrient` and `collectOoda`'s `ooda.debt`) pass nothing, so they behave as before.
 
-`dashboardDataRead()` computes `efficiency`, `autonomy` and `awareness` first. It then adds `autonomy_score` from the three objects' weekly scores, so nothing is computed twice.
+`dashboardDataRead()` reads the clock once (`now`). It computes `efficiency` (`efficiencyData(metrics, now)`, a new optional argument that defaults to `Date.now()`), `autonomy` (`autonomyData(now)`) and `awareness` (`awarenessData(now)`) first, so the three agree on the 12 weeks even across Monday 00:00 UTC (S1-2). It then adds `autonomy_score` from the three objects' weekly scores, so nothing is computed twice.
 
 Alternatives I dropped:
 - **Reading `informed` from the stored learning records.** The records hold counts only. The signals part needs each signal's forming and explanation times, and the lessons part needs which knowledge was given. Both need the log at E, so the records can't save the fold.
@@ -53,7 +53,7 @@ autonomy_score: {
 - *Explained at.* A signal's explanation time `x` is the earliest of these, as of E:
   - for each of its items, each knowledge or problem record whose `evidence` or `refs` cites the item at E: the time of the record's first line that carried that citation (its creation, or the first applied update whose `evidence` or `refs` includes the item);
   - the same for each decision that is live at E (`liveDecision`) and that `explained()` would read (one with an `o-` ref);
-  - for each live `orient-noise` decision whose `refs` name the signal's key: its `created_at`.
+  - for each `orient-noise` decision that `explained()` reads as covering the key (live at E, with an `o-` ref, its `refs` naming the key) and that was made at or after the signal formed: its `created_at`. A ruling covers only the sightings made at or before it (`covered()`), and later ones get a fresh look. So a ruling from before the signal formed leaves the forming sighting uncovered and doesn't explain the signal: `orientationDebt` would still list it (S1-1).
 
   A later line on a record that already cited the item doesn't move `x`. A citation dropped by E, or a decision corrected by E, doesn't count.
 - *Counted.* `of` = the week's signals, less those formed after `E − 24 h` with no `x` (they haven't had their day yet). `count` = those with `x ≤ formed + 24 h`. An `x` before forming counts as 0 hours.
@@ -77,20 +77,20 @@ Up to five, in this order, and cut at five:
 1. **Learn from a fixed incident.** One for each row of `incidentDebt(E)`, oldest first.
    - `kind`: `incident`; `id`: `aw-incident-<incident id>`.
    - `what`: "Write down what <incident title> taught".
-   - `evidence`: "Fixed and verified <n> days ago; no lesson cites it".
+   - `evidence`: "Fixed <n> days ago and verified since; no lesson cites it" (n counts from the resolution, `incidentDebt`'s `days`).
    - `effect`: "Fixed incidents that left a lesson: <count> of <of> → <count+1> of <of>".
 2. **Retire lessons nobody is given.** One, only when the lessons part's `of − count` is at least a quarter of `of` (and `of` > 0).
    - `kind`: `lessons`; `id`: `aw-lessons-unused`.
-   - `what`: "Look at the <n> lessons no session was given in 4 weeks".
-   - `evidence`: "<n> of <of> lessons in force reached no session start in the last 28 days".
-   - `effect`: "Lessons sessions use: <count> of <of> → <count> of <count> once those are retired or rescoped".
+   - `what`: "Look at the <n> lessons no session was given in 4 weeks" ("the lesson" when n is 1).
+   - `evidence`: "<n> of <of> lessons in force reached no session start in the last 28 days" ("lesson" when of is 1).
+   - `effect`: "Lessons sessions use: <count> of <of> → <count> of <count> once those are retired". Rescoping keeps a lesson in force, so the effect names retiring only (S1-3).
 3. **Explain something that keeps happening.** One for each row of `orientationDebt(E)`, oldest first.
    - `kind`: `signal`; `id`: `aw-signal-<key>`.
    - `what`: "Find out what keeps causing this: <latest detail, cut to 120 characters>". When the latest detail is empty, it reads "Find out why this keeps happening (<count> times)".
    - `evidence`: "Seen <count> times since <date>, unexplained".
-   - `effect`: "It has waited <hours> hours; explaining it stops further sightings piling up".
+   - `effect`: "First seen <d> days ago; explaining it stops further sightings piling up" (d = floor(hours / 24), at least 1, since every row has waited a day; "1 day"). The count starts at the first sighting, as `orientationDebt`'s `hours` does, so the words say "first seen", not "waited" (S1-4).
 
-Ids are made safe as kit-173's are. The `effId` rule (lower-case, every character outside `[a-z0-9-]` becomes `-`, cut to 110) moves into a shared `suggestionId(prefix, kind, subject)`. `effId` keeps its output exactly, and the test checks one.
+Ids are made safe as kit-173's are. The `effId` rule (lower-case, every character outside `[a-z0-9-]` becomes `-`, cut to 110) moves into a shared `suggestionId(prefix, kind, subject)`. `effId` keeps its output exactly, and the test checks one. Two subjects can map to one id (`a:b` and `a/b`, or a cut at 110). The id names the suggestion's thread, so a later suggestion whose id is already taken gets `-2`, `-3` and so on, in list order (S1-7).
 
 The words are plain, so the owner can act on them from the text alone (strategy R2). No suggestion names a command, a function or the words Informed, Orient or debt. The incident title and the observation detail are what the dashboard already shows elsewhere.
 
@@ -107,9 +107,9 @@ All in `test/awareness-data.test.mjs` (new), from hand-written fixture logs with
 1. **The four parts, for each of the 12 weeks, read at E** (done-when 1).
    - Every week's four `{count, of, share}` and its `score` equal hand-computed values. `awareness.weeks` has 12 entries, oldest first, the last starting at `M`.
    - The fixture covers each rule:
-     - **Signals.** A signal explained 3 h after forming (counts). One explained 30 h after (doesn't count). One explained by an `orient-noise` ruling on its key (counts). One cited by knowledge written before it formed (0 h, counts). One whose first citing record cited it 40 h late while a second record's earlier line cites it in time (the earliest counts). One with a later update to an already-citing record (doesn't move `x`). One cited only by a decision that is corrected before E (not explained). One formed under a day before a past week's E and unexplained (left out of `of`). One formed in the last day before E and explained (in `of`, and counted). A group of three items from one writer on one day (never forms).
+     - **Signals.** A signal explained 3 h after forming (counts). One explained 30 h after (doesn't count). One explained by an `orient-noise` ruling on its key (counts). One cited by knowledge written before it formed (0 h, counts). One whose first citing record cited it 40 h late while a second record's earlier line cites it in time (the earliest counts). One with a later update to an already-citing record (doesn't move `x`). One cited only by a decision that is corrected before E (not explained). One cited by knowledge whose evidence a later `set` before E drops (not explained in that week, though explained in an earlier week read before the drop). One with a live noise ruling made after its first two sightings but before the third, with an `o-` ref (not explained, and `orientationDebt` lists it), and one with a noise ruling made after it formed (explained at the ruling's time). One formed under a day before a past week's E and unexplained (left out of `of`). One formed in the last day before E and explained (in `of`, and counted). A group of three items from one writer on one day (never forms).
      - **Incidents.** An incident resolved and verified in week 5 with no lesson, which reads `0 of 1` in week 5. That week ends more than 30 days back, so `incidentDebt(now)` no longer lists it: a broken `now` argument reads `1 of 1` or null, and the check fails. One with a lesson (counts). One whose status the owner set (left out). One resolved but not verified (left out).
-     - **Lessons.** Knowledge given to a start 27 days before a week's E (used), and one given 29 days before (not used).
+     - **Lessons.** Knowledge given to a start exactly 28 days before a week's E (not used: the window is `(E − 28 d, E]`), one given 28 days less one minute before (used), and one given 29 days before (not used).
      - **Starts.** Starts with and without knowledge. A week with starts but no knowledge in force reads `starts.share` null.
    - The score is the rounded mean of the non-null shares. A week with every part null reads score null, and so do the weeks before the log.
    - *How it fails:* reading any clock at `Date.now()` instead of E, folding at the wrong cut, grouping after explanations are removed, or a wrong formed or explained time each changes at least one hand-computed value above.
@@ -127,17 +127,18 @@ All in `test/awareness-data.test.mjs` (new), from hand-written fixture logs with
    - `test/fixtures/g1/dashboard-data.txt` gains exactly the `awareness` and `autonomy_score` blocks G1 yields, re-recorded with `DEVTEAM_G1_RECORD=1`. The plan says what G1 holds: this week's lessons part 0 of 1, starts null, a lessons suggestion, and an Autonomy Score of null (efficiency null).
    - `metrics.txt` and every other golden are unchanged. The G1 test in `test/components.test.mjs` passes in CI.
    - The server's `/api/data` carries the same `awareness` and `autonomy_score` as `dashboard-data`.
+   - `autonomy_score.weeks[i].starts_at`, `awareness.weeks[i].starts_at`, `efficiency.weeks[i].starts_at` and `autonomy.decisions.weeks[i].starts_at` are equal for every `i` (one clock read, S1-2).
 
 ## Contracts
 
 - **Provides** `/api/data` `awareness` and `autonomy_score` (above). `kit-93` and `kit-90` consume them.
 - **Consumes** `efficiencyWeeks`, `withLogAt`, `signalKeyOf`, `correctionOf`, `calls`, `explained`'s reading rules, `liveDecision`, `incidentList`, `ownerHolds`, `orientationDebt`, `incidentDebt`, `efficiencyData().weeks[].score` (kit-173) and `autonomyData().decisions.weeks[].score` (kit-98).
-- `orientationDebt(now = Date.now())` and `incidentDebt(now = Date.now())` gain an optional argument, and with none they return what they return today.
+- `orientationDebt(now = Date.now())`, `incidentDebt(now = Date.now())` and `efficiencyData(m, now = Date.now())` gain an optional argument, and with none they return what they return today.
 - No log line, schema field, command, flag or setting changes.
 
 ## Edge cases
 
-- **A log younger than 12 weeks.** The weeks before its first line are folded empty: every part's `of` is 0, so every share and score is null and the Autonomy Score is null. They are computed without a fold: a cut before the first line folds nothing.
+- **A log younger than 12 weeks.** A week that ends before the log's first line is not folded at all. `awarenessData` gives it every part `{ count: 0, of: 0, share: null }` and a null score without calling `withLogAt`, so the Autonomy Score is null there too (S1-6).
 - **This week.** E = now, so the fast path applies. A signal formed an hour ago and unexplained is left out of `of`. It is not counted against the fleet.
 - **A citation removed, or a decision corrected, after E.** The week keeps it (as of E). Before E, it doesn't count.
 - **Knowledge in force with no starts in the week.** Starts reads null (`of` 0). Lessons can still read 0%.
@@ -152,7 +153,7 @@ The pages (`kit-93`, `kit-90`), any change to the learning record, `metrics --js
 
 1. **E for this week is now**, not the week's future end. Otherwise "under a day before E" would misjudge today's signals.
 2. **An open incident holding a fingerprint isn't an explanation** for the signals part. `explained()` counts it, but the done-when names only citations and noise rulings, and an open incident hasn't explained anything yet. `learningFigures`' own count is unchanged.
-3. **The decisions that explain** are those `explained()` reads: live, with an `o-` ref. That keeps one definition of "explained".
+3. **The decisions that explain** are those `explained()` reads: live, with an `o-` ref. A noise ruling counts only if made at or after the signal formed, so a part and `orientationDebt` never disagree. That keeps one definition of "explained".
 4. **Shares are 0 to 1 with 2 places**, as efficiency's parts are. The score is 0 to 100.
 5. **The suggestions' wording** is mine, in the mock's spirit. A signal's suggestion quotes its latest observation's detail (cut to 120), since that is what the owner would recognise. It never quotes the key.
 
