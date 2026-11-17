@@ -14618,6 +14618,126 @@ function dropSpace(paths) {
   return paths.some((p) => !isDropImage(p));
 }
 /* upload rules end */
+// --- files dropped on a laptop's dashboard: streamed to a folder of the project's own ---------
+// A box is the gateway's: it takes the drops there, and the dashboard only reads its folder.
+const uploadsOnBox = () => !!process.env.DEVTEAM_GATEWAY || onBox();
+// ~/.devteam/uploads/<slug>-<hash8>, from the main checkout's real path: a worktree's dashboard maps
+// to the same folder, and two checkouts that share a name never share one.
+function laptopUploadsDir() {
+  const real = fs.realpathSync(mainRoot);
+  return path.join(os.homedir(), '.devteam', 'uploads', `${path.basename(real).replace(/[^A-Za-z0-9-]+/g, '-').slice(0, 40)}-${sha256(real).slice(0, 8)}`);
+}
+const uploadsRoot = () => (uploadsOnBox() ? process.env.DEVTEAM_UPLOADS_DIR || '/data/uploads' : laptopUploadsDir());
+// The limits, which a test may lower (and the floor of free disk raise) only while boxFilesOff()
+// holds: a test's throwaway HOME. Nowhere else does the environment change them, nor ever loosen one.
+function uploadLimits() {
+  const lim = { max: UPLOAD_MAX, total: UPLOAD_TOTAL, free: UPLOAD_FREE, stallMs: UPLOAD_STALL_MS, keepMs: UPLOAD_KEEP_MS };
+  if (!boxFilesOff()) return lim;
+  const n = (k) => { const v = process.env[k]; return typeof v === 'string' && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v)) ? Number(v) : null; };
+  for (const [key, env] of [['max', 'DEVTEAM_UPLOAD_MAX'], ['total', 'DEVTEAM_UPLOAD_TOTAL'], ['stallMs', 'DEVTEAM_UPLOAD_STALL_MS']]) if (n(env) !== null) lim[key] = Math.min(lim[key], n(env));
+  if (n('DEVTEAM_UPLOAD_FREE') !== null) lim.free = Math.max(lim.free, n('DEVTEAM_UPLOAD_FREE'));
+  return lim;
+}
+// Why the root can't take a file (null when it can): checked as the gateway checks its own, so
+// nothing is ever written through a link, or into a folder someone else made or can write to.
+function uploadRootOk(root, { make = false } = {}) {
+  try {
+    if (make) {
+      const top = path.join(os.homedir(), '.devteam');
+      for (const d of [top, path.join(top, 'uploads'), root]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    }
+    const st = fs.lstatSync(root);
+    if (st.isSymbolicLink()) return `${root} is a link, not a folder`;
+    if (!st.isDirectory()) return `${root} is not a folder`;
+    if (st.uid !== process.getuid()) return `${root} is not this user's`;
+    if (st.mode & 0o022) return `others can write to ${root}`;
+    return null;
+  } catch (e) { return `${root}: ${e.code ?? e.message}`; }
+}
+// From the disk on every upload, never a list in memory, so a restart forgets nothing. Removes only a
+// folder named as ours, made by this user, that this process isn't receiving into: one past
+// keepMs, one with no file, and one whose .part has had nothing for stallMs (an upload cut off). A
+// fresh .part stays: another dashboard for the project (a worktree's) may be receiving into it.
+// Returns the bytes the folders left hold.
+async function sweepLaptopUploads(root, receiving, limits, now = Date.now()) {
+  let kept = 0;
+  for (const e of await fs.promises.readdir(root, { withFileTypes: true })) {
+    if (!e.isDirectory() || !UPLOAD_FOLDER.test(e.name) || receiving.has(e.name)) continue;
+    const folder = path.join(root, e.name);
+    // one that can't be read or removed costs only itself
+    try {
+      const st = await fs.promises.lstat(folder);
+      if (!st.isDirectory() || st.uid !== process.getuid()) continue;
+      const names = await fs.promises.readdir(folder);
+      let gone = !names.length || now - st.mtimeMs > limits.keepMs;
+      if (names.includes(UPLOAD_PART)) gone = now - (await fs.promises.lstat(path.join(folder, UPLOAD_PART))).mtimeMs > limits.stallMs;
+      if (gone) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
+      for (const n of names) kept += (await fs.promises.lstat(path.join(folder, n))).size;
+    } catch {}
+  }
+  return kept;
+}
+// What each folder this process is receiving into may yet take (folder -> bytes).
+const uploadsReceiving = new Map();
+// POST /upload?name= on the laptop's dashboard, after its Host check and relay refusal. Every refusal
+// before the body is answered without reading a byte of it, and closes: what's still coming goes with
+// the socket. `send` is the dashboard's own.
+async function receiveLaptopUpload(req, res, rawName, send) {
+  const refuse = (code, error) => send(res, code, 'application/json', JSON.stringify({ error }), { connection: 'close' });
+  if (uploadsOnBox()) return refuse(404, 'on a box the gateway takes dropped files');
+  // only the dashboard's own page: a page elsewhere can't send its Origin as ours, nor the browser's Sec-Fetch-Site
+  if (req.headers.origin !== `http://${req.headers.host}` || req.headers['sec-fetch-site'] !== 'same-origin') return refuse(403, 'dropped files only from this dashboard\'s own page');
+  const lim = uploadLimits();
+  const tooBig = () => refuse(413, `over the ${Math.floor(lim.max / 1048576)} MB limit for a file`);
+  const declared = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
+  if (declared !== null && !(declared <= lim.max)) return tooBig();
+  const want = declared ?? lim.max;
+  let root;
+  try { root = laptopUploadsDir(); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  const why = uploadRootOk(root, { make: true });
+  if (why) return refuse(503, `this machine has no folder for dropped files: ${why}`);
+  const pending = [...uploadsReceiving.values()].reduce((a, b) => a + b, 0);
+  let kept;
+  try { kept = await sweepLaptopUploads(root, new Set(uploadsReceiving.keys()), lim); } catch (e) { return refuse(503, `this machine has no folder for dropped files: ${e.code ?? e.message}`); }
+  if (kept + pending + want > lim.total) return refuse(507, `this machine already holds as many dropped files as it keeps (${Math.floor(lim.total / 1048576)} MB); they go after ${Math.round(lim.keepMs / 86400000)} days`);
+  const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
+  const folder = path.join(root, id);
+  const part = path.join(folder, UPLOAD_PART);
+  const stored = path.join(folder, safeUploadName(rawName));
+  uploadsReceiving.set(id, want);
+  let fh = null;
+  let size = 0;
+  const stall = setTimeout(() => req.destroy(new Error('stalled')), lim.stallMs);
+  try {
+    const { bavail, bsize } = await fs.promises.statfs(root);
+    if (bavail * bsize - pending - want < lim.free) throw Object.assign(new Error('full'), { code: 'ENOSPC' });
+    // a new folder of a random name, then a new file in it: neither can be anything already there
+    await fs.promises.mkdir(folder, { mode: 0o700 });
+    fh = await fs.promises.open(part, 'wx', 0o600);
+    // one chunk at a time, each written before the next is read: a big body waits, in the socket
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      size += chunk.length;
+      if (size > lim.max) throw Object.assign(new Error('too big'), { tooBig: true });
+      await fh.writeFile(chunk);
+      stall.refresh();
+    }
+    await fh.close();
+    fh = null;
+    await fs.promises.rename(part, stored);
+    return send(res, 200, 'application/json', JSON.stringify({ path: stored, size }));
+  } catch (e) {
+    await fh?.close().catch(() => {});
+    await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
+    if (e.tooBig) return tooBig();
+    if (req.destroyed || res.destroyed) return;
+    if (e.code === 'ENOSPC') return refuse(507, 'this machine\'s disk is too full for this file');
+    process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
+    return refuse(500, 'this machine could not store this file');
+  } finally {
+    clearTimeout(stall);
+    uploadsReceiving.delete(id);
+  }
+}
 // What the gateway signs (gateway.mjs, hubSignature): the route, when, a nonce, and the body's hash.
 const gatewaySigned = (p, ts, nonce, body) => Buffer.from(`devteam-operator-post-v1\n${p}\n${ts}\n${nonce}\n${sha256(body)}`);
 // Why a press's proof isn't the gateway's (null when it is): { path, ts, nonce, sig, body (base64) },
@@ -15826,7 +15946,7 @@ async function cmdDashboard() {
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
-  const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
+  const send = (res, code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', ...extra }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 10 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
@@ -16259,6 +16379,14 @@ async function cmdDashboard() {
     if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
     if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // a file dropped on the page: before every other route, and before a byte of its body is read
+    if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
+      try { return await receiveLaptopUpload(req, res, new URL(req.url, 'http://x').searchParams.get('name'), send); } catch (e) {
+        process.stderr.write(`a dropped file could not be stored: ${e.message}\n`);
+        if (!res.headersSent && !res.destroyed) return send(res, 500, 'application/json', JSON.stringify({ error: 'this machine could not store this file' }), { connection: 'close' });
+        return void req.destroy();
+      }
+    }
     if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
