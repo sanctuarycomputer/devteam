@@ -1,7 +1,8 @@
 # kit-90-overview-goals: verification
 
-- Code head verified: `04ba63a7`, which is `15d6b999` plus one test step (done-when 3's reload at Met; `dashboard-overview-goals` rerun there: 10 pass, 0 fail, 0 skip) (branch `ticket/kit-90-overview-goals`, origin/main merged at `ff262b5`, v0.64.4).
-- CI: pending; the PR's run is added here before the final review.
+- Code head verified: `d4a1d0f9` (branch `ticket/kit-90-overview-goals`, origin/main merged at `ff262b5`, v0.64.4). It is `15d6b999` plus done-when 3's reload at Met (`04ba63a7`) and the two CI fixes below (`398635d3`, `b850bfc8`).
+- CI: run [44168579236](https://github.com/sanctuarycomputer/devteam/actions/runs/44168579236) at `d4a1d0f9`: **success** on attempt 2, every job, recorded with `devteam.mjs gate ci -- gh run watch 44168579236 --exit-status`. Attempt 1 failed only `kit (24, chrome 2/2)`, on `dashboard-inbox-panel` 9 ("the review open, the panel still open on Inbox under it", timed out). That test is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`), and the failed job was rerun as ruled. More on it below.
+- Earlier CI: run [44163292008](https://github.com/sanctuarycomputer/devteam/actions/runs/44163292008) at `cc4f6080`: failure. Its fixes are in the next section.
 - On the box, only the touched files were run, one at a time. They ran through `gate test` on `/usr/local/bin/node` (Node 22, Chrome present) with their own HOME, TMUX and every `DEVTEAM_*` unset (`.superpowers/sdd/plan/rt90.sh`). Every run had 0 skipped. The full suite is CI's.
 
 ## Local runs at `15d6b999`
@@ -42,6 +43,7 @@ Every touched file passed. Three outside files failed; two were caused by the ta
 - **`dashboard-threads-sidebar` 1 and 6** (Node 22 and 24). At 720x800 and 390x844 the new Overview is taller than the window, so the document draws a 15px scrollbar (box probe: `innerWidth` 720, `clientWidth` 705). The panel is `--threads-w: 100vw` at 900px and below (the shell's layout block), so its left edge sat at -15. The fix is page CSS outside both shell blocks: at 900px and below, `html` doesn't scroll while the panel is open, since the panel is the whole window there. `398635d3`. Locally: threads-sidebar 8 pass, inbox-panel 12 pass, shell 16, measure 4, overview-goals 10, all 0 fail and 0 skip.
 - **`dashboard-pages` › "settings area"** (Node 22 and 24). The click helper scrolls its button into view. Overview is now 1014px tall at 1440x900, so the first press scrolled it by 114 and the sticky nav's switch moved 0.5px. The place is now read after the first press (Run, which posts nothing). The assertion is unchanged. Added to touches by `m-20261117-201656246-supervisor`. `b850bfc8`. Locally: 6 pass, 0 fail, 0 skip.
 - **`dashboard-inbox-panel` 9** (Node 22 only): a timeout. It passes on the box (12/12) and is no kit-90 code. It is filed under kit-283-ci-flakes (`m-20261117-201656246-supervisor`). The failed job is rerun if it recurs.
+- **More on `dashboard-inbox-panel` 9.** It failed in 2 of the 4 Chrome jobs that ran it across both runs, once on Node 22 and once on Node 24. None of the last 24 failed CI runs on main or other branches had it. On the box it passes at normal speed: 12/12, and 3/3 on the narrowed pattern. With the CPU throttled 6x, the "Open the review" press failed to open the review in 1 of 7 kit-90 runs, and it opened in 3 of 3 main runs. A trace on one throttled run showed a data load rewriting the whole Inbox (`render` → `$('questions').innerHTML`, not new in kit-90) inside the press. The cause isn't proven. The supervisor was told (`m-20261117-211948359`).
 
 ## What the supervisor asked to have named here
 
