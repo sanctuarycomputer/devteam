@@ -299,6 +299,26 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(await p.ev("Object.keys(SHELL_ROUTES.redirects).filter((k) => k.endsWith('?th=inbox'))"), [], 'no redirect key ends ?th=inbox');
     await p.click('#th-close');
     await soon(`!${IS_OPEN}`, 'the panel closed');
+
+    // th=inbox with an in-panel t (S has no subject) is rewritten to th=open, so S's card shows on Threads (spec §2.3,
+    // §4): by a hash change from another page, and cold in a new tab
+    const { S } = fx;
+    const S_SHOWN = `${AT_REST} && ${TAB('threads')}?.getAttribute('aria-selected') === 'true' && document.getElementById('th-inbox').hidden && TL.open === '${S}' && ${SEEN('#th-card-slot .tl-card')}`;
+    await p.ev("location.hash = '#goals'");
+    await soon(`location.hash === '#goals' && ${ON_PAGE('goals')} && !${IS_OPEN}`, 'Goals, the panel closed');
+    await p.ev(`location.hash = '#overview?th=inbox&t=${S}'`);
+    await soon(`location.hash === '#overview?th=open&t=${S}' && ${ON_PAGE('overview')} && ${S_SHOWN}`, "a hash change to th=inbox&t=S: th=open, S's card on Threads");
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
+    const c = await chrome.newPage();
+    later(() => c.close());
+    await c.send('Page.enable');
+    await c.send('Runtime.enable');
+    await c.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await c.send('Page.addScriptToEvaluateOnNewDocument', { source: paneInit(paneMenu()) });
+    await c.send('Page.navigate', { url: `http://127.0.0.1:${port}/#overview?th=inbox&t=${S}` });
+    await soonIn(c, 30000)(`location.hash === '#overview?th=open&t=${S}' && ${ON_PAGE('overview')} && ${S_SHOWN}`, "cold th=inbox&t=S: th=open, S's card on Threads");
+    await p.send('Page.bringToFront');
   });
 
   // AC3, second part, and AC4 (done-when 3, 4)
