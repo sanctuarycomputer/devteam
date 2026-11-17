@@ -1,4 +1,4 @@
-// The dashboard shell (dashboard-shell@1, docs/devteam/dashboard/shell.md): its two blocks are
+// The dashboard shell (dashboard-shell@1, test/contracts/shell.md): its two blocks are
 // byte-identical in index.html and hub.html, scoped so today's pages can't change, and their
 // builders, binders and URL rules do what the contract says (run in vm, over a tiny DOM of their
 // own HTML); and the measure check (test/lib/measure.mjs) passes on the fixture page built only from
@@ -18,7 +18,7 @@ const DASH = path.join(here, '..', 'docs', 'devteam', 'dashboard');
 const read = (f) => fs.readFileSync(path.join(DASH, f), 'utf8');
 const INDEX = read('index.html');
 const HUB = read('hub.html');
-const SHELL_MD = read('shell.md');
+const SHELL_MD = fs.readFileSync(path.join(here, 'contracts', 'shell.md'), 'utf8');
 const block = (src, name) => {
   const a = src.indexOf(`/* ${name} start */`), b = src.indexOf(`/* ${name} end */`);
   assert.ok(a >= 0 && b > a, `the ${name} block is in the page`);

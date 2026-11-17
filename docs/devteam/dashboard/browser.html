@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-kxR3cgZFVFlVW55U16Q2rvURR5L1yaesECFy2+zypNk='; style-src 'sha256-cqYYaeELvHFgB3LEIGD5/i37pu/j+tY+GNvrwVFT1xw='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-DDpsdbxQXFZ9wLTGXW9F8PnmQ068Ay5c5txm2XpplTw='; style-src 'sha256-cqYYaeELvHFgB3LEIGD5/i37pu/j+tY+GNvrwVFT1xw='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>Supervisor's browser</title>
@@ -82,7 +82,7 @@
   const area = $('area');
   const addr = $('addr');
 
-  // browser@1's view messages from the server (docs/devteam/schema/browser.schema.json); a message
+  // browser@1's view messages from the server (test/contracts/browser.schema.json); a message
   // that doesn't match its shape is ignored
   const JPEG = /^\/9j\/[A-Za-z0-9+/]*={0,2}$/;
   const QID = /^q-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
