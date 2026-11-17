@@ -192,6 +192,25 @@ test('artifact versions: exit 3 when there is nothing', (t) => {
   assert.equal(F.run(F.old, ['artifact', 'versions', 'Bad_Slug']).status, 1, 'a bad slug dies');
 });
 
+test('a git failure is an error, never "no versions": the CLI exits 1 and the endpoint answers 500', async (t) => {
+  const F = threadsFixture('versions-gitfail');
+  const later = cleanup(t);
+  later(() => F.done());
+  const B = await startApi(F, later);
+  const { commit: c1 } = landArtifact(F, 'viewer-mock', mock(1));
+  landArtifact(F, 'viewer-mock', mock(2));
+  assert.equal((await apiVersions(B, 'viewer-mock')).status, 200, 'readable before');
+  // v1's commit object gone from the checkout: main's tip still resolves, the history walk fails
+  const obj = path.join(F.old, '.git', 'objects', c1.slice(0, 2), c1.slice(2));
+  assert.ok(fs.existsSync(obj), 'a loose object to remove');
+  fs.rmSync(obj);
+  const r = F.run(F.old, ['artifact', 'versions', 'viewer-mock']);
+  assert.equal(r.status, 1, r.err || r.out);
+  assert.match(r.err, /viewer-mock: could not read main's history/);
+  const res = await apiVersions(B, 'viewer-mock');
+  assert.deepEqual([res.status, await res.json()], [500, { error: 'the versions could not be read' }]);
+});
+
 test('a listed version is served read-only at its url, under the artifact sandbox', async (t) => {
   const F = threadsFixture('versions-a3');
   const later = cleanup(t);
@@ -207,7 +226,7 @@ test('a listed version is served read-only at its url, under the artifact sandbo
   const main = await fetch(`${B}/artifact/main/viewer-mock/`);
   assert.equal(main.status, 200);
   const mainCsp = main.headers.get('content-security-policy');
-  const want = [...r.versions.map((v) => (v.kind === 'draft' ? fs.readFileSync(path.join(draft, 'index.html'), 'utf8') : null))];
+  const want = r.versions.map((v) => (v.kind === 'draft' ? fs.readFileSync(path.join(draft, 'index.html'), 'utf8') : null));
   let n = 3;
   for (const [i, v] of r.versions.entries()) {
     const res = await fetch(B + v.url);
@@ -215,7 +234,7 @@ test('a listed version is served read-only at its url, under the artifact sandbo
     assert.equal(await res.text(), want[i] ?? mock(n--)['index.html'], `${v.url}: that version's bytes`);
     const csp = res.headers.get('content-security-policy');
     assert.ok(csp.includes('sandbox allow-scripts'), `${v.url}: sandboxed`);
-    assert.equal(csp.replaceAll(B + v.url.replace(/\/$/, ''), `${B}/artifact/main/viewer-mock`), mainCsp.replaceAll(`${B}/artifact/main/viewer-mock/`.replace(/\/$/, ''), `${B}/artifact/main/viewer-mock`), `${v.url}: main's policy, its folder aside`);
+    assert.equal(csp.replaceAll(B + v.url.replace(/\/$/, ''), `${B}/artifact/main/viewer-mock`), mainCsp, `${v.url}: main's policy, its folder aside`);
     assert.equal(res.headers.get('x-frame-options'), null, `${v.url}: no x-frame-options`);
     assert.notEqual((await fetch(B + v.url, { method: 'POST' })).status, 200, `${v.url}: nothing can be written`);
   }
