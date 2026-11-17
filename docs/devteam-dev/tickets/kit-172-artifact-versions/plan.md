@@ -51,7 +51,7 @@
 2. **A revert to an older tree:** listed once, at its newest commit. Tested in T1 (A5b, A7).
 3. **A folder deleted on main:** there is no `landed`, but history is kept and still served. Tested in T1 (A5c, listed) and T2 (A5c, each url served 200).
 4. **A `sec-fetch-site` header missing:** must still answer 200 (curl, the gateway's loopback). Tested in T2 (A6).
-5. **Paths with spaces or odd names in an artifact folder** don't matter, since only the folder's own `040000` line is parsed. The parse must match the path exactly (`=== folder`), not a prefix, or `viewer-mock-2` would leak into `viewer-mock`. Tested in T1: A1 lands a sibling `viewer-mock-2` once, and it must not appear.
+5. **Paths with spaces or odd names in an artifact folder** don't matter, since only the folder's own `040000` line is parsed. The parse must match the path exactly (`=== folder`), not a prefix. The pathspec already limits `--raw` to the folder and its parents, so a sibling such as `viewer-mock-2` never reaches the parse; what the exact match guards against is the artifact's own subfolders (`<folder>/img`, whose `040000` line a prefix match would take as a version) and the parent folders. Tested in T1: in A1, v2 adds a subfolder `img/a.svg`, and a prefix parse would give a fourth entry or the wrong tree.
 
 ---
 
@@ -77,12 +77,12 @@
     - `mock(n)` gives VIEWER_MOCK-shaped files whose `index.html` contains `v${n}`.
   - Tests, with the spec's assertions:
     - `'versions: landed then earlier by date, each with its commit and time'` (A1):
-      - Land v1. Make an unrelated commit (a file outside `artifacts/`). Land v2 **and a sibling `viewer-mock-2` in the same commit** (so the pathspec keeps the commit, and only an exact-path match keeps the sibling's `040000` line out). Land v3.
+      - Land v1. Make an unrelated commit (a file outside `artifacts/`). Land v2, which also adds a subfolder file `img/a.svg` inside the artifact (so the commit's raw output has a `040000` line for `<folder>/img` that only an exact-path match leaves out). Land v3.
       - `versions` deep-equals `[landed v3, earlier v2, earlier v1]` on `kind`, `tree`, `commit`, `at` (`tree:${tree}`) and `url` (`/artifact/tree/${tree}/viewer-mock/`).
       - Each `time === F.g(['log','-1','--format=%cI',commit], F.old)`, and the times are non-increasing.
-      - No entry's commit is the unrelated commit; no entry's `tree` is `viewer-mock-2`'s folder tree (`rev-parse <v2 commit>:<ARTIFACTS_REL>/viewer-mock-2`); there are exactly 3 entries; `truncated === false`.
+      - No entry's commit is the unrelated commit; no entry's `tree` is the subfolder's tree (`rev-parse <v2 commit>:<ARTIFACTS_REL>/viewer-mock/img`); there are exactly 3 entries; `truncated === false`.
     - `'versions: the draft first, with its worktree and its own commit'` (A2), exactly as in the spec's A2:
-      - `demo-01-draft` is a `git init` checkout with one commit, made with `F.g(['-c','user.email=t@example.com','-c','user.name=t','commit','-qm','wt'], wt)` (CI has no git identity). Its `commit` equals `rev-parse HEAD` there.
+      - `demo-01-draft` is a `git init` checkout with one commit, made with `F.g(['add','-A'], wt)` and then `F.g(['-c','user.email=t@example.com','-c','user.name=t','commit','-qm','wt'], wt)` (staged first, or the commit exits 1; CI has no git identity). Its `commit` equals `rev-parse HEAD` there.
       - `demo-02-plain` is a plain folder, back-dated an hour with `fs.utimesSync`. Its `commit` is `null`.
       - The drafts are ordered newest first. Touching `demo-02-plain` to now+60 s flips the order.
       - A copy equal to main's gives no draft. Removing the worktrees gives no drafts.
