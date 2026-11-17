@@ -48,7 +48,9 @@ The other suites stay green because CI runs them. `dashboard-measure` and `hub-m
 
 ## Rulings
 
-- (pending) Comment-only edits inside the frozen blocks. Asked with the spec review request.
+- **m-20261117-111118330-supervisor** (answering m-20261117-111048344): *"Ruling: your recommendation. Rewrite the 4 lines to test/contracts/shell.md, same bytes in both pages and in shell.md's copy of the blocks; comment-only, so no contract bump and no kit-94 edge (it's released). No grep exemption."*
+  - The four block comments (`index.html:47/1168`, `hub.html:31/402`) are rewritten, with the same bytes in both pages. There is no bump and no kit-94 edge. The fallback above is dropped, and done-when 2's grep exempts nothing.
+  - `shell.md` names the blocks only by their markers (its table, lines 11–12) and holds no copy of their text, so the ruling's "shell.md's copy" leaves nothing to change there. `test/fixtures/dashboard-shell.html` holds no copy of the block comments either. The byte-identical test in `test/dashboard-shell.test.mjs` is the check.
 
 ## Out of scope
 
