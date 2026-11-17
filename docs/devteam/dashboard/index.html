@@ -948,8 +948,8 @@ try {
   .tl-card .ask, #ask-threads .ask { margin: 6px 0; padding: 8px 10px; flex: none; }
   .tl-card .ask-q, #ask-threads .ask-q { max-height: 120px; }
   @media (pointer: coarse) { .threads-head .end .icon-btn { height: 36px; width: 36px; } }
-  .card.goal.blk-full, .ov-goal.blk-full { outline: 2px solid var(--red); outline-offset: -2px; }
-  .card.goal.blk-partial, .ov-goal.blk-partial { outline: 2px dashed var(--red); outline-offset: -2px; }
+  .card.goal.blk-full, .ov-goal.blk-full { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .card.goal.blk-partial, .ov-goal.blk-partial { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); }
 </style>
 </head>
 <body class="shell">
@@ -3035,8 +3035,8 @@ function holdState(h) {
 // otherwise. Uses nothing but its arguments.
 function goalBlock(goal, data) {
   if (!goal || goal.status === 'met' || goal.status === 'abandoned') return null;
-  const mode = goal.hold_view && goal.hold_view.mode;
-  if (mode === 'park' || mode === 'let-go') return null;
+  // a let-go hold exists only on an abandoned goal (holdMode), already returned above
+  if (goal.hold_view && goal.hold_view.mode === 'park') return null;
   const feats = new Set((((data.ooda || {}).roadmap || {}).goals || []).filter((g) => g.id === goal.id).flatMap((g) => g.features || []));
   const live = (data.tickets || []).filter((t) => feats.has(t.feature) && !['merged', 'released', 'superseded'].includes(t.stage));
   const planners = (data.planners || []).filter((p) => (p.goals || []).includes(goal.id));

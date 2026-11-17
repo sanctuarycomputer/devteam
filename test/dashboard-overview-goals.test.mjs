@@ -59,4 +59,23 @@ test('goalBlock: full, partial and null', () => {
   assert.equal(goalBlock(G, d), null);
   d = mk({ tickets: [], planners: [{ goals: ['g1'], waiting: { kind: 'limit' } }] });
   assert.equal(goalBlock(G, d), null);
+  // an open question with no default names a ticket by its ticket field
+  d = mk({ questions: [{ id: 'q-6', status: 'open', ticket: 'a' }] }); tk(d, 'b', { depends_on: ['a'] });
+  assert.equal(goalBlock(G, d), 'full');
+  // a question that is not open holds nothing, by held_by or by blocks or ticket
+  const ans = { id: 'q-7', status: 'answered', blocks: ['a', 'b'], ticket: 'a' };
+  d = mk({ questions: [ans] }); tk(d, 'a', { held_by: 'q-7' });
+  assert.equal(goalBlock(G, d), null);
+  // merged, released and superseded tickets are done work, not stuck work
+  for (const stage of ['released', 'superseded']) {
+    d = mk({ questions: [q1] }); tk(d, 'a', { held_by: 'q-1' }); tk(d, 'b', { held_by: 'q-1', stage });
+    assert.equal(goalBlock(G, d), 'full', stage);
+    d = mk({ questions: [q1] }); tk(d, 'a', { stage }); tk(d, 'b', { held_by: 'q-1' });
+    assert.equal(goalBlock(G, d), 'full', stage);
+    d = mk({ questions: [q1] }); tk(d, 'a', { stage }); tk(d, 'b', { stage });
+    assert.equal(goalBlock(G, d), null, stage);
+  }
+  // a stuck ticket that is done does not count, so a lone live one moving is not blocked
+  d = mk({ questions: [q1] }); tk(d, 'a', { held_by: 'q-1', stage: 'released' });
+  assert.equal(goalBlock(G, d), null);
 });
