@@ -90,7 +90,7 @@ async function open(t, hash) {
     await p.send('Page.reload');
     await soon('!window.__old && typeof DATA === "object" && DATA !== null && TL.have > 0', 'the page reloaded and read');
   };
-  return { p, soon, size, reload, fx, root, env, port, dash };
+  return { p, soon, size, reload, fx, root, env, port, dash, chrome, later };
 }
 
 const IS_OPEN = "document.body.classList.contains('threads-open')";
@@ -98,11 +98,17 @@ const AT_REST = `(${IS_OPEN} && getComputedStyle(document.getElementById('thread
 // shown: a box, not display:none or visibility:hidden, and not hidden
 const SEEN = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e || e.hidden) return false; const c = getComputedStyle(e); return c.display !== 'none' && c.visibility !== 'hidden' && e.getClientRects().length > 0; })()`;
 const TAB = (id) => `document.querySelector('#th-tabs [role="tab"][data-tab="${id}"]')`;
+// an element inside #th-body's visible box (the panel's scroller), and so within the window
+const IN_BODY = (sel) => `(() => { const e = document.querySelector(${JSON.stringify(sel)}), b = document.getElementById('th-body'); if (!e || !b.contains(e)) return false;
+  const r = e.getBoundingClientRect(), v = b.getBoundingClientRect(); return r.height > 0 && r.top >= v.top - 1 && r.bottom <= v.bottom + 1 && r.top >= 0 && r.bottom <= innerHeight; })()`;
 const ON_PAGE = (id) => `!!document.querySelector('main.page > section[data-page="${id}"]')?.classList.contains('on')`;
 
 test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
-  const { p, soon, reload, fx } = await open(t, '#overview');
+  const { p, soon, reload, fx, chrome, later, port } = await open(t, '#overview');
   const { Q } = fx;
+  const len = () => p.ev('history.length');
+  const back = () => p.ev('history.back(); void 0');
+  const ON_INBOX = `${AT_REST} && ${TAB('inbox')}?.getAttribute('aria-selected') === 'true' && ${SEEN('#th-inbox')}`;
 
   // AC1 (done-when 1)
   await t.test('the tab and the button', async () => {
@@ -165,5 +171,105 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
       const w = await p.ev('[document.documentElement.scrollWidth, document.documentElement.clientWidth, innerWidth]');
       assert.equal(w[0], w[1], `${pg}: nothing sideways (scrollWidth, clientWidth, innerWidth): ${JSON.stringify(w)}`);
     }
+  });
+
+  // AC2 (done-when 2)
+  await t.test('the nav and the roads', async () => {
+    assert.equal(await p.ev("!!document.querySelector('.side nav a[href=\"#inbox\"]')"), false, 'no Inbox in the nav');
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('.side nav.nav[data-group=\"project\"] a .nl')].map((a) => a.textContent.trim())"), ['Overview', 'Goals', 'Progress', 'Board', 'Library']);
+    assert.equal(await p.ev("SHELL_ROUTES.pages.includes('inbox')"), false, 'SHELL_ROUTES.pages has no inbox');
+
+    // an open question's #q/ link on Board (the test draws the anchor: the routing is the page's)
+    await p.ev("location.hash = '#board'");
+    await soon(`location.hash === '#board' && ${ON_PAGE('board')} && !${IS_OPEN}`, 'Board, the panel closed');
+    const q2 = fx.q.q2;
+    await p.ev(`(() => { const a = document.createElement('a'); a.id = 'probe-q'; a.href = '#q/${q2}'; a.textContent = 'the probe'; document.querySelector('main.page > section[data-page="board"]').prepend(a); })()`);
+    let n = await len();
+    await p.click('#probe-q');
+    await soon(`location.hash === '#board?th=inbox' && ${ON_PAGE('board')} && ${ON_INBOX} && ${IN_BODY(`#q-${q2}`)}`, 'Board, the panel on Inbox, the card in view in #th-body');
+    assert.equal(await len(), n + 1, 'the q/ entry replaced: one entry');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
+    await back();
+    await soon(`location.hash === '#board' && ${ON_PAGE('board')} && !${IS_OPEN}`, 'Back: #board, the panel closed');
+
+    // a settled question's #q/: its read-only peek
+    for (const id of [fx.answered, fx.defaulted, fx.withdrawn]) {
+      await p.ev(`location.hash = '#q/${id}'`);
+      await soon(`DRAWER.id === ${JSON.stringify(id)} && !document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs')`, `${id}: its peek`);
+      assert.equal(await p.ev("[...document.querySelectorAll('#drawer button')].some((b) => /^Answer/.test(b.textContent.trim()))"), false, `${id}: no Answer in the peek`);
+      await p.ev("location.hash = '#board'");
+      await soon("location.hash === '#board' && !document.body.classList.contains('peek-open')", 'back on Board');
+    }
+
+    // an Inbox link inside a peek: the lesson's, over Loop; the peek stays, the panel opens on Inbox beside it
+    await p.ev("location.hash = '#loop'");
+    await soon(ON_PAGE('loop'), 'Loop');
+    await p.ev(`location.hash = '#lesson/${fx.L1}'`);
+    await soon(`DRAWER.id === ${JSON.stringify(fx.L1)} && !!document.querySelector('#drawer-body a[href="#inbox"]') && getComputedStyle(document.getElementById('drawer')).transform === 'none'`, "the lesson's peek at rest, its Inbox link");
+    const lessonHash = await p.ev('location.hash');
+    await p.click('#drawer-body a[href="#inbox"]');
+    await soon(`history.state?.page === '#loop?th=inbox' && ${ON_INBOX} && !document.getElementById('drawer').hidden`, 'the peek open, the panel on Inbox under it');
+    assert.equal(await p.ev('location.hash'), lessonHash, 'the peek\'s head kept: no #inbox hop');
+    assert.equal(await p.ev(ON_PAGE('loop')), true, 'still Loop');
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
+    await p.ev("location.hash = '#overview'");
+    await soon(`location.hash === '#overview' && ${ON_PAGE('overview')} && !document.body.classList.contains('peek-open') && !${IS_OPEN}`, 'Overview');
+
+    // old #inbox and #questions, by a hash change from Overview: replaced by #overview?th=inbox; Back, Overview
+    for (const old of ['#inbox', '#questions']) {
+      // (a fresh #overview entry each time: a push after Back drops the entry ahead, so history.length wouldn't grow)
+      if (old !== '#inbox') {
+        await p.ev("location.hash = '#goals'");
+        await soon(`location.hash === '#goals' && ${ON_PAGE('goals')} && !${IS_OPEN}`, 'Goals');
+        await p.ev("location.hash = '#overview'");
+        await soon(`location.hash === '#overview' && ${ON_PAGE('overview')} && !${IS_OPEN}`, 'Overview');
+      }
+      n = await len();
+      await p.ev(`location.hash = '${old}'`);
+      await soon(`location.hash === '#overview?th=inbox' && ${ON_INBOX}`, `${old}: #overview?th=inbox`);
+      assert.equal(await len(), n + 1, `${old}: one entry, replaced`);
+      await back();
+      await soon(`location.hash === '#overview' && ${ON_PAGE('overview')} && !${IS_OPEN}`, `${old}: Back lands on Overview, the panel closed`);
+    }
+    // both are redirects, read from the table inside the shell-routes block, after devteam-shell-js
+    assert.deepEqual(await p.ev("[SHELL_ROUTES.redirects.inbox, SHELL_ROUTES.redirects.questions]"), ['overview?th=inbox', 'overview?th=inbox']);
+    const file = fs.readFileSync(new URL('../docs/devteam/dashboard/index.html', import.meta.url), 'utf8');
+    const shellEnd = file.indexOf('/* devteam-shell-js end */'), start = file.indexOf('/* shell-routes start */'), end = file.indexOf('/* shell-routes end */');
+    assert.ok(shellEnd > 0 && start > shellEnd && end > start, 'the shell-routes block, after devteam-shell-js');
+    const block = file.slice(start, end);
+    assert.match(block, /redirects: \{[^}]*\binbox: 'overview\?th=inbox'/, 'inbox in the block\'s redirects');
+    assert.match(block, /redirects: \{[^}]*\bquestions: 'overview\?th=inbox'/, 'questions in the block\'s redirects');
+
+    // a cold load of an open question's #q/ in a new tab, /api/data held back: nothing thrown, then Overview
+    // with the panel on Inbox and the card in #th-body's box
+    const q1 = await chrome.newPage();
+    later(() => q1.close());
+    await q1.send('Page.enable');
+    await q1.send('Runtime.enable');
+    await q1.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await q1.send('Page.addScriptToEvaluateOnNewDocument', { source: `${paneInit(paneMenu())};(() => {
+      window.__thrown = [];
+      addEventListener('error', (e) => window.__thrown.push(String(e.error?.stack || e.message)));
+      addEventListener('unhandledrejection', (e) => window.__thrown.push(String(e.reason?.stack || e.reason)));
+      const f = window.fetch; let held = false;
+      window.fetch = async (u, o) => { if (!held && String(u && u.url ? u.url : u).startsWith('/api/data')) { held = true; await new Promise((r) => setTimeout(r, 1500)); } return f(u, o); };
+    })()` });
+    await q1.send('Page.navigate', { url: `http://127.0.0.1:${port}/#q/${fx.q.q3}` });
+    const soon1 = soonIn(q1, 30000);
+    await soon1(`location.hash === '#overview?th=inbox' && ${ON_INBOX} && ${IN_BODY(`#q-${fx.q.q3}`)}`, 'cold: #overview?th=inbox, the card in view in #th-body');
+    assert.deepEqual(await q1.ev('window.__thrown'), [], 'nothing thrown');
+    await q1.close();
+  });
+
+  // AC3, first part (done-when 3)
+  await t.test('th=inbox', async () => {
+    await p.ev(`location.hash = '#board?goal=${fx.goal}&th=inbox'`);
+    await soon(`${ON_PAGE('board')} && ${ON_INBOX}`, 'Board with the panel on Inbox');
+    const h = await p.ev('location.hash');
+    assert.ok(h.startsWith('#board?') && new URLSearchParams(h.split('?')[1]).get('goal') === fx.goal && new URLSearchParams(h.split('?')[1]).get('th') === 'inbox', `goal and th kept: ${h}`);
+    assert.deepEqual(await p.ev("Object.keys(SHELL_ROUTES.redirects).filter((k) => k.endsWith('?th=inbox'))"), [], 'no redirect key ends ?th=inbox');
+    await p.click('#th-close');
+    await soon(`!${IS_OPEN}`, 'the panel closed');
   });
 });

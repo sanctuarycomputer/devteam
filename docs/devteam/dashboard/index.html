@@ -4808,9 +4808,16 @@ function openPlanner(feature) {
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  // an open question: its entry is replaced by the Inbox (Back returns to the page the link was
-  // clicked on), and its card is brought into view
-  if (q?.status === 'open') { hideDrawer(); goHead('#inbox', { replace: true }); document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }); return; }
+  // an open question (kit-100 spec §2.4): its entry is replaced by the page head in force with th=inbox (on a cold
+  // load #overview?th=inbox, its kind's home), stamped, so Back returns to the page the link was clicked on; then
+  // the panel's Inbox tab shows its card (a floating thread's t is kept, as thGo keeps it)
+  if (q?.status === 'open') {
+    hideDrawer();
+    const p = parseHead(thHead(), SHELL_ROUTES), state = { ...p.state, th: 'inbox' };
+    if (!state.t || thInPanelId(state.t)) delete state.t;
+    goHead(headFor({ page: p.page, state }), { replace: true });
+    return void inboxGo({ scrollTo: `#q-${CSS.escape(id)}` });
+  }
   drawerFor('q', id);
   const p = peekOf('q', id);
   if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
@@ -5236,7 +5243,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
 let RV_FROM = null;
-function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#inbox'; }
+function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#overview?th=inbox'; }
 
 // ---- loop tabs ----
 // The tab is the route's (the lt state key, Observe when none): a click is a history entry, and
@@ -6080,24 +6087,46 @@ document.addEventListener('click', (e) => {
   const title = tLine($('drawer-bar-title')?.querySelector('.dtitle')?.textContent, T_TITLE_MAX) || T_KIND[ref.split(':')[0]];
   tlStart({ subject: { kind: 'item', ref, quote: tCut(title, 300) }, title, x: r.left + r.width / 2, y: r.top + r.height / 2 });
 });
-// A defaulted question's How it changes: the Inbox, its Answered list open, the question's card in
-// view with its Overrule field focused (the target rides on the click: the head keeps no such key).
+// A defaulted question's How it changes: the panel's Inbox tab over the page shown (a peek it is in stays open),
+// its Answered list open, the question's card in view with its Overrule field focused (the target rides on the
+// click: the head keeps no such key).
 document.addEventListener('click', (e) => {
   const a = e.target.closest?.('[data-answered-go]');
-  if (!a || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if (!a || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   e.preventDefault();
   const qid = a.dataset.answeredGo;
-  const go = () => {
-    if (location.hash !== '#inbox') return;
-    $('answered-wrap').open = true;
-    const card = document.getElementById(`a-${qid}`);
-    card?.scrollIntoView({ block: 'center' });
-    card?.querySelector('[data-overrule]')?.focus({ preventScroll: true });
-  };
-  if (location.hash === '#inbox') { hideDrawer(); go(); return; }
-  addEventListener('hashchange', go, { once: true });
-  location.hash = '#inbox';
+  // the list opened first, so the card has a box to scroll to
+  $('answered-wrap').open = true;
+  inboxGo({ scrollTo: `#a-${CSS.escape(qid)}`, then: (card) => { $('answered-wrap').open = true; card.querySelector('[data-overrule]')?.focus({ preventScroll: true }); } });
 });
+// Any other in-page link to the Inbox (the Loop's "waiting for you in the Inbox", the lesson peek's "Keep or retire
+// it in the Inbox"): its tab over the page shown, never a #inbox hop, which would redirect to Overview (kit-100 spec
+// §2.4). The href stays #inbox for a new tab, which the redirect serves; a modified click is the browser's.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest?.('a[href="#inbox"]');
+  if (!a || a.matches('[data-answered-go]') || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.button) return;
+  e.preventDefault();
+  inboxGo();
+});
+// The panel's Inbox tab over the page in force (kit-100 spec §2.4): thGo({ th: 'inbox' }), then scrollTo, an element
+// in #th-inbox, brought into view inside #th-body once the tab shows and the element is drawn (thRouted and the
+// render after: the next render() at most), and then(el) run on it. A road taken since replaces it.
+let INBOX_AT = null;
+function inboxGo({ scrollTo = null, then = null } = {}) {
+  INBOX_AT = scrollTo ? { sel: scrollTo, then } : null;
+  thGo({ th: 'inbox' });
+  inboxAt();
+}
+function inboxAt({ rendered = false } = {}) {
+  const at = INBOX_AT, box = $('th-inbox');
+  if (!at) return;
+  const el = box?.querySelector(at.sel);
+  if (box && !box.hidden && TH.th === 'inbox' && el) {
+    INBOX_AT = null;
+    el.scrollIntoView({ block: 'center' });
+    at.then?.(el);
+  } else if (rendered) INBOX_AT = null;
+}
 // The one element a subject's pin and card follow: the one in its home section (an observation is
 // also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
 function tlHome(s) {
@@ -7046,6 +7075,8 @@ function thRouted() {
   thApply();
   if (TL.open !== open || TL.draft !== draft) { tlMarkRow(); tlCard(); tlPins(); }
   thShow();
+  // an Inbox road's target, once its tab shows (kit-100 spec §2.4)
+  inboxAt();
 }
 // The route's t (kit-89 spec §2.4, §2.5): the thread it names opens, in the panel or floating beside its
 // subject; a t gone closes the card it opened (never one a pin or a Shift+click opened). Nothing is decided
@@ -7419,6 +7450,8 @@ function drawOrHold(d, force = false) {
     if (first) route();
     inboxTitle(shown);
     thDraw();
+    // an Inbox road's target, now drawn, or given up (kit-100 spec §2.4)
+    inboxAt({ rendered: true });
     // the thread layer, which the redraw doesn't touch: the open card as this data has its questions
     // (one answered elsewhere shows answered now, not at the next read), its pins on what was just
     // drawn, then its threads again

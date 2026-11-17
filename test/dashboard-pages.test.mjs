@@ -309,36 +309,44 @@ test('history', { skip: SKIP, timeout: 600000 }, async (t) => {
   await onPage('loop');
   assert.equal(await tab(), 'observe', 'a fresh #loop opens on Observe: the tab is not remembered');
 
-  // 2e: an open question's link on Goals: the Inbox with its card in view; Back returns to Goals
+  // 2e: an open question's link on Goals: Goals with the panel on its Inbox tab (kit-100), the card in view;
+  // Back returns to Goals
+  const onInbox = (page) => until(async () => JSON.stringify(await shown()) === JSON.stringify([page]) && await p.ev(`location.hash === ${JSON.stringify(`#${page}?th=inbox`)} && document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !document.getElementById('th-inbox').hidden && getComputedStyle(document.getElementById('threads')).transform === 'none'`), `${page} with the panel on Inbox, at rest`);
   await go('#goals');
   await onPage('goals');
   n = await len();
   await p.click(`#goals a[href="#q/${ids.goalQ}"]`);
-  await onPage('inbox');
+  await onInbox('goals');
   await until(() => p.ev(`(() => { const r = document.getElementById(${JSON.stringify(`q-${ids.goalQ}`)})?.getBoundingClientRect(); return !!r && r.height > 0 && r.top < innerHeight && r.bottom > 0; })()`), 'its card in view');
-  assert.equal(await len(), n + 1, 'the q/ entry is replaced by #inbox');
+  assert.equal(await len(), n + 1, 'the q/ entry is replaced by #goals?th=inbox');
   assert.equal(await peekOpen(), false);
   await back();
   await onPage('goals');
 
-  // a review: over the Inbox it was opened on, × goes Back; cold, it closes to #inbox
+  // a review: over the Inbox tab it was opened from (over Overview), × goes Back; cold, it closes to
+  // #overview?th=inbox (kit-100)
   const reviewing = (page) => until(async () => await p.ev("!document.querySelector('#review-view').hidden && document.querySelector('main').classList.contains('reviewing')") && JSON.stringify(await shown()) === JSON.stringify([page]), `the review over ${page}`);
-  await go('#inbox');
-  await onPage('inbox');
+  await go('#overview?th=inbox');
+  await onInbox('overview');
   await p.click(`[data-open-review="${ids.review}"]`);
-  await reviewing('inbox');
+  await reviewing('overview');
   assert.equal(await p.ev('location.hash'), `#review/${ids.review}`);
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
   const nRv = await len();
-  await p.click('#review-view [data-rv-close]');
-  await onPage('inbox');
+  // (the close by the element's click: #review-view over the panel is kit-100's Task 5, spec §2.8; until then the
+  // panel lies over the review's ×)
+  await p.ev("document.querySelector('#review-view [data-rv-close]').click(); void 0");
+  await onInbox('overview');
   assert.equal(await p.ev("document.querySelector('#review-view').hidden"), true);
   assert.equal(await len(), nRv, '× closes the review by Back: no entry added');
   await load(`#review/${ids.review}`);
   await until(() => p.ev("!document.querySelector('#review-view').hidden"), 'cold: the review');
   await until(() => p.ev("!!document.querySelector('#review-view [data-rv-close]')"), 'the review\'s close button');
-  await p.click('#review-view [data-rv-close]');
-  await onPage('inbox');
+  await p.ev("document.querySelector('#review-view [data-rv-close]').click(); void 0");
+  await onInbox('overview');
+  // the panel closed, so the remembered panel (kit-89) doesn't open over the visits below
+  await p.click('#th-close');
+  await until(() => p.ev("location.hash === '#overview' && !document.body.classList.contains('threads-open')"), 'the panel closed');
 
   // the viewer, each case in a visit of its own (see the note below): opened on Overview, closed
   // back to it; cold, over Library and closed to #library

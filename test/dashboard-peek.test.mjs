@@ -999,21 +999,25 @@ test('the peeks', { skip: SKIP, timeout: 600000 }, async (t) => {
     }
     assert.ok(await p.ev(`[...document.querySelectorAll('#drawer-body .psect')].some((s) => s.querySelector('.card-head')?.textContent.trim() === 'The answer it rests on' && !!s.querySelector('a[href="#q/${encodeURIComponent(ids.qDefaulted)}"]'))`), 'the decision rests on the defaulted question');
 
-    // the defaulted question's How it changes: the Inbox, its Answered list open, its card's Overrule focused
+    // the defaulted question's How it changes: the panel's Inbox tab beside the peek (kit-100), its Answered list
+    // open, its card's Overrule focused
     await open('qDefaulted');
     await soon(peekDrawn('q'), 'the defaulted question');
     await p.ev(`document.querySelector('#drawer-body [data-answered-go="${ids.qDefaulted}"]').click(); void 0`);
-    await soon(`location.hash === '#inbox' && document.getElementById('answered-wrap').open && document.activeElement === document.querySelector('#a-${ids.qDefaulted} [data-overrule]')`, 'the Inbox, the Answered list open, the card\'s Overrule focused');
-    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'the peek closed');
+    await soon(`document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true' && !document.getElementById('th-inbox').hidden && !!document.querySelector('#answered-wrap[open]') && document.activeElement === document.querySelector('input[data-overrule="${ids.qDefaulted}"]')`, 'the panel on Inbox, the Answered list open, the card\'s Overrule focused');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open')"), true, 'the peek stays open');
     assert.ok(await p.ev(`(() => { const r = document.getElementById('a-${ids.qDefaulted}').getBoundingClientRect(); return r.bottom > 0 && r.top < innerHeight; })()`), 'the card in view');
-    await p.ev("document.getElementById('answered-wrap').open = false; void 0");
+    await p.ev("document.getElementById('answered-wrap').open = false; document.getElementById('th-close').click(); void 0");
+    await soon("!document.body.classList.contains('threads-open')", 'the panel closed');
 
-    // an open question's link: the Inbox at its card, no peek
+    // an open question's link: the panel's Inbox tab at its card, no peek
     await p.ev("location.hash = '#board'");
     await soon("location.hash === '#board' && !document.body.classList.contains('peek-open')", 'back on Board');
     await p.ev(`location.hash = ${JSON.stringify(`#q/${encodeURIComponent(ids.qOpen)}`)}`);
-    await soon(`location.hash === '#inbox' && (() => { const c = document.getElementById(${JSON.stringify(`q-${ids.qOpen}`)}); if (!c) return false; const r = c.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; })()`, 'the Inbox at the open question\'s card');
+    await soon(`location.hash === '#board?th=inbox' && (() => { const c = document.getElementById(${JSON.stringify(`q-${ids.qOpen}`)}); if (!c) return false; const r = c.getBoundingClientRect(); return r.height > 0 && r.bottom > 0 && r.top < innerHeight; })()`, 'the panel\'s Inbox at the open question\'s card');
     assert.equal(await p.ev("document.body.classList.contains('peek-open')"), false, 'no peek');
+    await p.ev("document.getElementById('th-close').click(); void 0");
+    await soon("!document.body.classList.contains('threads-open')", 'the panel closed');
   });
 
   // Every detail stays (spec §2.4): one assertion per item of the design's peek inventory (the table
