@@ -13289,6 +13289,15 @@ function dashboardData() {
   reviewMemo = new Map();
   try { return dashboardDataRead(); } finally { reviewMemo = null; }
 }
+// The Autonomy Score: the mean of the Trust, Efficiency and Awareness scores for each of the 12 weeks,
+// null when any of the three is (a week with no tickets shipped says nothing about autonomy).
+function autonomyScore(autonomy, efficiency, awareness) {
+  const weeks = awareness.weeks.map((w, i) => {
+    const x = [autonomy.decisions.weeks[i].score, efficiency.weeks[i].score, w.score];
+    return { starts_at: w.starts_at, score: x.every((v) => typeof v === 'number') ? Math.round((x[0] + x[1] + x[2]) / 3) : null };
+  });
+  return { this_week: weeks[11].score, last_week: weeks[10].score, weeks };
+}
 function dashboardDataRead() {
   // one clock for the parts that read the 12 weeks, so they agree on which week is this one
   const now = Date.now();
@@ -13298,6 +13307,7 @@ function dashboardDataRead() {
   const msgs = logObjects('message');
   const replied = handledMessages();
   const H = heldByMap();
+  const efficiency = efficiencyData(metrics, now), awareness = awarenessData(now), autonomy = autonomyData(now);
   return {
     generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
@@ -13311,12 +13321,13 @@ function dashboardDataRead() {
     questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).map(withClassName),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics,
-    efficiency: efficiencyData(metrics, now),
-    awareness: awarenessData(now),
+    efficiency,
+    awareness,
     progress: collectProgress(),
     planners: planners().map((p) => ({ ...p, held_by: H.get(`plan-${p.feature}`) ?? null })),
     ooda: collectOoda(),
-    autonomy: autonomyData(now),
+    autonomy,
+    autonomy_score: autonomyScore(autonomy, efficiency, awareness),
     threads: threadCounts(),
     upkeep_days: upkeepDays(),
     // every kit setting, in words; never a credential (settingsAll)

@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
-import { fleetFixture, json, line, kit } from './lib/kit.mjs';
+import { fleetFixture, json, line, kit, dashboardOnFreePort } from './lib/kit.mjs';
 
 const MIN = 60000;
 const HOUR = 3600000;
@@ -431,4 +431,48 @@ test('awareness: no lessons in force, no lessons suggestion', () => {
     assert.deepEqual(a.parts.lessons, NONE);
     assert.deepEqual(a.suggestions, [{ id: sid('incident', p), kind: 'incident', what: 'Write down what the mail bounce taught', evidence: 'Fixed 2 days ago and verified since; no lesson cites it', effect: 'Fixed incidents that left a lesson: 0 of 1 → 1 of 1' }]);
   } finally { Fx.done(); }
+});
+
+// The Autonomy Score: the mean of Trust, Efficiency and Awareness, null when any is.
+test('autonomy score: the mean of the three, null when any is', (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { d } = shared();
+  const s = d.autonomy_score;
+  assert.equal(s.weeks.length, 12);
+  assert.equal(s.weeks[7].score, 83);
+  d.autonomy_score.weeks.forEach((w, i) => {
+    const x = [d.autonomy.decisions.weeks[i].score, d.efficiency.weeks[i].score, d.awareness.weeks[i].score];
+    assert.equal(w.score, x.every((v) => typeof v === 'number') ? Math.round((x[0] + x[1] + x[2]) / 3) : null, `week ${i}`);
+  });
+  assert.equal(s.weeks[0].score, null);
+  assert.equal(s.weeks[8].score, null);
+  assert.equal(s.weeks[11].score, null);
+  assert.equal(s.this_week, s.weeks[11].score);
+  assert.equal(s.last_week, s.weeks[10].score);
+});
+
+test("one clock: every block's weeks line up", (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { d } = shared();
+  for (let i = 0; i < 12; i++) {
+    const at = d.awareness.weeks[i].starts_at;
+    assert.equal(d.autonomy_score.weeks[i].starts_at, at, `score ${i}`);
+    assert.equal(d.efficiency.weeks[i].starts_at, at, `efficiency ${i}`);
+    assert.equal(d.autonomy.decisions.weeks[i].starts_at, at, `trust ${i}`);
+  }
+});
+
+test('the server serves the same awareness and autonomy_score', async (t) => {
+  if (tooSoon()) return t.skip(TOO_SOON);
+  const { A, d } = shared();
+  let dash = null;
+  try {
+    const D = await dashboardOnFreePort(A.old, A.env());
+    dash = D.dash;
+    const api = await (await fetch(`http://127.0.0.1:${D.port}/api/data`)).json();
+    // effect and evidence carry day counts, which move between the two reads
+    const bare = (a) => ({ ...a, suggestions: a.suggestions.map(({ effect, evidence, ...r }) => r) });
+    assert.deepEqual(bare(api.awareness), bare(d.awareness));
+    assert.deepEqual(api.autonomy_score, d.autonomy_score);
+  } finally { await dash?.stop(); }
 });

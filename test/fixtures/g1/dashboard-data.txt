@@ -1849,6 +1849,48 @@ exit 0
       }
     }
   },
+  "autonomy_score": {
+    "this_week": null,
+    "last_week": null,
+    "weeks": [
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      },
+      {
+        "score": null
+      }
+    ]
+  },
   "threads": {
     "you": 0,
     "waiting": 0,
