@@ -562,9 +562,13 @@ test('settings area', { skip: SKIP, timeout: 600000 }, async (t) => {
 
   // Run on a running fleet: no post; Drain: one post, then the mode shows drain
   // the click scrolls its button into view, and a page taller than the window (Overview) scrolls with it,
-  // moving the sticky nav by a fraction of a pixel: the place is read once the press has scrolled
-  await p.click(btn('run'));
+  // moving the sticky nav by a fraction of a pixel: so Run is scrolled into view as the click does,
+  // without a press, and the place is read once it holds still; pressing Run must not move it
+  await p.ev(`document.querySelector(${JSON.stringify(btn('run'))}).scrollIntoView({ block: 'center' }); void 0`);
+  await until(() => p.ev(STEADY(btn('run'))), 'Run held still after its scroll');
   const at0 = await place();
+  await p.click(btn('run'));
+  assert.equal(await place(), at0, 'pressing Run on a running fleet leaves the switch where it was');
   await p.click(btn('drain'));
   await until(async () => (await posts()) !== '[]', 'the drain posted');
   assert.equal(await posts(), JSON.stringify([{ op: 'drain' }]), 'Run on a running fleet posts nothing; Drain posts once');
