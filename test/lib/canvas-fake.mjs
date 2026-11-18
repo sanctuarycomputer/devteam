@@ -1442,13 +1442,15 @@ const ALLOWED_SKIPS = [
 ];
 // The skip rule, on the source with comments removed and string, template and regex insides blanked:
 // `skip:` only as one of the two allowed forms (canDrive imported from ./lib/chrome.mjs for the first);
-// no `.skip`, `.todo`, `.only`, `todo:` or `only:`.
+// no `.skip`, `.todo`, `.only`, `todo:` or `only:`; no `{ skip }`, `{ todo }` or `{ only }` in shorthand.
 export function skipProblems(source) {
   const s = scan(source);
   const b = s.blank;
   const out = [];
   for (const m of b.matchAll(/\.\s*(skip|todo|only)\b/g)) out.push(`line ${lineAt(source, m.index)}: .${m[1]}`);
   for (const m of b.matchAll(/(?<![\w$.])(todo|only)\s*:/g)) out.push(`line ${lineAt(source, m.index)}: ${m[1]}:`);
+  // an option in shorthand, `{ skip }` or `{ a, only }`: the bare word between `{` or `,` and `,` or `}`
+  for (const m of b.matchAll(/(?<=[{,]\s*)(skip|todo|only)(?=\s*[,}])/g)) out.push(`line ${lineAt(source, m.index)}: { ${m[1]} } in shorthand`);
   // a quoted or computed key, or bracket access: a string or plain template whose text is skip, todo
   // or only, followed by `:` or `]`
   for (let k = 0; k < source.length; k++) {
@@ -1546,6 +1548,12 @@ export const SKIP_CASES = deepFreeze({
     file('t["only"](', 'test(\'x\', (t) => { t["only"](\'y\', () => {}); });\n'),
     file("test['todo'](", "test['todo']('x');\n"),
     file('a skip inside a template substitution is code', "const s = `${test.skip('x')}`;\n"),
+    file('{ skip } in shorthand', "const skip = true;\ntest('x', { skip }, () => {});\n"),
+    file('{ todo } in shorthand', "const todo = true;\ntest('x', { todo }, () => {});\n"),
+    file('{ only } in shorthand', "const only = true;\ntest('x', { only }, () => {});\n"),
+    file('{ a, skip } in shorthand beside another', "const a = 1; const skip = true;\ntest('x', { a, skip }, () => {});\n"),
+    file('{ only, timeout: 5 } in shorthand beside a key', "const only = true;\ntest('x', { only, timeout: 5 }, () => {});\n"),
+    file('{ ...o, todo } in shorthand after a spread', "const o = {}; const todo = true;\ntest('x', { ...o, todo }, () => {});\n"),
   ],
   good: [
     file('canDrive imported from ./lib/chrome.mjs', "import { canDrive } from './lib/chrome.mjs';\ntest('x', { skip: canDrive ? false : 'no Chrome or no WebSocket' }, () => {});\n"),
@@ -1557,6 +1565,7 @@ export const SKIP_CASES = deepFreeze({
     file('division', "const half = a / 2 / b; const s = 'x / .only';\n"),
     file('division after )', "const h = (a) / 2; const s = '/ .only';\n"),
     file('the words as values, not keys', "const why = 'skip'; test('only', () => { why.length; });\n"),
+    file('the words inside longer names', "const skipped = 1; const onlyOne = 2;\ntest('x', { skipped, onlyOne }, () => {});\n"),
   ],
 });
 

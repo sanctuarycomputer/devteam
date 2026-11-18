@@ -1192,6 +1192,225 @@
     },
     {
       "tick": 250
+    },
+    {
+      "as": "d",
+      "send": {
+        "t": "select",
+        "ids": [
+          "badge"
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "b": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": [
+                  "badge"
+                ]
+              }
+            ]
+          }
+        ],
+        "a2": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": [
+                  "badge"
+                ]
+              }
+            ]
+          }
+        ],
+        "d": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": [
+                  "badge"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "d",
+      "close": true
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "b": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              }
+            ]
+          }
+        ],
+        "a2": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "open": "d2",
+      "person": "dee;name=Dee",
+      "level": null,
+      "expect": {
+        "d2": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 59,
+            "you": {
+              "id": "dee",
+              "conn": "$conn:d2"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "b": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": []
+              }
+            ]
+          }
+        ],
+        "a2": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": []
+              }
+            ]
+          }
+        ],
+        "d2": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              },
+              {
+                "id": "ben",
+                "name": "Ben Okafor",
+                "ids": []
+              },
+              {
+                "id": "dee",
+                "name": "Dee",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

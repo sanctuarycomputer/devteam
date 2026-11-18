@@ -680,7 +680,35 @@ const LIMIT_CHECKS = {
       for (const m of got) assert.ok(Buffer.byteLength(JSON.stringify(m)) <= LIMITS.serverMsgBytes, 'each message at most 1 MB');
       assert.deepEqual(got.flatMap((m) => m.ops), ops, 'the runs, in order, are the ops');
       assert.equal(fake.rev(SLUG), got.length);
+      // each run as long as fits (§8): no message but the last could take the next op within 1 MB, so the
+      // count is the least the ops allow; for these 40 ops of a 64 KB path, 15, 15 and 10
+      got.slice(0, -1).forEach((m, i) => {
+        const more = { ...m, ops: [...m.ops, got[i + 1].ops[0]] };
+        assert.ok(Buffer.byteLength(JSON.stringify(more)) > LIMITS.serverMsgBytes, `message ${i + 1} could not take the next op`);
+      });
+      assert.deepEqual(got.map((m) => m.ops.length), [15, 15, 10], 'the fewest messages: runs of 15, 15 and 10');
     });
+    // the greedy fit at its edge: ops whose one message is exactly 1 MB go as one message; a byte more, as two
+    const by1 = { id: 'supervisor', name: 'supervisor', via: 'apply' };
+    const sixteen = Object.fromEntries(range(16).map((i) => [`v${i}`, { type: 'vector', path: 'M0 0' }]));
+    const opsOfMessage = (n) => {
+      const ops = range(16).map((i) => ({ op: 'set', id: `v${i}`, prop: 'path', value: P64 }));
+      const size = () => Buffer.byteLength(JSON.stringify({ t: 'ops', rev: 1, by: by1, ack: null, ops }));
+      ops[15].value = pathOfBytes(LIMITS.pathBytes - (size() - n));
+      assert.equal(size(), n, `a message of exactly ${n} bytes`);
+      return ops;
+    };
+    for (const [n, runs] of [[LIMITS.serverMsgBytes, [16]], [LIMITS.serverMsgBytes + 1, [15, 1]]]) {
+      await onCanvas(docWith(sixteen), async (fake, c) => {
+        const ops = opsOfMessage(n);
+        const mark = c.messages.length;
+        const r = await local(fake, localBody(ops));
+        assert.equal(r.status, 200);
+        const got = (await since(c, mark)).filter((m) => m.t === 'ops');
+        assert.deepEqual(got.map((m) => m.ops.length), runs, `ops whose one message is ${n} bytes: runs of ${runs.join(', ')}`);
+        assert.deepEqual(r.json, { rev: runs.length, edits: runs.length, saved: true });
+      });
+    }
     // a single op whose message alone passes 1 MB refuses the whole apply
     const nodes = { k: { type: 'component', children: [] } };
     for (let i = 0; i < 20; i++) nodes[`w${i}`] = { type: 'vector', parent: 'k', path: 'M0 0' };
@@ -875,6 +903,9 @@ const LIMIT_CHECKS = {
       const at = await post(fake, 'image', atBody);
       assert.equal(at.status, 200, 'a 4 MB image');
       assert.equal((await post(fake, 'image', overBody)).status, 413, 'one byte over');
+      // over 4 MB and not an image by its first bytes: the size is judged first, 413 not 415 (§8's order)
+      const junk = { name: 'big.png', data: Buffer.alloc(LIMITS.imageBytes + 1, 7).toString('base64') };
+      assert.equal((await post(fake, 'image', junk)).status, 413, 'over 4 MB with wrong first bytes');
     });
   },
   async imageBodyBytes() {
@@ -1674,7 +1705,8 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'answers 200 `{ "rev", "edits": <messages sent>, "saved": true }` once the write covering `rev` is done (and `saved` is sent)',
       'While saving is paused it answers at once with `"saved": false`',
       'A restart after a local apply answered `saved: true` keeps that apply.',
-      '**Statuses in order**: the guards (403, 413), then a slug `land` closed 423 `{ "why": "closed" }`, then any other slug not open for editing 404, then no session 503, then the body (400 for bad JSON or keys), then 409 or 200.',
+      "which browsers can't reach: past the host check (403), it refuses any `Origin`",
+      '**Statuses in order**: the guards (the host, the forbidden headers, the token: 403; the body: 413), then a slug `land` closed 423 `{ "why": "closed" }`, then any other slug not open for editing 404, then no session 503, then the body (400 for bad JSON or keys), then 409 or 200.',
       'the owner-action guards and a 50 MB body limit (413 from `Content-Length`)',
       'The fake answers 501 within the limit.',
       "the fake doesn't serve them (404)",
@@ -1714,6 +1746,8 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'No quoted keys, computed keys or bracket access with those words',
       "as in `case 'skip':`, `x ? 'only' : y` or `['a', 'skip']`",
       'In a canvas test file, reword such a line',
+      'No option in shorthand: a bare `skip`, `todo` or `only` between a `{` or `,` and a `,` or `}` (`{ skip }`, `{ a, only }`, `{ ...o, todo }`), which Node\'s runner reads as `skip: skip`.',
+      'The shorthand rule has known false positives too: the bare word as a list item or an argument (`[a, skip, b]`, `f(a, only, b)`) or destructured (`const { skip } = o`); in a canvas test file, use another name.',
     ]);
     all(md, 'The fake', [
       '`startCanvasFake(opts) → Promise<fake>`',
@@ -2097,6 +2131,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       for (const [status, label, o] of refusals) {
         const r = await post(fake, 'image', o.body === undefined ? pngBody : o.body, o);
         assert.equal(r.status, status, label);
+        assert.equal(r.body.length, 0, `${label}: a refusal carries no body (§14)`);
       }
       const hex = PNG_NAME.slice(0, 16);
       const gets = [
@@ -2111,7 +2146,11 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         [404, 'a malformed slug', `Bad_Slug/${PNG_NAME}`],
         [404, 'a file not there', `${SLUG}/ffffffffffffffff.png`],
       ];
-      for (const [status, label, rest] of gets) assert.equal((await request(`${fake.url}/api/canvas/image/${rest}`)).status, status, label);
+      for (const [status, label, rest] of gets) {
+        const r = await request(`${fake.url}/api/canvas/image/${rest}`);
+        assert.equal(r.status, status, label);
+        assert.equal(r.body.length, 0, `${label}: a refusal carries no body (§14)`);
+      }
       assert.equal((await request(`${fake.url}/api/canvas/image/old/${PNG_NAME}`, { headers: { Host: `evil.example:${fake.port}` } })).status, 403, 'a bad host');
       assert.equal((await request(`${fake.url}/api/canvas/image/old/${PNG_NAME}`, { headers: { 'x-devteam-relay': '1' } })).status, 403, 'the relay mark');
       assert.equal((await request(`${fake.url}/api/canvas/image/nope/x`, { headers: { 'x-devteam-relay': '1' } })).status, 403, 'the relay mark before the file rule');
@@ -2140,13 +2179,19 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         ['a wrong token', { 'x-devteam-canvas-token': 'not-the-token' }],
         ['the token twice', { 'x-devteam-canvas-token': ['the-token', 'the-token'] }],
         ['a bad host', { Host: `evil.example:${fake.port}` }],
-      ]) assert.equal((await local(fake, body, { headers })).status, 403, label);
+      ]) {
+        const r = await local(fake, body, { headers });
+        assert.equal(r.status, 403, label);
+        assert.equal(r.body.length, 0, `${label}: a 403 carries no body (§14)`);
+      }
       const none = await local(fake, body);
       assert.equal(none.status, 503, 'no page connected');
       assert.deepEqual(none.json, { why: 'no-session' });
       assert.deepEqual(shapeErrors('error-response', none.json), []);
       assert.deepEqual([fake.rev(SLUG), fake.doc(SLUG)], [0, minimal()], 'nothing changed');
-      assert.equal((await local(fake, body, { slug: 'nope' })).status, 404, 'an unknown slug');
+      const unknown = await local(fake, body, { slug: 'nope' });
+      assert.equal(unknown.status, 404, 'an unknown slug');
+      assert.equal(unknown.body.length, 0, 'a 404 carries no body (§14)');
 
       const c = await openOn(fake);
       for (const [label, b] of [
@@ -2158,7 +2203,11 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
         ['a via of page', { ...body, via: 'page' }],
         ['a by with a space', { ...body, by: 'a b' }],
         ['an empty by', { ...body, by: '' }],
-      ]) assert.equal((await local(fake, b)).status, 400, label);
+      ]) {
+        const r = await local(fake, b);
+        assert.equal(r.status, 400, label);
+        assert.equal(r.body.length, 0, `${label}: a 400 carries no body (§14)`);
+      }
       assert.equal(fake.rev(SLUG), 0);
 
       let mark = c.messages.length;
