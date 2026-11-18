@@ -2110,7 +2110,7 @@ function ratingHistory(q) {
 // about_turn, seen, owner_said_turn and owner_said_at are written only when a question is asked and
 // nobody may set them after (x-authority), so they're left out too: an older kit, which drops them
 // as unknown, then hashes the question as this one does, and the owner's answer stands there.
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at'];
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2160,7 +2160,8 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
+    about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
@@ -7040,7 +7041,21 @@ function turnAnswer(what, v) {
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
   if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
-  const used = readLog().lines.find((l) => l.type === 'question' && l.op === 'set' && l.turn === uid);
+  // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
+  // other binding on the turn overlaps, with what the owner wrote since the question read first
+  if (flags.said !== undefined) {
+    if (v.about_turn !== uid) die(`--from-turn ${uid}: ${v.id} wasn't asked about that turn${v.about_turn ? ` (it's about ${v.about_turn})` : ''}; a clause binds only to the turn its question is about: thread ask ${u.thread} --turn ${uid} …, then answer that`);
+    if (v.thread !== u.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    const answerSeen = ownerTurnsRead(u.thread, logGet(v.seen ?? '')?.type === 'turn' ? logGet(v.seen) : u);
+    return { said: c.said, said_at: c.said_at, turn: uid, answer_seen: answerSeen };
+  }
+  for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`${what} --${k} goes with --said`);
+  // the whole turn: refused once anything is bound to it (an answer, whole or a clause, or a correction)
+  const used = turnBindings(readLog().lines, uid)[0];
   if (used) die(`--from-turn ${uid}: that turn already settled ${used.id}; one turn settles one question (the owner answers the other in the card, or says it again)`);
   if (v.thread && u.thread !== v.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
   if (u.created_at <= v.asked_at) die(`--from-turn ${uid}: the turn is older than ${v.id}; words said before the question was asked don't answer it`);
@@ -7114,7 +7129,7 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
-  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}), files };
+  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
   if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
@@ -12071,6 +12086,8 @@ function cmdGoal() {
   if (sub === 'approve' || sub === 'decide') {
     const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
     const fromTurn = flags['from-turn'] !== undefined;
+    // a goal is approved on its design, never on words said before it: the whole turn, newer than the question
+    if (fromTurn && ['said', 'at', 'seen-turn'].some((k) => flags[k] !== undefined)) die('goal decide --from-turn takes the whole turn: a goal is approved on its design, so --said, --at and --seen-turn aren\'t accepted there');
     const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
     const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
     const g = logGet(id);
