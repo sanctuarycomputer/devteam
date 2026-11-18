@@ -4414,7 +4414,10 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
   const soon = soonIn(p, 30000, () => dash.out());
   const card = (q) => `document.getElementById('q-${q}')`;
-  const still = async (f) => { await p.ev('window.__still()'); try { await f(); } finally { await p.ev('window.__stir()'); } };
+  // a step no read lands in, from finding what to click to the release's own work (pointerup's
+  // setTimeout draws what the press held back), as the presses test has it: a redraw can't replace
+  // what is clicked between its press and its release
+  const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   await soon(`!!${card(GY.q)} && !!${card(GR.q)} && innerWidth === 390`, 'both approvals, on a phone');
 
   await t.test('a recommendation that names no verdict is said as words', async () => {
@@ -4455,15 +4458,19 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
       await p.ev(`(() => { const ta = ${card(GR.q)}.querySelector('textarea[data-q]'); ta.value = 'a smaller measure'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     });
     await soon(`${card(GR.q)}.querySelector('textarea[data-q]').value === 'a smaller measure'`, 'the note typed');
-    await p.click(`#q-${GR.q} [data-answer]`);
-    await soon(`!!${card(GR.q)}?.querySelector('[data-refused]')`, 'the refusal, on the card');
+    await still(() => p.click(`#q-${GR.q} [data-answer]`));
+    // timed out, it says what the card showed instead: its error line, the pick, what was posted
+    for (const end = Date.now() + 30000; !(await p.ev(`!!${card(GR.q)}?.querySelector('[data-refused]')`));) {
+      if (Date.now() > end) assert.fail(`timed out: the refusal, on the card; it shows ${await p.ev(`JSON.stringify({ err: document.getElementById('e-${GR.q}')?.textContent ?? null, pick: picks['${GR.q}'] ?? null, posts: (window.__posts ?? []).map((x) => x.url) })`)}`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
     const said = await p.ev(`${card(GR.q)}.querySelector('[data-refused]').textContent`);
     assert.match(said, /^Not saved: the server didn't take this approval as sent, and nothing was recorded\. Reload the page and press Approve, Refine or Let go again\./, said);
     assert.doesNotMatch(said, /missing or invalid fields/, 'never the server\'s terse words');
     assert.equal(await p.ev(`${card(GR.q)}.querySelector('input[data-pick][value="Refine"]').checked`), true, 'the pick back');
     assert.equal(await p.ev(`${card(GR.q)}.querySelector('textarea[data-q]').value`), 'a smaller measure', 'the note back');
     assert.equal(asked(GR.q).status, 'open', 'nothing recorded');
-    await p.click(`#q-${GR.q} [data-answer]`);
+    await still(() => p.click(`#q-${GR.q} [data-answer]`));
     await onServer(() => asked(GR.q).status === 'answered', 'the approval pressed again, on the server', GR.q);
     assert.equal(asked(GR.q).answer, 'Refine — a smaller measure');
     assert.equal(decided(GR.g, 'refine'), 1, 'one decision');
@@ -4477,11 +4484,11 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   });
 
   await t.test('the recommended press is recorded once', async () => {
-    await p.click(`#q-${GY.q} .choice.rec input[data-pick]`);
+    await still(() => p.click(`#q-${GY.q} .choice.rec input[data-pick]`));
     await soon(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').checked`, 'the recommended choice picked');
     // pressed as the owner presses it, whatever the recommended choice is called: before #337 it was
     // "Yes", and the server refused the press ("missing or invalid fields", shown by this wait failing)
-    await p.click(`#q-${GY.q} [data-answer]`);
+    await still(() => p.click(`#q-${GY.q} [data-answer]`));
     await onServer(async () => asked(GY.q).status === 'answered' && (await goalStatus(GY.g)) === 'ready', 'the approval recorded and the goal ready', GY.q);
     assert.equal(asked(GY.q).answer, 'Approve');
     assert.equal(decided(GY.g, 'approve'), 1, 'one decision');
