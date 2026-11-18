@@ -246,7 +246,9 @@ test('org-access A1: an existing box\'s passkeys, sessions and push subscription
     assert.deepEqual({ name: after.people[0].name, methods: after.people[0].methods, pushSubs: after.people[0].pushSubs }, { name: 'Owner', methods: [], pushSubs: [] });
     assert.equal(after.peopleStamp, stampOf(before.passkeys.map((p) => p.id)));
     for (const cookie of cookies) assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 200, 'the owner\'s old sessions still open the box');
-    // T4: /auth/method/list with the old cookie lists the old passkeys
+    const list = await gw.req('GET', '/auth/method/list', { cookie: cookies[0] });
+    assert.equal(list.status, 200, list.body);
+    assert.deepEqual(list.json.methods, before.passkeys.map((p) => ({ id: p.id, type: 'passkey', label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null })), 'the old passkeys are the owner\'s methods');
     const t = await gw.req('POST', '/push/test', { cookie: cookies[0], body: { endpoint: 'https://web.push.apple.com/phone' } });
     assert.equal(t.status, 200, t.body);
     assert.deepEqual(sent, ['https://web.push.apple.com/phone'], 'an old subscription is the owner\'s');
@@ -415,6 +417,11 @@ test('org-access A9: a person\'s session opens artifact links, the terminal\'s s
     assert.equal(await termWs(gw, undefined), 401, 'and without a session it is refused');
     assert.equal(await previewWs(gw, cookie), 503, 'a preview\'s upgrade gets past the session check to "no such preview"');
     assert.equal(await previewWs(gw, undefined), 401);
+    // an unclaimed box (today's reclaim leaves peopleSessions) honours no link, as no other path
+    const r = reclaim(gw);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(gw.state().peopleSessions.length, 'Ana\'s entry outlived the reclaim');
+    assert.equal((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'capOk needs the box claimed');
   } finally { await gw.close(); }
 });
 
@@ -454,5 +461,257 @@ test('org-access A9: a sign-in on a box unclaimed since its challenge is refused
     assert.equal(v.json?.error, 'this box is not claimed yet');
     assert.equal(cookieOf(v), null);
     assert.deepEqual(gw.state().peopleSessions, before, 'no session written');
+  } finally { await gw.close(); }
+});
+
+// --- A9: each person's own methods -----------------------------------------------------------------
+const METHOD_VIEW = ['id', 'type', 'label', 'added_at', 'last_used'];
+const view = (m) => ({ id: m.id, type: m.type, label: m.label, added_at: m.added_at, last_used: m.last_used });
+const rowOf = (s, id) => s.people.find((p) => p.id === id);
+const raw = (gw) => fs.readFileSync(gw.file, 'utf8');
+// a non-passkey method in the owner's row (none can be made yet), and a top-level session opened with it
+const ownerStub = (gw) => {
+  const stub = { id: rid('m-'), type: 'stub', key: 'stub:1', label: 'stub', added_at: new Date().toISOString(), last_used: null, data: {} };
+  const sess = mintSession({ method: stub.id });
+  const s = gw.state();
+  gw.write({ ...s, people: s.people.map((p) => (p.role === 'owner' ? { ...p, methods: [...p.methods, stub] } : p)), sessions: [...s.sessions, sess.row] });
+  return { stub, cookie: sess.cookie, hash: sess.row.hash };
+};
+// today's add: options, then the authenticator's new credential to verify
+const addPasskey = async (gw, a, cookie, extra = {}) => {
+  const o = await gw.req('POST', '/auth/passkeys/options', { cookie, body: {} });
+  assert.equal(o.status, 200, o.body);
+  return { options: o.json, verify: await gw.req('POST', '/auth/passkeys/verify', { cookie, body: { ...a.create(o.json, gw.publicUrl), ...extra } }) };
+};
+const methodList = async (gw, cookie) => { const r = await gw.req('GET', '/auth/method/list', { cookie }); assert.equal(r.status, 200, r.body); return r.json.methods; };
+
+test('org-access A9: each person lists only their own methods, with no key material', async () => {
+  const { gw, owner, ana, vic, ownerCookie, anaRow, vicRow } = await people('a9-list');
+  try {
+    const { stub } = ownerStub(gw);
+    const ac = await signIn(gw, ana);
+    const vc = await signIn(gw, vic);
+    const s = gw.state();
+    assert.deepEqual(await methodList(gw, ac), rowOf(s, anaRow.id).methods.map(view), 'Ana\'s, exactly');
+    assert.deepEqual(await methodList(gw, vc), rowOf(s, vicRow.id).methods.map(view), 'Vic\'s, exactly');
+    const [pk] = s.passkeys;
+    assert.deepEqual(await methodList(gw, ownerCookie), [{ id: u(owner.id), type: 'passkey', label: pk.name, added_at: pk.createdAt, last_used: pk.usedAt ?? null }, view(stub)], 'the owner\'s passkeys, then their row\'s methods');
+    for (const c of [ac, vc, ownerCookie]) for (const m of await methodList(gw, c)) assert.deepEqual(Object.keys(m), METHOD_VIEW, 'no key, no data');
+    assert.equal((await gw.req('GET', '/auth/method/list', { cookie: '' })).status, 401);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a person adds a passkey to their own methods, never the owner\'s', async () => {
+  const { gw, owner, ana, vic, anaRow } = await people('a9-add');
+  try {
+    const ac = await signIn(gw, ana);
+    const before = gw.state();
+    const a2 = authenticator();
+    const { options, verify } = await addPasskey(gw, a2, ac, { name: 'tablet' });
+    assert.deepEqual(options.excludeCredentials.map((c) => c.id).sort(), [u(owner.id), u(ana.id), u(vic.id)].sort(), 'every credential on the box');
+    assert.deepEqual([options.user.name, options.user.displayName], ['Ana@box.localhost', 'Ana (box.localhost)'], 'named for her');
+    assert.equal(verify.status, 200, verify.body);
+    const s = gw.state();
+    assert.equal(JSON.stringify(s.passkeys), JSON.stringify(before.passkeys), 'top-level passkeys byte-identical');
+    assert.equal(s.peopleStamp, before.peopleStamp);
+    const row = rowOf(s, anaRow.id);
+    assert.equal(row.rev, rowOf(before, anaRow.id).rev + 1, 'her rev went up');
+    assert.equal(row.methods.length, 2);
+    const m = row.methods[1];
+    assert.deepEqual(Object.keys(m), ['id', 'type', 'key', 'label', 'added_at', 'last_used', 'data']);
+    assert.match(m.id, /^m-[a-z2-7]{12}$/);
+    assert.notEqual(m.id, row.methods[0].id);
+    assert.deepEqual({ type: m.type, key: m.key, label: m.label, last_used: m.last_used }, { type: 'passkey', key: u(a2.id), label: 'tablet', last_used: null });
+    assert.deepEqual(Object.keys(m.data), ['userId', 'jwk', 'alg', 'signCount', 'rp']);
+    assert.deepEqual([m.data.userId, m.data.rp], [options.user.id, 'box.localhost']);
+    for (const p of s.people.filter((x) => x.id !== anaRow.id)) assert.deepEqual(p, rowOf(before, p.id), `${p.name}'s row unchanged`);
+    const c2 = await signIn(gw, a2);
+    assert.deepEqual(gw.state().peopleSessions.filter((x) => x.hash === hashOf(c2)).map((x) => [x.person, x.method]), [[anaRow.id, m.id]], 'it signs her into her own session');
+    // the default label counts her own passkeys
+    assert.equal((await addPasskey(gw, authenticator(), c2)).verify.status, 200);
+    assert.equal(rowOf(gw.state(), anaRow.id).methods[2].label, 'passkey 3');
+    // and the owner's add stays top-level, stamped
+    const oc = await signIn(gw, owner);
+    const o2 = authenticator();
+    const own = await addPasskey(gw, o2, oc);
+    assert.equal(own.verify.status, 200, own.verify.body);
+    assert.equal(own.options.user.name, 'owner@box.localhost');
+    const t = gw.state();
+    assert.deepEqual(t.passkeys.map((p) => [p.id, p.name]), [[u(owner.id), t.passkeys[0].name], [u(o2.id), 'passkey 2']]);
+    assert.equal(t.peopleStamp, stampOf([u(owner.id), u(o2.id)]));
+    assert.deepEqual(ownerOf(t)[0].methods, []);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a credential already on the box is refused, whoever holds it', async () => {
+  const { gw, owner, ana, vic, ownerCookie } = await people('a9-dup');
+  try {
+    const ac = await signIn(gw, ana);
+    const refused = async (a, cookie, why) => {
+      const before = raw(gw);
+      const { verify } = await addPasskey(gw, a, cookie);
+      assert.equal(verify.status, 400, `${why}: ${verify.body}`);
+      assert.equal(verify.json?.error, 'that passkey is already registered', why);
+      assert.equal(raw(gw), before, `${why}: nothing written`);
+    };
+    await refused(owner, ac, 'Ana, the owner\'s');
+    await refused(vic, ac, 'Ana, Vic\'s');
+    await refused(ana, ownerCookie, 'the owner, Ana\'s');
+    const r = reclaim(gw);
+    assert.equal(r.status, 0, r.stderr);
+    const token = /claim#([A-Za-z0-9_-]+)/.exec(r.stdout)?.[1];
+    const before = raw(gw);
+    const c = await gw.claim(ana, { token });
+    assert.equal(c.status, 400, c.body);
+    assert.equal(c.json?.error, 'that passkey is already registered');
+    assert.equal(raw(gw), before, 'the claim wrote nothing');
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: an add whose person changed since its options is refused', async () => {
+  const { gw, ana, anaRow } = await people('a9-add-changed');
+  try {
+    const ac = await signIn(gw, ana);
+    const a2 = authenticator();
+    const verifyAfter = async (change) => {
+      const o = await gw.req('POST', '/auth/passkeys/options', { cookie: ac, body: {} });
+      assert.equal(o.status, 200, o.body);
+      const s = gw.state();
+      gw.write(change(s));
+      const before = raw(gw);
+      const v = await gw.req('POST', '/auth/passkeys/verify', { cookie: ac, body: a2.create(o.json, gw.publicUrl) });
+      const wrote = raw(gw) !== before;
+      gw.write(s);
+      return { v, wrote };
+    };
+    const gone = await verifyAfter((s) => ({ ...s, people: s.people.filter((p) => p.id !== anaRow.id) }));
+    assert.ok(gone.v.status >= 400, `her row deleted: ${gone.v.status} ${gone.v.body}`);
+    assert.ok(!gone.wrote, 'her row deleted: nothing written');
+    const promoted = await verifyAfter((s) => ({ ...s, people: s.people.map((p) => (p.id === anaRow.id ? { ...p, role: 'admin' } : p)) }));
+    assert.equal(promoted.v.status, 409, promoted.v.body);
+    assert.equal(promoted.v.json?.error, 'your account changed since; start again');
+    assert.ok(!promoted.wrote, 'her role changed: nothing written');
+    // unchanged, the same add lands
+    const ok = await verifyAfter((s) => s);
+    assert.equal(ok.v.status, 200, ok.v.body);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: nobody removes a method that isn\'t theirs, and "yours" is checked before "last"', async () => {
+  const { gw, owner, ana, ownerCookie } = await people('a9-not-yours');
+  try {
+    const { stub } = ownerStub(gw);
+    const o2 = authenticator();
+    assert.equal((await addPasskey(gw, o2, ownerCookie)).verify.status, 200, 'the owner holds two passkeys, so either could go');
+    const ac = await signIn(gw, ana);
+    const before = raw(gw);
+    for (const route of ['/auth/method/remove', '/auth/passkeys/remove']) {
+      for (const id of [u(owner.id), u(o2.id), stub.id]) {
+        const r = await gw.req('POST', route, { cookie: ac, body: { id } });
+        assert.equal(r.status, 404, `${route} ${id}: ${r.body}`);
+        assert.equal(raw(gw), before, `${route} ${id}: nothing changed`);
+      }
+    }
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: removing a method ends its sessions and the person\'s others, and nobody else\'s', async () => {
+  const { gw, ana, vic, ownerCookie, anaRow, vicRow } = await people('a9-remove');
+  try {
+    const a2 = authenticator();
+    const m2 = a2.method('passkey 2');
+    const s0 = gw.state();
+    gw.write({ ...s0, pushSubs: [pushSub('https://push.example/owner-1'), pushSub('https://push.example/owner-2')], people: s0.people.map((p) => (p.id === anaRow.id ? { ...p, methods: [...p.methods, m2], pushSubs: [pushSub('https://push.example/ana-1'), pushSub('https://push.example/ana-2')] } : p.id === vicRow.id ? { ...p, pushSubs: [pushSub('https://push.example/vic')] } : p)) });
+    const s1 = await signIn(gw, ana);
+    const s2 = await signIn(gw, a2);
+    const s3 = await signIn(gw, a2);
+    const vc = await signIn(gw, vic);
+    const before = gw.state();
+    const first = anaRow.methods[0].id;
+    const r = await gw.req('POST', '/auth/method/remove', { cookie: s3, body: { id: first } });
+    assert.equal(r.status, 200, r.body);
+    const after = gw.state();
+    const row = rowOf(after, anaRow.id);
+    assert.deepEqual(row.methods.map((m) => m.id), [m2.id]);
+    assert.equal(row.rev, rowOf(before, anaRow.id).rev + 1);
+    assert.deepEqual(row.pushSubs, [], 'her devices go');
+    assert.deepEqual(after.peopleSessions.filter((x) => x.person === anaRow.id).map((x) => x.hash), [hashOf(s3)], 'only the requesting session stays');
+    assert.deepEqual(after.sessions, before.sessions, 'the owner\'s sessions unchanged');
+    assert.equal(JSON.stringify(after.pushSubs), JSON.stringify(before.pushSubs), 'the owner\'s devices unchanged');
+    assert.equal(JSON.stringify(after.passkeys), JSON.stringify(before.passkeys));
+    assert.deepEqual(after.peopleSessions.filter((x) => x.person === vicRow.id), before.peopleSessions.filter((x) => x.person === vicRow.id), 'Vic\'s session unchanged');
+    assert.deepEqual(rowOf(after, vicRow.id), rowOf(before, vicRow.id), 'Vic\'s row and device unchanged');
+    for (const c of [s1, s2]) assert.equal((await gw.req('GET', '/box.json', { cookie: c })).status, 401);
+    for (const c of [s3, vc, ownerCookie]) assert.equal((await gw.req('GET', '/box.json', { cookie: c })).status, 200);
+    // two again, a session with each; the one the request came from goes
+    const a3 = authenticator();
+    assert.equal((await addPasskey(gw, a3, s3)).verify.status, 200);
+    const s4 = await signIn(gw, a3);
+    const r2 = await gw.req('POST', '/auth/passkeys/remove', { cookie: s3, body: { id: m2.id } });
+    assert.equal(r2.status, 200, r2.body);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: s3 })).status, 401, 'a session ends with its own method');
+    // the other passkey stays; its session, another of hers, ends by the rule (spec §Each person's own methods)
+    assert.equal((await gw.req('GET', '/box.json', { cookie: s4 })).status, 401);
+    assert.deepEqual(rowOf(gw.state(), anaRow.id).methods.map((m) => m.key), [u(a3.id)], 'the other passkey stays');
+    const s5 = await signIn(gw, a3);
+    const [last] = rowOf(gw.state(), anaRow.id).methods;
+    const was = raw(gw);
+    const r3 = await gw.req('POST', '/auth/method/remove', { cookie: s5, body: { id: last.id } });
+    assert.equal(r3.status, 400, r3.body);
+    assert.equal(raw(gw), was);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: changing methods takes a fresh sign-in, listing them does not', async () => {
+  const { gw, ana, anaRow } = await people('a9-fresh');
+  try {
+    const ac = await signIn(gw, ana);
+    const s = gw.state();
+    gw.write({ ...s, peopleSessions: s.peopleSessions.map((x) => (x.hash === hashOf(ac) ? { ...x, at: x.at - 600e3 } : x)) });
+    const before = raw(gw);
+    for (const route of ['/auth/method/remove', '/auth/passkeys/remove', '/auth/passkeys/options']) {
+      const r = await gw.req('POST', route, { cookie: ac, body: { id: anaRow.methods[0].id } });
+      assert.equal(r.status, 403, `${route}: ${r.body}`);
+      assert.match(r.json?.error ?? '', /sign in again/);
+    }
+    assert.equal(raw(gw), before);
+    assert.equal((await methodList(gw, ac)).length, 1, 'the list needs only a session');
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: the owner\'s last passkey stays, and their other methods go with their sessions', async () => {
+  const { gw, owner, ana, ownerCookie } = await people('a9-owner');
+  try {
+    let { stub, cookie: stubC } = ownerStub(gw);
+    const before = raw(gw);
+    for (const cookie of [ownerCookie, stubC]) {
+      const r = await gw.req('POST', '/auth/method/remove', { cookie, body: { id: u(owner.id) } });
+      assert.equal(r.status, 400, r.body);
+      assert.equal(raw(gw), before, 'passkeys unchanged');
+    }
+    const ac = await signIn(gw, ana);
+    const anaBefore = gw.state().peopleSessions;
+    const pre = gw.state();
+    // from a session opened with it: that session ends too
+    let r = await gw.req('POST', '/auth/method/remove', { cookie: stubC, body: { id: stub.id } });
+    assert.equal(r.status, 200, r.body);
+    let s = gw.state();
+    assert.deepEqual(ownerOf(s)[0].methods, []);
+    assert.equal(ownerOf(s)[0].rev, ownerOf(pre)[0].rev + 1);
+    assert.deepEqual(s.sessions, [], 'the requester\'s, opened with it, and the owner\'s other');
+    assert.equal(JSON.stringify(s.passkeys), JSON.stringify(pre.passkeys));
+    assert.equal(s.peopleStamp, pre.peopleStamp);
+    assert.deepEqual(s.peopleSessions, anaBefore, 'Ana\'s untouched');
+    for (const c of [stubC, ownerCookie]) assert.equal((await gw.req('GET', '/box.json', { cookie: c })).status, 401);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ac })).status, 200);
+    // from a session opened with a passkey: the stub's sessions end, the requester stays
+    const oc = await signIn(gw, owner);
+    ({ stub, cookie: stubC } = ownerStub(gw));
+    r = await gw.req('POST', '/auth/method/remove', { cookie: oc, body: { id: stub.id } });
+    assert.equal(r.status, 200, r.body);
+    s = gw.state();
+    assert.deepEqual(s.sessions.map((x) => x.hash), [hashOf(oc)]);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: stubC })).status, 401);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: oc })).status, 200);
   } finally { await gw.close(); }
 });

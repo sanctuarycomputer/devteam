@@ -1140,15 +1140,44 @@ export function createGateway(opts = {}) {
     return `${PUB}/`;
   };
 
+  // A person by id as it stands now; null is the stand-in owner's (a claimed file with no owner row).
+  const personOf = (s, id) => (id === null ? ownerRow(s) ?? STAND_IN : (s.people ?? []).find((p) => p.id === id) ?? null);
+  // A person's own sign-in methods, without key material: the owner's are the top-level passkeys and
+  // then their row's methods; anyone else's, their row's.
+  const ownMethods = (s, person) => {
+    const row = person.id === null ? null : (s.people ?? []).find((p) => p.id === person.id);
+    const methods = (row?.methods ?? []).map((m) => ({ id: m.id, type: m.type, label: m.label, added_at: m.added_at, last_used: m.last_used ?? null }));
+    return isOwner(person) ? [...s.passkeys.map((p) => ({ id: p.id, type: 'passkey', label: p.name, added_at: p.createdAt, last_used: p.usedAt ?? null })), ...methods] : methods;
+  };
+  // Every passkey on the box, everyone's: one credential belongs to one person.
+  const allCredentialIds = (s) => [...s.passkeys.map((p) => p.id), ...(s.people ?? []).flatMap((p) => (p.methods ?? []).filter((m) => m.type === 'passkey').map((m) => m.key))];
+  // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
+  // may hold a session too, so every other session of yours ends, and the requester's as well when it
+  // was opened with this method; your devices' notifications go (each subscribes again when its hub
+  // next opens). Nobody else's sessions or devices change.
+  const removeMethod = (s, person, id, session) => {
+    const own = ownMethods(s, person);
+    if (!own.some((m) => m.id === id)) return { status: 404, error: 'no such sign-in method of yours' };
+    const owner = isOwner(person);
+    const top = owner && s.passkeys.some((p) => p.id === id);
+    // the owner's last top-level passkey is what keeps the box claimed, whatever else they hold
+    if (owner ? top && s.passkeys.length < 2 : own.length < 2) return { status: 400, error: owner ? 'the last passkey can\'t be removed; add another first' : 'your last sign-in method can\'t be removed; add another first' };
+    const keep = (x) => x.hash === session.hash && x.method !== id;
+    const people = s.people?.map((p) => (p.id === person.id && p.methods.some((m) => m.id === id) ? { ...p, methods: p.methods.filter((m) => m.id !== id), rev: p.rev + 1, ...(owner ? {} : { pushSubs: [] }) } : p));
+    const next = owner
+      ? { ...s, ...(top ? { passkeys: s.passkeys.filter((p) => p.id !== id) } : {}), sessions: s.sessions.filter(keep), pushSubs: [], ...(people ? { people } : {}) }
+      : { ...s, people, peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== person.id || keep(x)) };
+    return { status: 200, next: top ? stamped(next) : next };
+  };
   // The passkey's user names its person, so a password manager doesn't file anyone's as the owner's.
   const creationOptions = (purpose, person = STAND_IN) => {
     const userId = b64u(crypto.randomBytes(16));
     return {
-      challenge: issue(purpose, { userId }), rp: { id: RP_ID, name: 'devteam' },
+      challenge: issue(purpose, { userId, person: person.id, role: person.role }), rp: { id: RP_ID, name: 'devteam' },
       user: isOwner(person) ? { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` } : { id: userId, name: `${person.name}@${RP_ID}`, displayName: `${person.name} (${RP_ID})` },
       pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
       authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
-      attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: store.load().passkeys.map((p) => ({ type: 'public-key', id: p.id })),
+      attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: allCredentialIds(store.load()).map((id) => ({ type: 'public-key', id })),
     };
   };
   const clientData = (b64, type, purpose) => {
@@ -1180,10 +1209,15 @@ export function createGateway(opts = {}) {
     if (!rawId || !sameBytes(rawId, Buffer.from(ad.credentialId))) throw new Error('credential id mismatch');
     const { jwk, alg } = coseToJwk(ad.cose);
     const s = store.load();
-    if (s.passkeys.some((p) => p.id === b64u(rawId))) throw new Error('that passkey is already registered');
-    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${s.passkeys.length + 1}`;
-    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() };
+    if (allCredentialIds(s).includes(b64u(rawId))) throw new Error('that passkey is already registered');
+    const who = personOf(s, issued.person ?? null);
+    const mine = who ? ownMethods(s, who).filter((m) => m.type === 'passkey').length : 0;
+    const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${mine + 1}`;
+    return { cred: { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() }, issued };
   };
+  // Where the route places it: the owner's goes top-level, where an older gateway reads it; anyone
+  // else's becomes a passkey method in their row.
+  const asMethod = ({ id: key, userId, jwk, alg, signCount, rp, name, createdAt }) => ({ id: newId('m-'), type: 'passkey', key, label: name, added_at: createdAt, last_used: null, data: { userId, jwk, alg, signCount, rp } });
   // A credential wherever it lives: the owner's top-level passkeys (`pk`), or a person's passkey
   // methods (`method`), the owner's row's included.
   const findCredential = (s, credId) => {
@@ -1550,7 +1584,8 @@ export function createGateway(opts = {}) {
     if (!prefix || /\.\.|%2e|%5c|\\/i.test(inner) || Number(exp) < Date.now()) return false;
     const want = Buffer.from(capMac(port, prefix, exp, sid));
     const got = Buffer.from(given);
-    return sameBytes(got, want) && liveSession(store.load(), (x) => x.hash.startsWith(sid)) !== null;
+    const s = store.load();
+    return sameBytes(got, want) && s.passkeys.length > 0 && liveSession(s, (x) => x.hash.startsWith(sid)) !== null;
   };
   const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
@@ -2160,7 +2195,7 @@ export function createGateway(opts = {}) {
           const want = unb64u(live.claimHash ?? '');
           if (!want || !sameBytes(sha256(typeof body?.token === 'string' ? body.token : ''), want)) return json(res, 403, { error: 'that is not this box\'s claim token' });
           if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
-          const pk = register(body, 'claim');
+          const { cred: pk } = register(body, 'claim');
           if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
           store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
           log(`claimed with passkey "${pk.name}"`);
@@ -2224,28 +2259,30 @@ export function createGateway(opts = {}) {
           store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash), ...(now.peopleSessions ? { peopleSessions: now.peopleSessions.filter((x) => x.hash !== session.hash) } : {}) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
-        // Until each person's own methods land (T4), these act on the owner's top-level passkeys only,
-        // so nobody else may reach them.
-        if ((p === '/auth/passkeys' || p.startsWith('/auth/passkeys/')) && !isOwner(person)) return json(res, 403, { error: 'only the owner can change these passkeys for now' });
-        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
-        if (p.startsWith('/auth/passkeys/') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
+        // Each of these acts on the signed-in person's own methods only (ownMethods, removeMethod).
+        if (p === '/auth/method/list' && req.method === 'GET') return json(res, 200, { methods: ownMethods(store.load(), person) });
+        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(ownMethods(store.load(), person).filter((m) => m.type === 'passkey').map((m) => ({ id: m.id, name: m.label, createdAt: m.added_at })), PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
+        if ((p.startsWith('/auth/passkeys/') || p === '/auth/method/remove') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`, person));
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
-          const pk = register(await readJson(req), `add:${session.hash}`);
+          const { cred, issued } = register(await readJson(req), `add:${session.hash}`);
           const now = store.load();
-          store.save({ ...now, passkeys: [...now.passkeys, pk] });
-          log(`passkey "${pk.name}" added`);
+          // the person as they stand now: an add started before they were removed or their role
+          // changed must not land where they were
+          const who = personOf(now, issued.person);
+          if (!who || who.role !== issued.role) return json(res, 409, { error: 'your account changed since; start again' });
+          store.save(isOwner(who)
+            ? stamped({ ...now, passkeys: [...now.passkeys, cred] })
+            : { ...now, people: now.people.map((x) => (x.id === who.id ? { ...x, methods: [...x.methods, asMethod(cred)], rev: x.rev + 1 } : x)) });
+          log(`passkey "${cred.name}" added`);
           return json(res, 200, { ok: true });
         }
-        if (p === '/auth/passkeys/remove' && req.method === 'POST') {
+        if ((p === '/auth/method/remove' || p === '/auth/passkeys/remove') && req.method === 'POST') {
           const body = await readJson(req);
-          const now = store.load();
-          if (now.passkeys.length < 2) return json(res, 400, { error: 'the last passkey can\'t be removed; add another first' });
-          if (!now.passkeys.some((x) => x.id === body?.id)) return json(res, 404, { error: 'no such passkey' });
-          // whoever held it may hold a session too: every other session ends, and every device's notifications
-          // (this one's subscribes again when its hub next opens)
-          store.save({ ...now, passkeys: now.passkeys.filter((x) => x.id !== body.id), sessions: now.sessions.filter((x) => x.hash === session.hash), pushSubs: [] });
-          log('a passkey was removed; every other session ended');
+          const out = removeMethod(store.load(), person, body?.id, session);
+          if (!out.next) return json(res, out.status, { error: out.error });
+          store.save(out.next);
+          log('a sign-in method was removed; its person\'s other sessions ended');
           return json(res, 200, { ok: true });
         }
         return send(res, 404, 'text/plain', 'not found');
