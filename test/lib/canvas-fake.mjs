@@ -76,6 +76,32 @@ export const LIMITS = Object.freeze({
   noteAnchorChars: 64,
 });
 
+// What crossing each limit by one answers, as the contract's Limits table words it (keyed like LIMITS).
+export const LIMIT_ANSWERS = Object.freeze({
+  docBytes: 'refused limit', folderBytes: 'refused limit', nodes: 'refused limit', pages: 'refused limit', tokens: 'refused limit',
+  tokenDepth: 'refused limit', depth: 'refused limit', overrideEntries: 'refused limit', props: 'refused limit', variants: 'refused limit',
+  tracks: 'refused value', idChars: 'refused value', nameChars: 'refused value', textChars: 'refused value', pathBytes: 'refused value',
+  figmaChars: 'refused value', propNameChars: 'refused value', tokenSegmentChars: 'refused value',
+  pageMsgBytes: 'close 1008', pageFrames: 'close 1008', editOpsBytes: 'refused limit', serverMsgBytes: 'split; one op over: 409 limit',
+  serverFrameBytes: 'fragmented', perSecond: 'close 1008', perPerson: 'close 1008', perCanvas: 'close 1008', openCanvases: 'close 1008',
+  perServer: 'close 1008', selectIds: 'ignored', pingMs: 'window: ping', unansweredPings: 'close 1001', savedMs: 'window: saved',
+  selectionsMs: 'window: selections', imageBytes: '413', imageBodyBytes: '413', localBodyBytes: '413', importBodyBytes: '413',
+  byChars: '400', noteAnchorChars: 'not an anchor',
+});
+
+// The numeric ranges of the value classes and token types, [lo, hi] inclusive, keyed by the contract's
+// Value classes row (a class) or Token types row (`token:<$type>`). The checks below read them.
+export const RANGES = deepFreeze({
+  dim: { value: [-100000, 100000] },
+  len: { value: [0, 100000] },
+  opacity: { value: [0, 1] },
+  tracks: { value: [0, 100000], fr: [1, 999] },
+  font: { size: [1, 1000], weight: [100, 900], lineHeight: [0.5, 10] },
+  'token:color': { component: [0, 1], alpha: [0, 1] },
+  'token:dimension': { value: [-100000, 100000] },
+  'token:fontWeight': { value: [100, 900] },
+});
+
 export const TYPES = Object.freeze(['frame', 'text', 'rect', 'ellipse', 'vector', 'image', 'component', 'instance']);
 const CONTAINERS = new Set(['frame', 'component']);
 const STRUCTURAL = new Set(['id', 'type', 'parent', 'children']);
@@ -140,6 +166,20 @@ function overridable(type, prop) {
   if (!TYPES.includes(type) || isTemplate(prop) || NOT_OVERRIDDEN.has(prop) || !own(PROPS[type], prop)) return null;
   return PROPS[type][prop];
 }
+// An override key not allowed there (refused `prop`): one never overridden, a structural key, a
+// template, or, its target node known, a property its type doesn't have. A target that doesn't resolve
+// is the refs rule's (`ref`), so ops in one edit may still refer forward.
+function overrideKeyBad(nodes, target, prop) {
+  if (NOT_OVERRIDDEN.has(prop) || STRUCTURAL.has(prop) || isTemplate(prop)) return true;
+  const t = ownGet(nodes, target);
+  return isObj(t) && TYPES.includes(t.type) && !overridable(t.type, prop);
+}
+// The same, over a whole map: `overrides` and `variant` ({ id: { prop } }), `variants` ({ name: { id: { prop } } }).
+function overrideMapBad(nodes, cls, m) {
+  if (!isObj(m)) return false;
+  const idMaps = cls === 'variants' ? Object.values(m).filter(isObj) : [m];
+  return idMaps.some((im) => Object.entries(im).some(([id, o]) => isObj(o) && Object.keys(o).some((prop) => overrideKeyBad(nodes, id, prop))));
+}
 
 // The document rules, in judgement order: the first that fails refuses an edit with its code.
 // The spec's order (tree, types and keys, classes, refs, component placement, instance cycles,
@@ -193,8 +233,30 @@ const SEGMENT_RE = /^[A-Za-z0-9_-]{1,40}$/;
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
 const FIGMA_RE = /^[A-Za-z0-9:;_-]{1,100}$/;
-const PATH_RE = /^[ ,]*[Mm][MLHVCSQTAZmlhvcsqtaz0-9.eE+\-, ]*$/;
-const FR_RE = /^([1-9][0-9]{0,2})fr$/;
+const PATH_CMD = new Set('MLHVCSQTAZmlhvcsqtaz');
+const PATH_NUM = /[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?/y;
+const PATH_WS = new Set([' ', '\t', '\n', '\r', '\f']);
+// Optional whitespace, a move, then commands and numbers separated by whitespace and at most one comma
+// (none leading, none trailing, never two in a row). A scan, so a long path costs linear time.
+function pathOk(s) {
+  let i = 0;
+  const n = s.length;
+  const ws = () => { while (i < n && PATH_WS.has(s[i])) i++; };
+  ws();
+  if (s[i] !== 'M' && s[i] !== 'm') return false;
+  i++;
+  for (;;) {
+    ws();
+    let comma = false;
+    if (s[i] === ',') { comma = true; i++; ws(); }
+    if (i >= n) return !comma;
+    if (PATH_CMD.has(s[i])) { i++; continue; }
+    PATH_NUM.lastIndex = i;
+    if (!PATH_NUM.test(s)) return false;
+    i = PATH_NUM.lastIndex;
+  }
+}
+const FR_RE = /^([0-9]+)fr$/;
 const SRC_RE = /^images\/([0-9a-f]{16}\.(?:png|jpg|webp|gif))$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -249,12 +311,16 @@ function tokenRef(v, refs, type, min, max) {
   return null;
 }
 const D = LIMITS;
-const DIM_MAX = 100000;
+const R = RANGES;
+const inR = (v, [lo, hi]) => num(v, lo, hi);
 function lenOf(v, refs) {
-  if (typeof v === 'number') return num(v, 0, DIM_MAX) ? null : 'not a number in 0..100000';
-  return tokenRef(v, refs, 'dimension', 0, DIM_MAX);
+  const [lo, hi] = R.len.value;
+  if (typeof v === 'number') return num(v, lo, hi) ? null : `not a number in ${lo}..${hi}`;
+  return tokenRef(v, refs, 'dimension', lo, hi);
 }
-const weightOk = (v) => Number.isInteger(v) && v >= 100 && v <= 900 && v % 100 === 0;
+const weightIn = (v, [lo, hi]) => Number.isInteger(v) && v >= lo && v <= hi && v % 100 === 0;
+const weightOk = (v) => weightIn(v, R.font.weight);
+const frOk = (x) => { const m = typeof x === 'string' ? FR_RE.exec(x) : null; return !!m && !/^0[0-9]/.test(m[1]) && inR(Number(m[1]), R.tracks.fr); };
 
 const SIMPLE = {
   color(v, refs) {
@@ -263,11 +329,12 @@ const SIMPLE = {
   },
   paint: (v, refs) => (v === null ? null : SIMPLE.color(v, refs)),
   dim(v, refs) {
-    if (typeof v === 'number') return num(v, -DIM_MAX, DIM_MAX) ? null : 'not a number in -100000..100000';
-    return tokenRef(v, refs, 'dimension', -DIM_MAX, DIM_MAX);
+    const [lo, hi] = R.dim.value;
+    if (typeof v === 'number') return num(v, lo, hi) ? null : `not a number in ${lo}..${hi}`;
+    return tokenRef(v, refs, 'dimension', lo, hi);
   },
   len: lenOf,
-  opacity: (v) => (num(v, 0, 1) ? null : 'not a number in 0..1'),
+  opacity: (v) => (inR(v, R.opacity.value) ? null : 'not a number in 0..1'),
   padding(v, refs) {
     if (!Array.isArray(v) || v.length !== 4) return 'not four lengths';
     for (const x of v) { const e = lenOf(x, refs); if (e) return e; }
@@ -278,7 +345,7 @@ const SIMPLE = {
     if (!Array.isArray(v)) return 'not an array';
     if (v.length > D.tracks) return `over ${D.tracks} tracks`;
     for (const x of v) {
-      if (typeof x === 'number' ? !num(x, 0, DIM_MAX) : !(x === 'auto' || (typeof x === 'string' && FR_RE.test(x)))) return `a track ${JSON.stringify(x)}`;
+      if (typeof x === 'number' ? !inR(x, R.tracks.value) : !(x === 'auto' || frOk(x))) return `a track ${JSON.stringify(x)}`;
     }
     return null;
   },
@@ -288,15 +355,15 @@ const SIMPLE = {
     const ks = Object.keys(v);
     if (ks.length !== 4 || !['family', 'size', 'weight', 'lineHeight'].every((k) => own(v, k))) return 'not exactly { family, size, weight, lineHeight }';
     if (!FAMILIES.includes(v.family) && tokenRef(v.family, refs, 'fontFamily')) return 'family not sans, serif, mono or a fontFamily reference';
-    if (!(typeof v.size === 'number' ? num(v.size, 1, 1000) : !tokenRef(v.size, refs, 'dimension', 1, 1000))) return 'size not 1..1000 or a dimension reference';
+    if (!(typeof v.size === 'number' ? inR(v.size, R.font.size) : !tokenRef(v.size, refs, 'dimension', ...R.font.size))) return 'size not 1..1000 or a dimension reference';
     if (!weightOk(v.weight) && tokenRef(v.weight, refs, 'fontWeight')) return 'weight not 100..900 by 100 or a fontWeight reference';
-    if (!(typeof v.lineHeight === 'number' ? num(v.lineHeight, 0.5, 10) : !tokenRef(v.lineHeight, refs, 'number', 0.5, 10))) return 'lineHeight not 0.5..10 or a number reference';
+    if (!(typeof v.lineHeight === 'number' ? inR(v.lineHeight, R.font.lineHeight) : !tokenRef(v.lineHeight, refs, 'number', ...R.font.lineHeight))) return 'lineHeight not 0.5..10 or a number reference';
     return null;
   },
   pathData(v) {
     if (typeof v !== 'string') return 'not a string';
     if (Buffer.byteLength(v) > D.pathBytes) return `over ${D.pathBytes} bytes`;
-    return PATH_RE.test(v) ? null : 'not SVG path commands and numbers starting with a move';
+    return pathOk(v) ? null : 'not SVG path commands and numbers starting with a move';
   },
   imageSrc(v, refs) {
     const m = typeof v === 'string' ? SRC_RE.exec(v) : null;
@@ -369,8 +436,8 @@ function checkClass(nodes, bad, refs, where, cls, v, extra) {
 
 // ---- tokens ----
 
-function dimToken(v, lo = -DIM_MAX, hi = DIM_MAX) {
-  return isObj(v) && Object.keys(v).length === 2 && num(v.value, lo, hi) && v.unit === 'px';
+function dimToken(v) {
+  return isObj(v) && Object.keys(v).length === 2 && inR(v.value, R['token:dimension'].value) && v.unit === 'px';
 }
 // What is wrong with a token, or null.
 function tokenProblem(t) {
@@ -381,21 +448,21 @@ function tokenProblem(t) {
     case 'color': {
       if (!isObj(v) || v.colorSpace !== 'srgb' || !Array.isArray(v.components) || v.components.length !== 3) return 'color: not { colorSpace: srgb, components: [r, g, b] }';
       if (Object.keys(v).some((k) => !['colorSpace', 'components', 'alpha', 'hex'].includes(k))) return 'color: an extra key';
-      if (!v.components.every((c) => num(c, 0, 1))) return 'color: a component not in 0..1';
-      if (own(v, 'alpha') && !num(v.alpha, 0, 1)) return 'color: alpha not in 0..1';
+      if (!v.components.every((c) => inR(c, R['token:color'].component))) return 'color: a component not in 0..1';
+      if (own(v, 'alpha') && !inR(v.alpha, R['token:color'].alpha)) return 'color: alpha not in 0..1';
       if (own(v, 'hex') && !(typeof v.hex === 'string' && HEX6_RE.test(v.hex))) return 'color: hex not #rrggbb';
       return null;
     }
     case 'dimension': return dimToken(v) ? null : 'dimension: not { value: -100000..100000, unit: px }';
     case 'fontFamily': return FAMILIES.includes(v) ? null : 'fontFamily: not sans, serif or mono';
-    case 'fontWeight': return weightOk(v) ? null : 'fontWeight: not 100..900 by 100';
+    case 'fontWeight': return weightIn(v, R['token:fontWeight'].value) ? null : 'fontWeight: not 100..900 by 100';
     case 'number': return num(v, -Infinity, Infinity) ? null : 'number: not a finite number';
     case 'typography': {
       const ks = ['fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight'];
       if (!isObj(v) || Object.keys(v).length !== 5 || !ks.every((k) => own(v, k))) return 'typography: not exactly { fontFamily, fontSize, fontWeight, letterSpacing, lineHeight }';
       if (!FAMILIES.includes(v.fontFamily)) return 'typography: fontFamily not sans, serif or mono';
       if (!dimToken(v.fontSize)) return 'typography: fontSize not a dimension';
-      if (!weightOk(v.fontWeight)) return 'typography: fontWeight not 100..900 by 100';
+      if (!weightIn(v.fontWeight, R['token:fontWeight'].value)) return 'typography: fontWeight not 100..900 by 100';
       if (!dimToken(v.letterSpacing)) return 'typography: letterSpacing not a dimension';
       if (!num(v.lineHeight, -Infinity, Infinity)) return 'typography: lineHeight not a number';
       return null;
@@ -487,6 +554,17 @@ export function docErrors(doc, { images = null, folderBytes = 0 } = {}) {
         if (!isObj(n[k])) { add('keys', `${w}.${k}`, 'a group that is not an object'); continue; }
         for (const sub of Object.keys(n[k])) if (!own(PROPS[n.type], `${k}.${sub}`)) add('keys', `${w}.${k}.${sub}`, `not a property of a ${n.type}`);
       } else if (!own(PROPS[n.type], k) || isTemplate(k)) add('keys', `${w}.${k}`, `not a property of a ${n.type}`);
+    }
+    // override keys not allowed there: a variant's (on a component) and an instance's
+    const idMaps = [];
+    if (n.type === 'component' && isObj(n.variants)) for (const [vn, vm] of Object.entries(n.variants)) idMaps.push([`${w}.variants.${vn}`, vm]);
+    if (n.type === 'instance') idMaps.push([`${w}.overrides`, n.overrides]);
+    for (const [wm, im] of idMaps) {
+      if (!isObj(im)) continue;
+      for (const [tid, o] of Object.entries(im)) {
+        if (!isObj(o)) continue;
+        for (const prop of Object.keys(o)) if (overrideKeyBad(nodes, tid, prop)) add('keys', `${wm}.${tid}.${prop}`, `${prop} may not be overridden on ${tid}`);
+      }
     }
   }
 
@@ -592,11 +670,7 @@ export function docErrors(doc, { images = null, folderBytes = 0 } = {}) {
   const inComp = (id, comp) => good.has(id) && encl.get(id) === comp;
   const overrideRefs = (w, comp, m) => {
     if (!isObj(m)) return;
-    for (const [id, o] of Object.entries(m)) {
-      if (!inComp(id, comp)) { add('refs', `${w}.${id}`, `${id} is not a descendant of component ${comp}`); continue; }
-      if (!isObj(o)) continue;
-      for (const prop of Object.keys(o)) if (!overridable(good.get(id).type, prop)) add('refs', `${w}.${id}.${prop}`, `${prop} is not an overridable property of a ${good.get(id).type}`);
-    }
+    for (const id of Object.keys(m)) if (!inComp(id, comp)) add('refs', `${w}.${id}`, `${id} is not a descendant of component ${comp}`);
   };
   for (const [id, n] of good) {
     const w = `nodes.${id}`;
@@ -776,6 +850,8 @@ function setProp(d, n, path, value) {
   const pp = propPath(n.type, path);
   if (!pp) return 'prop';
   const { def, keys } = pp;
+  if (pp.target && overrideKeyBad(d.nodes, pp.target, pp.prop)) return 'prop';
+  if (['overrides', 'variant', 'variants'].includes(def.class) && overrideMapBad(d.nodes, def.class, value)) return 'prop';
   if (value === null && def.default === undefined && !def.required) {
     // an entry or an absent-by-default property: null removes it; an override's id map
     // (`overrides.<id>`, `variants.<name>.<id>`) left empty goes too, never the variant or a map above

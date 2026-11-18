@@ -10,7 +10,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  TYPES, PROPS, CLASSES, TOKEN_TYPES, DOC_RULES, OPS, PAGE_KINDS, SERVER_KINDS, HTTP_KINDS, REFUSALS, ROUTES, LIMITS,
+  TYPES, PROPS, CLASSES, TOKEN_TYPES, DOC_RULES, OPS, PAGE_KINDS, SERVER_KINDS, HTTP_KINDS, REFUSALS, ROUTES, LIMITS, LIMIT_ANSWERS, RANGES,
   NODE_ID_RE, SLUG_RE, CLIENT_RE, SESSION_RE, BY_RE, IMAGE_FILE_RE, HOSTILE_MARKERS, PAUSE_WHYS, CLOSE_WHYS,
   docErrors, opErrors, applyEdit, resolve, shapeErrors, freeTexts, skipProblems, measureProblems, SKIP_CASES, MEASURE_CASES,
 } from './lib/canvas-fake.mjs';
@@ -231,7 +231,8 @@ const timed = (fn) => { const t0 = Date.now(); const v = fn(); return [v, Date.n
 // ---- the contract: its machine-read tables, found by their ### heading ----
 
 const contract = () => fs.readFileSync(path.join(here, 'contracts', 'canvas.md'), 'utf8');
-const cellsOf = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+// Cells split at unescaped pipes; `\|` (a pipe inside a cell, as GitHub writes it) is read as `|`.
+const cellsOf = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 const spans = (cell) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 const first = (cell, what) => { const s = spans(cell); assert.ok(s.length > 0, `${what}: a code span in ${JSON.stringify(cell)}`); return s[0]; };
 // The rows of the first table under `### <heading>` (before any other heading), its header checked.
@@ -263,12 +264,16 @@ function section(md, word) {
   assert.equal(hit.length, 1, `one ## section names ${word}`);
   return hit[0];
 }
-const all = (md, word, needles) => { const s = section(md, word); for (const n of needles) has(s, n, `section ${word}`); };
-// What crossing a limit answers, as the Limits table words it.
-const ANSWERS = [
-  /^refused (?:value|limit)$/, /^close (?:1008|1001)$/, /^(?:400|413)$/, /^window: (?:ping|saved|selections)$/,
-  /^ignored$/, /^split; one op over: 409 limit$/, /^fragmented$/, /^not an anchor$/,
-];
+// Each needle once in its section, so it pins one rule (a needle found twice could survive the rule's removal).
+const all = (md, word, needles) => {
+  const s = section(md, word);
+  for (const n of needles) {
+    has(s, n, `section ${word}`);
+    assert.equal(s.split(n).length - 1, 1, `section ${word} says ${JSON.stringify(n)} once`);
+  }
+};
+// The ranges a..b in a cell, as numbers written plainly.
+const rangesIn = (cell) => [...cell.matchAll(/(-?[0-9]+(?:\.[0-9]+)?)\.\.(-?[0-9]+(?:\.[0-9]+)?)/g)].map((m) => `${Number(m[1])}..${Number(m[2])}`);
 
 // ---- the fixtures: every file under test/fixtures/canvas/ is of a known kind by its name ----
 
@@ -600,7 +605,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     refused(base, [{ op: 'set', id: 'n1', prop: 'component', value: 'f1' }], 'ref');
     refused(base, [{ op: 'set', id: 'n1', prop: 'variant', value: 'light' }], 'ref');
     refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.t1.text', value: 'x' }], 'ref'); // not a descendant
-    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.ct.name', value: 'x' }], 'ref'); // a name override
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.ct.name', value: 'x' }], 'prop'); // a name override
     refused(base, [{ op: 'set', id: 'n1', prop: 'props.title', value: true }], 'ref'); // the wrong prop type
     refused(base, [{ op: 'set', id: 'n1', prop: 'props.nope', value: 'x' }], 'ref');
     refused(base, [{ op: 'set', id: 'c1', prop: 'props.title', value: { type: 'text', default: '', target: { id: 'cr', prop: 'text' } } }], 'ref'); // a text prop on a rect
@@ -628,6 +633,53 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     refused(base, [{ op: 'set', id: 'v1', prop: 'path', value: null }], 'value');
     refused(base, [{ op: 'set', id: 'i1', prop: 'src', value: null }], 'value');
     refused(base, [{ op: 'set', id: 'n1', prop: 'component', value: null }], 'value');
+
+    // an override key not allowed there is `prop`: by path, in a whole map, in a stored document
+    for (const key of ['name', 'figma', 'id', 'type', 'parent', 'children', 'component', 'variant', 'props', 'variants', 'overrides', 'radius', 'layout']) {
+      refused(base, [{ op: 'set', id: 'n1', prop: `overrides.ct.${key}`, value: 'x' }], 'prop');
+      refused(base, [{ op: 'set', id: 'c1', prop: `variants.dark.ct.${key}`, value: 'x' }], 'prop');
+      refused(base, [{ op: 'set', id: 'n1', prop: 'overrides', value: { ct: { [key]: 'x' } } }], 'prop');
+      refused(base, [{ op: 'set', id: 'c1', prop: 'variants', value: { dark: { ct: { [key]: 'x' } } } }], 'prop');
+      refused(base, [{ op: 'set', id: 'c1', prop: 'variants.loud', value: { ct: { [key]: 'x' } } }], 'prop');
+      const stored = small();
+      stored.nodes.n1.overrides.ct[key] = 'x';
+      assert.equal(errs(stored)[0].code, 'prop', `a stored ${key} override is prop first`);
+      assert.ok(errs(stored).some((e) => e.rule === 'keys'), `a stored ${key} override breaks keys`);
+      const storedV = small();
+      storedV.nodes.c1.variants.dark.ct[key] = 'x';
+      assert.equal(errs(storedV)[0].code, 'prop', `a stored variant ${key} override is prop first`);
+    }
+    // the op's own check: an override key is judged when its op is, so it beats a later op's code
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.ct.name', value: 'x' }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides', value: { ct: { name: 'x' } } }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
+    refused(base, [{ op: 'set', id: 'c1', prop: 'variants', value: { dark: { ct: { parent: 'x' } } } }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
+    // a target that doesn't resolve stays ref, so a forward reference still works; and once its node
+    // is known, a key not of its type is prop
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.zz.radius', value: 2 }], 'ref');
+    refused(base, [{ op: 'set', id: 'c1', prop: 'variants.dark.zz.radius', value: 2 }, { op: 'add', node: { id: 'zz', type: 'text', parent: 'c1' }, after: null }], 'prop');
+    applied(base, [{ op: 'set', id: 'c1', prop: 'variants.dark.zz.text', value: 'Z' }, { op: 'add', node: { id: 'zz', type: 'text', parent: 'c1' }, after: null }]);
+    applied(base, [{ op: 'set', id: 'n1', prop: 'overrides', value: { ct: { text: 'T', 'size.w': 'fill' }, cr: { radius: 3 } } }]);
+
+    // pathData: a move, then commands and numbers separated by whitespace and at most one comma
+    for (const ok of ['M0,0L10,10', 'm-1.5-2e-3.5 .5z', 'M 0 0 C 1 2, 3 4, 5 6 Z', ' \n\tM0 0', 'M1.5.5', 'M+1E+2 -3e-1', 'M0 0 h 10 v 10 z m 1 1']) {
+      assert.equal(applied(base, [{ op: 'set', id: 'v1', prop: 'path', value: ok }]).nodes.v1.path, ok, `path ${JSON.stringify(ok)}`);
+    }
+    for (const bad of [' ,M--e.e+ Z', ',M0 0', 'M0,,0', 'M0 0,', 'M1e', 'M.', 'M+-1', 'M1e+', 'Z M0 0', 'L0 0', '', ' ', 'M0 0 X', 'M0\u00a00', 'M--1', 'M0 0;', 'M0 e5']) {
+      refused(base, [{ op: 'set', id: 'v1', prop: 'path', value: bad }], 'value');
+    }
+    const longPath = `M${' 0'.repeat((LIMITS.pathBytes - 1) / 2)}`.padEnd(LIMITS.pathBytes, '0');
+    assert.equal(Buffer.byteLength(longPath), LIMITS.pathBytes);
+    assert.deepEqual(errs({ ...small(), nodes: { ...small().nodes, v1: { ...small().nodes.v1, path: longPath } } }), [], 'a path of 65536 bytes');
+    assert.ok(errs({ ...small(), nodes: { ...small().nodes, v1: { ...small().nodes.v1, path: `${longPath}0` } } }).some((e) => e.rule === 'classes'), 'a path of 65537 bytes');
+    const spaces = `M${' '.repeat(LIMITS.pathBytes - 2)}!`;
+    const [, spaceMs] = timed(() => errs({ ...small(), nodes: { ...small().nodes, v1: { ...small().nodes.v1, path: spaces } } }));
+    assert.ok(spaceMs < 2000, `a long run of spaces is judged in linear time (${spaceMs} ms)`);
+
+    // the ranges the classes read
+    refused(base, [{ op: 'set', id: 'f1', prop: 'layout.columns', value: ['1000fr'] }], 'value');
+    refused(base, [{ op: 'set', id: 'f1', prop: 'layout.columns', value: ['0fr'] }], 'value');
+    refused(base, [{ op: 'set', id: 'f1', prop: 'layout.columns', value: ['01fr'] }], 'value');
+    applied(base, [{ op: 'set', id: 'f1', prop: 'layout.columns', value: ['999fr', '1fr', 0, 100000] }]);
 
     // a typography token's fontSize is any dimension
     applied(base, [{ op: 'token', path: 'type.huge', value: { $type: 'typography', $value: { fontFamily: 'mono', fontSize: { value: 2000, unit: 'px' }, fontWeight: 900, letterSpacing: { value: -2, unit: 'px' }, lineHeight: 1 } } }]);
@@ -821,6 +873,17 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     for (const [k, v] of code) assert.deepEqual(props.get(k), v, `Properties: ${k}: class, words, default`);
 
     const names = (heading, header) => table(md, heading, header).map((r) => { assert.ok(r.slice(1).every((c) => c.length > 0), `${heading}: ${r[0]} is described`); return first(r[0], heading); });
+    // the numeric ranges in the Value classes and Token types rows are the code's RANGES, both ways
+    const ranged = new Set();
+    for (const [heading, header, keyOf] of [['Value classes', ['Class', 'Rule'], (k) => k], ['Token types', ['$type', '$value'], (k) => `token:${k}`]]) {
+      for (const [k, cell] of table(md, heading, header)) {
+        const key = keyOf(first(k, heading));
+        ranged.add(key);
+        const want = Object.hasOwn(RANGES, key) ? [...new Set(Object.values(RANGES[key]).map(([lo, hi]) => `${lo}..${hi}`))] : [];
+        assert.deepEqual([...new Set(rangesIn(cell))].sort(), want.sort(), `${heading}: ${key}'s ranges are the code's`);
+      }
+    }
+    for (const key of Object.keys(RANGES)) assert.ok(ranged.has(key), `RANGES.${key} has a row`);
     sameSet(names('Value classes', ['Class', 'Rule']), CLASSES, 'Value classes');
     sameSet(names('Token types', ['$type', '$value']), TOKEN_TYPES, 'Token types');
     assert.deepEqual(names('Ops', ['Op', 'Shape', 'Idempotent as']), [...OPS], 'Ops, in order');
@@ -834,17 +897,11 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     // limits: every LIMITS key with its number and what crossing it answers
     const limits = table(md, 'Limits', ['Name', 'Number', 'Answer']);
     sameSet(limits.map((r) => first(r[0], 'Limits')), Object.keys(LIMITS), 'Limits');
+    sameSet(Object.keys(LIMIT_ANSWERS), Object.keys(LIMITS), 'LIMIT_ANSWERS is keyed like LIMITS');
     for (const [n, num, answer] of limits) {
       const name = first(n, 'Limits');
       assert.equal(Number(first(num, `Limits ${name}`)), LIMITS[name], `Limits: ${name}'s number`);
-      assert.ok(ANSWERS.some((rx) => rx.test(answer)), `Limits: ${name}'s answer ${JSON.stringify(answer)} is one the contract words`);
-    }
-    // the class-bound limits answer value, the counts and sizes of the document limit
-    for (const k of ['tracks', 'idChars', 'nameChars', 'textChars', 'pathBytes', 'figmaChars', 'propNameChars', 'tokenSegmentChars']) {
-      assert.equal(limits.find((r) => first(r[0], 'Limits') === k)[2], 'refused value', `Limits: ${k} is a class bound`);
-    }
-    for (const k of ['docBytes', 'folderBytes', 'nodes', 'pages', 'tokens', 'tokenDepth', 'depth', 'overrideEntries', 'props', 'variants', 'editOpsBytes']) {
-      assert.equal(limits.find((r) => first(r[0], 'Limits') === k)[2], 'refused limit', `Limits: ${k} is a count or size`);
+      assert.equal(answer, LIMIT_ANSWERS[name], `Limits: ${name}'s answer is the code's`);
     }
     // routes
     const routes = table(md, 'Routes', ['Key', 'Method and path', 'Fake']).map(([k, mp, f]) => [first(k, 'Routes'), first(mp, 'Routes'), f]);
@@ -860,56 +917,198 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'Consumers and providers', 'The document: canvas-doc@1', 'The socket: canvas@1', 'Ops', 'Messages', 'Refusals', 'Limits',
       'HTTP routes', 'Presence on a canvas', 'Pins', 'Exports', 'Not defended', 'Canvas test files', 'The fake, the exchanges and the HTTP fixtures',
     ], 'the sections, in order');
-    all(md, 'Consumers and providers', ['`canvas: 1`', 'additive changes only', "ignores keys and message kinds it doesn't know", 'presence@1', 'Nothing in `presence@1` changes']);
+    // each needle pins a whole rule and appears once in its section, so removing or rewording the rule fails
+    all(md, 'Consumers and providers', [
+      'Version: `canvas: 1` in the document and in `welcome`; additive changes only, anything else bumps it.',
+      "a reader ignores keys and message kinds it doesn't know",
+      'Nothing in `presence@1` changes.',
+    ]);
     all(md, 'The document', [
-      'canvas.json', '`{ "canvas": 1, "rev"', 'a flat map by id', '1 to 100', 'unique across pages and nodes', "counts a page's children as 1",
-      'never sits inside another component, at any depth', 'stored nested', 'flat dotted keys', 'splits at its second dot', 'null removes',
-      'only under a parent whose `layout.mode` is `none`', 'Resolution order',
-      "the base value, then the default of a prop aimed at it, then the chosen variant's override, then the instance's override, then the instance's prop value aimed at it",
-      'the last that is present wins', 'shows its base values', 'applies to instances only', 'Free text', "a text prop's `default`",
-      'never `name`, `figma`', 'No aliases inside tokens', 'never both', "in the table's order", 'docErrors(doc, { images, folderBytes })',
-      'JSON.stringify(doc, null, 2)',
+      'The document is exactly `{ "canvas": 1, "rev": <integer ≥ 0>, "tokens": {…}, "pages": [ … ], "nodes": { … } }`',
+      '**Pages**: 1 to 100, each exactly `{ "id", "name", "children" }`',
+      'A page is not a node and `page` is not a node type.',
+      '**Nodes** are a flat map by id.',
+      'The tree is exact: each node\'s parent exists and lists it once, each listed child exists and names that parent, every node is reached from a page.',
+      '**Ids** are 1 to 40 of `[A-Za-z0-9_-]`, unique across pages and nodes; any id of that pattern is valid.',
+      "By the design's convention, which the rules don't check, whoever makes a node",
+      'A `component` never sits inside another component, at any depth (instances of other components may).',
+      "Depth counts a page's children as 1; at most 100.",
+      'stored nested (`"layout": { "gap": 12 }`), so last-writer-wins applies per real property',
+      'An override\'s properties are stored as flat dotted keys, `"overrides": { "k1-2": { "layout.gap": 4, "text": "Hi" } }`',
+      'so the path splits at its second dot (`variants.<name>.<id>.<prop>` at its third)',
+      'Setting a property whose default is absent (a map entry, `figma`) to null removes it; an override\'s id map (`overrides.<id>`, `variants.<name>.<id>`) left empty by that goes too, never the variant or a map above it.',
+      'A required property (`path`, `src`, `component`) can\'t be removed, and an `add` without it is `shape`.',
+      'place it only under a parent whose `layout.mode` is `none`: elsewhere they are kept and take no effect',
+      'never `name`, `figma` (names stay design-time, so no override carries a name)',
+      'An override key not allowed there is `prop`: one of those, a structural key (`id`, `type`, `parent`, `children`), or, once its target node is known, a property that node\'s type doesn\'t have',
+      'An override whose target doesn\'t resolve, or isn\'t a descendant of the component, is `ref`',
+      "the base value, then the default of a prop aimed at it, then the chosen variant's override, then the instance's override, then the instance's prop value aimed at it; the last that is present wins.",
+      'A prop\'s default always applies to an instance, so an instance with no prop value shows the default, never the base.',
+      "A component's own tree on the canvas shows its base values: a prop's default applies to instances only.",
+      "page and node `name`, `text`, a text prop's `default`, an instance's text prop value, and a `text` override on a variant or an instance",
+      'an object with any key starting `$` is a token and must be exactly `{ "$type", "$value" }`; any other object is a group.',
+      'A path is either a token or a group, never both.',
+      'No aliases inside tokens: a token\'s value is literal, so a `$ref` resolves in one step.',
+      '`docErrors(doc, { images, folderBytes })` lists every way a document isn\'t valid, as `{ rule, code, where, message }`, in the table\'s order',
+      'An edit\'s end state is refused with the code of the first rule that fails.',
+      '`canvas.json` at most 5 MB as written (`JSON.stringify(doc, null, 2)` plus a newline)',
+      'the server keeps them in the count and refuses an edit that would pass it',
     ]);
     all(md, 'The socket', [
-      '`GET /canvas?slug=<slug>`', 'presence@1 §2', '§4', '404', '`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`', 'not open for editing',
-      '16 of `[0-9a-z]`', 'the id its next session will use', 'reloads the document over HTTP', 'resends every edit of its own above the last `saved`',
-      'fragmented', 'host, relay mark, path, upgrade, origin, person headers, slug',
+      '`GET /canvas?slug=<slug>` with a WebSocket upgrade',
+      '`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`',
+      "in presence@1 §2's order, then the slug: host, relay mark, path, upgrade, origin, person headers, slug (a request breaking two guards gets the earlier one's status)",
+      'a slug missing, malformed, not open for editing (no `chore-canvas-<slug>` worktree), or landed (closed by `canvas land`) is 404',
+      'a server message over 256 KB is fragmented, a text frame then continuations, each of at most 256 KB',
+      'An open session has a `session` id, 16 of `[0-9a-z]`, made each time a session opens',
+      'A canvas with no open session has the id its next session will use, made when the last session ended',
+      'A canvas is open from its first connection until its last closes.',
+      'the page reloads the document over HTTP and resends every edit of its own above the last `saved`, acked or not',
+      'A reconnect to the same session resends only its unacked edits.',
+      'Neither ever resends an edit the page saw refused',
+      'and 1000 after `closed`',
     ]);
     all(md, 'Ops', [
-      'judged as a whole', 'refer forward', 'charged to its rule', 'An edit with no ops is `shape`', 'raises `rev` by one, whatever it changed',
-      'its properties as `set`s', 'does nothing', 'places last', 'Pages as ops', '"type": "page"', 'removes it and its nodes', 'reorders it', 'no sixth op',
+      'an `add` of an existing id with the same type and parent is its properties as `set`s; with a different type or parent it is `exists`; an `after` that is gone places last',
+      'removes the node and its subtree; `del` of a missing id does nothing',
+      '`move` to where it is does nothing; an `after` that is gone places last',
+      'sets the token, making groups on the way; `token` null on a missing path does nothing; a group left empty goes',
+      '`id`, `type`, `parent` and `children` change only by `add`, `del` and `move`: a `set` of any of them is `prop`.',
+      'A `move` of a missing node is `missing`; into its own subtree `cycle`.',
+      "the first op that fails refuses the edit with that check's code",
+      "the first failing rule in the table's order refuses the edit with that rule's code",
+      'So ops within one edit may refer forward (a prop target set before its node is added, a token retyped before its uses change), and a broken end state is charged to its rule, not to an op.',
+      'An edit with no ops is `shape`, and a View person\'s edit is `view` before anything else is judged.',
+      'An applied edit raises `rev` by one, whatever it changed',
+      '**Pages as ops** (so there is no sixth op)',
+      '`add` with `{ "id", "type": "page", "parent": null, "name" }` adds a page after `after` (null for first), and an `add` of an existing page sets its name',
+      '`del` of a page id removes it and its nodes (the last page is `limit`)',
+      "`set` of a page's `name` (any other property of a page is `prop`)",
+      '`move` of a page with parent null reorders it',
     ]);
     all(md, 'Messages', [
-      'acked again to that connection only', '"ops": []', "doesn't raise the client's highest `seq`", 'closed 1008', 'at most 100 ids',
-      'the whole `select` is ignored', 'are dropped', 'in the order they first connected', '250 ms', '500 ms', 'none while saving is paused',
-      '`branch-moved`, `worktree-gone` or `index-dirty`', '`landed` or `removed`', 'a close with code 1000', 'starts a new session',
-      "every client's highest `seq` is forgotten", 'A deleted node leaves every selection', 'every 20 s',
+      'An `edit` at or below it is acked again to that connection only, without being applied',
+      'whether or not that `seq` itself was applied',
+      "A refused edit doesn't raise the client's highest `seq`.",
+      'the page drops its local copy of the refused edit by reloading the document and reapplying its other unacked edits over it, says why in plain words, and never resends an edit it saw refused',
+      'is re-acked as if applied if resent',
+      'An `edit` whose `client` or `seq` breaks its rule is a message a page must not send: the connection is closed 1008.',
+      'a longer list or a bad id and the whole `select` is ignored; ids that name no node are dropped',
+      'their latest `select` from any of their connections (empty until one), in the order they first connected',
+      "at most one per 250 ms window (the first change opens it, and one message at its end carries all), like presence's `people`",
+      'A deleted node leaves every selection.',
+      'at most 500 ms after an applied edit (the first unsaved edit opens the window), to every connection; none while saving is paused; when the pause ends, at once if anything is unsaved',
+      '`paused` `why` is `branch-moved`, `worktree-gone` or `index-dirty`; `closed` `why` is `landed` or `removed`.',
+      '`closed` is followed by a close with code 1000; a later upgrade for that slug is 404.',
+      "A replace starts a new session on the open connections: `session` is the new id, every client's highest `seq` is forgotten, and the replaced document's `rev` is the old one plus one.",
+      'which the new session judges afresh (applied or refused aloud, never re-acked unseen)',
+      '`ping` every 20 s; two unanswered close the connection 1001.',
     ]);
-    all(md, 'Refusals', ['one word', 'plain words', 'No `closed` code', '423']);
-    all(md, 'Limits', ['1048576', 'on each frame header', 'before `welcome`', 'counts toward no connection limit', 'a class bound']);
+    all(md, 'Refusals', [
+      '`refused.why` is one word; the page turns it into plain words',
+      'No `closed` code: after `closed` the socket is closed, and the local route answers 423.',
+    ]);
+    all(md, 'Limits', [
+      'A limit that is a class bound',
+      'where the over-long string is an op\'s own `id`, an `add`\'s `node.id` or a `token` op\'s `path`, the op is malformed (`shape`)',
+      '`editOpsBytes` binds a page\'s edit only; a local apply is bound by its body.',
+      "the page's message is checked on each frame header before its payload is read",
+      'one over is accepted, then closed 1008 before `welcome`, so the page reads the code',
+      'A local apply is not a connection and counts toward no connection limit.',
+      'a single op whose `ops` message alone would pass 1 MB refuses the whole apply with `limit`',
+      'judged from `Content-Length` before the body is read, and from what is read',
+    ]);
     all(md, 'HTTP routes', [
-      '`GET /api/canvas/doc?slug=`', '&at=main', 'the relay mark', '`http://<Host>`', 'View 403', '415', 'a slug `land` closed 423', 'judged first',
-      'first 16 hex of SHA-256', 'the same bytes twice give the same `src`', '`[0-9a-f]{16}\\.(png|jpg|webp|gif)`', 'nothing from the URL is joined to a path',
-      'nosniff', '`x-devteam-canvas-token`', '`run/canvas-token`', '503', '`{ "why": "no-session" }`', 'One judgement, then one change',
-      'each raising `rev` by one', '`ack` null', 'The answer waits for the disk', '`"saved": false`', '409', '50 MB', '501', 'Statuses in order',
-      'keeps that apply', 'counts toward no connection limit', '404',
+      "The GETs are guarded as the dashboard's other data GETs are (its host check and the relay mark refused, 403)",
+      'a same-origin `Origin` (exactly `http://<Host>`; absent or another is 403), no relay mark, the person headers by presence@1 §4 (403), level `full` (View 403), `Content-Type: application/json` (415)',
+      'With `&at=main`, the canvas as main has it, for any canvas on main (open for editing or not), `session` null.',
+      'A slug neither open nor on main: 404.',
+      'Then a slug `land` closed 423, any other slug not open for editing 404: the 423 is judged first.',
+      'the image at most 4 MB, the body at most 6 MB (413, judged from `Content-Length` before reading and from what is read)',
+      'sniffed by its first bytes as PNG, JPEG, WebP or GIF (anything else, SVG included, 415)',
+      'saved as `images/<first 16 hex of SHA-256>.<ext>` → `{ "src" }`, so the same bytes twice give the same `src`',
+      '413 when the folder would pass 25 MB; 400 for bad JSON, keys or base64',
+      '`<file>` exactly `[0-9a-f]{16}\\.(png|jpg|webp|gif)`, else 404: nothing from the URL is joined to a path unless it matches',
+      "Served from the canvas's folder on its branch while it is open for editing, else from main's, else 404",
+      '`X-Content-Type-Options: nosniff`',
+      'it refuses any `Origin`, `Sec-Fetch-Site`, `x-devteam-relay`, `x-devteam-person` or `x-devteam-level` (403), and requires `x-devteam-canvas-token` equal to the token in `run/canvas-token`',
+      'With no session open, the answer is 503 `{ "why": "no-session" }` and nothing changes',
+      '**One judgement, then one change.**',
+      'Refused, nothing changes, no `ops` is sent, and the answer is 409 `{ "why": <refusal code> }`.',
+      'the change is sent as consecutive `ops` messages, each a run of the ops in order whose message fits 1 MB, each raising `rev` by one, all sent before any other edit is taken, with `by` `{ "id": by, "name": by, "via" }` and `ack` null',
+      '**The answer waits for the disk.**',
+      'answers 200 `{ "rev", "edits": <messages sent>, "saved": true }` once the write covering `rev` is done (and `saved` is sent)',
+      'While saving is paused it answers at once with `"saved": false`',
+      'A restart after a local apply answered `saved: true` keeps that apply.',
+      '**Statuses in order**: the guards (403, 413), then a slug `land` closed 423 `{ "why": "closed" }`, then any other slug not open for editing 404, then no session 503, then the body (400 for bad JSON or keys), then 409 or 200.',
+      'the owner-action guards and a 50 MB body limit (413 from `Content-Length`)',
+      'The fake answers 501 within the limit.',
+      "the fake doesn't serve them (404)",
     ]);
-    all(md, 'Presence on a canvas', ['"page": "canvas"', '"art": "<slug>@canvas"', '`@<page id>`', 'plus 200 px around', 'content bounds', 'presence-here']);
-    all(md, 'Pins', ['artifact-notes@1', '`{ "node": "<id>" }`', '1 to 64 characters of one line of plain text', '`anchorProblem`', 'note-anchor']);
-    all(md, 'Exports', ['HTML', 'attribute values quoted and escaped', 'sanitiser', 'written as `\\\\(`', 'longer than any run of backticks', 'goldens']);
-    all(md, 'Not defended', ['`run/canvas-token`', 'any session name it claims', 'with no person headers is the owner']);
+    all(md, 'Presence on a canvas', [
+      '`{ "page": "canvas", "tab": "<canvas page id>", "peek": null, "art": "<slug>@canvas", "thread": … }`',
+      'A cursor\'s anchor `k` is the node id under the pointer; over empty canvas it is `@<page id>`',
+      "fractions of the page's content bounds (the union of its top-level nodes' rectangles plus 200 px around)",
+      "checked with presence's own `shapeErrors` plus these rules",
+    ]);
+    all(md, 'Pins', [
+      'an `artifact-notes@1` note whose anchor is `{ "node": "<id>" }`',
+      'The value is 1 to 64 characters of one line of plain text',
+      'documented here for the kit\'s `anchorProblem` ticket',
+      '`shapeErrors(\'note-anchor\', …)`',
+    ]);
+    all(md, 'Exports', [
+      'HTML: text escaped as text; attribute values quoted and escaped.',
+      'CSS: class and custom-property names built from a sanitiser (`[a-z0-9-]`, a numeric suffix on collision), never from raw names',
+      'and `\\(` written as `\\\\(` so nothing interpolates',
+      'Markdown: names and text inside code spans whose fence is longer than any run of backticks they hold',
+      'goldens',
+    ]);
+    all(md, 'Not defended', [
+      'A process that can read `run/canvas-token` edits as any session name it claims.',
+      'A local process opening `/canvas` on the loopback port with no person headers is the owner',
+    ]);
     all(md, 'Canvas test files', [
-      'the whole identifier `test`', 'subtest(', 'inside a comment, a string or a template', '`test/canvas-*.test.mjs`', 'skipProblems', 'measureProblems',
-      "skip: canDrive ? false : '<reason>'", "skip: process.platform === 'darwin' ? false : 'not macOS'", './lib/chrome.mjs',
-      'quoted keys', 'computed keys', 'bracket access', 'false positives', "case 'skip':", 'reword',
+      "A real measured call's callee is the whole identifier `test`, in code",
+      "so it also counts `subtest('canvas A<n>:` and `t.test('canvas A<n>:`, and those are problems too",
+      'a match inside a comment, a string or a template is a problem wherever it is',
+      'every real call is in a `test/canvas-*.test.mjs` file; no `canvas A<n>:` appears twice',
+      'every `test/canvas-*.test.mjs`, and every file holding a match, passes the skip rule',
+      "`skip: canDrive ? false : '<reason>'` (a single-quoted, non-empty reason), with `canDrive` imported by that name from `./lib/chrome.mjs` in that file",
+      "`skip: process.platform === 'darwin' ? false : 'not macOS'`",
+      'No `.skip`, `.todo`, `todo:`, `.only` or `only:`.',
+      'No quoted keys, computed keys or bracket access with those words',
+      "as in `case 'skip':`, `x ? 'only' : y` or `['a', 'skip']`",
+      'In a canvas test file, reword such a line',
     ]);
     all(md, 'The fake', [
-      'startCanvasFake(opts)', '`canvases`', '`main`', '`images`', '`folderBytes`', '`repo`', '`ownerName`', '`token`', '`clock`', 'serve(req, res)',
-      'doc(slug)', 'rev(slug)', 'session(slug)', 'save(slug)', 'pause(slug, why)', 'resume(slug)', 'replace(slug, doc)', 'land(slug)', 'remove(slug)',
-      'restart(slug)', 'stats()', 'tick(ms)', '1012', 'openCanvas(url', 'continuation frames', 'request(url', 'contentLength',
-      'playExchange(fake, exchange', '"steps"', '"open"', '"as"', '"send"', '"close": true', '"local"', '"do"', '"tick"', '"expect"', '"doc"',
-      '"$session"', '"$conn:<name>"', '{ "$close": <code> }', 'nothing else is a placeholder', 'pings never fall due', 'playHttp',
-      '"requestKind"', '"responseKind"', '`local-request`', 'http-<route key>-<case>.json',
+      '`startCanvasFake(opts) → Promise<fake>`',
+      '`canvases`: slug → document, open for editing; `main`: slug → document, as main has it',
+      '`images`: slug → `{ "<16 hex>.<ext>": Buffer }`; `folderBytes`: slug → bytes of the folder\'s other files',
+      '`repo`: `{ name, public }`, default `{ name: null, public: null }`; `ownerName`: `\'Owner\'`; `token`: the local route\'s token, default random',
+      '`clock`: `\'real\'` (default) or `\'manual\'`, where no timer fires and time moves only by `tick(ms)`',
+      '`serve(req, res)` for any other plain request',
+      '`{ url, port, token, close(), doc(slug), rev(slug), session(slug), save(slug), pause(slug, why), resume(slug), replace(slug, doc), land(slug), remove(slug), restart(slug), stats(), tick(ms) }`',
+      '`replace` sends `reload` with a new session id and forgets every client\'s `seq`',
+      '`land` sends `closed` `landed`, closes with 1000 and moves the slug to main (later upgrades 404, the local route 423)',
+      '`restart` closes every connection on that canvas with 1012, reverts it to its last saved document and makes a new session id',
+      'over `net`, joining continuation frames into one message',
+      '`request(url, { method, headers, body, contentLength })`',
+      '`{ "fake": { options }, "request": { "method", "path", "headers", "body"?, "contentLength"? }, "status", "requestKind", "responseKind", "response"? }`',
+      '`"requestKind"` is an `HTTP_KINDS` entry the request body holds to, or null when the request has no JSON body or is deliberately broken',
+      '`playHttp(file, { fixturesDir }) → Promise<void>`',
+      'a fixture for an unserved route (`export`, `edit`) expects 404 with `responseKind` null',
+      '`{ "canvas": "<doc fixture>", "slug", "images"?: [names], "steps": [ … ] }`',
+      '`{ "open": "<name>", "person": "<x-devteam-person value>" or null, "level": "full"|"view" or null, "status"?: <n> }`',
+      '`{ "as": "<name>", "send": {…} }`; `{ "as": "<name>", "close": true }`',
+      'its body checked as `local-request` unless its expected `status` is a refusal (403, 413, 400) meant to exercise a broken body',
+      '`{ "do": "save"|"pause"|"resume"|"replace"|"land"|"remove"|"restart", "arg"?: … }`; `{ "tick": <ms> }`',
+      'each optionally with `"expect": { "<name>": [ messages ] }` and `"doc"`',
+      '`playExchange(fake, exchange, { fixturesDir })` runs it on the manual clock',
+      'a connection not named must have received nothing; pings never fall due inside an exchange',
+      'An expected list may end with `{ "$close": <code> }`',
+      'In expected messages `"$session"` matches the canvas\'s current session id and `"$conn:<name>"` that connection\'s conn; nothing else is a placeholder.',
+      '**An HTTP fixture** (`http-<route key>-<case>.json`)',
     ]);
   });
 

@@ -18,7 +18,7 @@ A folder is a canvas when it holds `canvas.json`; `artifact.json` is unchanged, 
 
 - **Pages**: 1 to 100, each exactly `{ "id", "name", "children" }`, `name` of the `name` class, `children` the ordered ids of its top-level nodes. A page is not a node and `page` is not a node type.
 - **Nodes** are a flat map by id. Every node has `type` and `parent` (a page id, or a `frame` or `component` id); `frame` and `component` also have `children` (ordered ids), and no other type has the key. A node holds no `id` key: its key in `nodes` is its id. The tree is exact: each node's parent exists and lists it once, each listed child exists and names that parent, every node is reached from a page.
-- **Ids** are 1 to 40 of `[A-Za-z0-9_-]`, unique across pages and nodes. Whoever makes a node names it `<prefix>-<counter>`, the prefix 6 random base-36 characters chosen once per page load or command run.
+- **Ids** are 1 to 40 of `[A-Za-z0-9_-]`, unique across pages and nodes; any id of that pattern is valid. By the design's convention, which the rules don't check, whoever makes a node (a page, the supervisor, the importer) names it `<prefix>-<counter>`, the prefix 6 random base-36 characters chosen once per page load or command run, so ids never collide across people or restarts.
 - **Types**: `frame`, `text`, `rect`, `ellipse`, `vector`, `image`, `component`, `instance`. A `component` never sits inside another component, at any depth (instances of other components may). Depth counts a page's children as 1; at most 100.
 - **Properties are dotted paths** (`layout.gap`, `size.w`), stored nested (`"layout": { "gap": 12 }`), so last-writer-wins applies per real property. Map entries are paths too: `props.<name>`, `variants.<name>`, `variants.<name>.<id>.<prop>`, `overrides.<id>.<prop>`, so two people overriding different nodes of one instance don't overwrite each other. The whole maps (`props`, `variants`, `overrides`) are settable too, for an importer or a `take` that replaces them. An override's properties are stored as flat dotted keys, `"overrides": { "k1-2": { "layout.gap": 4, "text": "Hi" } }`, and `overrides.k1-2.layout.gap` addresses one: an id holds no dot, so the path splits at its second dot (`variants.<name>.<id>.<prop>` at its third).
 - **Defaults**: a property not stored has its default (the Properties table). A default of absent means nothing is shown or exported for it. Setting a property whose default is absent (a map entry, `figma`) to null removes it; an override's id map (`overrides.<id>`, `variants.<name>.<id>`) left empty by that goes too, never the variant or a map above it. A required property (`path`, `src`, `component`) can't be removed, and an `add` without it is `shape`.
@@ -78,14 +78,14 @@ The allow-list: every value is checked against its class before it is applied, a
 |---|---|
 | `color` | `#rgb`, `#rrggbb` or `#rrggbbaa`, or a `$ref` to a `color` token |
 | `paint` | a `color`, or null |
-| `dim` | a finite number −100000..100000, or a `$ref` to a `dimension` token in that range |
+| `dim` | a finite number -100000..100000, or a `$ref` to a `dimension` token in that range |
 | `len` | a finite number 0..100000, or a `$ref` to a `dimension` token in that range (sizes, gap, padding, radius, stroke width: a negative token used as a len is `ref`) |
 | `opacity` | a number 0..1 |
 | `padding` | exactly four lens, in CSS order: top, right, bottom, left |
 | `sizing` | `"hug"`, `"fill"` or a len (fixed) |
 | `tracks` | an array of at most 64 tracks, each a number 0..100000, `"auto"` or `"<n>fr"` with n 1..999 |
 | `font` | a `$ref` to a `typography` token, or exactly `{ "family", "size", "weight", "lineHeight" }`: family `sans`, `serif`, `mono` or a `fontFamily` ref; size 1..1000 or a `dimension` ref in that range; weight 100..900 by 100 or a `fontWeight` ref; lineHeight 0.5..10 or a `number` ref in that range |
-| `pathData` | a string of the SVG path commands `M L H V C S Q T A Z` (either case), numbers, spaces and commas, starting with a move, at most 65536 bytes |
+| `pathData` | optional whitespace, then a move (`M` or `m`), then any sequence of the commands `M L H V C S Q T A Z` (either case) and numbers `[+-]?(\d+(\.\d*)?\|\.\d+)([eE][+-]?\d+)?`, separated by optional whitespace and at most one comma (none leading, none trailing, never two in a row); whitespace is space, tab, line feed, carriage return and form feed; at most 65536 bytes |
 | `imageSrc` | `images/<16 hex>.<ext>`, the hex lower case and the ext `png`, `jpg`, `webp` or `gif`, naming a file in the folder's `images/`; never a URL, `data:` or SVG |
 | `name` | a string of at most 200 characters, well-formed (no lone surrogate) |
 | `text` | a string of at most 10000 characters, well-formed (no lone surrogate) |
@@ -101,12 +101,12 @@ The allow-list: every value is checked against its class before it is applied, a
 | `variants` | an object from variant names (`[A-Za-z][A-Za-z0-9_]{0,39}`) to variants |
 | `variant` | an object from node ids to objects of overrides, `{ "<prop>": <override> }` |
 | `overrides` | an object from node ids to objects of overrides, `{ "<prop>": <override> }` |
-| `override` | a value of its target property's own class; the `refs` rule requires the target to be a descendant of the component and the property one of that node's type that may be overridden |
+| `override` | a value of its target property's own class; the `keys` rule requires the property to be one of the target's type that may be overridden (else `prop`), the `refs` rule the target to be a descendant of the component (else `ref`) |
 
 ### Components and resolution order
 
 - `props.<name>` (a name of `[A-Za-z][A-Za-z0-9_]{0,39}`, at most 32) is `{ "type": "text"|"bool", "default", "target": { "id": <a descendant>, "prop": "text"|"visible" } }`: a text prop aimed at a `text` node's `text`, a bool prop at any descendant's `visible`. `variants.<name>` (the same identifier, at most 32) maps descendant ids to `{ <prop>: <value> }`.
-- An override (a variant's or an instance's) names a descendant of the component and a property of that node's type, never `name`, `figma` (names stay design-time, so no override carries a name) nor a component's or instance's own `component`, `variant`, `props`, `variants` or `overrides`. An override that doesn't resolve is `ref`, so ops within one edit may still set an override before its node is added.
+- An override (a variant's or an instance's) names a descendant of the component and a property of that node's type, never `name`, `figma` (names stay design-time, so no override carries a name) nor a component's or instance's own `component`, `variant`, `props`, `variants` or `overrides`. An override key not allowed there is `prop`: one of those, a structural key (`id`, `type`, `parent`, `children`), or, once its target node is known, a property that node's type doesn't have; this holds for a `set` of `overrides.<id>.<prop>` or `variants.<name>.<id>.<prop>`, for a `set` of a whole map holding one, and for a stored document (the `keys` rule). An override whose target doesn't resolve, or isn't a descendant of the component, is `ref`, so ops within one edit may still set an override before its node is added.
 - An instance's `props.<name>` is a value of the component's prop type (a bool for a text prop is `ref`); `variant` names one of its variants or is null. An instance never sits inside the component it names, directly or through other instances (`cycle`).
 - **Resolution order**: an instance shows its component's tree with, for each descendant property, the base value, then the default of a prop aimed at it, then the chosen variant's override, then the instance's override, then the instance's prop value aimed at it; the last that is present wins. A prop's default always applies to an instance, so an instance with no prop value shows the default, never the base. A component's own tree on the canvas shows its base values: a prop's default applies to instances only. Overrides reach only the component's own descendants (an instance inside it can be overridden as a node, by its common properties, not inside). `resolve(doc, instanceId)` in the fake computes it; `doc-every-type.json` holds a conflict on one property (`button-label`'s `text`, seen through instance `buy`) at all five levels.
 
@@ -116,14 +116,14 @@ The fields hostile content may fill and every renderer and exporter must treat a
 
 ### Tokens
 
-DTCG 2025.10, six types. Tokens are nested groups whose segments are 1 to 40 of `[A-Za-z0-9_-]`, at most 8 deep and 1000 tokens; a token is exactly `{ "$type", "$value" }`, any other object a group. A path is either a token or a group, never both. Values are a subset of 2025.10's, so the tokens export is valid 2025.10 unchanged. No aliases inside tokens: a token's value is literal, so a `$ref` resolves in one step.
+DTCG 2025.10, six types. Tokens are nested groups whose segments are 1 to 40 of `[A-Za-z0-9_-]`, at most 8 deep and 1000 tokens; an object with any key starting `$` is a token and must be exactly `{ "$type", "$value" }`; any other object is a group. A path is either a token or a group, never both. Values are a subset of 2025.10's, so the tokens export is valid 2025.10 unchanged. No aliases inside tokens: a token's value is literal, so a `$ref` resolves in one step.
 
 ### Token types
 
 | $type | $value |
 |---|---|
 | `color` | `{ "colorSpace": "srgb", "components": [r, g, b], "alpha"?, "hex"? }`, each component and `alpha` 0..1, `hex` `#rrggbb` |
-| `dimension` | `{ "value": −100000..100000, "unit": "px" }` |
+| `dimension` | `{ "value": -100000..100000, "unit": "px" }` |
 | `fontFamily` | `"sans"`, `"serif"` or `"mono"` |
 | `fontWeight` | 100..900 by 100 |
 | `number` | a finite number |
@@ -141,7 +141,7 @@ Validity is whole-document. `docErrors(doc, { images, folderBytes })` lists ever
 | `id-form` | `value` | page and node ids 1 to 40 of `[A-Za-z0-9_-]` |
 | `id-unique` | `exists` | ids unique across pages and nodes |
 | `tree` | `parent` | each node's parent exists, is a page or a container, and lists it once; each listed child exists and names that parent; every node reached from a page |
-| `keys` | `prop` | a node's keys are its type's properties (groups `layout` and `size` holding only theirs) and no `id` |
+| `keys` | `prop` | a node's keys are its type's properties (groups `layout` and `size` holding only theirs) and no `id`; an override's keys (a variant's or an instance's) are properties its target may take as overrides |
 | `required` | `shape` | `path` on a vector, `src` on an image, `component` on an instance |
 | `classes` | `value` | every value in its class (an override in its target property's class) |
 | `tokens` | `value` | segments, groups and tokens of the six types, values literal |
@@ -162,7 +162,7 @@ Validity is whole-document. `docErrors(doc, { images, folderBytes })` lists ever
 
 **State.** A canvas has a `rev`, kept in `canvas.json` and raised by one for every edit applied. An open session has a `session` id, 16 of `[0-9a-z]`, made each time a session opens (so after every restart). A canvas with no open session has the id its next session will use, made when the last session ended, so `GET /api/canvas/doc` always names one. A canvas is open from its first connection until its last closes. A restart reads back the last saved `rev`, so a `rev` above it can be reused for a different edit; the `session` id is what tells a page so.
 
-**The page's State rule** (the design's): a page loads the document over HTTP, opens the socket and gets `welcome` with the `session` and current `rev`; it drops any `ops` at or below the `rev` it loaded. On any reconnect whose `session` differs from the one it loaded, or whose `rev` is below the highest it has seen, the page reloads the document over HTTP and resends every edit of its own above the last `saved`, acked or not, as the same `client` and `seq`; the new session judges them afresh. A reconnect to the same session resends only its unacked edits. A page that loaded between two sessions sees a different id at `welcome` and reloads.
+**The page's State rule** (the design's): a page loads the document over HTTP, opens the socket and gets `welcome` with the `session` and current `rev`; it drops any `ops` at or below the `rev` it loaded. On any reconnect whose `session` differs from the one it loaded, or whose `rev` is below the highest it has seen, the page reloads the document over HTTP and resends every edit of its own above the last `saved`, acked or not, as the same `client` and `seq`; the new session judges them afresh. A reconnect to the same session resends only its unacked edits. Neither ever resends an edit the page saw refused (§5). A page that loaded between two sessions sees a different id at `welcome` and reloads.
 
 **Close codes**: presence@1 §3's (1008 over a limit or for a message a page must not send, 1002 a protocol error, 1001 two unanswered pings, 1011 a handler that throws), and 1000 after `closed` (§5). The fake's `restart` closes with 1012.
 
@@ -209,7 +209,8 @@ Validity is whole-document. `docErrors(doc, { images, folderBytes })` lists ever
 | `closed` | `{ "t": "closed", "why" }`: the canvas no longer takes edits |
 | `ping` | `{ "t": "ping" }` |
 
-- **Acked means applied in memory**, not yet on disk. An `edit` at or below the client's highest applied `seq` in this session is acked again to that connection only, without being applied: `{ "t": "ops", "rev": <current>, "by": <its own by, via page>, "ack": { "client", "seq" }, "ops": [] }`. A refused edit doesn't raise the client's highest `seq`, so a resent refused edit is judged again. The sender's later edits are judged on their own.
+- **Acked means applied in memory**, not yet on disk. The server keeps only each client's highest applied `seq` for the session. An `edit` at or below it is acked again to that connection only, without being applied: `{ "t": "ops", "rev": <current>, "by": <its own by, via page>, "ack": { "client", "seq" }, "ops": [] }`, whether or not that `seq` itself was applied. A refused edit doesn't raise the client's highest `seq`. The sender's later edits are judged on their own.
+- **A refused edit is dropped** (the design's rule): the page drops its local copy of the refused edit by reloading the document and reapplying its other unacked edits over it, says why in plain words, and never resends an edit it saw refused. A re-ack can't tell a refused `seq` below the highest from an applied one, so an edit whose `refused` was lost in a drop, below a later applied edit of the same client, is re-acked as if applied if resent.
 - An `edit` whose `client` or `seq` breaks its rule is a message a page must not send: the connection is closed 1008. Any other fault in an edit (`ops` not an array, empty, a malformed op) is `refused` `shape`.
 - `select`: at most 100 ids of the id class; a longer list or a bad id and the whole `select` is ignored; ids that name no node are dropped. `selections` lists every person with a connection on the canvas (View people included), their latest `select` from any of their connections (empty until one), in the order they first connected; it goes to every connection, at most one per 250 ms window (the first change opens it, and one message at its end carries all), like presence's `people`. A deleted node leaves every selection.
 - `saved`: at most 500 ms after an applied edit (the first unsaved edit opens the window), to every connection; none while saving is paused; when the pause ends, at once if anything is unsaved.
@@ -226,13 +227,13 @@ Validity is whole-document. `docErrors(doc, { images, folderBytes })` lists ever
 | why | When |
 |---|---|
 | `shape` | an op or an edit malformed (an edit with no ops, an `add` with `children`, a missing required property), or a document's top, page or node shape |
-| `prop` | a property not of the node's type, or a structural key: `id`, `type`, `parent`, `children`; a page property other than `name` |
+| `prop` | a property not of the node's type, or a structural key: `id`, `type`, `parent`, `children`; a page property other than `name`; an override key not allowed there (`name`, `figma`, a structural key, a component's or instance's own wiring, a property its target's type doesn't have) |
 | `value` | a value outside its class, a token path inside a token or naming a group, a token value not of its type, an id of the wrong form in a document |
 | `missing` | `set` on a missing node or page, `move` of a missing node |
 | `parent` | `add` or `move` under a missing parent or a node that holds no children, a page with a non-null parent, a node with a null one, a component inside a component |
 | `exists` | `add` of an id with a different type or parent, of an id a page has, of a page with a node's id; an id twice in a document |
 | `cycle` | `move` into its own subtree, an instance cycle |
-| `ref` | a token, component, prop target, prop value, override, variant or image that doesn't resolve or is of the wrong type or range |
+| `ref` | a token, component, prop target, prop value, override target, variant or image that doesn't resolve or is of the wrong type or range |
 | `limit` | over a limit (§7), deleting the last page |
 | `view` | a View person's edit |
 
