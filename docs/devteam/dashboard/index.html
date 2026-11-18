@@ -8116,7 +8116,7 @@ window.addEventListener('message', (e) => {
     tsDrawSoon();
     return;
   }
-  // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
+  // a key only while the frame has the keyboard (decision 20), and never to lower the overlay: the page's own
   // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
   // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
   // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame (its keydown's message
