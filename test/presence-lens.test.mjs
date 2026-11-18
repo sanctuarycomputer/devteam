@@ -220,24 +220,30 @@ test('presence A16: place answers each selector\'s rect, once a frame and only o
   await ask({ lens: 1, type: 'resolve', id: 'r1', anchors: [{ key: 't-1', anchor: { selector: '#a', tag: 'p', text: 'A' } }] });
   await soon(`window.__heard.some((h) => h.data && h.data.lens === 1 && h.data.type === 'rects' && h.data.id === 'r1')`, 'the pins\' rects');
 
-  // A16a: 9 anchors: the first 8, in order; null for nothing found, not shown, or a bad selector
+  // A16a: the list cut to its first 8, then each entry checked (id 1..64 characters, k 1..200
+  // bytes): the valid ones among the first 8 answered in order, a valid 9th never (cut, then
+  // filtered); null for nothing found (no text search), not shown, or a bad selector
   let n = (await placed()).length;
   await ask({ lens: 1, type: 'place', anchors: [
     { id: 'c1', k: '#a' },
+    { id: 'x'.repeat(65), k: '#box' },
     { id: 'c2', k: '#gone', selector: '#gone', tag: 'p', text: 'decoy' },
+    { id: 'c-empty', k: '' },
     { id: 'c3', k: '#hid' },
-    { id: 'c4', k: '#inv' },
-    { id: 'c5', k: '<<bad' },
-    { id: 'c6', k: '#mover' },
-    { id: 'c7', k: '#box' },
-    { id: 'c8', k: '#box' },
+    { id: 'c-long', k: '#' + 'a'.repeat(200) },
+    { id: 7, k: '#box' },
+    null,
     { id: 'c9', k: '#box' },
   ] });
   m = await nth(n + 1, 'A16a: placed');
-  assert.deepEqual(m.rects.map((r) => r.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8'], 'A16a: the first 8, in order');
+  assert.deepEqual(m.rects.map((r) => r.id), ['c1', 'c2', 'c3'], 'A16a: the valid ones among the first 8, in order; not the 9th');
   assert.deepEqual(m.rects[0].rect, (await own({ ask: 'rect', sel: '#a' })).rect, 'A16a: #a as the frame measures it');
-  assert.deepEqual(m.rects.slice(1, 5).map((r) => r.rect), [null, null, null, null], 'A16a: null for #gone (no text search), #hid, #inv and <<bad');
-  assert.deepEqual(m.rects[5].rect, { x: 100, y: 400, w: 50, h: 20 }, 'A16a: #mover where it is');
+  assert.deepEqual(m.rects.slice(1).map((r) => r.rect), [null, null], 'A16a: null for #gone (no text search) and #hid');
+  // a second place replaces the first, and stands for A16b
+  n = (await placed()).length;
+  await ask({ lens: 1, type: 'place', anchors: [{ id: 'c4', k: '#inv' }, { id: 'c5', k: '<<bad' }, { id: 'c6', k: '#mover' }, { id: 'c7', k: '#box' }] });
+  m = await nth(n + 1, 'A16a: placed for the second place');
+  assert.deepEqual(m.rects, [{ id: 'c4', rect: null }, { id: 'c5', rect: null }, { id: 'c6', rect: { x: 100, y: 400, w: 50, h: 20 } }, { id: 'c7', rect: { x: 100, y: 100, w: 200, h: 100 } }], 'A16a: null for #inv and <<bad; #mover and #box where they are')
 
   // A16a-ii: a place with no list is ignored: the last place stands
   n = (await placed()).length;
@@ -285,26 +291,28 @@ test('presence A16: place answers each selector\'s rect, once a frame and only o
 
 // The lens's script, run in vm against a stand-in page (as test/dashboard.test.mjs's artLensRun): its
 // window listeners, what it posts to its parent, and timers that never fire.
-function lensInVm() {
+function lensInVm({ doc: docOver = {}, win: winOver = {} } = {}) {
   const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
   const script = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(src)[1];
   const ancestor = 'http://127.0.0.1:4321';
   const listeners = {};
   const posted = [];
   const parent = { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) };
-  const doc = { title: 'A mock', documentElement: {}, body: {}, elementFromPoint: () => null, querySelectorAll: () => [], querySelector: () => null, getElementsByTagName: () => [], getElementById: () => null };
+  const doc = { title: 'A mock', documentElement: {}, body: {}, elementFromPoint: () => null, querySelectorAll: () => [], querySelector: () => null, getElementsByTagName: () => [], getElementById: () => null, ...docOver };
   const win = {
     document: doc, parent, innerWidth: 800, innerHeight: 600,
     location: { pathname: '/artifact/main/lens-mock/index.html', ancestorOrigins: [ancestor] },
     addEventListener: (type, f) => { (listeners[type] ??= []).push(f); },
     setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {}, requestAnimationFrame: () => 0,
     MutationObserver: class { observe() {} }, TextEncoder, CSS: { escape: (s) => s },
+    ...winOver,
   };
   win.window = win;
   vm.runInNewContext(script, win);
   const fire = (type, e) => { for (const f of listeners[type] ?? []) f(e); };
-  fire('message', { data: { lens: 1, type: 'hello' }, source: parent, isTrusted: true, origin: ancestor });
-  return { posted, fire };
+  const hear = (data) => fire('message', { data, source: parent, isTrusted: true, origin: ancestor });
+  hear({ lens: 1, type: 'hello' });
+  return { posted, fire, hear };
 }
 // an element with no id, class or siblings: its selector is a path of one step
 const fakeDiv = (width, height) => ({ nodeType: 1, localName: 'div', id: '', getAttribute: () => null, classList: [], previousElementSibling: null, parentElement: null, getBoundingClientRect: () => ({ left: 0, top: 0, width, height }) });
@@ -321,4 +329,37 @@ test('presence A15f: pointer fractions are clamped to 0..1 and rounded to 4 deci
     const ptr = posted.filter((m) => m.type === 'pointer');
     assert.deepEqual(ptr, [{ lens: 1, type: 'pointer', k: 'div:nth-of-type(1)', ...want }], what);
   }
+});
+
+test('presence A16e: place measures on animation frames', () => {
+  // frames run only when the test runs them; timers are recorded and never fire
+  const frames = [];
+  const timers = [];
+  let rect = { left: 10, top: 20, width: 30, height: 40 };
+  const el = { nodeType: 1, checkVisibility: () => true, getBoundingClientRect: () => rect };
+  const { posted, hear } = lensInVm({
+    doc: { querySelector: (k) => (k === '#x' ? el : null) },
+    win: { requestAnimationFrame: (f) => { frames.push(f); return frames.length; }, setTimeout: (f, ms) => { timers.push(ms); return timers.length; } },
+  });
+  const placed = () => posted.filter((m) => m.type === 'placed');
+  const frame = () => frames.shift()();
+  const timersBefore = timers.length;
+  hear({ lens: 1, type: 'place', anchors: [{ id: 'a', k: '#x' }] });
+  assert.deepEqual(placed(), [{ lens: 1, type: 'placed', rects: [{ id: 'a', rect: { x: 10, y: 20, w: 30, h: 40 } }] }], 'answered at once');
+  assert.equal(frames.length, 1, 'one frame asked for');
+  assert.equal(timers.length, timersBefore, 'no timer: frames only');
+  frame();
+  assert.equal(placed().length, 1, 'nothing changed: nothing sent');
+  assert.equal(frames.length, 1, 'the next frame asked for');
+  rect = { left: 11, top: 20, width: 30, height: 40 };
+  frame();
+  assert.deepEqual(placed().slice(1), [{ lens: 1, type: 'placed', rects: [{ id: 'a', rect: { x: 11, y: 20, w: 30, h: 40 } }] }], 'a change: sent on its frame');
+  assert.equal(frames.length, 1);
+  hear({ lens: 1, type: 'place', anchors: [] });
+  assert.deepEqual(placed().slice(2), [{ lens: 1, type: 'placed', rects: [] }], 'an empty list, answered');
+  assert.equal(frames.length, 1, 'no second loop');
+  frame();
+  assert.equal(frames.length, 0, 'the loop has stopped');
+  assert.equal(placed().length, 3);
+  assert.equal(timers.length, timersBefore, 'never a timer');
 });

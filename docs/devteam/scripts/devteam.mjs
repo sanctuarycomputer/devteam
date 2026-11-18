@@ -7616,10 +7616,12 @@ const ARTIFACT_LENS = String.raw`(() => {
   // once a frame while there is a list, sent only when a rect changed; an empty list ends it
   const placeFrame = () => {
     if (!placing.length) { placeLoop = false; return; }
-    const rects = placedNow();
-    const now = JSON.stringify(rects);
-    if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
-    requestAnimationFrame(placeFrame);
+    // the next frame is asked for whatever this one's measuring did
+    try {
+      const rects = placedNow();
+      const now = JSON.stringify(rects);
+      if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    } finally { requestAnimationFrame(placeFrame); }
   };
 
   // --- the viewer's questions ------------------------------------------------------------------------
