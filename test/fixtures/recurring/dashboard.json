@@ -35,11 +35,11 @@
         },
         {
           "kind": "failing-long",
-          "since": "2026-11-18T18:31:02Z",
+          "since": "2026-11-18T18:31:03Z",
           "text": "Failing for half a day with a fix ticket open.",
           "may": "Look at ci-04-fix-ci-main.",
           "evidence": [
-            "o-20261118-183102000-supervisor",
+            "o-20261118-183103000-supervisor",
             "o-20261119-003107000-supervisor"
           ]
         }

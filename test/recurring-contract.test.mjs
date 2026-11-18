@@ -473,6 +473,17 @@ test('dashboard.json is C5\'s upkeep.recurring', () => {
   // C5: a signal's since is the time of its earliest evidence line (an observation id carries it)
   const idTime = (id) => { const m = /^o-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(\d{3})-/.exec(id); return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${m[7] === '000' ? '' : `.${m[7]}`}Z`; };
   for (const e of E) for (const g of e.signals) assert.equal(g.since, g.evidence.map(idTime).sort()[0], `${e.name} ${g.kind}: since`);
+  // C1 on the dashboard's checks: a run starts at or after its slot (an at-time check's last run on
+  // that day's at), an hourly check's next is its last start plus every, and every next is after the
+  // snapshot's latest moment (a builtin's last run), so no slot sits past due unrun
+  const snapshot = d.builtin.map((b) => b.last_at).filter(Boolean).sort().at(-1);
+  for (const e of E.filter((x) => x.kind === 'check')) {
+    assert.ok(e.next_at > snapshot, `${e.name}: next_at after ${snapshot}`);
+    if (!e.last) continue;
+    if (e.at) assert.ok(e.last.at.slice(11, 16) === e.at && e.last.at.slice(17, 19) < '10', `${e.name}: last run starts at its slot, ${e.at}`);
+    const h = /^(\d+)h$/.exec(e.every);
+    if (h) assert.equal(e.next_at, isoOf(Date.parse(e.last.at) + Number(h[1]) * 3600e3), `${e.name}: next from the last start`);
+  }
   // a job's runs and signals come after it was registered
   for (const e of E) for (const t of [e.last?.at, ...e.signals.flatMap((g) => g.evidence.map(idTime))].filter(Boolean)) assert.ok(t > e.registered.at, `${e.name}: ${t} after registered`);
   assert.deepEqual(d.builtin.map((b) => [b.name, b.setting]), [['retro', 'retro_every_days'], ['research', 'research_every_days'], ['kit-sync', 'upstream_check_hours'], ['sensors', null]]);
