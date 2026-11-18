@@ -310,6 +310,19 @@ test('the minute loop recreates home:hub only when it is gone', () => {
   assert.deepEqual(made(noServer.calls), []);
 });
 
+test('the image\'s downloads retry', () => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').replace(/\\\n/g, ' ');
+  const curls = df.split('\n').filter((l) => /\bcurl\b/.test(l) && /https:\/\//.test(l));
+  assert.ok(curls.length >= 5, `at least 5 network curl lines, found ${curls.length}`);
+  for (const l of curls) {
+    assert.match(l, /--retry 5\b/, `--retry 5 on: ${l.slice(0, 80)}`);
+    assert.match(l, /--retry-all-errors\b/, `--retry-all-errors on: ${l.slice(0, 80)}`);
+  }
+  const conf = df.indexOf('Acquire::Retries "5"');
+  assert.ok(conf >= 0, 'apt is told to retry');
+  assert.ok(conf < df.indexOf('apt-get update'), 'the apt retry config is written before the first apt-get update');
+});
+
 test('the boot\'s hub lines sit where the boot needs them', () => {
   const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n');
   assert.ok(df.includes('ENV DEVTEAM_IMAGE_HUB=4320'));
@@ -559,7 +572,7 @@ case $cmd in
 esac
 `);
 write(path.join(loopFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
-write(path.join(loopFakes, 'flock'), '#!/bin/sh\necho "$*" >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
+write(path.join(loopFakes, 'flock'), '#!/bin/sh\nfor a; do printf \'%s\\037\' "$a" >> "$HOME/.flocks"; done; echo >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
 write(path.join(loopFakes, 'node'), '#!/bin/sh\n[ -z "$STOP_DURING" ] || : > "$HOME/.box/stopping"\ncase $* in *"settings --get tmux_session"*) cat .session 2>/dev/null || echo null ;; esac\n');
 write(path.join(loopFakes, 'box-recover'), '#!/bin/sh\necho ran >> "$HOME/.recovers"\n');
 for (const f of ['tmux', 'timeout', 'flock', 'node', 'box-recover']) fs.chmodSync(path.join(loopFakes, f), 0o755);
@@ -730,7 +743,7 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.equal(recovers(), before, 'none started');
   const owed = path.join(h, '.box', 'recover.owed');
   assert.ok(fs.existsSync(owed), 'owed');
-  assert.ok(!read(path.join(h, '.flocks')).includes('-w'), 'the loop never waits on the lock');
+  assert.ok(!read(path.join(h, '.flocks')).split('\n').some((l) => l.split('\x1f').some((a) => /^-[A-Za-z]*w/.test(a) || (a.startsWith('--') && ((n) => n !== '' && ('wait'.startsWith(n) || 'timeout'.startsWith(n)))(a.slice(2).split('=')[0])))), 'the loop never waits on the lock');
   state({ pid: 905, home: ['operator', 'hub'], panes: '' });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'still held: still owed');

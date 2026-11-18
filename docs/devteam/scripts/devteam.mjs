@@ -488,7 +488,7 @@ if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operat
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', 'held', 'held-locks', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -1813,6 +1813,27 @@ function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
       }
       if (Date.now() - start > waitMs) die(`timed out waiting for ${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
+// withLock's lock, for a caller that must never wait (the dashboard's tick): a lock held and fresh
+// is undefined back, and fn never runs; a stale one (either way) is taken, once.
+function tryLock(file, fn, { staleMs = 10000 } = {}) {
+  const lock = `${file}.lock`;
+  for (let tries = 0; ; tries++) {
+    try {
+      fs.mkdirSync(lock, { recursive: false });
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const at = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
+      if (tries || (at !== undefined && Math.abs(Date.now() - at) <= staleMs)) return undefined;
+      fs.rmSync(lock, { recursive: true, force: true });
     }
   }
   try {
@@ -3507,12 +3528,20 @@ function holdLine(key, target, line, paste = null) {
     return path.join(dir, `${name}.json`);
   } catch { return null; }
 }
+// A window's own short lock, for the steps a late line could slip between: a sender's look at what
+// is held and its hold, a flusher's claim, a put-back. Only renames and reads run under it: nothing typed.
+function heldLock(key, fn) {
+  fs.mkdirSync(path.join(runDir, 'held-locks'), { recursive: true });
+  return withLock(path.join(runDir, 'held-locks', encodeURIComponent(key)), fn);
+}
 // Lines back into the window's folder, under their own names: older than anything held since.
-function unclaimHeld(claimed, dir) {
-  const names = heldFiles(claimed);
-  if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
-  for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
-  try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+function unclaimHeld(key, claimed, dir) {
+  heldLock(key, () => {
+    const names = heldFiles(claimed);
+    if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
+    for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
+    try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+  });
 }
 // A line let go, said in the log by whoever writes as the supervisor (its tick, accounts-tick): any
 // other process leaves it for them.
@@ -3530,11 +3559,26 @@ function dropHeld(key, file, why) {
 // Stale claims back, and what is a day old let go: whoever looks, whatever else holds the window.
 function tidyHeld(key) {
   const dir = heldDir(key);
-  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(c.dir, dir);
+  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(key, c.dir, dir);
   for (const n of heldFiles(dir)) if (!(heldAge(n) < HELD_MAX_MS)) dropHeld(key, path.join(dir, n), 'held for over a day');
 }
-// a line still worth typing waits, or someone is typing them now
-const heldPending = (key) => heldFiles(heldDir(key)).some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+// a line still worth typing waits, or someone is typing them now. Tests only
+// (DEVTEAM_HELD_CHECK_DELAY_MS): held open between the two reads, with a held-locks/<k>.checking
+// marker, so a put-back can be tried inside that window.
+function heldPending(key) {
+  const files = heldFiles(heldDir(key));
+  const delay = Number(process.env.DEVTEAM_HELD_CHECK_DELAY_MS ?? 0);
+  if (!(delay > 0)) return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  const marker = path.join(runDir, 'held-locks', `${encodeURIComponent(key)}.checking`);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // Types a window's held lines, oldest first, each only into a pane that is ready for it. The number typed.
 function flushHeld(key) {
   const dir = heldDir(key);
@@ -3544,11 +3588,14 @@ function flushHeld(key) {
   if (heldClaims(key).length) return 0;
   for (let stopped = false; !stopped && heldFiles(dir).length;) {
     const claimed = `${dir}.claim-${process.pid}-${Date.now()}`;
-    try { fs.renameSync(dir, claimed); } catch { break; }
+    // taken only while nobody else holds a claim: another flusher's lines go first, in order
+    let took = false;
+    try { took = heldLock(key, () => { if (heldClaims(key).length) return false; fs.renameSync(dir, claimed); return true; }); } catch {}
+    if (!took) break;
     const names = heldFiles(claimed);
     const live = names.filter((n) => heldAge(n) < HELD_MAX_MS);
     // only lines nobody here may let go: left where they are for the supervisor's next look
-    if (!live.length && !heldLogs()) { unclaimHeld(claimed, dir); break; }
+    if (!live.length && !heldLogs()) { unclaimHeld(key, claimed, dir); break; }
     for (const n of names) {
       const f = path.join(claimed, n);
       if (!(heldAge(n) < HELD_MAX_MS)) { dropHeld(key, f, 'held for over a day'); continue; }
@@ -3568,7 +3615,7 @@ function flushHeld(key) {
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
     }
-    unclaimHeld(claimed, dir);
+    unclaimHeld(key, claimed, dir);
   }
   return typed;
 }
@@ -7512,14 +7559,25 @@ function readPreviews() {
   }
   return recs;
 }
-function writePreview(rec) {
+// The raw writers, for a caller that already holds the record's lock (the tick, under tryLock).
+function writePreviewFile(rec) {
   const { mtimeMs, ...r } = rec;
   fs.mkdirSync(previewsDir(), { recursive: true });
   const tmp = `${previewFile(r.name)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(r, null, 2)}\n`);
   fs.renameSync(tmp, previewFile(r.name));
 }
-const removePreview = (name) => fs.rmSync(previewFile(name), { force: true });
+const removePreviewFile = (name) => fs.rmSync(previewFile(name), { force: true });
+// Everyone else's: under the record's lock, so the tick's look-then-write can't land between
+// them and undo a stop (withLock isn't re-entrant: never call these from inside one).
+function writePreview(rec) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(rec.name), () => writePreviewFile(rec));
+}
+function removePreview(name) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(name), () => removePreviewFile(name));
+}
 // What this project calls itself, and who is asking.
 const previewProject = () => loadSettings().project ?? path.basename(mainRoot);
 function previewLabel() {
@@ -7965,6 +8023,21 @@ const previewUp = new Map();
 const previewUpHere = () => { if (previewUpHere.seen === undefined) { try { previewUpHere.seen = JSON.parse(process.env.DEVTEAM_PREVIEW_UP ?? '{}'); } catch { previewUpHere.seen = {}; } } return previewUpHere.seen; };
 const tmuxAsync = (args) => new Promise((resolve) => execFile('tmux', args, { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }, (err, stdout) => resolve(err ? null : stdout)));
 const previewAsIRead = (r) => { try { return fs.statSync(previewFile(r.name)).mtimeMs === r.mtimeMs; } catch { return false; } };
+// The tick's write, held open for a test (DEVTEAM_PREVIEW_WRITE_DELAY_MS) so a stop can be put
+// inside the window it guards: a <name>.json.writing marker, the wait, the write, and the marker
+// gone only once the write is done. Unset, it is just the write.
+function previewWriteHook(name, write) {
+  const delay = Number(process.env.DEVTEAM_PREVIEW_WRITE_DELAY_MS ?? 0);
+  if (!(delay > 0)) return write();
+  const marker = `${previewFile(name)}.writing`;
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return write();
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // The dashboard's housekeeping, every 10 s, and nowhere else (hello is a read: the operator runs
 // it). Probes each port, keeps the answers for hello and the Library, and finishes what any crash
 // left: expiry, a server gone for a day, a dev~ window with no record. It writes a record only when
@@ -7987,16 +8060,23 @@ async function previewTick() {
     const since = Date.parse(r.down_since ?? '');
     // an expiry that doesn't parse is past: a file nobody wrote through the kit never lives forever
     if (!(Date.parse(r.expires) > now) || (!r.run && !up && since && now - since > DAY)) {
-      if (!previewAsIRead(r)) return;
+      // the look and the removal under the record's lock, never waiting on it: a held one is next tick's
+      fs.mkdirSync(previewsDir(), { recursive: true });
+      const gone = tryLock(previewFile(r.name), () => previewAsIRead(r) && (removePreviewFile(r.name), true));
+      if (!gone) return;
       await kill(r);
-      removePreview(r.name);
       previewUp.delete(r.name);
       return;
     }
     const want = up ? null : (Number.isNaN(since) ? nowIso() : r.down_since);
     if ((r.down_since ?? null) === want || !previewAsIRead(r)) return;
     const { down_since, ...rest } = r;
-    writePreview(want ? { ...rest, down_since: want } : rest);
+    // the look again and the write, under the lock a preview command takes: a stop can't land between them
+    fs.mkdirSync(previewsDir(), { recursive: true });
+    tryLock(previewFile(r.name), () => {
+      if (!previewAsIRead(r)) return;
+      previewWriteHook(r.name, () => writePreviewFile(want ? { ...rest, down_since: want } : rest));
+    });
   }));
   for (const n of previewUp.keys()) if (!names.has(n)) previewUp.delete(n);
   // The windows were listed before these records are read, so a window opened since has its id in
@@ -13436,7 +13516,16 @@ function probeHello(port, ms = 300) {
 // Free means nothing answers there and this process could bind it: a dev server on localhost (::1)
 // or on every interface would still pass a bind of 127.0.0.1 alone, then take the owner's
 // localhost:<port> while the dashboard holds 127.0.0.1:<port>.
-const answers = (port, host) => new Promise((resolve) => { const c = net.connect({ port, host, timeout: 300 }); c.once('connect', () => { c.destroy(); resolve(true); }); c.once('timeout', () => { c.destroy(); resolve(false); }); c.once('error', () => resolve(false)); });
+// A blocked loop runs timers before I/O when it wakes, so the timeout could fire before a connect
+// already made is heard: the timeout's verdict waits one turn (setImmediate), and a connect wins.
+const answers = (port, host) => new Promise((resolve) => {
+  let done = false;
+  const settle = (v) => { if (!done) { done = true; resolve(v); } };
+  const c = net.connect({ port, host, timeout: 300 });
+  c.once('connect', () => { c.destroy(); settle(true); });
+  c.once('timeout', () => setImmediate(() => { c.destroy(); settle(false); }));
+  c.once('error', () => settle(false));
+});
 const binds = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
 const portFree = async (port) => !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await binds(port));
 // The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,
@@ -17513,8 +17602,10 @@ function typeInto(target, line, paste = null) {
   const key = paneKey(target);
   if (!key) return typeNow(target, line, paste);
   const asking = paneAsking(target);
-  if (!asking && !heldPending(key)) return typeNow(target, line, paste);
-  const file = holdLine(key, target, line, paste);
+  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+  // now; false: it could not be held
+  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+  if (file === null) return typeNow(target, line, paste);
   if (!file) return asking ? false : typeNow(target, line, paste);
   if (!asking) flushHeld(key);
   if (!fs.existsSync(file)) return true;
@@ -19467,6 +19558,9 @@ const sensorObserveOnce = (m, fields) => (sensorKeys().has(fields.source_key) ? 
 // well (ids and numbers out of its fingerprints and templates) gives it less to find.
 const SCRUB_KEY = String.raw`[\w-]*?(?:password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|session(?:[_-]?id)?|ssn|dob|date[_-]?of[_-]?birth|birth[_-]?date|address)`;
 const luhn = (digits) => { let s = 0; for (let i = 0; i < digits.length; i++) { let d = +digits[digits.length - 1 - i]; if (i % 2) { d *= 2; if (d > 9) d -= 9; } s += d; } return s % 10 === 0; };
+// The alphanumeric token around s[off, off+len) is exactly 40 or 64 hex characters: a full sha.
+// The scan stops once the run passes 64 (never a full sha), so each match costs a constant.
+const inFullSha = (s, off, len) => { let a = off; let b = off + len; while (a > 0 && b - a <= 64 && /[0-9A-Za-z]/.test(s[a - 1])) a--; while (b < s.length && b - a <= 64 && /[0-9A-Za-z]/.test(s[b])) b++; return (b - a === 40 || b - a === 64) && /^[0-9A-Fa-f]+$/.test(s.slice(a, b)); };
 const entropy = (s) => { const c = {}; for (const ch of s) c[ch] = (c[ch] ?? 0) + 1; return Object.values(c).reduce((e, n) => e - (n / s.length) * Math.log2(n / s.length), 0); };
 const SCRUB_RULES = [
   // headers and URLs first, while their shape is intact
@@ -19485,7 +19579,8 @@ const SCRUB_RULES = [
   [/\b(?:(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|sntry[su]_[A-Za-z0-9=_+/-]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|HRKU-[A-Za-z0-9_-]{20,})/g, '[key]'],
   [/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,254}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/g, '[email]'],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
-  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x) => (luhn(x.replace(/\D/g, '')) ? '[card]' : x)],
+  // a Luhn-valid run inside a whole 40- or 64-hex git sha is the sha's, not a card (inFullSha)
+  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x, off, s) => (luhn(x.replace(/\D/g, '')) && !inFullSha(s, off, x.length) ? '[card]' : x)],
   [/(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.])/g, '[ip]'],
   [/(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])/g, (x) => (/\d/.test(x) && net.isIPv6(x) ? '[ip]' : x)],
   [/(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])\d{3,4}[ .-]\d{3,4}(?!\w)/g, '[phone]'],
