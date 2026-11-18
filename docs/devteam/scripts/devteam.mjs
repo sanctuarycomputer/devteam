@@ -16583,6 +16583,52 @@ async function cmdBoxPins() {
 // dashboard whose hub port it names leaves the hub to the image; a project still on an older kit can
 // take the port in the second the image's hub restarts, until it adopts this release.
 const imageHub = () => (/^\d+$/.test(process.env.DEVTEAM_IMAGE_HUB ?? '') ? Number(process.env.DEVTEAM_IMAGE_HUB) : null);
+// The kit a dashboard runs (kit-288): the script Node loaded and the dashboard's own pages, scripts and
+// styles. A print of them, by path: size and mtime from a stat, and the sha256 of the bytes, read again
+// only for a file whose stat moved since prev. The project's files (project/, run/, its own code) are
+// not in it: they never restart a dashboard.
+const kitWatched = (self) => {
+  const dir = path.join(kitDir, 'dashboard');
+  let names = [];
+  try { names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile() && /\.(html|js|css)$/.test(e.name)).map((e) => path.join(dir, e.name)); } catch {}
+  return [self, ...names.sort()];
+};
+function kitPrint(self, prev = new Map()) {
+  const print = new Map();
+  for (const f of kitWatched(self)) {
+    let st;
+    try { st = fs.statSync(f); } catch { continue; }
+    const was = prev.get(f);
+    if (was && was.size === st.size && was.mtime === st.mtimeMs) { print.set(f, was); continue; }
+    let sha;
+    try { sha = sha256(fs.readFileSync(f)); } catch { continue; }
+    print.set(f, { size: st.size, mtime: st.mtimeMs, sha });
+  }
+  return print;
+}
+// The files two prints differ in (a sha, or there in one only), relative to the kit; a print's key.
+const kitPrintDiff = (a, b) => [...new Set([...a.keys(), ...b.keys()])].filter((f) => a.get(f)?.sha !== b.get(f)?.sha).map((f) => path.relative(kitDir, f).split(path.sep).join('/')).sort();
+const kitPrintKey = (p) => [...p].map(([f, v]) => `${f}\0${v.sha}`).sort().join('\n');
+// How a dashboard whose kit changed hands over to the new code: 'exit' where something restarts it
+// (DEVTEAM_DASHBOARD_RESTART=exit, or a while loop around it, as the box's image runs it), 'respawn'
+// where it is its own tmux pane's process (a laptop's window: tmux runs the pane's command again),
+// else 'stay' (nothing would start it again). The first that holds wins. A pane is respawned only when
+// its process is this one, or the one shell running it: a dashboard a test or a probe started inside
+// a worker's pane inherits that pane's TMUX_PANE, and must never respawn it.
+function kitHandOver() {
+  const want = process.env.DEVTEAM_DASHBOARD_RESTART;
+  if (want === 'off') return { how: 'stay', why: 'DEVTEAM_DASHBOARD_RESTART=off' };
+  if (want === 'exit') return { how: 'exit' };
+  let parent = '';
+  try { parent = execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  if (/\bwhile\b/.test(parent) && /\bdashboard\b/.test(parent)) return { how: 'exit' };
+  if (process.env.TMUX && process.env.TMUX_PANE) {
+    let pid = null;
+    try { pid = Number(execFileSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#{pane_pid}'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {}
+    if (pid === process.pid || (pid === process.ppid && /\bdashboard\b/.test(parent))) return { how: 'respawn', pane: process.env.TMUX_PANE };
+  }
+  return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
+}
 async function cmdDashboard() {
   const picked = await pickDashboardPort();
   let port = picked.port;
@@ -16595,6 +16641,8 @@ async function cmdDashboard() {
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
   const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
+  // the kit as this process loaded it, before it serves anything (kit-288)
+  const startPrint = kitPrint(self);
   const ownerEnv = ownerActionEnv('dashboard');
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
@@ -16673,6 +16721,8 @@ async function cmdDashboard() {
   // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
   let hello = null;
   let kit = null;
+  // the kit's version as this process started on it, from its first hello: the restart's "from"
+  let startKit = null;
   let kitAt = { main: null, at: 0 };
   let helloRunning = false;
   const refreshHello = () => {
@@ -16686,7 +16736,7 @@ async function cmdDashboard() {
       execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
         helloRunning = false;
         if (err) return;
-        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; startKit ??= hello.kit; } } catch {}
       });
     });
   };
@@ -17535,6 +17585,46 @@ async function cmdDashboard() {
   keepAlive(server);
   server.requestTimeout = UPLOAD_REQUEST_MS;
   server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
+  // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
+  // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands
+  // over to it (kitHandOver). One that doesn't parse, or with nothing to start it again, is said
+  // once per print and served on.
+  const watchMs = Number(process.env.DEVTEAM_KIT_WATCH_MS) || 10000;
+  let lastPrint = startPrint;
+  let pending = null;
+  let checking = false;
+  let restarting = false;
+  const said = new Set();
+  const sayOnce = (key, msg) => { if (!said.has(key)) { said.add(key); log(msg); } };
+  // the version on disk now, from the new script's own hello: this process's settings are cached
+  const newKit = () => new Promise((resolve) => execFile(process.execPath, [self, 'hello', '--json'], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => { try { resolve((!err && JSON.parse(stdout).kit) || 'unknown'); } catch { resolve('unknown'); } }));
+  const restart = async (files, key) => {
+    const how = kitHandOver();
+    const to = await newKit();
+    const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
+    if (how.how !== 'exit') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why ?? 'not its own tmux pane'})`);
+    restarting = true;
+    log(`restarting: ${changed}`);
+    server.close(() => process.exit(0));
+  };
+  const watchTick = () => {
+    if (checking || restarting) return;
+    const print = kitPrint(self, lastPrint);
+    const key = kitPrintKey(print);
+    const same = key === kitPrintKey(lastPrint);
+    lastPrint = print;
+    if (key === kitPrintKey(startPrint)) { pending = null; return; }
+    // settled: the same print two polls running
+    if (!same || pending !== key) { pending = key; if (!same) return; }
+    if (said.has(key)) return;
+    checking = true;
+    execFile(process.execPath, ['--check', self], { timeout: 20000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) => {
+      if (err) { checking = false; return sayOnce(key, `kit files changed but scripts/devteam.mjs does not parse: ${String(stderr || err.message).split('\n').find((l) => l.trim()) ?? ''}; staying on ${startKit ?? 'unknown'}`); }
+      restart(kitPrintDiff(startPrint, print), key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
+    });
+  };
+  setInterval(watchTick, watchMs).unref();
   server.listen(port, host);
 }
 
