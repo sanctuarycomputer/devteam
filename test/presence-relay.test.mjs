@@ -172,6 +172,9 @@ async function refusals(url, port, { ownOrigin = null } = {}) {
     [403, 'a foreign Origin', { origin: 'http://evil.example' }],
     [403, 'Origin http://localhost on a 127.0.0.1 Host', { origin: `http://localhost:${port}` }],
     [404, 'another path', {}, '/elsewhere'],
+    [404, 'a path that only normalises to /presence (//)', {}, '//zq7/presence'],
+    [404, 'a path that only normalises to /presence (..)', {}, '/zq7/../presence'],
+    [404, 'a path that only normalises to /presence (%2e%2e)', {}, '/%2e%2e/presence'],
     [400, 'no key', { headers: { 'Sec-WebSocket-Key': null } }],
     [400, 'version 12', { headers: { 'Sec-WebSocket-Version': '12' } }],
     [400, 'a key of 15 bytes', { headers: { 'Sec-WebSocket-Key': Buffer.alloc(15, 1).toString('base64') } }],
@@ -195,7 +198,7 @@ async function refusals(url, port, { ownOrigin = null } = {}) {
   ];
   if (ownOrigin) rows.push([403, `another server's origin (${ownOrigin})`, { origin: ownOrigin }]);
   for (const [status, label, opts, where = ''] of rows) {
-    const c = await open(`${url}${where}`, opts);
+    const c = await open(url, { ...opts, path: where || '/presence' });
     assert.equal(c.status, status, label);
     assert.equal(c.you, undefined, `${label}: no welcome`);
     assert.deepEqual(c.messages, [], `${label}: no message`);
@@ -603,16 +606,20 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
     O.send(hereMsg({ page: 'zq7-once' }));
     await O.next((m) => m.t === 'people', 5000);
     const G = await open(url, { headers: P('zq7-flood') });
+    const tG = Date.now(); // G's server seconds roll at tG − (a few ms) + n s
     const burst = (c) => c.raw(Buffer.concat(Array.from({ length: 40 }, () => c.build(json({ t: 'zz' })))));
     await new Promise((r) => setTimeout(r, 1100));
     burst(O); // one second over, then nothing
+    await new Promise((r) => setTimeout(r, Math.max(0, tG + 2150 - Date.now()))); // 150 ms into G's third second
     const start = Date.now();
     let code = null;
     G.closed.then((x) => { code = x; });
     while (code === null && Date.now() - start < 15000) { burst(G); await new Promise((r) => setTimeout(r, 250)); }
     const took = Date.now() - start;
     assert.equal(code, 1008, 'the flood is closed 1008');
-    assert.ok(took >= 9000 && took <= 14000, `closed after ten seconds over, not before (${took} ms)`);
+    // over in each of the ten seconds from the one it began in: closed at that tenth second's roll, about 9.85 s
+    // (eleven would be 10.85 s)
+    assert.ok(took >= 9000 && took <= 10400, `closed after ten seconds over, not before and not eleven (${took} ms)`);
     await sentinel(O, { page: 'zq7-once' }, [O]);
     assert.equal(O.status, 101, 'the one-second burst is still open');
   });
@@ -726,6 +733,7 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
       let qClosed = false;
       Q.closed.then(() => { qClosed = true; clearInterval(answer); });
       assert.equal(await closedWithin(Pn, 8000), 1001, 'two unanswered pings close 1001');
+      assert.equal(Pn.messages.filter((m) => m.t === 'ping').length, 2, 'closed after exactly two pings, at the third');
       const took = Date.now() - t0;
       assert.ok(took >= 2500 && took <= 6000, `at the third ping, not the second (${took} ms)`);
       const seen = Q.messages.filter((m) => m.t === 'ping').length;
@@ -742,6 +750,9 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
 
 test('presence A8: the hello carries present, one entry per visible person, capped at 50; nothing about presence is kept', check(async () => {
   const { url, port, runDir, dash } = await dashboard();
+  // (d) run/ listed before anything connects, and again after
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
+  const before = new Set(walk(runDir).map((f) => path.relative(runDir, f)));
   const hello = async () => JSON.parse((await get(port, '/api/hello')).text);
   // (a) nobody connected
   const h0 = await hello();
@@ -778,11 +789,12 @@ test('presence A8: the hello carries present, one entry per visible person, capp
   assert.deepEqual(shapeErrors('hello', h), []);
   assert.ok(Buffer.byteLength(body) < 65536, `the hello is under 64 KB (${Buffer.byteLength(body)} bytes)`);
   await closeEvery();
-  // (d) nothing about presence is kept: no file under run/ holds a zq7 word, no path names presence,
-  // and the dashboard's own output holds none
-  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
+  // (d) nothing about presence is kept: run/ has no file it didn't have before, none holds a zq7 word,
+  // no path names presence, and the dashboard's own output holds none
   const files = walk(runDir);
   assert.ok(files.length > 0, 'run/ has files to look in');
+  const added = files.map((f) => path.relative(runDir, f)).filter((r) => !before.has(r));
+  assert.deepEqual(added, [], 'no file was added under run/ while people came and went');
   for (const f of files) {
     const rel = path.relative(runDir, f);
     assert.ok(!/presence/i.test(rel), `no path under run/ names presence (${rel})`);

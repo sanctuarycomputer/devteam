@@ -364,7 +364,8 @@ function personOf(req, ownerName) {
   return { id: m[1], name: cutName(name), level: ls.length ? ls[0] : 'full' };
 }
 const validKey = (k) => typeof k === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(k) && Buffer.from(k, 'base64').length === 16;
-const pathOf = (url) => { try { return new URL(url, 'http://x').pathname; } catch { return null; } };
+// the path exactly as sent, less a query: never normalised, so only /presence is /presence (§2)
+const pathOf = (url) => String(url ?? '').split('?')[0];
 const STATUS = { 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found' };
 
 const sameSpot = (a, b) => a.page === b.page && a.tab === b.tab && a.peek === b.peek && a.art === b.art;
@@ -654,13 +655,14 @@ export async function startPresenceFake({ hub = false, ownerName = 'Owner', serv
 
 // A WebSocket client over `net` for the fake (or a real relay): the handshake, then frames. It resolves
 // on whichever comes first: a non-101 status, `welcome`, or the socket closing. `headers` adds or
-// overrides request headers (null leaves one out, an array repeats it); `origin: null` sends none.
-export function openPresence(url, { headers = {}, origin, host, keep = true } = {}) {
+// overrides request headers (null leaves one out, an array repeats it); `origin: null` sends none; `path`
+// is sent as written (a URL would normalise `..` and `%2e%2e` away).
+export function openPresence(url, { headers = {}, origin, host, keep = true, path = null } = {}) {
   const u = new URL(url);
   const port = Number(u.port);
   const hostH = host ?? `127.0.0.1:${port}`;
   const originH = origin === undefined ? `http://${hostH}` : origin;
-  const where = `${u.pathname && u.pathname !== '/' ? u.pathname : '/presence'}${u.search}`;
+  const where = path ?? `${u.pathname && u.pathname !== '/' ? u.pathname : '/presence'}${u.search}`;
   const key = crypto.randomBytes(16).toString('base64');
   const base = [['Host', hostH], ['Upgrade', 'websocket'], ['Connection', 'Upgrade'], ['Sec-WebSocket-Key', key], ['Sec-WebSocket-Version', '13']];
   if (originH !== null) base.push(['Origin', originH]);

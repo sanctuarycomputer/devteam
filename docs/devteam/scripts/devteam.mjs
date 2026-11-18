@@ -14600,7 +14600,8 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     return cut ? { id: m[1], name: cut, level: ls.length ? ls[0] : 'full' } : null;
   };
   const validKey = (k) => typeof k === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(k) && Buffer.from(k, 'base64').length === 16;
-  const pathOf = (url) => { try { return new URL(url, 'http://x').pathname; } catch { return null; } };
+  // the path exactly as sent, less a query: never normalised, so only /presence is /presence (§2)
+  const pathOf = (url) => String(url ?? '').split('?')[0];
   // §2's guards in order: the person, or the status refusing it
   const guard = (req, upgrade) => {
     const host = req.headers.host;
@@ -14628,10 +14629,10 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     }
     return [...by.values()];
   };
-  // a socket that holds over 1 MB unsent isn't reading: dropped without a close frame
+  // a socket that would hold over 1 MB unsent isn't reading: dropped without a close frame
   const write = (c, buf) => {
     if (!c.open || c.socket.destroyed) return;
-    if (c.socket.writableLength > L.unsent) { c.open = false; c.socket.destroy(); leave(c); return; }
+    if (c.socket.writableLength + buf.length > L.unsent) { c.open = false; c.socket.destroy(); leave(c); return; }
     c.socket.write(buf);
   };
   function leave(c) {
