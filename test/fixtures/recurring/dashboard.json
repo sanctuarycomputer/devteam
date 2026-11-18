@@ -13,11 +13,11 @@
       "fails_in_a_row": 3,
       "last": {
         "status": "error",
-        "at": "2026-11-19T00:27:06Z",
+        "at": "2026-11-19T06:27:06Z",
         "seconds": 1800,
         "excerpt": "timed out after 1800 s"
       },
-      "next_at": "2026-11-19T06:27:06Z",
+      "next_at": "2026-11-19T12:27:06Z",
       "ticket": "ci-04-fix-ci-main",
       "registered": {
         "qid": "q-20261101-090000000",
@@ -26,21 +26,21 @@
       "signals": [
         {
           "kind": "erroring",
-          "since": "2026-11-19T00:27:06Z",
+          "since": "2026-11-19T06:57:06Z",
           "text": "Its last run timed out instead of finishing.",
           "may": "Raise timeout_s, or look at what hangs.",
           "evidence": [
-            "o-20261119-002706000-supervisor"
+            "o-20261119-065706000-supervisor"
           ]
         },
         {
           "kind": "failing-long",
-          "since": "2026-11-18T12:27:04Z",
+          "since": "2026-11-18T18:31:02Z",
           "text": "Failing for half a day with a fix ticket open.",
           "may": "Look at ci-04-fix-ci-main.",
           "evidence": [
-            "o-20261118-122704000-supervisor",
-            "o-20261118-182705000-supervisor"
+            "o-20261118-183102000-supervisor",
+            "o-20261119-003107000-supervisor"
           ]
         }
       ]
@@ -58,7 +58,7 @@
       "fails_in_a_row": 0,
       "last": {
         "status": "pass",
-        "at": "2026-11-19T06:00:41Z",
+        "at": "2026-11-19T06:00:01Z",
         "seconds": 41.2,
         "excerpt": "0 broken links"
       },
@@ -103,7 +103,7 @@
       "fails_in_a_row": 0,
       "last": {
         "status": "pass",
-        "at": "2026-11-19T05:00:09Z",
+        "at": "2026-11-19T05:00:01Z",
         "seconds": 9.3,
         "excerpt": "0"
       },
@@ -171,7 +171,7 @@
       "signals": [
         {
           "kind": "overdue",
-          "since": "2026-11-19T00:04:00Z",
+          "since": "2026-11-16T00:04:00Z",
           "text": "Started three days ago and not merged.",
           "may": "Look at deps-07-recurring-deps-bump.",
           "evidence": [
@@ -250,8 +250,8 @@
       "next_at": "2026-12-01T00:00:00Z",
       "ticket": null,
       "registered": {
-        "qid": "q-20260901-090000000",
-        "at": "2026-09-01T09:05:00Z"
+        "qid": "q-20260720-090000000",
+        "at": "2026-07-20T09:05:00Z"
       },
       "signals": [
         {

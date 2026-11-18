@@ -327,9 +327,10 @@ const PEEK_SHAPE = closed({
   entry: { type: 'object', properties: { kind: { enum: ['check', 'chore'] }, title: str, what: str, every: str, registered: REGISTERED }, required: ['kind', 'title', 'what', 'every', 'registered'] },
   runs: {
     type: 'array', maxItems: 20,
-    items: closed({ status: { enum: ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'] }, at: time, slot: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'], maxLength: 200 }, ref: { type: ['string', 'null'] } }),
+    items: closed({ status: { enum: ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'] }, at: time, slot: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'], maxLength: 200 }, ref: { type: ['string', 'null'], minLength: 1 } }),
   },
 });
+const RUN_STATUS = ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'];
 const STATES = ['passing', 'failing', 'due', 'started', 'overdue', 'held', 'never'];
 const SIGNALS = ['flapping', 'erroring', 'slow', 'failing-long', 'idle', 'overdue', 'quiet'];
 const DASHBOARD_SHAPE = closed({
@@ -339,7 +340,7 @@ const DASHBOARD_SHAPE = closed({
       name: str, title: str, what: str, kind: { enum: ['check', 'chore'] }, by: { enum: ['supervisor', 'worker', null] },
       every: str, on: { type: ['string', 'integer', 'null'] }, at: { type: ['string', 'null'] },
       state: { enum: STATES }, fails_in_a_row: { type: 'integer', minimum: 0 },
-      last: { type: ['object', 'null'], properties: { status: str, at: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'] } }, required: ['status', 'at', 'seconds', 'excerpt'], additionalProperties: false },
+      last: { type: ['object', 'null'], properties: { status: { enum: RUN_STATUS }, at: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'], maxLength: 200 } }, required: ['status', 'at', 'seconds', 'excerpt'], additionalProperties: false },
       next_at: { type: ['string', 'null'], pattern: ISO }, ticket: { type: ['string', 'null'] }, registered: REGISTERED,
       signals: { type: 'array', items: closed({ kind: { enum: SIGNALS }, since: time, text: str, may: str, evidence: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^o-' } } }) },
     }),
@@ -442,6 +443,10 @@ test('peek.json is peek recurring --json for a failing check and a worker chore'
   for (const f of ['timeout_s', 'fail', 'fail_after', 'severity']) assert.ok(f in chk.entry, `check default ${f} filled`);
   assert.ok('grace_days' in chr.entry, 'chore default grace_days filled');
   assert.ok(chk.runs.every((r) => ['pass', 'fail', 'error'].includes(r.status)));
+  // C1: an hourly check's next slot is its previous run's start (at) plus every
+  const hours = Number(/^(\d+)h$/.exec(chk.entry.every)[1]);
+  for (let i = 0; i + 1 < chk.runs.length; i++) assert.equal(chk.runs[i].slot, isoOf(Date.parse(chk.runs[i + 1].at) + hours * 3600e3), `run ${i}: slot from the run before`);
+  for (const r of chk.runs) assert.ok(r.at >= r.slot, 'a run starts at or after its slot');
   assert.equal(new Set(chk.runs.map((r) => r.slot)).size, chk.runs.length, 'one row per slot');
   assert.ok(chr.runs.every((r) => ['started', 'done', 'nothing', 'abandoned'].includes(r.status)));
   for (const s of ['done', 'nothing']) assert.ok(chr.runs.some((r) => r.status === s), `a ${s} row`);
@@ -459,11 +464,17 @@ test('dashboard.json is C5\'s upkeep.recurring', () => {
   assert.ok(E.filter((e) => e.kind === 'check').every((e) => e.by === null));
   assert.ok(E.some((e) => e.kind === 'check' && e.fails_in_a_row >= 2));
   const failing = Object.values(peek).find((v) => v.entry.kind === 'check');
-  const streak = failing.runs.slice(0, failing.runs.findIndex((r) => r.status === 'pass'));
+  const passAt = failing.runs.findIndex((r) => r.status === 'pass');
+  const streak = failing.runs.slice(0, passAt === -1 ? failing.runs.length : passAt);
   assert.ok(streak.some((r) => r.status === 'error'), 'the streak includes an error');
   assert.equal(E.find((e) => e.name === failing.name).fails_in_a_row, streak.length);
   assert.ok(E.some((e) => e.signals.length === 0) && E.some((e) => e.signals.length === 2));
   for (const s of SIGNALS) assert.ok(E.some((e) => e.signals.some((g) => g.kind === s)), `signal ${s}`);
+  // C5: a signal's since is the time of its earliest evidence line (an observation id carries it)
+  const idTime = (id) => { const m = /^o-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})(\d{3})-/.exec(id); return `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}${m[7] === '000' ? '' : `.${m[7]}`}Z`; };
+  for (const e of E) for (const g of e.signals) assert.equal(g.since, g.evidence.map(idTime).sort()[0], `${e.name} ${g.kind}: since`);
+  // a job's runs and signals come after it was registered
+  for (const e of E) for (const t of [e.last?.at, ...e.signals.flatMap((g) => g.evidence.map(idTime))].filter(Boolean)) assert.ok(t > e.registered.at, `${e.name}: ${t} after registered`);
   assert.deepEqual(d.builtin.map((b) => [b.name, b.setting]), [['retro', 'retro_every_days'], ['research', 'research_every_days'], ['kit-sync', 'upstream_check_hours'], ['sensors', null]]);
   assert.deepEqual(d.proposals.map((p) => p.status).sort(), ['open', 'registering', 'stopping']);
   for (const v of Object.values(peek)) {
