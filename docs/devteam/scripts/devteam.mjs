@@ -16637,16 +16637,22 @@ function kitHandOver() {
   if (want === 'off') return { how: 'stay', why: 'DEVTEAM_DASHBOARD_RESTART=off' };
   if (want === 'exit') return { how: 'exit' };
   let parent = '';
-  try { parent = execFileSync('ps', ['-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
-  if (/\bwhile\b/.test(parent) && /\bdashboard\b/.test(parent)) return { how: 'exit' };
+  try { parent = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(process.ppid)], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  // a shell running a command line (sh -c '…'), and that line runs the dashboard: never an agent or
+  // anything else whose own arguments happen to hold the word
+  const shellRunning = /^(\S*\/)?(sh|bash|dash|zsh|ksh|ash)\s+(-\S+\s+)*-\w*c\w*\s/.test(parent) && /\bdashboard\b/.test(parent);
+  if (shellRunning && /\bwhile\b/.test(parent)) return { how: 'exit' };
   if (process.env.TMUX && process.env.TMUX_PANE) {
     let pid = null;
     try { pid = Number(execFileSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#{pane_pid}'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()); } catch {}
-    if (pid === process.pid || (pid === process.ppid && /\bdashboard\b/.test(parent))) return { how: 'respawn', pane: process.env.TMUX_PANE };
+    if (pid === process.pid || (pid === process.ppid && shellRunning)) return { how: 'respawn', pane: process.env.TMUX_PANE };
   }
   return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
 }
 async function cmdDashboard() {
+  // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
+  // while it starts is then a change it sees
+  const startPrint = kitPrint(fileURLToPath(import.meta.url));
   const picked = await pickDashboardPort();
   let port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
@@ -16658,8 +16664,6 @@ async function cmdDashboard() {
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
   const pageCsp = (frames = []) => `frame-src ${['\'self\'', ...frames].join(' ')}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
-  // the kit as this process loaded it, before it serves anything (kit-288)
-  const startPrint = kitPrint(self);
   // Its timers, kept so a hand-over to a new kit stops each (nothing new starts while it drains) and
   // a respawn that failed starts them again.
   const timers = [];

@@ -4684,7 +4684,7 @@ test('kit watch: a press whose command is still typing holds the restart', { ski
   assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'and the new kit has not started');
   fs.writeFileSync(go, '');
   await until(() => pane.typed().includes('[devteam answer'), 'the nudge typed');
-  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')) || kwAlive(first) === false, 'the nudge landed before the old process left');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'the nudge landed before the new kit started (the loop waits 1 s after the old one exits)');
   await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the nudge');
 });
 
@@ -4750,6 +4750,26 @@ test('kit watch: a failed respawn listens again on the old code', { skip: hasTmu
   assert.ok(!/started \(kit B\)/.test(log()), 'on the old code');
   fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- c -->\n');
   await until(() => kwCount(log(), /restarting: kit files changed/) === 2, 'a new change noticed again: its timers came back');
+});
+
+test("kit watch: a pane whose process is a dashboard's parent but no shell is never respawned", { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  // an agent as a pane's own command, its child the dashboard, "dashboard" in its own arguments
+  const F = kwFixture(t, 'kwagent');
+  const port = await freePort();
+  const parent = path.join(F.base, 'agent.mjs');
+  write(parent, `import { spawn } from 'node:child_process';\nconst c = spawn(process.execPath, [${JSON.stringify(F.dt)}, 'dashboard', '--port', '${port}'], { stdio: 'inherit', cwd: ${JSON.stringify(F.root)} });\nc.on('exit', () => setInterval(() => {}, 1000));\n`);
+  const s = kwSession(F, 'kwa');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane(F.env, `${kwSq(process.execPath)} ${kwSq(parent)} --task kit-288-dashboard-self-restart`)]).status, 0);
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the dashboard under the agent');
+  const p0 = kwPanePid(`=${s}:a`);
+  const dash = kwStartsOf(log)()[0].pid;
+  assert.notEqual(p0, dash, "the pane's process is the agent, not the dashboard");
+  kitB(F);
+  await until(() => /runs older code than its files/.test(log()), 'the stale code said');
+  await kwSleep(1000);
+  assert.equal(kwPanePid(`=${s}:a`), p0, "the agent's pane was never respawned");
+  assert.ok(kwAlive(p0) && kwAlive(dash), 'both still run');
 });
 
 test('kit watch: a plain dashboard, or one told off, stays and says so', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
