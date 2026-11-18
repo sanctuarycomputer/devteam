@@ -104,8 +104,12 @@ test('amber at or over the reading\'s ceiling', () => {
   assert.match(v.tail.text, /\(28\.8 GB\)/);
   assert.match(v.label, /waits at 28\.8 GB/);
   // exactly at the ceiling is at it
-  assert.equal(memoryView([{ ...DESIGN, working_set: Math.ceil(0.8 * DESIGN.max) }], T0).bar.full, true);
-  assert.equal(memoryView([{ ...DESIGN, working_set: Math.floor(0.8 * DESIGN.max) }], T0).bar.full, false);
+  const at75 = 0.75 * DESIGN.max;
+  assert.ok(Number.isSafeInteger(at75));
+  assert.equal(memoryView([{ ...DESIGN, ceiling: 0.75, working_set: at75 }], T0).bar.full, true, 'exactly at the ceiling');
+  assert.equal(memoryView([{ ...DESIGN, ceiling: 0.75, working_set: at75 - 1 }], T0).bar.full, false, 'a byte under');
+  // more than the cap (a cgroup over its limit for a moment): the bar is full width, not wider
+  assert.equal(memoryView([{ ...DESIGN, working_set: DESIGN.max + GB }], T0).bar.share, 1);
 });
 
 test('kinds in plain names, the subcommand only in a title', () => {
@@ -142,6 +146,14 @@ test('kinds in plain names, the subcommand only in a title', () => {
   for (const n of Object.values(SUB_NAMES)) assert.ok(subs.some((s) => s.name === n), `${n} at 10:00`);
   const other = subs.find((s) => s.name === 'Other devteam commands');
   assert.equal(other.title, 'devteam.mjs metrics', 'metrics, not in the plain list, only in a title');
+  // Other devteam commands holds the other subcommands and what the split doesn't cover
+  const split = Object.values(ten.devteam).reduce((a, e) => a + e.rss, 0);
+  assert.ok(ten.kinds.devteam.rss > split, 'the fixture leaves part of the devteam kind unsplit');
+  assert.equal(other.gb, ((ten.devteam.metrics.rss + ten.kinds.devteam.rss - split) / GB).toFixed(1));
+  // only an uncovered part: the row, with no title; a split that covers it all: no row
+  const r = { ...DESIGN, kinds: { devteam: { n: 3, rss: 3 * GB } }, devteam: { wait: { n: 1, rss: GB } } };
+  assert.deepEqual(plain(memoryView([r], T0).kinds.filter((x) => x.sub)), [{ name: 'Supervisors waiting', gb: '1.0', share: 33, title: 'devteam.mjs wait', sub: true }, { name: 'Other devteam commands', gb: '2.0', share: 67, title: '', sub: true }]);
+  assert.deepEqual(plain(memoryView([{ ...r, kinds: { devteam: { n: 1, rss: GB } } }], T0).kinds.map((x) => x.name)), ['devteam\'s own processes', 'Supervisors waiting']);
 });
 
 test('projects largest first', () => {
@@ -176,6 +188,9 @@ test('a gap where readings are missing', () => {
   // the words for a gap that ended minutes, or an hour, ago
   assert.equal(memoryView(upTo('2026-11-17T04:05:00Z'), Date.parse('2026-11-17T04:05:30Z')).tail.text, 'restarted 15 minutes ago');
   assert.equal(memoryView(upTo('2026-11-17T04:55:00Z'), Date.parse('2026-11-17T04:55:30Z')).tail.text, 'restarted 1 hour ago');
+  assert.equal(memoryView(upTo('2026-11-17T05:49:00Z'), Date.parse('2026-11-17T05:49:30Z')).tail.text, 'restarted 1 hour ago', 'hours round down');
+  assert.equal(memoryView(upTo('2026-11-17T05:50:00Z'), Date.parse('2026-11-17T05:50:30Z')).tail.text, 'restarted 2 hours ago');
+  assert.equal(memoryView(upTo('2026-11-17T03:50:00Z'), Date.parse('2026-11-17T03:50:20Z')).tail.text, 'restarted 1 minute ago', 'under a minute reads as one');
 });
 
 test('no reading, nothing', () => {
@@ -256,4 +271,252 @@ test('the answers: merge, reload on a refused after, keep the day on anything el
   assert.equal(r.askedAt, 0);
   assert.equal(r.inFlight, false);
   assert.equal(memoryPlan(r, END + 120001), since, 'the day again, at once');
+});
+
+// ----- the page, in headless Chrome ---------------------------------------------------------------
+// A test's cleanup, as in hub-overview.test.mjs: the last step added runs first, every step runs,
+// each bounded, and the first error is the one thrown.
+async function runSteps(steps, ms = 30000) {
+  let first = null;
+  for (const step of [...steps].reverse()) {
+    let timer;
+    const limit = new Promise((_, no) => { timer = setTimeout(() => no(new Error(`cleanup step did not settle in ${ms / 1000} s`)), ms); });
+    try { await Promise.race([Promise.resolve().then(step), limit]); } catch (e) { first ??= e; } finally { clearTimeout(timer); }
+  }
+  return first;
+}
+const cleanups = new WeakMap();
+function defer(t, fn) {
+  let steps = cleanups.get(t);
+  if (!steps) { steps = []; cleanups.set(t, steps); t.after(async () => { const e = await runSteps(steps); if (e) throw e; }); }
+  steps.push(fn);
+}
+async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
+  await new Promise((r) => srv.listen(port, host, r));
+  defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
+  return srv.address().port;
+}
+// the fixture day moved so its last reading is a minute old
+const shifted = (readings, lastAgo = 60000) => { const by = Date.now() - lastAgo - Date.parse(readings.at(-1).at); return readings.map((r) => ({ ...r, at: new Date(Date.parse(r.at) + by).toISOString().replace('.000Z', 'Z') })); };
+function hello(name, port) {
+  return { devteam: 1, name, root: `/srv/${name}`, port, kit: 'v0.64.0', viewer: 1, inbox: 0, threads: { you: 0, waiting: 0, ready: 0 }, fleet: { mode: 'run', workers: 1 }, pulse: { state: 'moving', blocking: null, working: 1, last_activity: new Date().toISOString(), activity: Array(84).fill(0), activity_of: 'commits', attention: [], open_tickets: 2, done_tickets: 1, blocked_tickets: 0, goals_open: 1, goal: { title: `${name}'s goal`, done: 1, total: 3 } } };
+}
+// A hub serving hub.html, instances.json and /memory.json from F.readings (mode: ok, 404, junk,
+// refuse-after, 502-after); F.asks holds each /memory.json query
+async function memoryHub(t, { readings = [], projects = [] } = {}) {
+  const F = { readings, mode: 'ok', asks: [], list: [] };
+  for (const name of projects) {
+    const port = await listenOn(t, http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'text/html' }); s.end('<!doctype html><title>stand-in</title>'); }));
+    F.list.push(hello(name, port));
+  }
+  const hubPort = await listenOn(t, http.createServer((q, s) => {
+    const u = new URL(q.url, 'http://x');
+    const send = (code, body, type = 'application/json') => { s.writeHead(code, { 'content-type': type }); s.end(typeof body === 'string' ? body : JSON.stringify(body)); };
+    if (u.pathname === '/') return send(200, hubHtml(), 'text/html');
+    if (u.pathname === '/instances.json') return send(200, { hub: 1, kit: 'v0.64.0', instances: F.list });
+    if (u.pathname === '/memory.json') {
+      F.asks.push(u.search.slice(1));
+      const after = u.searchParams.get('after');
+      if (F.mode === '404') return send(404, {});
+      if (F.mode === 'junk') return send(200, 'not json', 'text/plain');
+      if (after && F.mode === 'refuse-after') return send(400, { error: 'after is more than 6 hours back' });
+      if (after && F.mode === '502-after') return send(502, { error: 'the hub isn\'t answering' });
+      return send(200, { v: 1, readings: after ? F.readings.filter((r) => Date.parse(r.at) > Date.parse(after)) : F.readings });
+    }
+    send(404, {});
+  }));
+  F.url = `http://127.0.0.1:${hubPort}/#overview`;
+  return F;
+}
+// Chrome on the hub, at a size and in a theme, with the page's errors kept in window.__errs
+async function hubPage(t, url, { width = 1440, height = 900, scheme = 'light' } = {}) {
+  const chrome = await openChrome();
+  defer(t, () => chrome.close());
+  const p = await chrome.newPage();
+  defer(t, () => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message))); addEventListener("unhandledrejection", (e) => __errs.push(String(e.reason)));' });
+  await p.send('Page.navigate', { url });
+  p.until = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
+  return p;
+}
+const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 };
+// a token's colour as the page computes it
+const tokenColor = (prop, token) => `(() => { const d = document.createElement('div'); d.style.${prop} = 'var(${token})'; document.body.append(d); const c = getComputedStyle(d).${prop}; d.remove(); return c; })()`;
+const tick = (p) => p.ev('(async () => { MEM.askedAt = 1; await memoryTick(); return true; })()');
+
+test('no /memory.json: the Overview is as before', CHROME, async (t) => {
+  for (const mode of ['404', 'junk']) {
+    const F = await memoryHub(t, { projects: ['alpha'] });
+    F.mode = mode;
+    const p = await hubPage(t, F.url);
+    await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+    await until(() => F.asks.length >= 1, 'the page asked for the day');
+    await p.ev('new Promise((r) => setTimeout(r, 300))');
+    await p.ev('paintOverview()');
+    assert.equal(await p.ev(`document.querySelectorAll('#ov-body .mem').length`), 0, `${mode}: no memory line`);
+    assert.deepEqual(await p.ev('[...document.querySelector("#ov-body").children].map((c) => c.className)'), ['ov-head', 'g12'], 'the head, then the cards');
+    assert.deepEqual(await p.ev('window.__errs'), [], `${mode}: no page error`);
+  }
+});
+
+test('the memory line on the Overview', CHROME, async (t) => {
+  const { memoryView } = memoryFns();
+  const day = shifted(READINGS);
+  const F = await memoryHub(t, { readings: day, projects: ['alpha'] });
+  const p = await hubPage(t, F.url);
+  await p.until('the memory line', `!!document.querySelector('#ov-body > .mem')`);
+  await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+  assert.deepEqual(await p.ev('[...document.querySelector("#ov-body").children].map((c) => c.className.split(" ")[0])'), ['ov-head', 'mem', 'g12'], 'under the head, before the cards');
+  const v = memoryView(day, Date.now());
+  assert.equal(await p.ev(`document.querySelector('.mem-words').textContent`), `${v.line} · ${v.tail.text}`);
+  assert.match(v.tail.text, /^restarted \d+ hours ago$/);
+  const bar = await p.ev(`(() => { const b = document.querySelector('.mem-bar').getBoundingClientRect(), f = document.querySelector('.mem-bar > i').getBoundingClientRect(), c = document.querySelector('.mem-bar > .ceil').getBoundingClientRect(); return { share: f.width / b.width, ceil: (c.left + c.width / 2 - b.left) / b.width, label: document.querySelector('.mem-bar').getAttribute('aria-label') }; })()`);
+  assert.ok(Math.abs(bar.share - v.bar.share) < 0.02, `fill ${bar.share} vs ${v.bar.share}`);
+  assert.ok(Math.abs(bar.ceil - 0.8) < 0.02, `ceiling mark at ${bar.ceil}`);
+  assert.equal(bar.label, v.label);
+  const spark = await p.ev(`(() => { const s = document.querySelector('.mem-spark svg'); return { m: (s.querySelector('path').getAttribute('d').match(/M/g) || []).length, gaps: [...s.querySelectorAll('rect.gap')].map((r) => r.querySelector('title').textContent), ceil: !!s.querySelector('line.ceil') }; })()`);
+  const gap = v.spark.gaps[0];
+  assert.deepEqual(spark, { m: 2, gaps: [`No readings from ${gap.from.slice(11, 16)} to ${gap.to.slice(11, 16)}`], ceil: true });
+  assert.equal(await p.ev(`document.querySelector('.mem-open').textContent`), 'What holds it');
+  assert.equal(await p.ev(`document.querySelector('.mem').classList.contains('full')`), false);
+  // at the ceiling: amber, and the words say new work waits
+  const i = READINGS.findIndex((r) => r.working_set >= r.ceiling * r.max);
+  F.readings = shifted(READINGS.slice(0, i + 1));
+  await p.ev('MEM.day = []; MEM.askedAt = 0; memoryTick()');
+  await p.until('amber', `document.querySelector('.mem')?.classList.contains('full')`);
+  assert.equal(await p.ev(`getComputedStyle(document.querySelector('.mem-bar > i')).backgroundColor`), await p.ev(tokenColor('backgroundColor', '--amber')));
+  assert.equal(await p.ev(`getComputedStyle(document.querySelector('.mem-spark path')).stroke`), await p.ev(tokenColor('color', '--amber')));
+  assert.match(await p.ev(`document.querySelector('.mem-words .amber').textContent`), /new work waits for room$/);
+  assert.equal(await p.ev(`getComputedStyle(document.querySelector('.mem-words .amber')).color`), await p.ev(tokenColor('color', '--amber-fg')));
+  assert.deepEqual(await p.ev('window.__errs'), []);
+});
+
+test('What holds it: open across the redraw, closed by its button and Escape', CHROME, async (t) => {
+  const { memoryView } = memoryFns();
+  const day = shifted(READINGS);
+  const F = await memoryHub(t, { readings: day, projects: ['alpha'] });
+  const p = await hubPage(t, F.url);
+  await p.until('the button and the card', `!!document.querySelector('.mem-open') && document.querySelectorAll('.ov-card').length === 1`);
+  assert.equal(await p.ev(`document.getElementById('mem-holds').hidden`), true);
+  await p.click('.mem-open');
+  await p.until('open', `document.getElementById('mem-holds')?.hidden === false`);
+  const v = memoryView(day, Date.now());
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#mem-holds caption')].map((c) => c.textContent)`), ['By kind', 'By project']);
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#mem-holds table')[0].querySelectorAll('tr')].map((r) => [r.cells[0].textContent, r.cells[1].textContent, r.classList.contains('sub'), r.title])`), plain(v.kinds.map((r) => [r.name, `${r.gb} GB`, r.sub, r.title])));
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#mem-holds table')[1].querySelectorAll('tr')].map((r) => r.cells[0].textContent)`), plain(v.projects.map((r) => r.name)));
+  assert.deepEqual(await p.ev(`[document.querySelector('.mem-open').textContent, document.querySelector('.mem-open').getAttribute('aria-expanded'), document.activeElement?.dataset.k]`), ['Hide', 'true', 'overview:memory']);
+  // the 10 s redraw, five times: still open, the keyboard where it was, and no new request
+  for (let k = 0; k < 5; k++) await p.ev('draw()');
+  await p.ev('paintOverview()');
+  assert.deepEqual(await p.ev(`[document.getElementById('mem-holds').hidden, document.activeElement?.dataset.k]`), [false, 'overview:memory']);
+  assert.deepEqual(F.asks, ['since=24h'], 'one request: the redraw asks nothing');
+  // its button closes it
+  await p.click('.mem-open');
+  await p.until('closed', `document.getElementById('mem-holds').hidden === true`);
+  assert.equal(await p.ev(`document.querySelector('.mem-open').textContent`), 'What holds it');
+  // Enter opens it, Escape closes it and the keyboard stays on the button
+  // (the helper's key() sends no text for Enter, and a button acts on Enter's character)
+  for (const type of ['keyDown', 'keyUp']) await p.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) });
+  await p.until('open by Enter', `document.getElementById('mem-holds').hidden === false`);
+  await p.key('Escape');
+  await p.until('closed by Escape', `document.getElementById('mem-holds').hidden === true`);
+  assert.equal(await p.ev('document.activeElement?.dataset.k'), 'overview:memory');
+  // with the ⋯ menu open too, one Escape closes only the menu
+  await p.click('.mem-open');
+  await p.until('open again', `document.getElementById('mem-holds').hidden === false`);
+  await p.click('.ov-card .menu-btn');
+  await p.until('the menu', `!!document.querySelector('.menu-pop')`);
+  await p.key('Escape');
+  await p.until('the menu closed', `!document.querySelector('.menu-pop')`);
+  assert.deepEqual(await p.ev(`[document.getElementById('mem-holds').hidden, document.activeElement?.dataset.k]`), [false, '/srv/alpha:menu']);
+  await p.ev(`document.querySelector('.mem-open').focus()`);
+  await p.key('Escape');
+  await p.until('then the table', `document.getElementById('mem-holds').hidden === true`);
+  assert.deepEqual(await p.ev('window.__errs'), []);
+});
+
+test('a project named with markup is text', CHROME, async (t) => {
+  const name = '<img src=x onerror="window.__xss = 1">';
+  const day = shifted(READINGS);
+  day[day.length - 1] = { ...day.at(-1), projects: { [name]: { rss: 5 * GB, sessions: 2 } } };
+  const F = await memoryHub(t, { readings: day });
+  const p = await hubPage(t, F.url);
+  await p.until('the button', `!!document.querySelector('.mem-open')`);
+  await p.click('.mem-open');
+  await p.until('open', `document.getElementById('mem-holds')?.hidden === false`);
+  assert.equal(await p.ev(`document.querySelectorAll('#mem-holds table')[1].rows[0].cells[0].textContent`), `${name} · 2 sessions`);
+  assert.equal(await p.ev(`document.querySelectorAll('.mem img').length`), 0);
+  assert.equal(await p.ev('window.__xss ?? null'), null);
+});
+
+test('the after request, and a refused after reloads the day', CHROME, async (t) => {
+  const day = shifted(READINGS);
+  const F = await memoryHub(t, { readings: day });
+  const p = await hubPage(t, F.url);
+  await p.until('the memory line', `!!document.querySelector('.mem')`);
+  assert.deepEqual(F.asks, ['since=24h']);
+  // a minute on: what's newer than the newest
+  F.readings = [...day, { ...day.at(-1), at: new Date(Date.parse(day.at(-1).at) + 60000).toISOString().replace('.000Z', 'Z') }];
+  await tick(p);
+  assert.equal(F.asks[1], `after=${encodeURIComponent(day.at(-1).at)}`);
+  assert.equal(await p.ev('MEM.day.at(-1).at'), F.readings.at(-1).at, 'merged into the day');
+  // the hub restarting (502): the line stays, and the next tick asks after= again
+  F.mode = '502-after';
+  await tick(p);
+  assert.match(F.asks.at(-1), /^after=/);
+  assert.equal(await p.ev(`!!document.querySelector('.mem')`), true, 'the last good day stays');
+  await tick(p);
+  assert.match(F.asks.at(-1), /^after=/);
+  // refused (400): the day again
+  F.mode = 'refuse-after';
+  await tick(p);
+  assert.match(F.asks.at(-1), /^after=/);
+  F.mode = 'ok';
+  await p.ev('memoryTick()');
+  await until(() => F.asks.at(-1) === 'since=24h', 'the day asked again at once');
+  assert.deepEqual(await p.ev('window.__errs'), []);
+});
+
+test('a laptop reading: the line and sparkline, no button', CHROME, async (t) => {
+  const F = await memoryHub(t, { readings: shifted(READINGS) });
+  const p = await hubPage(t, F.url);
+  await p.until('the button', `!!document.querySelector('.mem-open')`);
+  await p.click('.mem-open');
+  await p.until('open', `document.getElementById('mem-holds')?.hidden === false`);
+  F.readings = shifted([{ v: 1, at: '2026-11-17T23:59:00Z', working_set: 12025908428, max: 17179869184, source: 'os' }]);
+  await p.ev('(async () => { MEM.day = []; MEM.askedAt = 0; await memoryTick(); })()');
+  await p.until('the laptop line', `document.querySelector('.mem-words')?.textContent === 'Memory 11.2 of 16 GB'`);
+  assert.deepEqual(await p.ev(`[!!document.querySelector('.mem-spark svg path'), !!document.querySelector('.mem-open'), !!document.getElementById('mem-holds'), MEM.open]`), [true, false, false, false]);
+});
+
+test('the half-grid rule and the small screen', CHROME, async (t) => {
+  const day = shifted(READINGS);
+  const F = await memoryHub(t, { readings: day, projects: ['alpha', 'beta'] });
+  const p = await hubPage(t, F.url);
+  await p.until('the memory line', `!!document.querySelector('.mem-open')`);
+  const w = await p.ev(`(() => { const d = document.createElement('div'); d.style.width = 'var(--measure)'; document.body.append(d); const m = d.getBoundingClientRect().width; d.remove(); const e = document.querySelector('.mem-words'); return { tag: e.tagName, max: getComputedStyle(e).maxWidth, measure: m, width: e.getBoundingClientRect().width }; })()`);
+  assert.equal(w.tag, 'DIV');
+  assert.equal(w.max, `${w.measure}px`, 'the words are capped at the half grid');
+  assert.ok(w.width <= w.measure + 0.5);
+  const q = await hubPage(t, F.url, { width: 390, height: 800 });
+  await q.until('the memory line', `!!document.querySelector('.mem-open')`);
+  await q.click('.mem-open');
+  await q.until('open', `document.getElementById('mem-holds')?.hidden === false`);
+  assert.deepEqual(await q.ev(`(() => { const o = document.getElementById('overview'); const m = document.querySelector('.mem').getBoundingClientRect(); return [o.scrollWidth <= o.clientWidth, m.right <= innerWidth + 0.5]; })()`), [true, true], 'nothing wider than the phone');
+});
+
+test('both themes', CHROME, async (t) => {
+  const F = await memoryHub(t, { readings: shifted(READINGS) });
+  const seen = {};
+  for (const scheme of ['light', 'dark']) {
+    const p = await hubPage(t, F.url, { scheme });
+    await p.until('the memory line', `!!document.querySelector('.mem')`);
+    seen[scheme] = await p.ev(`[getComputedStyle(document.querySelector('.mem')).backgroundColor, getComputedStyle(document.querySelector('.mem-words')).color]`);
+    assert.deepEqual(seen[scheme], [await p.ev(tokenColor('backgroundColor', '--surface')), await p.ev(tokenColor('color', '--fg'))], scheme);
+  }
+  assert.notDeepEqual(seen.light, seen.dark, 'the two themes differ');
 });

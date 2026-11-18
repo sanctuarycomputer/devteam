@@ -301,6 +301,38 @@
   .menu-pop .mi b { font-weight: 500; overflow-wrap: anywhere; text-align: right; }
   .menu-pop button { all: unset; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
   .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--hover); }
+  /* box-memory-css start */
+  /* the machine's memory under the head (kit-593): the bar with its ceiling, the words, the last 24
+     hours, and what holds it; amber at the ceiling */
+  #ov-body > .mem { margin-top: 12px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 12px 14px; }
+  .mem-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-width: 0; }
+  .mem-words { max-width: var(--measure); min-width: 0; color: var(--fg); }
+  .mem-words .dim { color: var(--fg-2); }
+  .mem-words .amber { color: var(--amber-fg); }
+  .mem-bar { position: relative; width: 180px; height: 8px; border-radius: 4px; background: var(--well); flex: none; }
+  .mem-bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--series-1); }
+  .mem-bar > .ceil { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--fg-2); }
+  .mem.full .mem-bar > i { background: var(--amber); }
+  .mem-spark { flex: 1 1 220px; min-width: 160px; max-width: 360px; height: 34px; }
+  .mem-spark svg { display: block; width: 100%; height: 34px; overflow: visible; }
+  .mem-spark .gap { fill: var(--well); }
+  .mem-spark .ceil { stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .mem-spark .ws { fill: none; stroke: var(--series-1); stroke-width: 1.5; }
+  .mem-spark .ws.full { stroke: var(--amber); }
+  .mem-open { margin-left: auto; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  .mem-open:hover { background: var(--hover); }
+  .mem-open:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .mem-holds { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 16px; align-items: start; }
+  .mem-holds[hidden] { display: none; }
+  .mem-holds table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .mem-holds caption { text-align: left; font-weight: 600; padding-bottom: 4px; }
+  .mem-holds td { padding: 3px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .mem-holds td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 12px; }
+  .mem-holds td.share { width: 70px; padding-left: 12px; }
+  .mem-holds td.share span { display: block; height: 6px; border-radius: 3px; background: var(--series-1); min-width: 2px; }
+  .mem-holds tr.sub td:first-child { padding-left: 14px; color: var(--fg-2); }
+  @media (max-width: 560px) { .mem-bar { flex: 1 1 100%; width: auto; } .mem-spark { max-width: none; } .mem-open { margin-left: 0; } }
+  /* box-memory-css end */
   /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
   #ov-body { min-width: 0; }
   #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
@@ -1437,6 +1469,112 @@ function memoryAnswer(state, url, status, body, now) {
   else if (status === 400 && /[?&]after=/.test(url)) { next.day = []; next.askedAt = 0; }
   return next;
 }
+// ----- the page's part: the day it holds, asking for it, and the section it draws ----------------
+// The table's open state lives here, not in the DOM, so the 10 s redraw (paintOverview rebuilds the
+// page whole) keeps it open.
+const MEM = { day: [], askedAt: 0, inFlight: false, open: false, started: false };
+async function memoryTick() {
+  if (document.hidden) return;
+  const url = memoryPlan(MEM, Date.now());
+  if (!url) return;
+  MEM.inFlight = true;
+  MEM.askedAt = Date.now();
+  let status = 0, body = null;
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    status = r.status;
+    try { body = await r.json(); } catch { body = null; }
+  } catch { status = 0; }
+  Object.assign(MEM, memoryAnswer(MEM, url, status, body, Date.now()));
+  paintOverview();
+}
+// once, from draw: the day at once, then a tick a minute; and Escape closes the table
+function memoryStart() {
+  if (MEM.started) return;
+  MEM.started = true;
+  memoryTick();
+  setInterval(memoryTick, MEMORY_ASK_MS);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !MEM.open || e.defaultPrevented || selected !== OVERVIEW) return;
+    // only from the line itself or from nowhere: the ⋯ menu's own Escape runs first and puts the
+    // keyboard on its ⋯, and the fleet switch's confirm Escape is preventDefault'ed, so one Escape
+    // closes one thing. (A ⋯ whose card went away leaves the keyboard on body: then both close.)
+    const sec = ovBody.querySelector('.mem');
+    const at = document.activeElement;
+    if (!sec || !(at === document.body || at === null || sec.contains(at))) return;
+    MEM.open = false;
+    paintOverview();
+    ovBody.querySelector('.mem-open')?.focus({ preventScroll: true });
+  });
+}
+const MEMORY_SVG_NS = 'http://www.w3.org/2000/svg';
+function memorySvg(tag, attrs) {
+  const n = document.createElementNS(MEMORY_SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
+  return n;
+}
+function memoryTable(caption, rows) {
+  const t = document.createElement('table');
+  t.append(el('caption', '', caption));
+  const body = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = el('tr', r.sub ? 'sub' : '');
+    if (r.title) tr.title = r.title;
+    const share = el('td', 'share');
+    if (!r.sub) { const bar = el('span'); bar.style.width = `${Math.max(2, r.share)}%`; share.append(bar); }
+    tr.append(el('td', '', r.name), el('td', 'n', `${r.gb} GB`), share);
+    body.append(tr);
+  }
+  t.append(body);
+  return t;
+}
+// the section under the head, or null with no reading to show
+function memoryEl() {
+  const v = memoryView(MEM.day, Date.now());
+  if (!v) return null;
+  if (!v.kinds) MEM.open = false;
+  const sec = el('section', `mem${v.bar?.full ? ' full' : ''}`);
+  sec.setAttribute('aria-label', 'Memory on this machine');
+  const row = el('div', 'mem-row');
+  if (v.bar) {
+    const bar = el('div', 'mem-bar');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', v.label);
+    const fill = el('i');
+    fill.style.width = `${(v.bar.share * 100).toFixed(2)}%`;
+    bar.append(fill);
+    if (v.bar.ceiling !== null) { const c = el('span', 'ceil'); c.style.left = `${v.bar.ceiling * 100}%`; bar.append(c); }
+    row.append(bar);
+  }
+  const words = el('div', 'mem-words', v.line);
+  if (v.tail) { words.append(' · '); words.append(el('span', v.tail.tone, v.tail.text)); }
+  row.append(words);
+  const spark = el('div', 'mem-spark');
+  spark.setAttribute('aria-hidden', 'true');
+  const svg = memorySvg('svg', { viewBox: `0 0 ${MEMORY_W} ${MEMORY_H}`, preserveAspectRatio: 'none' });
+  const hm = (at) => String(at).slice(11, 16);
+  for (const g of v.spark.gaps) { const r = memorySvg('rect', { x: g.x, y: 0, width: Math.max(1, g.w), height: MEMORY_H, class: 'gap' }); r.append(memorySvg('title', {})); r.firstChild.textContent = `No readings from ${hm(g.from)} to ${hm(g.to)}`; svg.append(r); }
+  if (v.spark.ceilY !== null) svg.append(memorySvg('line', { x1: 0, x2: MEMORY_W, y1: v.spark.ceilY, y2: v.spark.ceilY, class: 'ceil' }));
+  svg.append(memorySvg('path', { d: v.spark.d, class: v.spark.full ? 'ws full' : 'ws', 'vector-effect': 'non-scaling-stroke' }));
+  spark.append(svg);
+  row.append(spark);
+  sec.append(row);
+  if (v.kinds) {
+    const b = el('button', 'mem-open', MEM.open ? 'Hide' : 'What holds it');
+    b.type = 'button';
+    b.dataset.k = 'overview:memory';
+    b.setAttribute('aria-expanded', String(MEM.open));
+    b.setAttribute('aria-controls', 'mem-holds');
+    b.onclick = () => { MEM.open = !MEM.open; paintOverview(); };
+    row.append(b);
+    const holds = el('div', 'mem-holds');
+    holds.id = 'mem-holds';
+    holds.hidden = !MEM.open;
+    holds.append(memoryTable('By kind', v.kinds), memoryTable('By project', v.projects));
+    sec.append(holds);
+  }
+  return sec;
+}
 /* box-memory end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
@@ -1469,7 +1607,9 @@ function paintOverview() {
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-  ovBody.replaceChildren(head, ...(all.length ? [grid] : []));
+  // the machine's memory under the head, when the hub has a reading (kit-593)
+  const mem = memoryEl();
+  ovBody.replaceChildren(head, ...(mem ? [mem] : []), ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
   else if (fromMenu !== null) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${fromMenu}:menu`)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
@@ -2239,6 +2379,8 @@ function notifyControl() {
 }
 
 async function draw() {
+  // the memory line asks on its own one-minute timer, never on this 10 s one
+  memoryStart();
   let data;
   try {
     const r = await fetch('instances.json', { cache: 'no-store' });
