@@ -783,3 +783,61 @@ test('box-pins changed --smoke names a project kit the image\'s readers can no l
     leftNothing(tmpd);
   }
 });
+
+const before = (anchor, add) => (t) => { assert.equal(t.split(anchor).length, 2, `anchor ${anchor} once`); return t.replace(anchor, () => `${add}${anchor}`); };
+
+test('box-pins changed --smoke: a kit= the image can\'t read is a difference, never a placeholder; an exit alone is one too', () => {
+  // a number where the image reads a string: its line says kit=?, which the kit placeholder must not take
+  onBranch('smoke-kit', { [SCRIPT]: before('  return flags.json ? json(r) : out(`${r.name} at', '  r.kit = 42;\n') });
+  const k = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(k.r.status, 3, k.r.stderr + k.r.stdout);
+  assert.ok(k.r.stdout.split('\n').includes('image: (smoke)#machine status'), k.r.stdout);
+  leftNothing(k.tmpd);
+  // the fixture's own recover says the same and exits 1: the image's recover --machine exits 1 with the same line
+  onBranch('smoke-exit', { [SCRIPT]: after("  out(say);\n  if (say.startsWith('NOT started')) process.exitCode = 1;\n", '  process.exitCode = 1;\n') });
+  const e = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(e.r.status, 3, e.r.stderr + e.r.stdout);
+  const lines = e.r.stdout.split('\n');
+  assert.ok(lines.includes('image: (smoke)#recover --machine --dry-run --force'), e.r.stdout);
+  assert.ok(!lines.some((l) => l.startsWith('image: (smoke)#machine')), e.r.stdout);
+  const rec = e.trace.filter((x) => x.command === 'recover --machine --dry-run --force');
+  assert.deepEqual(rec.map((x) => x.exit), [0, 1]);
+  assert.equal(rec[0].stdout, rec[1].stdout, 'the same line, only the exit differs');
+  leftNothing(e.tmpd);
+});
+
+test('box-pins changed --smoke exits 2, says why and cleans up, when a fixture can\'t be seeded or the image is blind', () => {
+  onBranch('smoke-no-init', { [SCRIPT]: after('function cmdInit() {\n', "  die('broken for the test');\n") });
+  const s = smokeRun(['--since', 'v9.1.0']);
+  assert.equal(s.r.status, 2, s.r.stderr + s.r.stdout);
+  assert.equal(s.r.stdout, '');
+  assert.match(s.r.stderr, /^devteam: box-pins changed: --smoke: the to fixture's init failed \(exit 1\): devteam: broken for the test$/m);
+  leftNothing(s.tmpd);
+  // the image's own kit prints nothing of its fixture for --questions: the comparison would be blind
+  onBranch('smoke-blind', { [SCRIPT]: after('function machineQuestions() {\n', '  return;\n') });
+  const b = smokeRun(['--since', 'smoke-blind', '--to', 'v9.1.0']);
+  assert.equal(b.r.status, 2, b.r.stderr + b.r.stdout);
+  assert.equal(b.r.stdout, '');
+  assert.match(b.r.stderr, /^devteam: box-pins changed: --smoke: machine status --questions printed no line of the --since fixture$/m);
+  leftNothing(b.tmpd);
+});
+
+test('box-pins changed --smoke stopped by a signal exits 2 and leaves nothing', async () => {
+  cg(['checkout', '-q', '-B', 'smoke-signal', 'v9.1.0']);
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  let killed = false;
+  const done = new Promise((resolve) => {
+    const c = execFile(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', '--since', 'v9.1.0', '--smoke'], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv({ TMPDIR: tmpd }), timeout: 600000 }, (err, stdout, stderr) => resolve({ status: err ? err.code : 0, signal: err?.signal ?? null, stdout, stderr }));
+    // once the first fixture is being made, mid-run
+    const poll = setInterval(() => {
+      const made = lsOr(tmpd).some((d) => fs.existsSync(path.join(tmpd, d, 'since', 'smoke-fixture')));
+      if (made && !killed) { killed = true; clearInterval(poll); c.kill('SIGTERM'); }
+    }, 50);
+    c.on('close', () => clearInterval(poll));
+  });
+  const r = await done;
+  assert.ok(killed, 'the signal was sent mid-run');
+  assert.equal(r.status, 2, `${r.signal} ${r.stderr}${r.stdout}`);
+  assert.equal(r.stdout, '');
+  leftNothing(tmpd);
+});

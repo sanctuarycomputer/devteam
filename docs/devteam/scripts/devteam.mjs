@@ -18008,7 +18008,7 @@ const IMAGE_RUNS = {
 // script whose leaves changed (judged as partsChanged judges them), and the script's rest (its r:
 // leaf only, never a region's rest). With smoke, also what the image's readers print of a project on
 // each kit. Dies with 2 when it can't tell.
-function imageChanges(since, to, { smoke = false } = {}) {
+async function imageChanges(since, to, { smoke = false } = {}) {
   const cant = (why) => die(`box-pins changed: ${why}`, 2);
   const found = new Map();
   const add = (file, part) => found.set(`${file}\0${part ?? ''}`, { file, part });
@@ -18047,21 +18047,24 @@ function imageChanges(since, to, { smoke = false } = {}) {
       if (leaves.some((k) => (inBase.has(k) ? cb : ch).has(k))) add(S, name);
     }
   }
-  if (smoke) for (const command of smokeDiffers()) add('(smoke)', command);
+  if (smoke) for (const command of await smokeDiffers()) add('(smoke)', command);
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
   return [...found.values()].sort((a, b) => cmp(a.file, b.file) || (a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : cmp(a.part, b.part)));
   // --smoke (image-changes@1 §6): the image (a worktree of since) runs its readers of a project
   // against a fixture made by each kit, each fixture on a HOME of its own, in a temporary folder that
   // is removed on every exit (and git's record of the worktree pruned). A different exit, or a
   // different line of the fixture's own (after placeholders), is a change named for the command.
-  function smokeDiffers() {
+  // Each child is awaited, so a signal is handled between children (and kills the running one).
+  async function smokeDiffers() {
     const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-smoke-')));
     const tmuxDir = path.join(tmpDir, 'tmux'), imageDir = path.join(tmpDir, 'image');
     const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^DEVTEAM_/.test(k) && k !== 'TMUX' && k !== 'TMUX_PANE'));
     let cleaned = false;
+    let child = null;
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
+      if (child) { try { child.kill('SIGKILL'); } catch {} }
       // nothing here starts a tmux server, but one left on this folder's own sockets is stopped
       let socks = [];
       try { socks = fs.readdirSync(tmuxDir).flatMap((d) => { try { return fs.readdirSync(path.join(tmuxDir, d)).map((s) => path.join(tmuxDir, d, s)); } catch { return []; } }); } catch {}
@@ -18069,7 +18072,7 @@ function imageChanges(since, to, { smoke = false } = {}) {
       fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       spawnSync('git', ['worktree', 'prune'], { cwd: repoRoot, stdio: 'ignore', timeout: 60000 });
     };
-    // a die (process.exit) cleans up too; a signal is handled once the running child returns
+    // a die (process.exit) cleans up too, and so does a signal: the running child is killed first
     const onSignal = () => { cleanup(); process.exit(2); };
     process.on('exit', cleanup);
     for (const s of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(s, onSignal);
@@ -18078,37 +18081,54 @@ function imageChanges(since, to, { smoke = false } = {}) {
       const port = Number(spawnSync(process.execPath, ['-e', "const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { console.log(s.address().port); s.close(); })"], { encoding: 'utf8', timeout: 20000 }).stdout);
       if (!Number.isInteger(port) || port <= 0 || port === 4320) cant('--smoke: no free port for the fixtures\' hub');
       Object.assign(env, { DEVTEAM_HUB_PORT: String(port), TMUX_TMPDIR: tmuxDir, GIT_AUTHOR_NAME: 'devteam-smoke', GIT_COMMITTER_NAME: 'devteam-smoke', GIT_AUTHOR_EMAIL: 'devteam-smoke@example.invalid', GIT_COMMITTER_EMAIL: 'devteam-smoke@example.invalid' });
-      const run = (cmd, args, { cwd, home, input } = {}) => spawnSync(cmd, args, { cwd, env: { ...env, HOME: home ?? env.HOME }, encoding: input ? undefined : 'utf8', input, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
+      // spawnSync's result, awaited: { status, signal, stdout (a Buffer when binary), stderr, error }
+      const run = (cmd, args, { cwd, home, input, binary = false, childEnv } = {}) => new Promise((resolve) => {
+        const c = spawn(cmd, args, { cwd, env: childEnv ?? { ...env, HOME: home ?? env.HOME }, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+        child = c;
+        const so = [], se = [];
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; c.kill('SIGKILL'); }, 120000);
+        c.stdout.on('data', (d) => so.push(d));
+        c.stderr.on('data', (d) => se.push(d));
+        const done = (r) => { clearTimeout(timer); if (child === c) child = null; resolve(r); };
+        c.on('error', (error) => done({ status: null, signal: null, stdout: binary ? Buffer.alloc(0) : '', stderr: '', error }));
+        c.on('close', (status, signal) => { const out = Buffer.concat(so); done({ status, signal, stdout: binary ? out : out.toString('utf8'), stderr: Buffer.concat(se).toString('utf8'), error: timedOut ? Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }) : undefined }); });
+        if (input) c.stdin.end(input);
+      });
       const must = (r, what) => {
-        if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${String(r.stderr ?? '').trim() ? `: ${String(r.stderr).trim().split('\n')[0].slice(0, 300)}` : ''}`);
+        // the line that says why: the kit's own (devteam: …), or an error's, else the first
+        const lines = String(r.stderr ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+        const why = lines.find((l) => /^devteam: /.test(l)) ?? lines.find((l) => /^\w*Error\b/.test(l)) ?? lines[0];
+        if (r.error || r.status !== 0) cant(`--smoke: ${what} failed (${r.error ? r.error.code ?? r.error.message : r.signal ?? `exit ${r.status}`})${why ? `: ${why.slice(0, 300)}` : ''}`);
         return r;
       };
-      must(run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
+      must(await run('git', ['worktree', 'add', '-q', '--detach', imageDir, since], { cwd: repoRoot }), `git worktree add of ${since}`);
       const kitIn = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-      const sides = [['since', since], ['to', to]].map(([side, sha]) => {
+      const sides = [];
+      for (const [side, sha] of [['since', since], ['to', to]]) {
         const parent = path.join(tmpDir, side), root = path.join(parent, 'smoke-fixture'), home = path.join(tmpDir, `home-${side}`);
         fs.mkdirSync(root, { recursive: true });
         fs.mkdirSync(home);
-        must(run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
-        const tar = must(run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, input: Buffer.alloc(0) }), `git archive of ${sha}`);
-        must(run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
+        must(await run('git', ['init', '-q', '-b', 'main'], { cwd: root, home }), `git init of the ${side} fixture`);
+        const tar = must(await run('git', ['archive', '--format=tar', sha, 'docs/devteam'], { cwd: repoRoot, binary: true }), `git archive of ${sha}`);
+        must(await run('tar', ['-x', '-C', root], { input: tar.stdout }), `unpacking the ${side} fixture's kit`);
         for (const d of ['project', 'run']) fs.rmSync(path.join(root, 'docs', 'devteam', d), { recursive: true, force: true });
-        const own = (args, what) => must(run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
-        own(['init'], 'init');
-        must(run('git', ['add', '-A'], { cwd: root, home }), `git add in the ${side} fixture`);
-        must(run('git', ['commit', '-q', '-m', 'fixture'], { cwd: root, home }), `git commit in the ${side} fixture`);
-        own(['ask', '--question', 'Smoke question?', '--stake', '1', '--urgency', '1'], 'ask');
-        own(['knowledge', 'add', '--owner', '--kind', 'fact', '--statement', 'Smoke fact.'], 'knowledge add');
+        const own = async (args, what) => must(await run(process.execPath, [kitIn(root), ...args], { cwd: root, home }), `the ${side} fixture's ${what}`);
+        await own(['init'], 'init');
+        must(await run('git', ['add', '-A'], { cwd: root, home }), `git add in the ${side} fixture`);
+        must(await run('git', ['commit', '-q', '-m', 'fixture'], { cwd: root, home }), `git commit in the ${side} fixture`);
+        await own(['ask', '--question', 'Smoke question?', '--stake', '1', '--urgency', '1'], 'ask');
+        await own(['knowledge', 'add', '--owner', '--kind', 'fact', '--statement', 'Smoke fact.'], 'knowledge add');
         fs.rmSync(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json'), { force: true });
-        return { side, parent, root, home, outs: {} };
-      });
+        sides.push({ side, parent, root, home, outs: {} });
+      }
       const READERS = [['machine status', ['machine', 'status']], ['machine status --questions', ['machine', 'status', '--questions']], ['machine status --knowledge', ['machine', 'status', '--knowledge']], ['recover --machine --dry-run --force', ['recover', '--machine', '--dry-run', '--force']]];
       const trace = process.env.DEVTEAM_SMOKE_TRACE;
       const listing = (home) => { try { return fs.readdirSync(path.join(home, '.devteam')).sort(); } catch { return []; } };
       for (const s of sides) for (const [name, args] of READERS) {
         const childEnv = { ...env, HOME: s.home };
         const before = listing(childEnv.HOME);
-        const r = spawnSync(process.execPath, [kitIn(imageDir), ...args, '--in', s.parent], { cwd: imageDir, env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 64 * 1024 * 1024 });
+        const r = await run(process.execPath, [kitIn(imageDir), ...args, '--in', s.parent], { cwd: imageDir, childEnv });
         if (r.error || r.status === null) cant(`--smoke: the image's ${name} against the ${s.side} fixture did not finish (${r.error?.code ?? r.signal})`);
         s.outs[name] = { exit: r.status, stdout: r.stdout };
         if (trace) fs.appendFileSync(trace, `${JSON.stringify({ fixture: s.side, command: name, home: childEnv.HOME, parent: s.parent, exit: r.status, stdout: r.stdout, home_devteam_before: before, home_devteam: listing(childEnv.HOME) })}\n`);
@@ -18169,7 +18189,7 @@ async function cmdBoxPins() {
     if (!kitsOwnRepoAt(repoRoot)) die(`box-pins changed: ${repoRoot} is not a checkout of the kit's own repo (${KIT_UPSTREAM}); run it there, at --to`, 2);
     const sha = (k, ref) => git(['rev-parse', '--verify', '-q', `${ref}^{commit}`], repoRoot) ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
     const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
-    const changes = imageChanges(since, to, { smoke: !!flags.smoke });
+    const changes = await imageChanges(since, to, { smoke: !!flags.smoke });
     const kind = changes.length ? 'minor' : 'patch';
     if (flags.json) out(JSON.stringify({ v: 1, since, to, kind, changes }, null, 2));
     else {
