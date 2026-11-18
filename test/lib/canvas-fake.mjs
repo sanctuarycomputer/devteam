@@ -9,6 +9,10 @@ import { ID_RE as PERSON_ID_RE, CONN_RE, cutName, shapeErrors as presenceShapeEr
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+// A key from the document written as an own data property, so `__proto__`, `constructor` and the
+// like are ids like any other and never reach a prototype; the object stays plain and JSON-equal.
+const put = (o, k, v) => { Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }); return v; };
+const ownGet = (o, k) => (isObj(o) && own(o, k) ? o[k] : undefined);
 const num = (v, lo, hi) => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi;
 const safeInt = (v, lo) => Number.isSafeInteger(v) && v >= lo;
 
@@ -138,19 +142,21 @@ function overridable(type, prop) {
 }
 
 // The document rules, in judgement order: the first that fails refuses an edit with its code.
+// The spec's order (tree, types and keys, classes, refs, component placement, instance cycles,
+// limits), with the shapes every later rule reads first, and the token tree before the refs into it.
 export const DOC_RULES = deepFreeze([
   { rule: 'top', code: 'shape' }, // exactly { canvas: 1, rev, tokens, pages, nodes }
   { rule: 'page-shape', code: 'shape' }, // each page exactly { id, name, children }
   { rule: 'node-shape', code: 'shape' }, // each node an object with a known type, a parent, children only on frame and component
   { rule: 'id-form', code: 'value' }, // ids are 1 to 40 of [A-Za-z0-9_-]
   { rule: 'id-unique', code: 'exists' }, // unique across pages and nodes
+  { rule: 'tree', code: 'parent' }, // parents exist and list their children once, children name their parent, all reached from a page
   { rule: 'keys', code: 'prop' }, // a node's keys are its type's properties
   { rule: 'required', code: 'shape' }, // vector path, image src, instance component
   { rule: 'classes', code: 'value' }, // every value in its class
-  { rule: 'tree', code: 'parent' }, // parents exist and list their children once, children name their parent, all reached from a page
-  { rule: 'components', code: 'parent' }, // a component never inside another, at any depth
   { rule: 'tokens', code: 'value' }, // groups and tokens of the six types, values literal
   { rule: 'refs', code: 'ref' }, // tokens, components, prop targets, overrides, variants, images resolve
+  { rule: 'components', code: 'parent' }, // a component never inside another, at any depth
   { rule: 'instance-cycle', code: 'cycle' }, // an instance never inside the component it names, directly or through others
   { rule: 'limits', code: 'limit' }, // nodes, pages, tokens, depth, props, variants, override entries, bytes
 ]);
@@ -388,7 +394,7 @@ function tokenProblem(t) {
       const ks = ['fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight'];
       if (!isObj(v) || Object.keys(v).length !== 5 || !ks.every((k) => own(v, k))) return 'typography: not exactly { fontFamily, fontSize, fontWeight, letterSpacing, lineHeight }';
       if (!FAMILIES.includes(v.fontFamily)) return 'typography: fontFamily not sans, serif or mono';
-      if (!dimToken(v.fontSize, 1, 1000)) return 'typography: fontSize not a dimension of 1..1000 px';
+      if (!dimToken(v.fontSize)) return 'typography: fontSize not a dimension';
       if (!weightOk(v.fontWeight)) return 'typography: fontWeight not 100..900 by 100';
       if (!dimToken(v.letterSpacing)) return 'typography: letterSpacing not a dimension';
       if (!num(v.lineHeight, -Infinity, Infinity)) return 'typography: lineHeight not a number';
@@ -770,27 +776,26 @@ function setProp(d, n, path, value) {
   const pp = propPath(n.type, path);
   if (!pp) return 'prop';
   const { def, keys } = pp;
-  if (value === null && def.default === undefined) {
-    // an entry or an absent-by-default property: null removes it, and any map left empty under an entry
+  if (value === null && def.default === undefined && !def.required) {
+    // an entry or an absent-by-default property: null removes it; an override's id map
+    // (`overrides.<id>`, `variants.<name>.<id>`) left empty goes too, never the variant or a map above
     const chain = [n];
     for (const k of keys.slice(0, -1)) {
       const at = chain[chain.length - 1];
-      if (!isObj(at[k])) return null;
+      if (!isObj(ownGet(at, k))) return null;
       chain.push(at[k]);
     }
     delete chain[chain.length - 1][keys[keys.length - 1]];
-    for (let i = chain.length - 1; i >= 2; i--) if (Object.keys(chain[i]).length === 0) delete chain[i - 1][keys[i - 1]];
+    const last = chain.length - 1;
+    if (pp.target && Object.keys(chain[last]).length === 0) delete chain[last - 1][keys[last - 1]];
     return null;
   }
   const bad = [];
   checkClass(d.nodes, bad, [], path, def.class, value, pp.target ? { target: pp.target, prop: pp.prop } : def);
   if (bad.length) return 'value';
   let at = n;
-  for (const k of keys.slice(0, -1)) {
-    if (!isObj(at[k])) at[k] = {};
-    at = at[k];
-  }
-  at[keys[keys.length - 1]] = structuredClone(value);
+  for (const k of keys.slice(0, -1)) at = isObj(ownGet(at, k)) ? at[k] : put(at, k, {});
+  put(at, keys[keys.length - 1], structuredClone(value));
   return null;
 }
 // An add's node as property paths: a group's keys under its name, everything else as it is.
@@ -864,7 +869,7 @@ const APPLY = {
     const n = { type: nd.type, parent: nd.parent };
     if (CONTAINERS.has(nd.type)) n.children = [];
     for (const [path, v] of flatten(nd.type, nd)) { const why = setProp(d, n, path, v); if (why) return why; }
-    d.nodes[nd.id] = n;
+    put(d.nodes, nd.id, n);
     insertAfter(list, nd.id, op.after);
     return null;
   },
@@ -921,7 +926,7 @@ const APPLY = {
     for (const seg of segs.slice(0, -1)) {
       if (!own(g, seg)) {
         if (op.value === null) return null;
-        g[seg] = {};
+        put(g, seg, {});
       } else if (!isObj(g[seg]) || isTokenNode(g[seg])) return 'value'; // inside a token
       chain.push([g[seg], seg]);
       g = g[seg];
@@ -936,7 +941,7 @@ const APPLY = {
       return null;
     }
     if (tokenProblem(op.value)) return 'value';
-    g[last] = structuredClone(op.value);
+    put(g, last, structuredClone(op.value));
     return null;
   },
 };
@@ -968,15 +973,16 @@ export function applyEdit(doc, ops, { images = null, folderBytes = 0, level = 'f
 // variant's override, then the instance's override, then the instance's prop value aimed at it.
 export function resolve(doc, instanceId) {
   const nodes = doc.nodes;
-  const inst = nodes[instanceId];
+  const inst = ownGet(nodes, instanceId);
   if (!isObj(inst) || inst.type !== 'instance') throw new Error(`resolve: ${instanceId} is not an instance`);
-  const comp = nodes[inst.component];
+  const comp = ownGet(nodes, inst.component);
   if (!isObj(comp) || comp.type !== 'component') throw new Error(`resolve: ${inst.component} is not a component`);
   const out = {};
   const stack = [...comp.children].reverse();
   while (stack.length) {
     const id = stack.pop();
-    const n = nodes[id];
+    if (own(out, id)) continue;
+    const n = ownGet(nodes, id);
     if (!isObj(n) || !TYPES.includes(n.type)) continue;
     const vals = {};
     for (const path of PLAIN[n.type]) {
@@ -985,19 +991,19 @@ export function resolve(doc, instanceId) {
       if (v === undefined) v = PROPS[n.type][path].default;
       if (v !== undefined) vals[path] = structuredClone(v);
     }
-    out[id] = vals;
+    put(out, id, vals);
     if (CONTAINERS.has(n.type)) for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
   }
   const props = isObj(comp.props) ? comp.props : {};
-  const put = (id, prop, v) => { if (own(out, id)) out[id][prop] = structuredClone(v); };
-  for (const pd of Object.values(props)) if (isObj(pd) && isObj(pd.target)) put(pd.target.id, pd.target.prop, pd.default);
-  const variant = typeof inst.variant === 'string' && isObj(comp.variants) ? comp.variants[inst.variant] : null;
-  if (isObj(variant)) for (const [id, o] of Object.entries(variant)) for (const [prop, v] of Object.entries(o)) put(id, prop, v);
-  if (isObj(inst.overrides)) for (const [id, o] of Object.entries(inst.overrides)) for (const [prop, v] of Object.entries(o)) put(id, prop, v);
+  const set = (id, prop, v) => { if (own(out, id)) put(out[id], prop, structuredClone(v)); };
+  for (const pd of Object.values(props)) if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, pd.default);
+  const variant = typeof inst.variant === 'string' && isObj(comp.variants) ? ownGet(comp.variants, inst.variant) : null;
+  if (isObj(variant)) for (const [id, o] of Object.entries(variant)) for (const [prop, v] of Object.entries(o)) set(id, prop, v);
+  if (isObj(inst.overrides)) for (const [id, o] of Object.entries(inst.overrides)) for (const [prop, v] of Object.entries(o)) set(id, prop, v);
   if (isObj(inst.props)) {
     for (const [name, v] of Object.entries(inst.props)) {
-      const pd = props[name];
-      if (isObj(pd) && isObj(pd.target)) put(pd.target.id, pd.target.prop, v);
+      const pd = ownGet(props, name);
+      if (isObj(pd) && isObj(pd.target)) set(pd.target.id, pd.target.prop, v);
     }
   }
   return out;
@@ -1285,7 +1291,7 @@ function scan(src) {
   }
   let blank = '';
   for (let j = 0; j < n; j++) blank += kind[j] === CODE || keep[j] || src[j] === '\n' ? src[j] : ' ';
-  return { kind, opener, blank };
+  return { kind, opener, keep, blank };
 }
 const lineAt = (src, k) => { let l = 1; for (let j = 0; j < k; j++) if (src.charCodeAt(j) === 10) l++; return l; };
 const noComment = (s, a, b) => { for (let j = a; j < b; j++) if (s.kind[j] === 1) return false; return true; };
@@ -1314,6 +1320,19 @@ export function skipProblems(source) {
   const out = [];
   for (const m of b.matchAll(/\.\s*(skip|todo|only)\b/g)) out.push(`line ${lineAt(source, m.index)}: .${m[1]}`);
   for (const m of b.matchAll(/(?<![\w$.])(todo|only)\s*:/g)) out.push(`line ${lineAt(source, m.index)}: ${m[1]}:`);
+  // a quoted or computed key, or bracket access: a string or plain template whose text is skip, todo
+  // or only, followed by `:` or `]`
+  for (let k = 0; k < source.length; k++) {
+    if (!s.opener[k]) continue;
+    let j = k + 1;
+    while (j < source.length && s.kind[j] === s.kind[k] && !s.keep[j]) j++;
+    if (j >= source.length || source[j] !== source[k]) continue;
+    const word = source.slice(k + 1, j);
+    if (!['skip', 'todo', 'only'].includes(word)) continue;
+    let after = j + 1;
+    while (after < b.length && /\s/.test(b[after])) after++;
+    if (b[after] === ':' || b[after] === ']') out.push(`line ${lineAt(source, k)}: ${source[k]}${word}${source[k]} as a key`);
+  }
   let imported = null;
   for (const m of b.matchAll(/(?<![\w$.])skip\s*:/g)) {
     const k = m.index;
@@ -1387,6 +1406,16 @@ export const SKIP_CASES = deepFreeze({
     file('a slash inside a regex class does not end the regex', "const r = /[/']/;\ntest.skip('x', () => {});\n"),
     file('a slash after ) is division: the quote it meets opens a string that ends at its line', "if (x) /'/.test(s);\ntest.skip('x', () => {});\n"),
     file('a slash misread as a regex blanks only to the end of its line', 'const of = 4; const y = of / 2;\ntest.skip(\'x\', () => {});\n'),
+    file('a slash inside a regex class does not end the regex, on its own line', "const r = /[/']/; test.skip(1);\n"),
+    file('a slash after ) is division, on its own line', 'const h = (a) / 2; test.skip(1); const k = 3 / 4;\n'),
+    file("{ 'skip': true }", "test('x', { 'skip': true }, () => {});\n"),
+    file('{ "only": true }', 'test(\'x\', { "only": true }, () => {});\n'),
+    file("{ 'todo': true }", "test('x', { 'todo': true }, () => {});\n"),
+    file("{ ['skip']: true }", "test('x', { ['skip']: true }, () => {});\n"),
+    file('{ [`todo`]: true }', "test('x', { [`todo`]: true }, () => {});\n"),
+    file("test['skip'](", "test['skip']('x', () => {});\n"),
+    file('t["only"](', 'test(\'x\', (t) => { t["only"](\'y\', () => {}); });\n'),
+    file("test['todo'](", "test['todo']('x');\n"),
     file('a skip inside a template substitution is code', "const s = `${test.skip('x')}`;\n"),
   ],
   good: [
@@ -1397,6 +1426,8 @@ export const SKIP_CASES = deepFreeze({
     file('a quote in a regex opens no string', "const r = /'/; const s = 'test.skip(';\ntest('x', () => { r.test(s); });\n"),
     file('the forbidden words in a template text', 'const s = `a .skip and only: in ${1 + 1} text`;\n'),
     file('division', "const half = a / 2 / b; const s = 'x / .only';\n"),
+    file('division after )', "const h = (a) / 2; const s = '/ .only';\n"),
+    file('the words as values, not keys', "const why = 'skip'; test('only', () => { why.length; });\n"),
   ],
 });
 

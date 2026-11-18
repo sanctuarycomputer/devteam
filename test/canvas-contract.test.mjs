@@ -19,6 +19,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 const IMG = '0123456789abcdef.png';
 const OPTS = { images: new Set([IMG]), folderBytes: 0 };
 const long = (n, ch = 'a') => ch.repeat(n);
+const PROTO_NAMES = Object.getOwnPropertyNames(Object.prototype).sort();
 const CLIENT = 'abcdefghij012345';
 const SESSION = '0123456789abcdef';
 
@@ -499,7 +500,75 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.deepEqual([...seenCodes].sort(), [...REFUSALS].sort(), 'every refusal code is reached');
     // a page's own name is the only page property
     refused(base, [{ op: 'set', id: 'p1', prop: 'name', value: long(201) }], 'value');
+
+    // a variant's last override removed: the variant stays (n1 still uses it)
+    d = applied(base, [{ op: 'set', id: 'c1', prop: 'variants.dark.cr.fill', value: null }]);
+    assert.deepEqual(d.nodes.c1.variants.dark, { ct: { text: 'Var' } }, 'an emptied id map goes');
+    d = applied(d, [{ op: 'set', id: 'c1', prop: 'variants.dark.ct.text', value: null }]);
+    assert.deepEqual(d.nodes.c1.variants, { dark: {} }, 'the variant itself stays');
+    assert.equal(d.nodes.n1.variant, 'dark');
+    d = applied(base, [{ op: 'set', id: 'n1', prop: 'overrides.ct.text', value: null }, { op: 'set', id: 'n1', prop: 'overrides.ct.size.w', value: null }]);
+    assert.deepEqual(d.nodes.n1.overrides, {}, "an instance's emptied override id map goes, the map stays");
+
+    // a required property set to null: the op's own class check refuses it
+    refused(base, [{ op: 'set', id: 'v1', prop: 'path', value: null }], 'value');
+    refused(base, [{ op: 'set', id: 'i1', prop: 'src', value: null }], 'value');
+    refused(base, [{ op: 'set', id: 'n1', prop: 'component', value: null }], 'value');
+
+    // a typography token's fontSize is any dimension
+    applied(base, [{ op: 'token', path: 'type.huge', value: { $type: 'typography', $value: { fontFamily: 'mono', fontSize: { value: 2000, unit: 'px' }, fontWeight: 900, letterSpacing: { value: -2, unit: 'px' }, lineHeight: 1 } } }]);
   });
+
+  await t.test('rules: ids that name prototype keys are ids like any other', () => {
+    const base = small();
+    // an override keyed __proto__ is not a descendant: ref, and nothing reaches Object.prototype
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.__proto__.text', value: 'polluted' }], 'ref');
+    refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.constructor.text', value: 'polluted' }], 'ref');
+    // a node with id __proto__ is added, validated and stored as an own key, as JSON round-trips it
+    for (const id of ['__proto__', 'constructor', 'hasOwnProperty', 'toString']) {
+      let d = applied(base, [{ op: 'add', node: { id, type: 'frame', parent: 'p2', name: id }, after: null }]);
+      assert.ok(Object.prototype.hasOwnProperty.call(d.nodes, id), `${id} is an own node`);
+      assert.equal(Object.getPrototypeOf(d.nodes), Object.prototype, 'nodes stays a plain object');
+      assert.deepEqual(d.pages[1].children, [id]);
+      const round = JSON.parse(JSON.stringify(d));
+      assert.deepEqual(errs(round), [], `${id}: the JSON document holding it is valid too`);
+      assert.deepEqual(Object.keys(round.nodes).includes(id), true);
+      d = applied(d, [{ op: 'add', node: { id: 'k', type: 'rect', parent: id }, after: null }, { op: 'set', id, prop: 'layout.gap', value: 3 }]);
+      assert.equal(d.nodes[id].layout.gap, 3);
+      d = applied(d, [{ op: 'move', id: 'k', parent: 'p2', after: null }, { op: 'del', id }]);
+      assert.ok(!Object.prototype.hasOwnProperty.call(d.nodes, id), `${id} deleted`);
+      refused(base, [{ op: 'add', node: { id, type: 'rect', parent: id }, after: null }], 'parent');
+    }
+    const fromJson = JSON.parse(JSON.stringify(small()).replace('"r1":', '"__proto__":').replace(/"r1"/g, '"__proto__"'));
+    assert.deepEqual(errs(fromJson), [], 'a JSON document with a __proto__ node is valid');
+    const moved = applied(fromJson, [{ op: 'set', id: '__proto__', prop: 'radius', value: 6 }]);
+    assert.equal(moved.nodes.__proto__.radius, 6, 'and its node is edited like any other');
+    // token segments
+    let d = applied(base, [{ op: 'token', path: '__proto__.x', value: { $type: 'number', $value: 2 } }]);
+    assert.ok(Object.prototype.hasOwnProperty.call(d.tokens, '__proto__'), 'a __proto__ token group is stored');
+    assert.equal(d.tokens.__proto__.x.$value, 2);
+    assert.deepEqual(errs(JSON.parse(JSON.stringify(d))), []);
+    d = applied(d, [{ op: 'set', id: 'ct', prop: 'font', value: { family: 'sans', size: 12, weight: 400, lineHeight: { $ref: '__proto__.x' } } }]);
+    refused(d, [{ op: 'token', path: '__proto__.x', value: null }], 'ref');
+    d = applied(base, [{ op: 'token', path: 'constructor', value: { $type: 'number', $value: 1 } }]);
+    assert.equal(d.tokens.constructor.$value, 1);
+    refused(base, [{ op: 'set', id: 't1', prop: 'color', value: { $ref: 'toString' } }], 'ref');
+    // prop and variant names
+    d = applied(base, [
+      { op: 'set', id: 'c1', prop: 'props.constructor', value: { type: 'text', default: 'C', target: { id: 'ct', prop: 'text' } } },
+      { op: 'set', id: 'c1', prop: 'variants.toString', value: { cr: { fill: '#123' } } },
+      { op: 'set', id: 'n1', prop: 'props.constructor', value: 'Ctor' },
+      { op: 'set', id: 'n1', prop: 'variant', value: 'toString' },
+    ]);
+    assert.equal(d.nodes.c1.props.constructor.default, 'C');
+    assert.equal(resolve(d, 'n1').ct.text, 'Ctor', 'resolve reads own prop names');
+    assert.equal(resolve(d, 'n1').cr.fill, '#123', 'and own variant names');
+    refused(base, [{ op: 'set', id: 'n1', prop: 'props.hasOwnProperty', value: 'x' }], 'ref');
+    refused(base, [{ op: 'set', id: 'n1', prop: 'variant', value: 'valueOf' }], 'ref');
+    const r = resolve(base, 'n1');
+    assert.ok(!Object.prototype.hasOwnProperty.call(r, '__proto__'));
+  });
+
 
   await t.test('rules: resolve order', () => {
     const d = small();
@@ -595,6 +664,9 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.ok(skipProblems("const r = /'/;\ntest.skip('x', () => {});").length > 0, 'a quote in a regex');
     assert.ok(skipProblems('const r = /[`]/;\ntest.skip(1);').length > 0, 'a backtick in a regex class');
     assert.ok(skipProblems("if (x) /'/.test(s)\ntest.skip(1);").length > 0, 'a slash after ) read as division: the string it opens ends at the line');
+    assert.ok(skipProblems("const r = /[/']/; test.skip(1);").length > 0, 'a slash in a regex class, the skip on the same line');
+    assert.ok(skipProblems('const h = (a) / 2; test.skip(1); const k = 3 / 4;').length > 0, 'division after ), the skip on the same line');
+    assert.deepEqual(skipProblems("const h = (a) / 2; const s = '/ .only';"), [], 'division after ) opens no regex');
     assert.deepEqual(skipProblems("const r = /'/; const s = 'test.skip(';"), [], 'a quote in a regex opens no string');
     assert.ok(MEASURE_CASES.bad.length >= 7 && MEASURE_CASES.good.length >= 2);
     for (const files of MEASURE_CASES.bad) assert.ok(measureProblems(files).length > 0, `measure rule flags: ${files.map((f) => f.name).join(', ')}`);
@@ -607,5 +679,10 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.deepEqual(measureProblems(files), [], 'every test file obeys the rule');
     assert.ok(measureProblems([me, { name: 'canvas-copy.test.mjs', source: me.source }]).length > 0, "this file's own A1 is counted (a copy repeats it)");
     assert.ok(measureProblems([{ name: 'elsewhere.test.mjs', source: me.source }]).length > 0, 'and is a canvas file');
+  });
+  await t.test('rules: Object.prototype is untouched', () => {
+    assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).sort(), PROTO_NAMES);
+    assert.equal(({}).text, undefined);
+    assert.equal(({}).x, undefined);
   });
 });
