@@ -5329,14 +5329,267 @@ function missingPins(root = mainRoot) {
   return [];
 }
 const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
+// Machine-wide setup slots (kit-596): on one machine at most N worktree_setups of session and chore
+// worktrees run at once, each through a runner (setupRunner) that holds a slot for its run. A slot is
+// the folder ~/.devteam/setup-slots/<n> holding holder.json ({ id, pid, start, at }, then pgid and
+// leader_start once the setup runs). Every step is a rename, so two takers never both get <n>, and a
+// waiter frees a slot only when it is still the one it judged. lib is run as text on its own
+// (node -e, beside setupRunner), so it closes over nothing here and requires what it uses.
+const setupSlots = Object.freeze({
+  SLOT_WAIT: 75,
+  PAST_DEADLINE: 124,
+  DEFAULT: 2,
+  MAX: 8,
+  dir: () => path.join(os.homedir(), '.devteam', 'setup-slots'),
+  lib: function () {
+    const fs = require('fs');
+    const path = require('path');
+    const os = require('os');
+    const cp = require('child_process');
+    // DEFAULT and MAX as above (this text can't read them)
+    const DEFAULT = 2;
+    const MAX = 8;
+    const UNREADABLE_MS = 10000;
+    const LEFTOVER_MS = 60000;
+    const OLD_MS = 15 * 60000;
+    const RECHECK_MS = 60000;
+    let attempts = 0;
+    const rand = () => `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+    const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+    const atMs = (h) => (typeof h?.at === 'number' ? h.at : Date.parse(h?.at));
+    // a holder the protocol wrote whole: an id, a numeric pid and a readable at
+    const whole = (h) => !!h && typeof h === 'object' && typeof h.id === 'string' && h.id !== '' && Number.isInteger(h.pid) && h.pid > 0 && Number.isFinite(atMs(h));
+    // a pid (or, negative, a group) that exists; EPERM is someone else's, still alive
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+    // field 22 of /proc/<pid>/stat on Linux (after the command's closing paren), ps lstart elsewhere;
+    // null when it can't be read, which never matches
+    const proc = os.platform() === 'linux' && fs.existsSync('/proc/self/stat');
+    function startTime(pid) {
+      if (proc) {
+        try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19] ?? null; } catch { return null; }
+      }
+      const r = cp.spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000 });
+      return (r.status === 0 && r.stdout.trim()) || null;
+    }
+    const same = (pid, start) => { const s = startTime(pid); return s !== null && s === start; };
+    function count(env, warn) {
+      const v = env.DEVTEAM_SETUP_SLOTS;
+      if (v === undefined) return DEFAULT;
+      if (/^[0-9]+$/.test(v) && Number(v) >= 1 && Number(v) <= MAX) return Number(v);
+      warn(`DEVTEAM_SETUP_SLOTS "${v}" is not a whole number from 1 to ${MAX}; using ${DEFAULT}`);
+      return DEFAULT;
+    }
+    // The first free slot, taken: holder.json written and fsynced in a private folder, then that
+    // folder renamed to <n>, which succeeds only where <n> is missing (or an empty folder).
+    function take(dir, n, me) {
+      for (let slot = 0; slot < n; slot++) {
+        const to = path.join(dir, String(slot));
+        try { if (fs.readdirSync(to).length) continue; } catch {}
+        const tmp = path.join(dir, `.take-${me.id}-${++attempts}`);
+        try {
+          fs.mkdirSync(tmp);
+          const fd = fs.openSync(path.join(tmp, 'holder.json'), 'w');
+          try { fs.writeSync(fd, JSON.stringify({ ...me, at: new Date().toISOString() })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+          fs.renameSync(tmp, to);
+          return slot;
+        } catch {
+          try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+        }
+      }
+      return null;
+    }
+    // 'gone' (free it now), 'old' (held past 15 minutes: take it over) or 'held'. The id judged is
+    // left in memo.judged[slot] (null: an unreadable holder) for free to compare against. A holder
+    // already seen alive with the same start times is checked with kill(…, 0) only, and its start
+    // times read again once a minute.
+    function judge(dir, slot, memo, now = Date.now()) {
+      memo.seen ??= new Map();
+      memo.judged ??= {};
+      const at = path.join(dir, String(slot));
+      const h = readJson(path.join(at, 'holder.json'));
+      if (!whole(h)) {
+        memo.judged[slot] = null;
+        let st;
+        try { st = fs.statSync(at); } catch { memo.judged[slot] = undefined; return 'gone'; }
+        // younger, it may be a rewrite in flight
+        return now - st.mtimeMs > UNREADABLE_MS ? 'gone' : 'held';
+      }
+      memo.judged[slot] = h.id;
+      const key = `${h.id} ${h.pgid ?? ''}`;
+      const hasGroup = Number.isInteger(h.pgid) && h.pgid > 0;
+      let up;
+      const seen = memo.seen.get(key);
+      if (seen !== undefined && now - seen < RECHECK_MS) up = alive(h.pid) || (hasGroup && alive(-h.pgid));
+      else {
+        const runner = alive(h.pid) && same(h.pid, h.start);
+        // the group lives unless its leader is alive with another start (a reused group id)
+        const group = hasGroup && alive(-h.pgid) && !(alive(h.pgid) && !same(h.pgid, h.leader_start));
+        up = runner || group;
+        if (up) memo.seen.set(key, now);
+      }
+      if (!up) { memo.seen.delete(key); return 'gone'; }
+      return now - atMs(h) > OLD_MS ? 'old' : 'held';
+    }
+    // Move <n> away, then remove it only if it still holds the holder judged (judgedId null: one
+    // still unreadable); otherwise put it back untouched. True when it was removed.
+    function free(dir, slot, judgedId) {
+      const at = path.join(dir, String(slot));
+      const away = path.join(dir, `.free-${Date.now()}-${rand()}`);
+      try { fs.renameSync(at, away); } catch { return false; }
+      const h = readJson(path.join(away, 'holder.json'));
+      const judged = judgedId === null ? !whole(h) : whole(h) && h.id === judgedId;
+      if (judged) { try { fs.rmSync(away, { recursive: true, force: true }); } catch {} return true; }
+      // <n> taken again meanwhile: the leftover is swept in a minute (the protocol's one gap)
+      try { fs.renameSync(away, at); } catch {}
+      return false;
+    }
+    // a runner's own slot, freed at its end; one taken over (another id at <n>) is left alone
+    function release(dir, slot, myId) { free(dir, slot, myId); }
+    // .take-* and .free-* folders a killed process left, removed past a minute (a .free-'s time is
+    // in its name: renaming a folder keeps its old mtime)
+    function sweep(dir, now = Date.now()) {
+      let names;
+      try { names = fs.readdirSync(dir); } catch { return; }
+      for (const e of names) {
+        if (!/^\.(take|free)-/.test(e)) continue;
+        const p = path.join(dir, e);
+        let t = Number(/^\.free-(\d+)-/.exec(e)?.[1]);
+        if (!t) { try { t = fs.statSync(p).mtimeMs; } catch { continue; } }
+        if (now - t > LEFTOVER_MS) try { fs.rmSync(p, { recursive: true, force: true }); } catch {}
+      }
+    }
+    return { count, take, judge, free, release, sweep, startTime };
+  },
+});
+// The setup runner's main (kit-596), run as text by seedWorktree (node -e, with setupSlots.lib as
+// slots), so self-contained. It takes a slot (waiting 1 s between rounds until config.deadline, or
+// config.maxWaitMs with none), runs `sh -c config.cmd` as the leader of its own process group,
+// forwards SIGINT, SIGTERM and SIGHUP to that group, kills the group at the deadline, releases the
+// slot, and writes its report as one JSON line to fd 3: { outcome: 'ran' | 'no-slot' | 'deadline',
+// code, signal, took_over }. Exit 0 (ran, the setup exited 0), 75 (no slot), 124 (deadline), else 1.
+async function setupRunner(config, slots) {
+  const fs = require('fs');
+  const path = require('path');
+  const { spawn } = require('child_process');
+  const crypto = require('crypto');
+  const say = (s) => process.stderr.write(`devteam: ${s}\n`);
+  const warn = (s) => say(`warning: ${s}`);
+  const tookOver = [];
+  const report = (outcome, code = null, signal = null) => { try { fs.writeSync(3, `${JSON.stringify({ outcome, code, signal, took_over: tookOver })}\n`); } catch {} };
+  const me = { id: crypto.randomBytes(8).toString('hex'), pid: process.pid, start: slots.startTime(process.pid) };
+  const n = slots.count(process.env, warn);
+  const dir = config.dir;
+  let child = null;
+  let finished = false;
+  // While the setup runs a signal goes to its group. While waiting it ends the wait: handlers run
+  // between whole steps, so nothing is half-taken; no report, so seedWorktree says the setup failed.
+  const onSignal = (sig) => {
+    if (finished) return;
+    if (child) { try { process.kill(-child.pid, sig); } catch {} return; }
+    process.exit(1);
+  };
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, onSignal);
+  let slot = null;
+  let haveDir = true;
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {
+    haveDir = false;
+    warn(`no setup slots folder (${dir}: ${e.code ?? e.message}); running worktree_setup without a slot`);
+  }
+  if (haveDir) {
+    const limit = config.deadline ?? Date.now() + config.maxWaitMs;
+    const memo = {};
+    let told = 0;
+    for (;;) {
+      const now = Date.now();
+      slots.sweep(dir, now);
+      slot = slots.take(dir, n, me);
+      if (slot !== null) break;
+      let freed = false;
+      for (let s = 0; s < n; s++) {
+        const verdict = slots.judge(dir, s, memo, now);
+        if (verdict === 'held') continue;
+        let h = null;
+        try { h = JSON.parse(fs.readFileSync(path.join(dir, String(s), 'holder.json'), 'utf8')); } catch {}
+        if (!slots.free(dir, s, memo.judged[s])) continue;
+        freed = true;
+        if (verdict === 'old' && h?.id === memo.judged[s]) {
+          warn(`took over setup slot ${s}, held since ${h.at} by pid ${h.pid}`);
+          tookOver.push({ slot: s, pid: h.pid, since: h.at });
+        }
+      }
+      if (freed) { slot = slots.take(dir, n, me); if (slot !== null) break; }
+      if (!told || Date.now() - told >= 60000) {
+        let inUse = 0;
+        for (let s = 0; s < n; s++) if (fs.existsSync(path.join(dir, String(s)))) inUse++;
+        say(`waiting for a setup slot (${inUse} of ${n} in use on this machine)`);
+        told = Date.now();
+      }
+      if (Date.now() >= limit) { report('no-slot'); process.exit(75); }
+      await new Promise((r) => setTimeout(r, Math.max(0, Math.min(1000, limit - Date.now()))));
+    }
+  }
+  child = spawn('sh', ['-c', config.cmd], { detached: true, stdio: 'inherit' });
+  if (slot !== null && child.pid) {
+    // the setup's group into the holder (temp file, fsync, rename), so a waiter sees it alive even
+    // after this runner is gone
+    try {
+      const f = path.join(dir, String(slot), 'holder.json');
+      const h = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (h.id === me.id) {
+        const tmp = `${f}.${me.id}.tmp`;
+        const fd = fs.openSync(tmp, 'w');
+        try { fs.writeSync(fd, JSON.stringify({ ...h, pgid: child.pid, leader_start: slots.startTime(child.pid) })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+        fs.renameSync(tmp, f);
+      }
+    } catch {}
+  }
+  let timer = null;
+  let hit = false;
+  const arm = () => {
+    if (config.deadline === null) return;
+    const wait = config.deadline - Date.now();
+    if (wait > 0) { timer = setTimeout(arm, Math.min(wait, 2147483647)); return; }
+    hit = true;
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+  };
+  if (child.pid) arm();
+  const [code, signal] = await new Promise((resolve) => {
+    child.once('exit', (c, s) => resolve([c, s]));
+    child.once('error', (e) => { warn(`could not start worktree_setup: ${e.message}`); resolve([null, null]); });
+  });
+  clearTimeout(timer);
+  finished = true;
+  if (slot !== null) slots.release(dir, slot, me.id);
+  if (hit) { report('deadline', code, signal); process.exit(124); }
+  report('ran', code, signal);
+  process.exit(code === 0 ? 0 : 1);
+}
 // A worktree of repo R is seeded from R's own settings and main checkout, never home's.
-function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
+// A session or chore worktree (session) runs its setup through the setup runner, in a machine-wide
+// slot and before DEVTEAM_SETUP_DEADLINE; a gate checkout runs it inline, as it always has.
+function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = false } = {}) {
   const s = R.settings;
   for (const rel of s.worktree_files ?? []) {
     const from = path.join(R.root, rel);
     if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in ${R.name === 'home' ? 'the main checkout' : `${R.name}'s checkout (${R.root})`}`); continue; }
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
+  }
+  if (setup && s.worktree_setup && session) {
+    const d = process.env.DEVTEAM_SETUP_DEADLINE;
+    const config = { cmd: s.worktree_setup, dir: setupSlots.dir(), deadline: d && Number.isFinite(Number(d)) ? Number(d) : null, maxWaitMs: 900000 };
+    const r = spawnSync(process.execPath, ['-e', `const lib = (${setupSlots.lib})(); (${setupRunner})(JSON.parse(process.argv[1]), lib)`, JSON.stringify(config)], { cwd: wt, env: gateEnv(null, R), stdio: ['ignore', 'inherit', 'inherit', 'pipe'] });
+    // decided from the report, never the exit code alone; none at all is a runner that crashed
+    let rep = null;
+    try { rep = JSON.parse(String(r.output?.[3] ?? '').trim().split('\n').pop()); } catch {}
+    for (const t of rep?.took_over ?? []) {
+      try { appendLog({ type: 'observation', source: 'kit', kind: 'setup-slot-taken-over', subject: `setup-slot-${t.slot}`, detail: `a worktree_setup for ${wt} took over setup slot ${t.slot}, held since ${t.since} by pid ${t.pid} (past 15 minutes)`, detector: 'kit', severity: 2, valence: -1, source_key: `setup-slot-taken-over ${t.slot} ${t.pid} ${t.since}` }); } catch {}
+    }
+    if (rep?.outcome === 'ran' && rep.code === 0) return;
+    if (rep?.outcome === 'no-slot') die('setup-slot-wait: no setup slot free before the deadline', setupSlots.SLOT_WAIT);
+    if (rep?.outcome === 'deadline') die(`worktree_setup ran past its deadline in ${wt}`, setupSlots.PAST_DEADLINE);
+    const hint = pinsHint(missingPins(R.root), R.root);
+    die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
   }
   if (setup && s.worktree_setup) {
     try {
@@ -12123,7 +12376,7 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup }); }
+  if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
