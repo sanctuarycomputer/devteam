@@ -1821,6 +1821,27 @@ function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
     fs.rmSync(lock, { recursive: true, force: true });
   }
 }
+// withLock's lock, for a caller that must never wait (the dashboard's tick): a lock held and fresh
+// is undefined back, and fn never runs; a stale one (either way) is taken, once.
+function tryLock(file, fn, { staleMs = 10000 } = {}) {
+  const lock = `${file}.lock`;
+  for (let tries = 0; ; tries++) {
+    try {
+      fs.mkdirSync(lock, { recursive: false });
+      break;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      const at = fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs;
+      if (tries || (at !== undefined && Math.abs(Date.now() - at) <= staleMs)) return undefined;
+      fs.rmSync(lock, { recursive: true, force: true });
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { recursive: true, force: true });
+  }
+}
 
 let mainRefCache;
 let mainShaCache;
@@ -7512,14 +7533,25 @@ function readPreviews() {
   }
   return recs;
 }
-function writePreview(rec) {
+// The raw writers, for a caller that already holds the record's lock (the tick, under tryLock).
+function writePreviewFile(rec) {
   const { mtimeMs, ...r } = rec;
   fs.mkdirSync(previewsDir(), { recursive: true });
   const tmp = `${previewFile(r.name)}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(r, null, 2)}\n`);
   fs.renameSync(tmp, previewFile(r.name));
 }
-const removePreview = (name) => fs.rmSync(previewFile(name), { force: true });
+const removePreviewFile = (name) => fs.rmSync(previewFile(name), { force: true });
+// Everyone else's: under the record's lock, so the tick's look-then-write can't land between
+// them and undo a stop (withLock isn't re-entrant: never call these from inside one).
+function writePreview(rec) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(rec.name), () => writePreviewFile(rec));
+}
+function removePreview(name) {
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  return withLock(previewFile(name), () => removePreviewFile(name));
+}
 // What this project calls itself, and who is asking.
 const previewProject = () => loadSettings().project ?? path.basename(mainRoot);
 function previewLabel() {
@@ -7965,6 +7997,21 @@ const previewUp = new Map();
 const previewUpHere = () => { if (previewUpHere.seen === undefined) { try { previewUpHere.seen = JSON.parse(process.env.DEVTEAM_PREVIEW_UP ?? '{}'); } catch { previewUpHere.seen = {}; } } return previewUpHere.seen; };
 const tmuxAsync = (args) => new Promise((resolve) => execFile('tmux', args, { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }, (err, stdout) => resolve(err ? null : stdout)));
 const previewAsIRead = (r) => { try { return fs.statSync(previewFile(r.name)).mtimeMs === r.mtimeMs; } catch { return false; } };
+// The tick's write, held open for a test (DEVTEAM_PREVIEW_WRITE_DELAY_MS) so a stop can be put
+// inside the window it guards: a <name>.json.writing marker, the wait, the write, and the marker
+// gone only once the write is done. Unset, it is just the write.
+function previewWriteHook(name, write) {
+  const delay = Number(process.env.DEVTEAM_PREVIEW_WRITE_DELAY_MS ?? 0);
+  if (!(delay > 0)) return write();
+  const marker = `${previewFile(name)}.writing`;
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return write();
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // The dashboard's housekeeping, every 10 s, and nowhere else (hello is a read: the operator runs
 // it). Probes each port, keeps the answers for hello and the Library, and finishes what any crash
 // left: expiry, a server gone for a day, a dev~ window with no record. It writes a record only when
@@ -7987,16 +8034,23 @@ async function previewTick() {
     const since = Date.parse(r.down_since ?? '');
     // an expiry that doesn't parse is past: a file nobody wrote through the kit never lives forever
     if (!(Date.parse(r.expires) > now) || (!r.run && !up && since && now - since > DAY)) {
-      if (!previewAsIRead(r)) return;
+      // the look and the removal under the record's lock, never waiting on it: a held one is next tick's
+      fs.mkdirSync(previewsDir(), { recursive: true });
+      const gone = tryLock(previewFile(r.name), () => previewAsIRead(r) && (removePreviewFile(r.name), true));
+      if (!gone) return;
       await kill(r);
-      removePreview(r.name);
       previewUp.delete(r.name);
       return;
     }
     const want = up ? null : (Number.isNaN(since) ? nowIso() : r.down_since);
     if ((r.down_since ?? null) === want || !previewAsIRead(r)) return;
     const { down_since, ...rest } = r;
-    writePreview(want ? { ...rest, down_since: want } : rest);
+    // the look again and the write, under the lock a preview command takes: a stop can't land between them
+    fs.mkdirSync(previewsDir(), { recursive: true });
+    tryLock(previewFile(r.name), () => {
+      if (!previewAsIRead(r)) return;
+      previewWriteHook(r.name, () => writePreviewFile(want ? { ...rest, down_since: want } : rest));
+    });
   }));
   for (const n of previewUp.keys()) if (!names.has(n)) previewUp.delete(n);
   // The windows were listed before these records are read, so a window opened since has its id in

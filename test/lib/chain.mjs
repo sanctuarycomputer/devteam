@@ -4769,6 +4769,27 @@ http.createServer((req, res) => {
       assert.match((await died.json()).error, /exited before port/);
       fs.rmSync(path.join(PV_DIR(), 'dying-app.json'), { force: true });
       assert.ok(!pvWindows().some((w) => w.name === 'dev~start-mine'), 'Stop on a kit-started server closes its window');
+      // a stop inside the tick's look-then-write: it waits for the record's lock, and the record stays gone
+      pvClear();
+      await d.stop();
+      d = await pvDashboard({ DEVTEAM_PREVIEW_WRITE_DELAY_MS: '3000' });
+      pvMake('race-mine', { port: await freePort() });
+      const marker = path.join(PV_DIR(), 'race-mine.json.writing');
+      await until(() => fs.existsSync(marker), 'the tick to be inside its write');
+      pvOk(['preview', 'stop', 'race-mine']);
+      await until(() => !fs.existsSync(marker), 'the write to be done');
+      assert.deepEqual(pvFiles(), [], 'a stop that lands in the tick\'s write is never undone');
+      // the tick never waits on a held lock, and a stale one is taken
+      const lock = path.join(PV_DIR(), 'lock-mine.json.lock');
+      fs.mkdirSync(PV_DIR(), { recursive: true });
+      fs.mkdirSync(lock);
+      pvMake('lock-mine', { port: await freePort() });
+      await until(async () => (await pvHello(d.base)).find((p) => p.name === 'lock-mine')?.up === false, 'the tick to probe a locked record');
+      assert.equal(pvRec('lock-mine').down_since, undefined, 'a held lock is left alone: no write');
+      const old = new Date(Date.now() - 20000);
+      fs.utimesSync(lock, old, old);
+      await until(() => pvRec('lock-mine').down_since, 'a stale lock to be taken and the write to land');
+      await until(() => !fs.existsSync(lock), 'the lock to be released after the write');
     } finally { await d.stop(); for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]); pvClear(); }
     assert.ok(stale);
   });
