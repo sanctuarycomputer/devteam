@@ -113,13 +113,14 @@ const deadlineIn = (ms) => ({ DEVTEAM_SETUP_DEADLINE: String(Date.now() + ms) })
 const clock = '$(node -e "process.stdout.write(String(Date.now()))")';
 
 test('4a: the setup leads its own process group under a node runner, and a long stdout leaves the report whole', async () => {
-  const S = slotFleet('installs-4a', (F) => `echo "$$ $(ps -o pgid= -p $$ | tr -d ' ') $PPID $(ps -o ppid= -p $PPID | tr -d ' ') $(ps -o comm= -p $PPID)" > ${F.base}/4a.txt; awk 'BEGIN { for (i = 0; i < 2048; i++) printf "%0100d\\n", i }'`);
+  const S = slotFleet('installs-4a', (F) => `echo "$$ $(ps -o pgid= -p $$ | tr -d ' ') $PPID $(ps -o ppid= -p $PPID | tr -d ' ') $(basename "$(ps -o args= -p $PPID | awk '{ print $1 }')")" > ${F.base}/4a.txt; awk 'BEGIN { for (i = 0; i < 2048; i++) printf "%0100d\\n", i }'`);
   try {
     const r = await S.startAsync('one');
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.length > 200000, 'the setup\'s stdout comes through');
     const [sh, pgid, ppid, gp, comm] = fs.readFileSync(path.join(S.F.base, '4a.txt'), 'utf8').trim().split(/\s+/);
     assert.equal(pgid, sh, 'the setup\'s shell leads its own group');
+    // the parent's program, from its command line: node 24 names its main thread MainThread, so comm no longer says node
     assert.match(comm, /^node/);
     assert.notEqual(Number(ppid), r.pid, 'its parent is not the chore start process');
     assert.equal(Number(gp), r.pid, 'its parent is a child of chore start (the runner)');
