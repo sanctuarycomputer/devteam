@@ -836,15 +836,18 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
-      // the Board's Goal select, in the page bar
+      // the Board's Goal select, in the page bar (drawn again only when it changes); a Board column, drawn on every
+      // read the page isn't held, says whether the page is drawing
       const goal = '.pagebar .extra select[data-f="goal"]';
       await p.ev(`window.__o = document.querySelector('${goal}').options[0]`);
       await p.click(goal);
+      await p.ev(`window.__c = document.querySelector('#board-cols > .col')`);
       await polls();
       assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
+      assert.equal(await p.ev(`window.__c.isConnected`), true, 'nothing is drawn while it is open');
       await p.key('Escape');
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
-      await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
+      await soon(`!window.__c.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
       // back to the Inbox, for the card (#inbox opens the panel on its Inbox tab, kit-100)
       await p.ev(`location.hash = '#inbox'`);

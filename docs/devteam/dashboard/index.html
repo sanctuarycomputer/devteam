@@ -2165,11 +2165,16 @@ function setFilters(page, patch) {
   if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
   location.hash = headFor({ page, state });
 }
-// The page's filters drawn into the page bar's .extra; emptied on every other page.
+// The page's filters drawn into the page bar's .extra; emptied on every other page. Written only when they
+// change: every read draws them, and a control replaced under a press would lose the press.
 function drawFilters(page) {
   const el = document.querySelector('.pagebar .extra');
   if (!el) return;
-  if (!DATA || !FILTER_PAGES.includes(page)) { el.innerHTML = ''; return; }
+  const html = filtersHtml(page);
+  if (el.dataset.drawn !== html) { el.innerHTML = html; el.dataset.drawn = html; }
+}
+function filtersHtml(page) {
+  if (!DATA || !FILTER_PAGES.includes(page)) return '';
   const f = filtersNow(page);
   const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
   const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
@@ -2183,15 +2188,14 @@ function drawFilters(page) {
     if (f.feat && !feats.includes(f.feat)) feats.push(f.feat);
     const repos = [...new Set(['home', ...p.tickets.map((t) => t.repo).filter(Boolean)])];
     if (f.repo && !repos.includes(f.repo)) repos.push(f.repo);
-    el.innerHTML = goal
+    return goal
       + sel('feat', 'Feature', opt('', 'All features', f.feat) + feats.map((x) => opt(x, featureTitle(x), f.feat)).join(''))
       + sel('repo', 'Repo', opt('', 'All repos', f.repo) + repos.map((r) => opt(r, r, f.repo)).join(''))
       + `<button type="button" class="ghost" data-f="att" aria-label="Needs attention" aria-pressed="${f.att ? 'true' : 'false'}"><i class="icon-circle-alert" aria-hidden="true"></i>Needs attention</button>`;
-    return;
   }
   const vs = narrowViews(DATA.progress, f.goal);
   const narrow = opt('', 'Every view', f.narrow) + NARROW_GROUPS.map((g) => { const xs = vs.filter((v) => v[2] === g); return xs.length ? `<optgroup label="${esc(g)}">${xs.map(([k, label]) => opt(k, label, f.narrow)).join('')}</optgroup>` : ''; }).join('');
-  el.innerHTML = goal + sel('narrow', 'Narrow', narrow) + sel('show', 'Show', opt('', 'Active', f.show) + opt('complete', 'Complete', f.show) + opt('all', 'Everything', f.show));
+  return goal + sel('narrow', 'Narrow', narrow) + sel('show', 'Show', opt('', 'Active', f.show) + opt('complete', 'Complete', f.show) + opt('all', 'Everything', f.show));
 }
 // The page shown drawn again for its filters (a filter change, Back, Forward): at once, not at the next read,
 // focus kept on the control it was on.
