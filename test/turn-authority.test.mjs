@@ -108,6 +108,9 @@ test('turn authority', async (t) => {
       }
       const Q2 = askAbout(T, U, 'Merge it?', ['--seen-turn', later]);
       assert.deepEqual([raw(Q2)[0].about_turn, raw(Q2)[0].seen], [U, later]);
+      // answered from the question's seen on: nothing newer, so no --seen-turn (task-3 T3-2)
+      F.sup(answer(Q2, U, 'Merge the dashboard PR.'));
+      assert.equal(raw(Q2).find((l) => l.answer !== undefined).answer_seen, later);
       // --seen-turn must name the newest owner turn even when nothing came after
       refused(['thread', 'ask', T, '--turn', later, ...q('x?'), '--seen-turn', U], /newest owner turn .* is/);
       // the supervisor alone asks
@@ -139,6 +142,8 @@ test('turn authority', async (t) => {
       const [line] = raw(Q);
       assert.deepEqual([line.owner_said, line.owner_said_turn, line.owner_said_at, line.about_turn], ['Restart it now, the fix is in.', U, [0, 30], U]);
       assert.match(line.context, /The owner said: Restart it now, the fix is in\./);
+      const v = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0];
+      assert.deepEqual([v.owner_said_turn, v.owner_said_at, v.about_turn, v.seen], [U, [0, 30], U, U], 'questions --json carries them (task-3 T3-3)');
       held = { T, U, Q };
     });
 
@@ -186,7 +191,7 @@ test('turn authority', async (t) => {
       refused(answer(Qc, W, 'Yes to that.'), /already settled .* whole/);
       // A2 again, on fresh turns: a clause inside another, and a ? never left out; a closing . may be
       const { T: T3, U: U3 } = thread('Hold', "Don't merge it yet. Ship it? Or wait for CI?");
-      const Q3 = askAbout(T3, U3, 'Merge?');
+      const Q3 = askAbout(T3, U3, 'Hold the merge, or ship?');
       refused(answer(Q3, U3, 'merge it'), /part of a clause/);
       refused(answer(Q3, U3, 'Ship it'), /part of a clause; give the whole clause: "Ship it\?"/);
       const { T: T4, U: U4 } = thread('No stop', 'Merge the dashboard PR.');
@@ -208,6 +213,7 @@ test('turn authority', async (t) => {
       // A12: goal decide takes the whole turn only
       const A = F.approval();
       for (const extra of [['--said', 'approve it'], ['--at', '0'], ['--seen-turn', U]]) refused(['goal', 'decide', A.goal, 'approve', '--from-turn', U, ...extra], /goal decide --from-turn takes the whole turn/);
+      refused(['goal', 'decide', A.goal, 'approve', '--from-turn', U, '--from-chat', '--said', 'approve it'], /not both/);
       // A13: the lifted remediation is answered from the same clause; lifting it bound nothing
       F.sup(answer(held.Q, held.U, 'Restart it now, the fix is in.'));
       assert.equal(JSON.parse(F.owner(['questions', '--id', held.Q, '--json']))[0].status, 'answered');
@@ -271,6 +277,9 @@ test('turn authority', async (t) => {
       refused(['correct', D9, '--from-turn', U9, '--said', 'Ship it.'], /overlap what already settled/);
       F.sup(['correct', D9, '--from-turn', U9, '--said', 'Wrong.']);
       assert.deepEqual(set(D9).corrected.said_at, [0, 6]);
+      // the correction binds its clause for answers too, and the turn for a whole-turn answer (task-3 T3-1)
+      refused(answer(askAbout(T9, U9, 'Was it wrong?'), U9, 'Wrong.'), new RegExp(`overlap what already corrected ${D9}`));
+      refused(['answer', F.sup(['thread', 'ask', T9, ...q('Whole turn?')]), 'Yes', '--from-turn', U9], /already settled/);
       // A15: the act that carried a decision out; a standalone act from a turn, and another from chat
       const D2 = call('decision');
       const A = call('act', { decision: D2 });
@@ -328,7 +337,11 @@ test('turn authority', async (t) => {
       F.g(['add', '-A'], F.old);
       F.g(['commit', '-qm', 'a claude supervisor'], F.old);
       F.g(['push', '-q', 'origin', 'main'], F.old);
-      // the owner typed one of the two chat corrections (A18's), and never the lifted hold's words
+      // a decision corrected from chat, words the owner never typed (task-5 T5-1)
+      const Dc = 'd-20261118-000000099-supervisor';
+      F.hand('supervisor', { id: Dc, type: 'decision', class: 'release-scope', what: 'slip the import story', authority: 'rung', rung: 2 }, 600000);
+      F.sup(['correct', Dc, '--from-chat', '--said', 'pull the import story back in']);
+      // the owner typed one of the chat corrections (A18's), and never the lifted hold's words
       const dir = path.join(F.home, 'claude', 'projects', fs.realpathSync(F.old).replace(/[^a-zA-Z0-9]/g, '-'));
       const ts = new Date(Date.now() - 2 * 3600000).toISOString();
       const entry = (text) => `${JSON.stringify({ type: 'user', userType: 'external', timestamp: ts, message: { role: 'user', content: text } })}\n`;
@@ -336,11 +349,14 @@ test('turn authority', async (t) => {
       fs.writeFileSync(path.join(dir, 'session.jsonl'), entry('You are the supervisor for this repository.') + entry('ok: wrong call, roll it back'));
       const found = findings();
       const X = found.map((x) => x.subject);
-      assert.equal(found.length, 1, JSON.stringify(found));
-      assert.equal(logGet(X[0]).type, 'act', 'the standalone act corrected from chat');
-      assert.match(found[0].detail, /never again/);
+      assert.equal(found.length, 2, JSON.stringify(found));
+      assert.ok(X.includes(Dc), 'the decision corrected from chat, its subject the decision');
+      assert.match(found.find((x) => x.subject === Dc).detail, /pull the import story back in/);
+      const act = found.find((x) => x.subject !== Dc);
+      assert.equal(logGet(act.subject).type, 'act', 'the standalone act corrected from chat');
+      assert.match(act.detail, /never again/);
       assert.ok(!X.includes(held.Q), 'a hold lifted from a turn is checked against its turn');
-      fs.appendFileSync(path.join(dir, 'session.jsonl'), entry('and never again, please'));
+      fs.appendFileSync(path.join(dir, 'session.jsonl'), entry('and never again, please') + entry('no: pull the import story back in'));
       assert.deepEqual(findings(), [], 'typed, it clears');
     });
 
@@ -354,6 +370,29 @@ test('turn authority', async (t) => {
         assert.deepEqual(found.map((x) => x.subject).sort(), FAKE.unbound.map((x) => x.subject).sort(), JSON.stringify(found.map((x) => [x.subject, x.detail])));
         for (const { subject, why } of FAKE.unbound) assert.match(found.find((x) => x.subject === subject).detail, new RegExp(why), subject);
         assert.ok(found.every((x) => x.severity === 'medium'));
+        // as strict as the writers, beyond the fake (task-5 T5-2, T5-3): a correction dated before the
+        // turn it cites, and one on an act that carried out a decision
+        const at = (t) => `2026-01-10T${t}Z`;
+        const id = (p, t, by) => `${p}-20260110-${t.replace(/[:.]/g, '')}-${by}`;
+        const D0 = id('d', '12:00:00.000', 'supervisor');
+        const A0 = id('a', '12:01:00.000', 'supervisor');
+        const T0 = id('t', '12:02:00.000', 'owner');
+        const U0 = id('u', '12:02:00.001', 'owner');
+        const T1 = id('t', '12:03:00.000', 'owner');
+        const U1 = id('u', '12:10:00.000', 'owner');
+        writeLines([
+          { v: 1, id: D0, at: at('12:00:00.000'), by: 'supervisor', type: 'decision', class: 'release-scope', what: 'Slipped the sync story', authority: 'rung', op: 'new' },
+          { v: 1, id: A0, at: at('12:01:00.000'), by: 'supervisor', type: 'act', class: 'release-scope', what: 'Moved the sync story', decision: D0, op: 'new' },
+          { v: 1, id: T0, at: at('12:02:00.000'), by: 'owner', channel: 'cli', type: 'thread', title: 'Correct', subject: { kind: 'item', ref: `act:${A0}` }, op: 'new' },
+          { v: 1, id: U0, at: at('12:02:00.001'), by: 'owner', channel: 'cli', type: 'turn', thread: T0, text: 'No.', op: 'new' },
+          { v: 1, id: A0, at: at('12:02:30.000'), by: 'owner', channel: 'thread', type: 'act', corrected: { reason: 'No.', said: 'No.', said_at: [0, 3], turn: U0 }, op: 'set' },
+          { v: 1, id: T1, at: at('12:03:00.000'), by: 'owner', channel: 'cli', type: 'thread', title: 'Correct', subject: { kind: 'item', ref: `decision:${D0}` }, op: 'new' },
+          { v: 1, id: D0, at: at('12:05:00.000'), by: 'owner', channel: 'thread', type: 'decision', corrected: { reason: 'Bad.', said: 'Bad.', said_at: [0, 4], turn: U1 }, op: 'set' },
+          { v: 1, id: U1, at: at('12:10:00.000'), by: 'owner', channel: 'cli', type: 'turn', thread: T1, text: 'Bad.', op: 'new' },
+        ]);
+        const more = unbound();
+        assert.match(more.find((x) => x.subject === A0)?.detail ?? '', new RegExp(`carried out ${D0}`));
+        assert.match(more.find((x) => x.subject === D0)?.detail ?? '', /written after it/);
       } finally { F.restoreLog(snap); }
     });
   } finally { F.done(); }

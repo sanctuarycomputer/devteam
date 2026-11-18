@@ -7596,7 +7596,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -12119,6 +12119,7 @@ function cmdGoal() {
     const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
     const fromTurn = flags['from-turn'] !== undefined;
     // a goal is approved on its design, never on words said before it: the whole turn, newer than the question
+    if (fromTurn && flags['from-chat'] !== undefined) die('goal decide: --from-turn or --from-chat, not both');
     if (fromTurn && ['said', 'at', 'seen-turn'].some((k) => flags[k] !== undefined)) die('goal decide --from-turn takes the whole turn: a goal is approved on its design, so --said, --at and --seen-turn aren\'t accepted there');
     const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
     const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
@@ -12937,7 +12938,10 @@ function threadAnswersUnbound() {
     : !clauseBounds(u.text, at[0], at[1]) ? `binds part of a clause${what}, not whole clauses` : null);
   const overlapWhy = (l, uid, span) => { const b = boundBefore(l, uid).find((x) => spansOverlap(x.span, span)); return b ? `overlaps words of the turn that already bound ${b.id}` : null; };
   const turnWhy = (uid) => { const u = typeof uid === 'string' ? logGet(uid) : null; return u?.type !== 'turn' ? [null, `names no turn that exists (${uid ?? 'none'})`] : u.created_by !== 'owner' ? [u, "cites a turn that is the supervisor's, not the owner's"] : [u, null]; };
-  const newestOwnerTurn = (thread, at) => ownerTurnsIn(thread).filter((x) => x.created_at <= at).pop()?.id ?? null;
+  // the newest owner turn in the thread before the line, by the log's order (a turn in the same
+  // millisecond, appended after it, wasn't there to read)
+  const newestOwnerTurn = (thread, l) => sorted.filter((x) => x.type === 'turn' && x.op === 'new' && x.thread === thread && writerClass(x.by) === 'owner' && before(x, l)).pop()?.id ?? null;
+  const afterWhy = (u, l) => (u.created_at > l.at ? `cites a turn written after it (${u.id})` : null);
   const found = [];
   for (const l of sorted) {
     let why = null;
@@ -12946,8 +12950,8 @@ function threadAnswersUnbound() {
       const [u, w] = turnWhy(l.turn);
       why = w ?? (q?.thread !== u.thread ? 'cites a turn from another thread than the one the question was asked in'
         : q.about_turn !== u.id ? `answers a question asked about another turn (${q.about_turn ?? 'none'})`
-          : sliceWhy(u, l.said, l.said_at, '') ?? overlapWhy(l, u.id, l.said_at)
-            ?? (l.answer_seen !== newestOwnerTurn(u.thread, l.at) ? `gives answer_seen ${l.answer_seen ?? 'none'}, not the newest owner turn the answer should have read (${newestOwnerTurn(u.thread, l.at)})` : null));
+          : afterWhy(u, l) ?? sliceWhy(u, l.said, l.said_at, '') ?? overlapWhy(l, u.id, l.said_at)
+            ?? (l.answer_seen !== newestOwnerTurn(u.thread, l) ? `gives answer_seen ${l.answer_seen ?? 'none'}, not the newest owner turn the answer should have read (${newestOwnerTurn(u.thread, l)})` : null));
     } else if (l.type === 'question' && l.op === 'set' && l.channel === 'thread') {
       const q = logGet(l.id);
       const [u, w] = turnWhy(l.turn);
@@ -12965,14 +12969,15 @@ function threadAnswersUnbound() {
       const rem = asList(l.blocks).find((b) => String(b).startsWith('remediation:'));
       const no = !w && rem ? remediationAnswers(rem, asList(l.blocks).find((b) => String(b).startsWith('release:')) ?? null).filter((a) => !a.run && a.at < l.at).pop() : null;
       why = w ?? (u.thread !== l.thread ? 'lifts a hold with a turn from another thread than the question\'s'
-        : sliceWhy(u, l.owner_said, l.owner_said_at, ' to lift a hold')
+        : afterWhy(u, l) ?? sliceWhy(u, l.owner_said, l.owner_said_at, ' to lift a hold')
           ?? (no && !(u.created_at > no.at) ? `lifts a hold with a turn older than the no it lifts (the owner's, ${no.id})` : null));
     } else if (['decision', 'act'].includes(l.type) && l.op === 'set' && l.channel === 'thread' && isObj(l.corrected) && l.corrected.turn !== undefined) {
       const [u, w] = turnWhy(l.corrected.turn);
       const ref = w ? null : logGet(u.thread)?.subject?.ref ?? null;
       const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
       why = w ?? (ref !== `${l.type}:${l.id}` && !(via?.type === 'act' && via.decision === l.id) ? `corrects from a thread about another record (${ref ?? 'nothing in particular'})`
-        : sliceWhy(u, l.corrected.said, l.corrected.said_at, '') ?? overlapWhy(l, u.id, l.corrected.said_at));
+        : l.type === 'act' && logGet(l.id)?.decision ? `corrects an act that carried out ${logGet(l.id).decision}; the decision is what's corrected`
+          : afterWhy(u, l) ?? sliceWhy(u, l.corrected.said, l.corrected.said_at, '') ?? overlapWhy(l, u.id, l.corrected.said_at));
     }
     if (why) found.push({ id: l.id, why });
   }
