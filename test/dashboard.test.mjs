@@ -4470,7 +4470,8 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   await t.test('the recommended press is recorded once', async () => {
     await p.click(`#q-${GY.q} .choice.rec input[data-pick]`);
     await soon(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').checked`, 'the recommended choice picked');
-    assert.equal(await p.ev(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').value`), 'Approve');
+    // pressed as the owner presses it, whatever the recommended choice is called: before #337 it was
+    // "Yes", and the server refused the press ("missing or invalid fields", shown by this wait failing)
     await p.click(`#q-${GY.q} [data-answer]`);
     await onServer(async () => asked(GY.q).status === 'answered' && (await goalStatus(GY.g)) === 'ready', 'the approval recorded and the goal ready', GY.q);
     assert.equal(asked(GY.q).answer, 'Approve');
