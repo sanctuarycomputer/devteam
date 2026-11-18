@@ -909,6 +909,27 @@ test('goal peek and Upkeep peek', { ...CHROME, timeout: 300000 }, async (t) => {
   assert.equal(await p.ev(`document.querySelectorAll('#drawer-body select[data-impact]').length`), 0, 'no impact form on Upkeep\'s peek');
 });
 
+// A press on the panel's tabs that comes before a hashchange is routed (input first, under load) acts on the head in
+// force: after thGo's own entry (a card's ×) it acts on the new head, not the one before; after a fresh entry (a nav
+// link) it leaves the router to bring back the remembered panel (CI inbox-panel 4; final-4 F4-1).
+test('a tab press before the hashchange acts on the head in force', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-th-sync-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env } = goalsFixture(base, 'th-sync');
+  const { p, soon, go } = await openOn(later, root, env, { init: { data: DATA_PATCH(), hello: { pulse: pulseFixture() } } });
+  const TAB = (id) => `document.querySelector('#th-tabs [role="tab"][data-tab="${id}"]')`;
+  await go('#goals?th=open');
+  await soon(`TH.th === 'open' && !!${TAB('threads')} && JSON.parse(localStorage.getItem('devteam.threads.open') || 'null')?.th === 'open'`, 'the panel open on Threads, remembered');
+  // a fresh entry (a nav link), then a press in the same task: the panel stays as remembered, never closed or forgotten
+  await p.ev(`location.hash = '#overview'; ${TAB('threads')}.click(); void 0`);
+  await soon(`location.hash === '#overview?th=open' && TH.th === 'open' && !document.querySelector('#overview').hidden`, 'Overview with the remembered panel');
+  assert.equal(await p.ev(`JSON.parse(localStorage.getItem('devteam.threads.open') || 'null')?.th`), 'open', 'the remembered panel is kept');
+  // thGo's own entry, then a press in the same task: the press acts on th=inbox, so Threads is a change
+  await p.ev(`thGo({ th: 'inbox' }); ${TAB('threads')}.click(); void 0`);
+  await soon(`location.hash === '#overview?th=open' && TH.th === 'open'`, 'the press acted on the new head: back on Threads');
+});
+
 test('the Next chip', { ...CHROME, timeout: 300000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-next-chip-'));
   const later = cleanup(t);

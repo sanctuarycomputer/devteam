@@ -7366,12 +7366,15 @@ function thHead() {
   if (p.link === undefined) return headFor(p);
   return typeof history.state?.page === 'string' ? history.state.page : '#overview';
 }
-// TH as the page head in force has it. A head written (a card's ×: thGo's own new entry) or moved to (Back) is in force
-// at once, but routed only when its hashchange runs, a task later: a press in between (input comes first under load)
+// TH as the page head in force has it. A head thGo writes (a card's ×: a new entry) is in force at once, but routed
+// only when its hashchange runs, a task later: a press in between (input comes first under load)
 // would act on the entry before it, keeping, say, the t of a floating card just closed. Routed now, if so; the
 // hashchange's route then finds it done.
+// Only the entry thGo itself just wrote and the router hasn't routed yet (TH_FRESH, read on its popstate, says not
+// fresh; route clears it): any other new entry (a nav link, a typed head) is the router's to route first, as it reads
+// freshness and brings back the remembered panel (final-4 F4-1).
 function thSync() {
-  if (VIEWER) return;
+  if (VIEWER || !TH_FRESH || TH_FRESH.hash !== location.hash || TH_FRESH.fresh) return;
   const s = parseHead(thHead(), SHELL_ROUTES).state ?? {};
   if ((TH_LISTS.includes(s.th) ? s.th : null) !== TH.th || (typeof s.t === 'string' ? s.t : null) !== TH.t) thRoute();
 }
