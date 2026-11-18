@@ -41,12 +41,12 @@ test('terminal A6: supervisorPaneIn skips a tagged pane', () => {
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 export const SAME = { 'sec-fetch-site': 'same-origin' };
-// A request with exactly these headers (Host too: 127.0.0.1:<port> unless given).
-export function req(port, method, p, { headers = {}, body } = {}) {
-  const h = Object.keys(headers).some((k) => k.toLowerCase() === 'host') ? headers : { host: `127.0.0.1:${port}`, ...headers };
+// A request with exactly these headers (Host too: <to>:<port> unless given), to <to> (127.0.0.1).
+export function req(port, method, p, { headers = {}, body, to = '127.0.0.1' } = {}) {
+  const h = Object.keys(headers).some((k) => k.toLowerCase() === 'host') ? headers : { host: `${to}:${port}`, ...headers };
   const data = body === undefined ? null : Buffer.isBuffer(body) || typeof body === 'string' ? body : JSON.stringify(body);
   return new Promise((resolve, reject) => {
-    const r = http.request({ host: '127.0.0.1', port, method, path: p, headers: h, setHost: false }, (res) => {
+    const r = http.request({ host: to, port, method, path: p, headers: h, setHost: false }, (res) => {
       const parts = [];
       res.on('data', (b) => parts.push(b));
       res.on('end', () => { const text = Buffer.concat(parts).toString('utf8'); let j = null; try { j = JSON.parse(text); } catch {} resolve({ status: res.statusCode, headers: res.headers, text, json: j }); });
@@ -56,7 +56,7 @@ export function req(port, method, p, { headers = {}, body } = {}) {
     r.end(data ?? undefined);
   });
 }
-export const post = (port, p, body, extra = {}) => req(port, 'POST', p, { headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json', ...extra }, body: typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body) });
+export const post = (port, p, body, extra = {}, to = '127.0.0.1') => req(port, 'POST', p, { to, headers: { origin: `http://${to}:${port}`, 'content-type': 'application/json', ...extra }, body: typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body) });
 
 // The dashboard's tmux: logs each call's subcommands (never another argument) and its span, then runs
 // the lib's shim by its path (PATH's tmux is this). tmux-delay.json holds, tmux-fail.json fails, a
@@ -272,17 +272,18 @@ test('terminal A5b: screen and history are refused with their why before any pan
   // the routing happens before view: a View request to an unknown path is a 404 (§3 step 2)
   errorAnswer(await T.req(port, 'GET', '/api/term/x', { headers: { ...SAME, 'x-devteam-level': 'view' } }), 404, 'view on an unknown path');
   await dash.stop();
-  // a dashboard on another address: not-loopback, after view
-  const wide = await T.dashboard(['--host', '0.0.0.0']);
-  const wideHost = { host: `0.0.0.0:${wide.port}` };
+  // a dashboard on another address (127.0.0.2: loopback to the box, not to the routes, and never
+  // every interface as 0.0.0.0 would be): not-loopback, after view
+  const wide = await T.dashboard(['--host', '127.0.0.2']);
+  const at2 = { to: '127.0.0.2' };
   for (const p of reads) {
-    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, ...wideHost } }), 'not-loopback', `${p} on 0.0.0.0`);
-    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, host: `127.0.0.1:${wide.port}` } }), 'not-loopback', `${p} on 0.0.0.0, by 127.0.0.1`);
-    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { 'sec-fetch-site': 'cross-site', ...wideHost } }), 'not-loopback', `${p} on 0.0.0.0, not-loopback before cross-site`);
-    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, 'x-devteam-level': 'view', ...wideHost } }), 'view', `${p} on 0.0.0.0, view first`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { ...at2, headers: SAME }), 'not-loopback', `${p} on 127.0.0.2`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { ...at2, headers: { ...SAME, host: `127.0.0.1:${wide.port}` } }), 'not-loopback', `${p} on 127.0.0.2, by 127.0.0.1`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { ...at2, headers: { 'sec-fetch-site': 'cross-site' } }), 'not-loopback', `${p} on 127.0.0.2, not-loopback before cross-site`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { ...at2, headers: { ...SAME, 'x-devteam-level': 'view' } }), 'view', `${p} on 127.0.0.2, view first`);
   }
-  refusedWhy(await T.req(wide.port, 'GET', '/api/term/token', { headers: { ...SAME, ...wideHost } }), 'not-loopback', 'token on 0.0.0.0');
-  refusedWhy(await T.post(wide.port, '/api/term/shell/open', {}, { ...SAME, ...wideHost, origin: `http://0.0.0.0:${wide.port}` }), 'not-loopback', 'open on 0.0.0.0', true);
+  refusedWhy(await T.req(wide.port, 'GET', '/api/term/token', { ...at2, headers: SAME }), 'not-loopback', 'token on 127.0.0.2');
+  refusedWhy(await T.post(wide.port, '/api/term/shell/open', {}, SAME, '127.0.0.2'), 'not-loopback', 'open on 127.0.0.2', true);
   assert.equal(termReads(T), 0, 'no refused read reached the pane');
   assert.equal(T.oneCallReads() + T.historyReads(), 0);
 });
@@ -311,4 +312,287 @@ test('terminal A5: the token only to a same-origin read, and the same one each t
   assert.equal(six.json.token, a.json.token);
   const local = await T.req(port, 'GET', '/api/term/token', { headers: { ...SAME, host: `localhost:${port}` } });
   assert.equal(local.json.token, a.json.token);
+});
+
+// ---- the screen and history (terminal@1 §6, §7) ----
+// termLine alone, as the script has it
+const termLineFn = () => { const c = vm.createContext({}); vm.runInContext(`${fnSrc('termLine')}\nglobalThis.termLine = termLine;`, c); return c.termLine; };
+const READ_FAILED = { error: 'the terminal could not be read; try again' };
+const screenOf = async (T, port, which = 'supervisor', headers = {}) => { const r = await T.req(port, 'GET', `/api/term/${which}/screen`, { headers: { ...SAME, ...headers } }); return r; };
+const historyOf = (T, port, q, which = 'supervisor') => T.req(port, 'GET', `/api/term/${which}/history?${q}`, { headers: SAME });
+// until the screen's JSON passes f (the cache holds a read 100 ms)
+const screenUntil = async (T, port, f, what, which = 'supervisor') => {
+  let last;
+  try { await until(async () => { last = await screenOf(T, port, which); return last.status === 200 && f(last.json); }, what); } catch (e) { assert.fail(`${e.message}; the last screen: ${last?.status} ${last?.text}`); }
+  return last;
+};
+const tmuxOut = (T, args) => spawnSync('tmux', args, { env: T.env, encoding: 'utf8' }).stdout ?? '';
+// a line for the stand-in to print at once, with nothing after it (say adds its own lines)
+const sayRaw = (s, text) => { const t = path.join(s.dir, 'say.tmp'); fs.writeFileSync(t, text); fs.renameSync(t, path.join(s.dir, 'say')); };
+const GONE = { pane: null, state: 'gone', cols: 0, rows: 0, cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: { count: 0, oldest_ms: 0, prompt: 'readable' }, lines: [] };
+const isGone = (j, which = 'supervisor') => { const { etag, ...rest } = j ?? {}; assert.match(etag ?? '', /^[0-9a-f]{20}$/); assert.deepEqual(rest, { v: 1, which, ...GONE }); return true; };
+// tmux 3.3a ends a captured line with no reset; later ones may add one (0 or 39)
+const RED_LINE = /^\x1b\[31mred(?:\x1b\[(?:0|39)?m)?$/;
+const L53 = Array.from({ length: 53 }, (_, i) => `L${i}`);
+
+test('terminal A3: termLine keeps SGR and drops every other escape, C0 and DEL, and trailing spaces', () => {
+  const termLine = termLineFn();
+  assert.equal(termLine('a\x1b[1;31mb\x1b[0mc\x1b[m'), 'a\x1b[1;31mb\x1b[0mc\x1b[m', 'SGR kept');
+  assert.equal(termLine('a\x1b[38:5:1mb'), 'a\x1b[38:5:1mb', 'SGR with colons kept');
+  assert.equal(termLine('\x1b[?25lx\x1b[2Ky\x1b[1 qz'), 'xyz', 'CSI dropped, intermediates and all');
+  assert.equal(termLine('\x1b]8;;http://x\x07link\x1b]8;;\x07'), 'link', 'an OSC 8 link shows its text only');
+  assert.equal(termLine('a\x1b]8;;http://x\x1b\\b'), 'ab', 'an OSC to ESC \\');
+  assert.equal(termLine('a\x1b]0;title never ended'), 'a', 'an unterminated OSC to the line end');
+  assert.equal(termLine('a\x1bPq#0;2\x1b\\b\x1bXs\x07c\x1b^p\x07d\x1b_a\x07e'), 'abcde', 'DCS, SOS, PM, APC');
+  assert.equal(termLine('\x1b(Bx\x1b=y\x1b>z\x1b'), 'xyz', 'other escapes with their bytes, a lone ESC');
+  assert.equal(termLine('a\x07b\x7fc\x00d\x08e\tf'), 'abcdef', 'C0 and DEL');
+  assert.equal(termLine('a  \x1b[0m  '), 'a  \x1b[0m', 'trailing spaces');
+});
+
+test('terminal A3: the screen in one call, its etag and 304, history above it; no-store everywhere', async () => {
+  const T = termFixture('term-a3');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['plain', '\x1b[31mred\x1b[0m'] });
+  sayRaw(s, '\x1b[4;6H');
+  const { port } = await T.dashboard();
+  const check = (j, what) => {
+    assert.equal(j.v, 1, what);
+    assert.equal(j.which, 'supervisor', what);
+    assert.equal(j.pane, s.pane, what);
+    assert.equal(j.state, 'live', what);
+    const [w, h, cx, cy] = tmuxOut(T, ['display', '-p', '-t', s.pane, '#{pane_width} #{pane_height} #{cursor_x} #{cursor_y}']).trim().split(' ').map(Number);
+    assert.deepEqual([j.cols, j.rows], [w, h], `${what}: the size is tmux's`);
+    assert.deepEqual(j.cursor, { x: cx, y: cy, visible: true }, `${what}: the cursor is tmux's`);
+    assert.deepEqual(j.cursor, { x: 5, y: 3, visible: true }, what);
+    assert.deepEqual(j.modes, { app_cursor: false, app_keypad: false }, what);
+    assert.equal(typeof j.history_size, 'number', what);
+    assert.deepEqual(j.held, { count: 0, oldest_ms: 0, prompt: 'readable' }, what);
+    assert.equal(j.lines.length, j.rows, `${what}: exactly rows lines`);
+    assert.equal(j.lines[0], 'plain', what);
+    assert.match(j.lines[1], RED_LINE, `${what}: the red line, its SGR only`);
+    assert.ok(j.lines.slice(2).every((l) => l === ''), what);
+    assert.deepEqual(Object.keys(j), ['v', 'which', 'pane', 'state', 'cols', 'rows', 'cursor', 'modes', 'history_size', 'held', 'lines', 'etag'], `${what}: nothing else, raw not sent`);
+    assert.match(j.etag, /^[0-9a-f]{20}$/, what);
+  };
+  const a = await screenUntil(T, port, (j) => j.cursor.y === 3, 'the cursor moved');
+  check(a.json, 'the screen');
+  assert.equal(a.headers['cache-control'], 'no-store');
+  assert.match(a.headers['content-type'], JSON_TYPE);
+  assert.equal(a.headers.etag, `"${a.json.etag}"`, 'the ETag header is the quoted etag');
+  const b = await screenOf(T, port, 'supervisor', { 'if-none-match': `"${a.json.etag}"` });
+  assert.equal(b.status, 304, b.text);
+  assert.equal(b.text, '', 'a 304 has no body');
+  assert.equal(b.headers.etag, `"${a.json.etag}"`);
+  assert.equal(b.headers['cache-control'], 'no-store');
+  for (const inm of [`W/"${a.json.etag}"`, a.json.etag, `"${a.json.etag}", "x"`, '"0"']) {
+    const c = await screenOf(T, port, 'supervisor', { 'if-none-match': inm });
+    assert.equal(c.status, 200, `If-None-Match ${inm}`);
+    assert.equal(c.json.etag, a.json.etag, 'the same screen, the same etag');
+  }
+  // the shell isn't open: gone, as an answer
+  const sh = await screenOf(T, port, 'shell');
+  assert.equal(sh.status, 200, sh.text);
+  isGone(sh.json, 'shell');
+  // the global refusals and a route's refusal carry no-store too (S2-4)
+  for (const r of [await screenOf(T, port, 'supervisor', { 'x-devteam-relay': '1' }), await screenOf(T, port, 'supervisor', { host: `evil.test:${port}` }), await historyOf(T, port, 'before=x&count=1')]) assert.equal(r.headers['cache-control'], 'no-store', r.text);
+  // history: a stand-in with more lines than the screen holds; the three just above it
+  const h = T.standIn({ lines: L53 });
+  const sc = await screenUntil(T, port, (j) => j.pane === h.pane && j.lines.includes('L52'), 'the second stand-in');
+  const hs = sc.json.history_size;
+  assert.ok(hs >= 3, `history_size ${hs}`);
+  const hr = await historyOf(T, port, `before=${hs}&count=3`);
+  assert.equal(hr.status, 200, hr.text);
+  assert.equal(hr.headers['cache-control'], 'no-store');
+  const direct = tmuxOut(T, ['capture-pane', '-p', '-S', '-3', '-E', '-1', '-t', h.pane]).split('\n').slice(0, 3).map((l) => l.trimEnd());
+  assert.deepEqual(direct, ['L27', 'L28', 'L29'], 'tmux itself');
+  assert.deepEqual(hr.json, { v: 1, which: 'supervisor', pane: h.pane, before: hs, history_size: hs, lines: direct });
+  h.kill();
+  s.kill();
+});
+
+test('terminal A3: a C locale still parses (tmux -u)', async () => {
+  const T = termFixture('term-a3c');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['plain', '\x1b[31mred\x1b[0m'] });
+  const { port } = await T.dashboard([], { LC_ALL: 'C', LANG: 'C', LC_CTYPE: 'C' });
+  const a = await screenUntil(T, port, (j) => j.lines[1]?.includes('red'), 'the red line');
+  assert.equal(a.json.state, 'live');
+  assert.equal(a.json.pane, s.pane);
+  assert.ok(a.json.cols > 0 && a.json.rows > 0, a.text);
+  assert.equal(a.json.lines.length, a.json.rows);
+  assert.equal(a.json.lines[0], 'plain');
+  assert.match(a.json.lines[1], RED_LINE);
+  s.kill();
+});
+
+test('terminal A5d: history by absolute line, its offsets exact, its range refused', async () => {
+  const T = termFixture('term-a5d');
+  after(() => T.done());
+  const s = T.standIn({ lines: L53 });
+  const { port } = await T.dashboard();
+  const sc = await screenUntil(T, port, (j) => j.lines.includes('L52'), 'the stand-in\'s lines');
+  assert.equal(sc.json.rows, 24);
+  assert.equal(sc.json.history_size, 30, sc.text);
+  assert.deepEqual(sc.json.lines.slice(0, 23), L53.slice(30), 'the screen is L30 to L52');
+  assert.equal(sc.json.lines[23], '', 'and the cursor row');
+  const hs = sc.json.history_size;
+  const lines = async (q) => { const r = await historyOf(T, port, q); assert.equal(r.status, 200, `${q}: ${r.text}`); assert.equal(r.json.history_size, hs); assert.equal(r.json.pane, s.pane); return r.json.lines; };
+  assert.deepEqual(await lines('before=20&count=5'), ['L15', 'L16', 'L17', 'L18', 'L19']);
+  assert.deepEqual(await lines(`before=${hs}&count=1`), ['L29'], 'the line just above the screen');
+  assert.deepEqual(await lines('before=3&count=10'), ['L0', 'L1', 'L2'], 'fewer when fewer exist');
+  assert.deepEqual(await lines(`before=${hs}&count=500`), L53.slice(0, 30));
+  const before = T.historyReads();
+  const zero = await historyOf(T, port, 'before=0&count=5');
+  assert.equal(zero.status, 200, zero.text);
+  assert.deepEqual(zero.json, { v: 1, which: 'supervisor', pane: s.pane, before: 0, history_size: hs, lines: [] });
+  assert.equal(T.historyReads(), before, 'before=0 reads no history');
+  for (const q of [`before=${hs + 1}&count=1`, 'before=-1&count=1', 'before=1&count=0', 'before=1&count=501', 'before=1.5&count=1', 'count=1', 'before=1']) errorAnswer(await historyOf(T, port, q), 400, q);
+  // gone: before=0 answers, anything else is 400
+  s.kill();
+  await screenUntil(T, port, (j) => j.state === 'gone', 'the pane gone');
+  const g = await historyOf(T, port, 'before=0&count=5');
+  assert.equal(g.status, 200, g.text);
+  assert.deepEqual(g.json, { v: 1, which: 'supervisor', pane: null, before: 0, history_size: 0, lines: [] });
+  errorAnswer(await historyOf(T, port, 'before=1&count=5'), 400, 'gone, before=1');
+  const sh = await historyOf(T, port, 'before=0&count=1', 'shell');
+  assert.deepEqual(sh.json, { v: 1, which: 'shell', pane: null, before: 0, history_size: 0, lines: [] });
+});
+
+test('terminal A5c: modes from tmux; history count 1 to 500', async () => {
+  const T = termFixture('term-a5c-modes');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['modes'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.lines[0] === 'modes' && !j.modes.app_cursor && !j.modes.app_keypad, 'modes off');
+  await s.say('\x1b[?1h\x1b=on');
+  await screenUntil(T, port, (j) => j.modes.app_cursor && j.modes.app_keypad, 'both modes on');
+  await s.say('\x1b[?1l\x1b>off');
+  await screenUntil(T, port, (j) => !j.modes.app_cursor && !j.modes.app_keypad, 'both modes off again');
+  errorAnswer(await historyOf(T, port, 'before=0&count=501'), 400, 'count=501');
+  const ok = await historyOf(T, port, 'before=0&count=500');
+  assert.equal(ok.status, 200, ok.text);
+  assert.ok(String(await s.received()) === '', 'nothing typed');
+  s.kill();
+});
+
+test('terminal A6: the screen reads gone for a killed pane, a shell prompt, a foreign pane', async () => {
+  const T = termFixture('term-a6-gone');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A6 stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  await s.exit();
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone at a shell prompt')).json);
+  s.kill();
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone when killed')).json);
+  // a pane started outside the root, its id noted: foreign when the record names another server
+  const made = spawnSync('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', `=${T.session}:`, '-n', 'far', '-c', T.F.base, process.execPath, '-e', 'setInterval(() => {}, 1000)'], { env: T.env, encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  const far = made.stdout.trim();
+  await until(() => tmuxOut(T, ['display', '-p', '-t', far, '#{pane_current_command}']).trim() === 'node', 'node in the far pane');
+  const run = path.join(T.root, 'docs/devteam/run');
+  write(path.join(run, 'supervisor-pane'), `${far}\n`);
+  write(path.join(run, 'supervisor-pane-role'), `${far}\n`);
+  write(path.join(run, 'supervisor-up.json'), JSON.stringify({ up: true, kind: 'tmux', pane: far, server: '1' }));
+  await pause(150);
+  const g = await screenOf(T, port);
+  assert.equal(g.status, 200, g.text);
+  isGone(g.json);
+  // the same pane, the record naming this server: it is the supervisor's (so the gone was the pid)
+  const pid = tmuxOut(T, ['display', '-p', '#{pid}']).trim();
+  write(path.join(run, 'supervisor-up.json'), JSON.stringify({ up: true, kind: 'tmux', pane: far, server: pid }));
+  assert.equal((await screenUntil(T, port, (j) => j.state === 'live', 'live on its own server')).json.pane, far);
+  // with no server recorded, a pane outside the root is foreign
+  fs.rmSync(path.join(run, 'supervisor-up.json'));
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone with no record')).json);
+  // a tagged pane is never the supervisor's
+  write(path.join(run, 'supervisor-up.json'), JSON.stringify({ up: true, kind: 'tmux', pane: far, server: pid }));
+  await screenUntil(T, port, (j) => j.state === 'live', 'live again');
+  assert.equal(spawnSync('tmux', ['set-option', '-p', '-t', far, '@devteam-shell', T.root], { env: T.env }).status, 0);
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone when tagged')).json);
+});
+
+test('terminal A8: twenty screen GETs share one read; a failed read is 500, a missing pane gone; a slow read blocks nothing', async () => {
+  const T = termFixture('term-a8');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A8 stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live', 'live');
+  await pause(150);
+  T.clearCalls();
+  const all = await Promise.all(Array.from({ length: 20 }, () => screenOf(T, port)));
+  for (const r of all) assert.equal(r.status, 200, r.text);
+  assert.equal(new Set(all.map((r) => r.json.etag)).size, 1);
+  assert.ok(T.oneCallReads() <= 1, `${T.oneCallReads()} one-call reads`);
+  // tmux failing: 500, never gone, and nothing cached
+  const fail = path.join(T.F.base, 'tmux-fail.json');
+  write(fail, JSON.stringify({ 'display+capture-pane': 'server exited unexpectedly' }));
+  await pause(150);
+  const f = await screenOf(T, port);
+  assert.equal(f.status, 500, f.text);
+  assert.deepEqual(f.json, READ_FAILED);
+  assert.equal(f.headers['cache-control'], 'no-store');
+  const fh = await historyOf(T, port, 'before=1&count=1');
+  assert.equal(fh.status, 500, fh.text);
+  assert.deepEqual(fh.json, READ_FAILED);
+  write(fail, JSON.stringify({ 'display+capture-pane': "can't find pane: %9" }));
+  const g = await screenOf(T, port);
+  assert.equal(g.status, 200, g.text);
+  isGone(g.json);
+  fs.rmSync(fail);
+  await pause(150);
+  assert.equal((await screenOf(T, port)).json.state, 'live');
+  // a held read: the dashboard answers meanwhile
+  write(path.join(T.F.base, 'tmux-delay.json'), JSON.stringify({ 'display+capture-pane': 3000 }));
+  await pause(150);
+  let done = false;
+  const slow = screenOf(T, port).then((r) => { done = true; return r; });
+  await pause(200);
+  const t0 = Date.now();
+  const hello = await T.req(port, 'GET', '/api/hello');
+  assert.equal(hello.status, 200);
+  assert.ok(Date.now() - t0 < 1000, `hello took ${Date.now() - t0} ms`);
+  assert.equal(done, false, 'the screen read was still in flight');
+  assert.equal((await slow).status, 200);
+  s.kill();
+});
+
+// A POST streaming `total` bytes in 64 KB chunks: cut is true when the server cut it off (the
+// request errors, or its socket is destroyed) before the whole body was written; a server that
+// drains it all lets it finish, or keeps reading past the 30 s given. Kept alive, as a browser's
+// is: a closing connection would end with the answer whatever the server drained.
+const streamPost = (port, p, total, headers = {}) => new Promise((resolve) => {
+  let wrote = 0, settled = false;
+  const finish = (cut) => { if (!settled) { settled = true; clearTimeout(cap); r.destroy(); resolve({ wrote, cut }); } };
+  const cap = setTimeout(() => finish(false), 30000);
+  const r = http.request({ host: '127.0.0.1', port, method: 'POST', path: p, setHost: false, headers: { host: `127.0.0.1:${port}`, connection: 'keep-alive', 'content-type': 'application/json', 'content-length': String(total), ...headers } }, (res) => res.resume());
+  r.on('error', () => finish(wrote < total));
+  r.on('finish', () => finish(false));
+  const chunk = Buffer.alloc(65536, 0x20);
+  const pump = () => { while (wrote < total) { if (r.destroyed) return finish(true); wrote += chunk.length; if (!r.write(chunk)) return void r.once('drain', pump); } r.end(); };
+  pump();
+});
+
+test('terminal A5b: a refusal before the body drains at most 4 x CAP; a client gone mid-body is logged as gone', async () => {
+  const T = termFixture('term-a5b-body');
+  after(() => T.done());
+  const { port } = await T.dashboard();
+  const total = 16 * 1024 * 1024;
+  // a 404, a 405, a refusal with a why, the content type, and the global relay refusal
+  for (const [p, h] of [['/api/term/x', {}], ['/api/term/supervisor/screen', {}], ['/api/term/supervisor/keys', {}], ['/api/term/supervisor/keys', { ...SAME, origin: `http://127.0.0.1:${port}`, 'content-type': 'text/plain' }], ['/api/term/supervisor/keys', { 'x-devteam-relay': '1' }]]) {
+    const { wrote, cut } = await streamPost(port, p, total, h);
+    assert.ok(cut, `${p} ${JSON.stringify(h)}: not cut off (${wrote} bytes written)`);
+  }
+  // a body begun and abandoned: the client went, not a body over the cap
+  const tok = (await T.req(port, 'GET', '/api/term/token', { headers: SAME })).json.token;
+  await new Promise((resolve) => {
+    const r = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/term/supervisor/keys', setHost: false, headers: { host: `127.0.0.1:${port}`, origin: `http://127.0.0.1:${port}`, ...SAME, 'content-type': 'application/json', 'content-length': '1000' } });
+    r.on('error', () => {});
+    r.write(`{"token":"${tok}",`);
+    setTimeout(() => { r.destroy(); setTimeout(resolve, 300); }, 300);
+  });
+  const log = path.join(T.root, 'docs/devteam/run/dashboard.log');
+  await until(() => /refused \/api\/term\/supervisor\/keys: the client went before its body ended/.test(fs.readFileSync(log, 'utf8')), 'the abort logged');
+  assert.doesNotMatch(fs.readFileSync(log, 'utf8'), /far over the cap/);
+  assert.equal((await T.req(port, 'GET', '/api/term/token', { headers: SAME })).status, 200, 'the dashboard still answers');
 });

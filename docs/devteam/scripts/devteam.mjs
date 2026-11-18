@@ -16658,7 +16658,21 @@ const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, 
 // What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
 const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
 const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
-const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste' };
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again' };
+// A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
+const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
+// The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
+const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
+// tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
+const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
+// A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
+// BEL or ESC \ or the line's end, so an OSC 8 link's URL never shows) and any other escape dropped
+// (with its intermediates, so ESC ( B goes whole); then C0 and DEL; then trailing spaces.
+function termLine(s) {
+  return s.replace(/\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g, (m, sgr) => (sgr === undefined ? '' : m))
+    // every ESC left opens a kept SGR
+    .replace(/[\x00-\x1a\x1c-\x1f\x7f]/g, '').replace(/ +$/, '');
+}
 // The /api/term/* routes, for cmdDashboard: `port` a getter (the dashboard re-picks its port when the
 // first is taken), `host` its bind address, `log` its own output (a refusal's reason, never a body).
 function termRoutes({ port, host, log }) {
@@ -16674,6 +16688,107 @@ function termRoutes({ port, host, log }) {
   // every terminal route's gateway nonces: each once, pruned after twice the window
   const nonces = new Map();
   const json = (res, status, obj, extra = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra }); res.end(JSON.stringify(obj)); };
+  // Every tmux call: async (no request blocks the server), -u (a C locale prints a format's tab as _; P1).
+  const tmuxCall = (args, input = null) => new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile('tmux', ['-u', ...args], { encoding: 'utf8', timeout: TERM.TMUX_MS, maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => {
+        const timedOut = !!e?.killed;
+        resolve({ ok: !e, out: out ?? '', err: err ?? '', timedOut, missing: !!e && !timedOut && typeof e.code === 'number' && TERM_MISSING.test(err ?? '') });
+      });
+    } catch (e) { return resolve({ ok: false, out: '', err: String(e?.message ?? e), timedOut: false, missing: false }); }
+    child.stdin.on('error', () => {});
+    child.stdin.end(typeof input === 'string' ? input : undefined);
+  });
+  const root = realPath(mainRoot);
+  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display line, by field name (a tab in the start path stays in it)
+  const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
+  // the supervisor's: the marked pane only, as an id (S11)
+  const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
+  // the Shell's: remembered, else the lowest-numbered pane of this session tagged with this root, not the marked one
+  let shellPane = null;
+  async function paneOf(which) {
+    if (which === 'supervisor') return marked();
+    if (shellPane) return shellPane;
+    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{@devteam-shell}']);
+    if (!got.ok) return null;
+    const m = marked();
+    const ids = got.out.split('\n').map((l) => l.split('\t')).filter(([id, tag]) => /^%\d+$/.test(id) && tag === root && id !== m).map(([id]) => id);
+    return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
+  }
+  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  const withEtag = (s, raw) => {
+    const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
+    // raw, the read's fields, for the keys route's 423s and 409s: never sent
+    return Object.defineProperty({ ...s, etag }, 'raw', { value: raw, enumerable: false });
+  };
+  const gone = (which, raw = null) => withEtag({ v: 1, which, pane: null, state: 'gone', cols: 0, rows: 0, cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: held(), lines: [] }, raw);
+  // Why the read pane isn't the route's, or null. Supervisor: resolvePane's checks, the tag, and a
+  // noted id from another server (S1); shell: its tag, session, and never the marked pane.
+  const notOurs = (which, f) => {
+    if (f.pane_dead === '1') return 'dead';
+    if (which === 'shell') return f['@devteam-shell'] !== root || f.session_name !== session || f.pane_id === marked() ? 'moved' : null;
+    if (SHELLS.has(f.pane_current_command.replace(/^-/, ''))) return 'shell';
+    if (f['@devteam-shell']) return 'tagged';
+    const rec = supervisorUpRecord();
+    return (rec?.server ? String(rec.server) !== f.pid : realPath(f.pane_start_path) !== root) ? 'foreign' : null;
+  };
+  // One call: display first, so its line is the first, then capture's rows (S16).
+  async function readNow(which, again = true) {
+    const P = await paneOf(which);
+    if (!P) return gone(which, { pane: null, why: 'none' });
+    const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
+    if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const out = got.ok ? got.out.split('\n') : [];
+    const f = got.ok ? fieldsOf(out[0]) : null;
+    // a display line that didn't parse is a failed read, never a screen
+    if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
+    const why = f ? notOurs(which, f) : 'missing';
+    // the Shell's pane moved or went: forget it, and look once more
+    if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    if (why) return gone(which, { pane: P, why, fields: f });
+    const rows = Number(f.pane_height);
+    const lines = out.slice(1, 1 + rows).map(termLine);
+    while (lines.length < rows) lines.push('');
+    return withEtag({
+      v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
+      cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
+      modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
+      history_size: Number(f.history_size), held: held(), lines,
+    }, { pane: P, why: null, fields: f });
+  }
+  // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
+  // generation, so a read begun before the send never fills the cache after it (S12); a failed read
+  // is never cached.
+  const screens = { supervisor: { gen: 0, at: 0, val: null, flight: null }, shell: { gen: 0, at: 0, val: null, flight: null } };
+  function readScreen(which, { fresh = false } = {}) {
+    const c = screens[which];
+    if (!fresh && c.val && Date.now() - c.at < cacheMs) return Promise.resolve(c.val);
+    if (!fresh && c.flight) return c.flight;
+    const gen = c.gen;
+    const p = readNow(which).then((s) => { if (c.gen === gen && !s.error) { c.val = s; c.at = Date.now(); } return s; })
+      .finally(() => { if (c.flight === p) c.flight = null; });
+    c.flight = p;
+    return p;
+  }
+  const voidScreen = (which) => { const c = screens[which]; c.gen++; c.val = null; c.flight = null; };
+  // History (§7): lines max(0, n - k) to n - 1, by offsets from history_size, with history_size read
+  // after them in the same call; read once more if it moved.
+  async function readHistory(P, n, k, hs) {
+    for (let again = true; ; again = false) {
+      const a = Math.max(0, n - k), b = n - 1;
+      const got = await tmuxCall(['capture-pane', '-e', '-p', '-S', String(a - hs), '-E', String(b - hs), '-t', P, ';', 'display', '-p', '-t', P, '#{history_size}']);
+      if (!got.ok) return got.missing ? { gone: true } : { error: TERM_WORDS.read };
+      const out = got.out.split('\n');
+      if (out.at(-1) === '') out.pop();
+      const now = Number(out.pop());
+      if (now === hs || !again || !Number.isInteger(now)) return { lines: out.map(termLine), hs };
+      if (n > now) return { range: true };
+      hs = now;
+    }
+  }
   function route(pathname) {
     if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
     if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
@@ -16689,17 +16804,18 @@ function termRoutes({ port, host, log }) {
     if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
     return site === 'same-origin' && req.headers.origin === `http://${req.headers.host}` ? null : 'cross-site';
   }
-  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP cut off.
+  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP
+  // cut off. A client that goes first (a destroyed slow body) settles it too, as gone.
   const readBody = (req) => new Promise((resolve) => {
     const chunks = [];
     let n = 0;
     req.on('data', (c) => {
       n += c.length;
-      if (n > 4 * TERM.CAP) { chunks.length = 0; req.destroy(); return resolve(null); }
+      if (n > 4 * TERM.CAP) { chunks.length = 0; resolve({ cut: true }); return req.destroy(); }
       if (n <= TERM.CAP) chunks.push(c); else chunks.length = 0;
     });
     req.on('end', () => resolve(n > TERM.CAP ? { over: true } : { body: Buffer.concat(chunks) }));
-    req.on('error', () => resolve(null));
+    for (const ev of ['error', 'aborted', 'close']) req.on(ev, () => resolve({ gone: true }));
   });
   const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
   const PAGE = /^[A-Za-z0-9_-]{16,64}$/;
@@ -16733,7 +16849,7 @@ function termRoutes({ port, host, log }) {
   async function serve(req, res, u) {
     const at = u.pathname.slice('/api/term/'.length);
     // a refusal: its reason to the dashboard's output, never a body
-    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); if (!req.complete) req.resume(); return json(res, status, obj); };
+    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); termDrain(req); return json(res, status, obj); };
     const r = route(u.pathname);
     if (!r) return no(404, { error: 'not found' });
     if (req.method !== r.method) return no(405, { error: 'not this method' });
@@ -16741,15 +16857,34 @@ function termRoutes({ port, host, log }) {
     if (why) return no(403, r.method === 'GET' ? { why } : { error: TERM_WORDS.page, why });
     if (r.name === 'token') return json(res, 200, { token: termToken() });
     if (r.name === 'history') {
-      // the shape (§7); before's top, history_size, is the read's (T3)
+      // the shape (§7); before's top, history_size, is the screen read's
       const before = u.searchParams.get('before'), count = u.searchParams.get('count');
       if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
+      const n = Number(before), k = Number(count);
+      const s = await readScreen(r.which);
+      if (s.error) return no(500, { error: s.error });
+      const answer = (pane, hs, lines) => json(res, 200, { v: 1, which: r.which, pane, before: n, history_size: hs, lines });
+      // before=0: nothing above it, no history call, live or gone (S8)
+      if (n === 0) return answer(s.pane, s.history_size, []);
+      if (s.state === 'gone' || n > s.history_size) return no(400, { error: 'before is past the screen\'s top' });
+      const h = await readHistory(s.pane, n, k, s.history_size);
+      if (h.error) return no(500, { error: h.error });
+      if (h.gone) { voidScreen(r.which); return no(400, { error: 'the pane is gone' }); }
+      if (h.range) return no(400, { error: 'before is past the screen\'s top' });
+      return answer(s.pane, h.hs, h.lines);
     }
-    if (r.method === 'GET') return json(res, 501, { error: 'not yet' });
+    if (r.name === 'screen') {
+      const s = await readScreen(r.which);
+      if (s.error) return no(500, { error: s.error });
+      const etag = `"${s.etag}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'cache-control': 'no-store', etag }); return res.end(); }
+      return json(res, 200, s, { etag });
+    }
     // the two POSTs, §3 steps 4 to 10
     if (!jsonType(req.headers['content-type'])) return no(403, { error: TERM_WORDS.page }, 'not application/json');
     const got = await readBody(req);
-    if (got === null) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.cut) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.gone) return void log(`refused /api/term/${at}: the client went before its body ended`);
     if (got.over) return no(413, { error: TERM_WORDS.big }, 'a body over the cap');
     let b;
     try { b = JSON.parse(got.body.toString('utf8')); } catch { return no(400, { error: TERM_WORDS.shape }, 'not JSON'); }
@@ -17308,7 +17443,7 @@ async function cmdDashboard() {
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
     const isTerm = req.url.startsWith('/api/term/');
-    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); req.resume(); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
     if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
     if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
