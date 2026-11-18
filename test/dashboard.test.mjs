@@ -4688,6 +4688,16 @@ test('kit watch: a press whose command is still typing holds the restart', { ski
   await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the nudge');
 });
 
+test('kit watch: supervisor.md says the dashboard restarts itself', () => {
+  const doc = fs.readFileSync(path.join(kit, 'process', 'supervisor.md'), 'utf8');
+  const s11 = doc.slice(doc.indexOf('\n## 11.'), doc.indexOf('\n## 12.'));
+  const bullet = s11.split('\n').find((l) => l.startsWith('- The dashboard:'));
+  assert.ok(bullet, "§11's dashboard bullet");
+  assert.match(bullet, /restarts itself when its kit/);
+  assert.match(bullet, /DEVTEAM_DASHBOARD_RESTART/);
+  assert.match(bullet, /no manual restart after a sync/i);
+});
+
 // tmux, in the test lib's own server only (its TMUX_TMPDIR shim): never the box's, never kill-server.
 const kwTmux = (args) => { const r = spawnSync('tmux', args, { encoding: 'utf8', env: process.env, timeout: 20000 }); return { status: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() }; };
 const kwSq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
@@ -4767,7 +4777,7 @@ test('kit watch: a plain dashboard, or one told off, stays and says so', { skip:
   const d = await loopedDashboard(G, gp, { DEVTEAM_DASHBOARD_RESTART: 'off' });
   const first = d.starts()[0].pid;
   kitB(G);
-  await until(() => /runs older code than its files \(DEVTEAM_DASHBOARD_RESTART=off\)/.test(d.log()), 'the stale code said, off');
+  await until(() => /runs older code than its files;.*\(DEVTEAM_DASHBOARD_RESTART=off\)/.test(d.log()), 'the stale code said, off');
   await kwSleep(1000);
   assert.ok(kwAlive(first) && !d.starts().some((x) => x.line.includes('started (kit B)')), 'it stays on its code');
 });

@@ -17653,16 +17653,28 @@ async function cmdDashboard() {
     const how = kitHandOver();
     const to = await newKit();
     const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
-    if (how.how === 'stay' || how.how === 'respawn') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why ?? 'not its own tmux pane'})`);
+    if (how.how === 'stay') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why})`);
     restarting = true;
     draining = true;
     log(`restarting: ${changed}; waiting for ${inFlight.size} open requests and ${liveChildren.size} running commands`);
     stopTimers();
     hubHandle?.close();
+    hubHandle = null;
     for (const name of [...relays.keys()]) relayClose(name);
     server.close();
     await drained();
-    process.exit(0);
+    if (how.how === 'exit') process.exit(0);
+    // its own pane: tmux runs the pane's command again (and hangs this process up as it does). A
+    // respawn that fails leaves it serving its old code, said once, tried again on a new print.
+    const failed = await new Promise((resolve) => execFile('tmux', ['respawn-pane', '-k', '-t', how.pane], { timeout: 10000 }, (err, _o, se) => resolve(err ? String(se || err.message).trim().split('\n')[0] : null)));
+    if (failed === null) process.exit(0);
+    log(`could not respawn its tmux pane ${how.pane}: ${failed}; staying on ${startKit ?? 'unknown'}`);
+    said.add(key);
+    draining = false;
+    restarting = false;
+    server.listen(port, host);
+    startTimers();
+    startHubOnce();
   };
   const watchTick = () => {
     if (checking || restarting) return;
