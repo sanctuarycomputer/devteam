@@ -198,6 +198,10 @@ exit 0
       "channel": null,
       "said": null,
       "turn": null,
+      "answer_seen": null,
+      "about_turn": null,
+      "seen": null,
+      "owner_said_turn": null,
       "review": null,
       "result": null,
       "declined": null,
@@ -2111,6 +2115,28 @@ exit 0
       "set": false,
       "default": "",
       "owner_only": "gate-change"
+    },
+    {
+      "key": "worktree_copy",
+      "group": "Agents and sessions",
+      "name": "Installed folders copied into new worktrees",
+      "description": "folders copied from the main checkout into a new session or chore worktree whose lockfile matches",
+      "shown": "count",
+      "value": 0,
+      "set": false,
+      "default": 0,
+      "owner_only": null
+    },
+    {
+      "key": "worktree_setup_always",
+      "group": "Agents and sessions",
+      "name": "Always run worktree setup",
+      "description": "run worktree_setup on every session start, even when nothing it installs from changed",
+      "shown": "value",
+      "value": false,
+      "set": false,
+      "default": false,
+      "owner_only": null
     },
     {
       "key": "worktree_files",

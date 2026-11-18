@@ -62,12 +62,27 @@ test("the viewer's box, its narrowing for the panel, and the frames that fill a 
     // #pin-right is placed from the frame's right edge, so it moved 380px left when the panel opened: a pin drawn
     // from a rect the page said before the narrowing misses it. (#pin-me, from the left edge, didn't move.)
     const where = (id) => V.soon(`!!${CENTRE(id)}`, `setup: the page on the stage says where #${id} is`).then(() => p.ev(CENTRE(id)));
+    // The page's own word on #pin-right is for the narrowed frame: its centre at the frame's content right edge
+    // less 380px (right: 320px, 120px wide). A wait: when the frame's box first reads steady, the page can still
+    // be telling its place in the wide frame (kit-305 spec-1 S1).
+    const NARROWED = `(() => { const c = ${CENTRE('pin-right')}, f = tsFrame(), r = f.getBoundingClientRect(); return c && { said: c.x, want: r.left + f.clientLeft + f.clientWidth - 380 }; })()`;
+    await V.soon(`(() => { const n = ${NARROWED}; return !!n && Math.abs(n.said - n.want) <= 2; })()`, 'the page in the frame says where #pin-right is in the narrowed frame').catch(async (e) => {
+      const n = await p.ev(NARROWED);
+      assert.fail(`#pin-right's centre as the page says it, ${n?.said}, is the narrowed frame's right edge less 380px, ${n?.want}: ${e.message}`);
+    });
+    // Each pin follows the lens's word on its anchor, redrawn on the next animation frame (or the panel's slide
+    // ending), so it can lag the page's own word by a frame: a wait until it is within 40px, then the check
+    // with what was read then (kit-305: a single read here failed on CI with TR's pin still where the wide
+    // frame put it).
+    const PIN = (sel) => `(() => { const e = document.querySelector(${J(sel)}); if (!e) return null; const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`;
     for (const [th, name, id] of [[TA, 'TA', 'pin-me'], [TR, 'TR', 'pin-right']]) {
       const pinSel = `#av-pins [data-tl-pin="${th}"]`;
       await V.soon(`(() => { const e = document.querySelector(${J(pinSel)}); return !!e && e.getBoundingClientRect().width > 0; })()`, `setup: ${name}'s pin drawn on the stage`);
-      const at = await where(id);
-      const pin = await p.ev(`(() => { const r = document.querySelector(${J(pinSel)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
-      assert.ok(near(pin, at, 40), `${name}'s pin ${J(pin)} is within 40px of #${id}'s centre ${J(at)}`);
+      await where(id);
+      await V.soon(`(() => { const a = ${CENTRE(id)}, q = ${PIN(pinSel)}; return !!a && !!q && Math.hypot(a.x - q.x, a.y - q.y) <= 40; })()`, `${name}'s pin within 40px of #${id}'s centre`).catch(async (e) => {
+        const at = await p.ev(CENTRE(id)), pin = await p.ev(PIN(pinSel));
+        assert.ok(pin && at && near(pin, at, 40), `${name}'s pin ${J(pin)} is within 40px of #${id}'s centre ${J(at)}: ${e.message}`);
+      });
     }
 
     // a real Shift+click on #other-right (placed from the frame's right edge; the frame has the keyboard first,
