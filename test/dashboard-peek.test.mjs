@@ -545,7 +545,9 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
     await closePeek();
     // the peek's close lands on the page it was opened over, not on an entry the viewer's frame left
-    // (kit-303): a reload then shows the board, with no peek
+    // (kit-303): a reload then shows the board, with no peek. closePeek waits for the slide out, not for the
+    // history.go it started, so the hash is read after the same settle as the history checks
+    await new Promise((r) => setTimeout(r, 400));
     assert.equal(await p.ev('location.hash'), '#board', 'the peek closed to #board');
     await p.ev('window.__beforeReload = true');
     await p.send('Page.reload');
@@ -594,6 +596,8 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   await t.test('the top-right button stays reachable beside the peek', async () => {
+    // a fresh visit: a kit-303 case that failed partway leaves no viewer or peek here
+    await load('#board');
     const m = () => p.ev(`(() => { ${SEEN}
       const tt = document.querySelector('.pagebar .tt'), tp = document.getElementById('tt-peek'), d = document.getElementById('drawer');
       const r = tp?.getBoundingClientRect(), tr = tt.getBoundingClientRect(), dr = d.getBoundingClientRect();
