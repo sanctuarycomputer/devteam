@@ -21421,8 +21421,8 @@ const RECURRING_ENTRY_SHAPE = Object.freeze({
   }),
 });
 // What is wrong with one job, each problem naming the entry and field ("settings recurring.<name>.<field>: …"),
-// empty when it holds. It reads no log and no other setting (but sensor_scrub, through scrubText,
-// whose markers it counts too), so any reader can check any entry.
+// empty when it holds. It reads no log and no other setting but sensor_scrub (a run its patterns
+// would scrub is refused), so any reader can check any entry.
 function recurringEntryProblems(name, entry) {
   const R = RECURRING_ENTRY_SHAPE;
   const UNITS = Object.keys(R.every_max); // h, d, w, mo: shortest first
@@ -21467,19 +21467,14 @@ function recurringEntryProblems(name, entry) {
     const r = entry.run;
     if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
     else {
-      // every marker the scrubber can write: any bracketed word (the built-ins, an owner's "[ACME]"), and
-      // each owner sensor_scrub "as" in whatever form it takes; counted, so a typed one hides nothing
-      const owned = (loadSettings().sensor_scrub ?? []).map((p) => (isObj(p) && p.as !== undefined ? String(p.as) : null)).filter((x) => x && !/^\[[^[\]\s]{1,60}\]$/.test(x));
-      const count = (t) => {
-        const c = new Map();
-        const add = (x, n = 1) => c.set(x, (c.get(x) ?? 0) + n);
-        for (const x of t.match(/\[[^[\]\s]{1,60}\]/g) ?? []) add(x);
-        for (const o of owned) add(o, t.split(o).length - 1);
-        return c;
-      };
+      // what the built-in rules hide shows as a bracketed marker, counted before and after, so one
+      // typed in the command hides nothing; what an owner's sensor_scrub pattern would hide is refused
+      // whenever the pattern matches at all, whatever it writes in its place ("", "$1", "[ip]")
+      const count = (t) => { const c = new Map(); for (const x of t.match(/\[[^[\]\s]{1,60}\]/g) ?? []) c.set(x, (c.get(x) ?? 0) + 1); return c; };
       const refs = r.replace(REF, '[var]');
       const before = count(refs);
       const hidden = [...count(scrubText(refs))].filter(([x, n]) => n > (before.get(x) ?? 0) && !SCRUB_ALLOWED.includes(x)).map(([x]) => x);
+      if (scrubExtra().some(([re]) => new RegExp(re.source, re.flags.replace('g', '')).test(refs))) hidden.push('sensor_scrub');
       if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.length) bad('run', `it carries a credential${hidden.length ? ` (${hidden.join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
     }
   }

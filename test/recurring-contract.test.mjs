@@ -182,11 +182,11 @@ test('validate refuses each case, naming the entry and field', () => {
 test('a run the owner\'s own scrub patterns would hide is refused, whatever their marker', () => {
   const dir = project('recur-scrub');
   withSettings(dir, {
-    sensor_scrub: [{ pattern: 'ACME-[0-9a-z]{8}', as: '[ACME]' }, { pattern: 'ZED-[0-9]{4}', as: '[acme_id]' }, { pattern: 'QQ-[0-9]{4}', as: 'HIDDEN' }, 'PLAIN-[0-9]{4}'],
+    sensor_scrub: [{ pattern: 'ACME-[0-9a-z]{8}', as: '[ACME]' }, { pattern: 'ZED-[0-9]{4}', as: '[acme_id]' }, { pattern: 'QQ-[0-9]{4}', as: 'HIDDEN' }, 'PLAIN-[0-9]{4}', { pattern: 'GONE-[0-9]{4}', as: '' }, { pattern: 'KEEP-([0-9]{2})[0-9]{2}', as: 'KEEP-$1..' }, { pattern: 'LOC-[0-9]{4}', as: '[ip]' }],
     recurring: { 'safe-one': check({ run: 'curl https://example.com/ACME' }) },
   });
   assert.equal(validate(dir).status, 0, 'a run with no match passes');
-  for (const [name, run] of [['acme', 'tool --id ACME-1234abcd'], ['zed', 'tool --id ZED-1234'], ['qq', 'tool --id QQ-1234'], ['plain', 'tool --id PLAIN-1234']]) {
+  for (const [name, run] of [['acme', 'tool --id ACME-1234abcd'], ['zed', 'tool --id ZED-1234'], ['qq', 'tool --id QQ-1234'], ['plain', 'tool --id PLAIN-1234'], ['gone', 'tool --id GONE-1234'], ['keep', 'tool --id KEEP-1234'], ['loc', 'tool --id LOC-1234']]) {
     withSettings(dir, { recurring: { [name]: check({ run }) } });
     const r = validate(dir);
     assert.equal(r.status, 1, `${name}: ${r.out}`);
