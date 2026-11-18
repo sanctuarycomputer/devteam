@@ -14577,14 +14577,16 @@ function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return super
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
 function supervisorPaneIn(repo, noted, rec, { notedOnly = false, strict = false } = {}) {
-  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
+  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}\t#{@devteam-shell}']);
   if (listed === null) return null;
   if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
   const root = realPath(repo);
   const server = tmuxServerPid();
   let other = null;
   for (const l of listed.split('\n').filter(Boolean)) {
-    const [id, win, start, cmd] = l.split('\t');
+    const [id, win, start, cmd, tag] = l.split('\t');
+    // a pane tagged @devteam-shell is a terminal's own shell, never the supervisor unless noted as it
+    if (tag && id !== noted) continue;
     if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
     const at = realPath(start);
     if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
