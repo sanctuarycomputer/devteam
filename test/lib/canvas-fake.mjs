@@ -62,6 +62,7 @@ export const LIMITS = Object.freeze({
   openCanvases: 20,
   perServer: 200,
   selectIds: 100,
+  refusedMemory: 1000, // refused seqs remembered within this of a client's highest seq seen
   pingMs: 20000,
   unansweredPings: 2,
   savedMs: 500,
@@ -84,7 +85,7 @@ export const LIMIT_ANSWERS = Object.freeze({
   figmaChars: 'refused value', propNameChars: 'refused value', tokenSegmentChars: 'refused value',
   pageMsgBytes: 'close 1008', pageFrames: 'close 1008', editOpsBytes: 'refused limit', serverMsgBytes: 'split; one op over: 409 limit',
   serverFrameBytes: 'fragmented', perSecond: 'close 1008', perPerson: 'close 1008', perCanvas: 'close 1008', openCanvases: 'close 1008',
-  perServer: 'close 1008', selectIds: 'ignored', pingMs: 'window: ping', unansweredPings: 'close 1001', savedMs: 'window: saved',
+  perServer: 'close 1008', selectIds: 'ignored', refusedMemory: 're-acked', pingMs: 'window: ping', unansweredPings: 'close 1001', savedMs: 'window: saved',
   selectionsMs: 'window: selections', imageBytes: '413', imageBodyBytes: '413', localBodyBytes: '413', importBodyBytes: '413',
   byChars: '400', noteAnchorChars: 'not an anchor',
 });
@@ -1040,6 +1041,39 @@ export function applyEdit(doc, ops, { images = null, folderBytes = 0, level = 'f
   const errs = docErrors(d, { images, folderBytes });
   if (errs.length) return no(errs[0].code);
   return { doc: d, why: null };
+}
+
+// ---- the edit bookkeeping of one session: applied and refused seqs per client ----
+
+// One per session (a new session starts a new book). `judge(client, seq)`: 'new' (judge it), 'reack'
+// (at or below the highest applied, not a refusal it remembers: ack again with ops []), or
+// { refused: why } (a seq it refused: refuse it again, same why, never re-ack). `record(client, seq, why)`
+// after judging a new edit: why null when applied. Refused seqs are remembered while within
+// LIMITS.refusedMemory of the client's highest seq seen, so the book stays bounded.
+export function makeSeqBook() {
+  const clients = new Map();
+  const of = (client) => {
+    if (!clients.has(client)) clients.set(client, { applied: 0, seen: 0, refused: new Map() });
+    return clients.get(client);
+  };
+  return {
+    judge(client, seq) {
+      const c = clients.get(client);
+      if (!c) return 'new';
+      if (c.refused.has(seq)) return { refused: c.refused.get(seq) };
+      return seq <= c.applied ? 'reack' : 'new';
+    },
+    record(client, seq, why) {
+      const c = of(client);
+      if (why === null) {
+        if (seq > c.applied) c.applied = seq;
+        c.refused.delete(seq);
+      } else c.refused.set(seq, why);
+      if (seq > c.seen) c.seen = seq;
+      for (const s of c.refused.keys()) if (s < c.seen - LIMITS.refusedMemory) c.refused.delete(s);
+    },
+    highest: (client) => (clients.has(client) ? clients.get(client).applied : 0),
+  };
 }
 
 // ---- resolve: an instance's tree, five levels ----

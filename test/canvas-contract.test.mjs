@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import {
   TYPES, PROPS, CLASSES, TOKEN_TYPES, DOC_RULES, OPS, PAGE_KINDS, SERVER_KINDS, HTTP_KINDS, REFUSALS, ROUTES, LIMITS, LIMIT_ANSWERS, RANGES,
   NODE_ID_RE, SLUG_RE, CLIENT_RE, SESSION_RE, BY_RE, IMAGE_FILE_RE, HOSTILE_MARKERS, PAUSE_WHYS, CLOSE_WHYS,
-  docErrors, opErrors, applyEdit, resolve, shapeErrors, freeTexts, skipProblems, measureProblems, SKIP_CASES, MEASURE_CASES,
+  docErrors, opErrors, applyEdit, resolve, makeSeqBook, shapeErrors, freeTexts, skipProblems, measureProblems, SKIP_CASES, MEASURE_CASES,
 } from './lib/canvas-fake.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -685,6 +685,37 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     applied(base, [{ op: 'token', path: 'type.huge', value: { $type: 'typography', $value: { fontFamily: 'mono', fontSize: { value: 2000, unit: 'px' }, fontWeight: 900, letterSpacing: { value: -2, unit: 'px' }, lineHeight: 1 } } }]);
   });
 
+  await t.test('rules: the seq book remembers refusals', () => {
+    const b = makeSeqBook();
+    assert.equal(b.judge(CLIENT, 5), 'new');
+    b.record(CLIENT, 5, 'missing');
+    assert.equal(b.judge(CLIENT, 6), 'new');
+    b.record(CLIENT, 6, null);
+    // the refused for 5 and the ack for 6 are lost in a drop; the page resends both
+    assert.deepEqual(b.judge(CLIENT, 5), { refused: 'missing' }, 'resend 5: refused again, same why');
+    assert.equal(b.judge(CLIENT, 6), 'reack', 'resend 6: re-acked');
+    assert.equal(b.judge(CLIENT, 4), 'reack', 'a seq never seen below the highest applied: re-acked');
+    assert.equal(b.judge(CLIENT, 7), 'new');
+    assert.equal(b.judge('zzzzzzzzzzzzzzzz', 5), 'new', 'per client');
+    assert.equal(b.highest(CLIENT), 6);
+    // a refusal above the highest applied is remembered too
+    b.record(CLIENT, 8, 'value');
+    assert.deepEqual(b.judge(CLIENT, 8), { refused: 'value' });
+    // remembered while within refusedMemory of the highest seq seen; forgotten beyond it
+    b.record(CLIENT, 5 + LIMITS.refusedMemory, null);
+    assert.deepEqual(b.judge(CLIENT, 5), { refused: 'missing' }, 'exactly refusedMemory below: remembered');
+    b.record(CLIENT, 6 + LIMITS.refusedMemory, null);
+    assert.equal(b.judge(CLIENT, 5), 'reack', 'more than refusedMemory below: forgotten, re-acked');
+    assert.deepEqual(b.judge(CLIENT, 8), { refused: 'value' }, 'still within: remembered');
+    // bounded: many refusals keep at most refusedMemory + 1
+    const c = makeSeqBook();
+    for (let s = 1; s <= 3 * LIMITS.refusedMemory; s++) c.record(CLIENT, s, 'value');
+    let kept = 0;
+    for (let s = 1; s <= 3 * LIMITS.refusedMemory; s++) if (typeof c.judge(CLIENT, s) === 'object') kept++;
+    assert.equal(kept, LIMITS.refusedMemory + 1, 'the book is bounded');
+    assert.deepEqual(makeSeqBook().judge(CLIENT, 5), 'new', 'a new session remembers nothing');
+  });
+
   await t.test('rules: ids that name prototype keys are ids like any other', () => {
     const base = small();
     // an override keyed __proto__ is not a descendant: ref, and nothing reaches Object.prototype
@@ -991,7 +1022,10 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'whether or not that `seq` itself was applied',
       "A refused edit doesn't raise the client's highest `seq`.",
       'the page drops its local copy of the refused edit by reloading the document and reapplying its other unacked edits over it, says why in plain words, and never resends an edit it saw refused',
-      'is re-acked as if applied if resent',
+      'An `edit` whose `seq` is one it remembers refusing is answered `refused` again with the same `why`, to that connection only, and never re-acked',
+      "it keeps the seqs it refused that are within 1000 of the client's highest seq seen (`refusedMemory`)",
+      'A refused `seq` more than 1000 below the highest seen is forgotten and, at or below the highest applied, re-acked.',
+      'A new session (a restart, a `reload`) starts with nothing remembered.',
       'An `edit` whose `client` or `seq` breaks its rule is a message a page must not send: the connection is closed 1008.',
       'a longer list or a bad id and the whole `select` is ignored; ids that name no node are dropped',
       'their latest `select` from any of their connections (empty until one), in the order they first connected',
