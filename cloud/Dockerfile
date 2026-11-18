@@ -7,10 +7,11 @@
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
 # at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
 # pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
-# (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default). The old port names and public. are gone,
-# and nothing redirects them. The wildcard certificate covers every project host: no DNS record or
-# certificate to add. Name a project with `project` in its settings.md: a DNS label of a-z, 0-9 and -,
-# not all digits, not term, public or www, unique on the box. The terminal has its own host
+# (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default). Older releases' addresses (a port number
+# or public. in front of the box's name) no longer answer, and nothing redirects them. The wildcard
+# certificate covers every project host: no DNS record or certificate to add. A project's host is its
+# name, `project` in its settings.md (else its folder's name): a DNS label of a-z, 0-9 and -, not all
+# digits, not term, public or www, unique on the box. The terminal has its own host
 # (term.box.example.com). Signing in is at box.example.com/auth.
 # A session's running dev server gets a name of its own under the same wildcard, cool-tiger.box.example.com,
 # behind the owner's session; box.example.com/dev/ lists them. DEVTEAM_PREVIEWS=1 says this image's
