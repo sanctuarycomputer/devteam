@@ -540,6 +540,16 @@ test('org-access A9: a person adds a passkey to their own methods, never the own
     assert.deepEqual(t.passkeys.map((p) => [p.id, p.name]), [[u(owner.id), t.passkeys[0].name], [u(o2.id), 'passkey 2']]);
     assert.equal(t.peopleStamp, stampOf([u(owner.id), u(o2.id)]));
     assert.deepEqual(ownerOf(t)[0].methods, []);
+    // today's passkeys page lists the signed-in person's own: Ana's for her, the owner's for them
+    const anaPage = (await gw.req('GET', '/auth/passkeys', { cookie: c2 })).body;
+    for (const x of rowOf(t, anaRow.id).methods) assert.ok(anaPage.includes(`data-id="${x.id}"`), `her ${x.label}`);
+    for (const p of t.passkeys) assert.ok(!anaPage.includes(p.id), 'none of the owner\'s');
+    const ownerPage = (await gw.req('GET', '/auth/passkeys', { cookie: oc })).body;
+    for (const p of t.passkeys) assert.ok(ownerPage.includes(`data-id="${p.id}"`));
+    for (const x of rowOf(t, anaRow.id).methods) assert.ok(!ownerPage.includes(x.id) && !ownerPage.includes(x.key), 'none of Ana\'s');
+    // and the owner's remove restamps in the same write
+    assert.equal((await gw.req('POST', '/auth/method/remove', { cookie: oc, body: { id: u(o2.id) } })).status, 200);
+    assert.equal(gw.state().peopleStamp, stampOf([u(owner.id)]), 'the stamp of what is left');
   } finally { await gw.close(); }
 });
 
