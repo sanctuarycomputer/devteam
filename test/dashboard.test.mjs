@@ -4447,10 +4447,13 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     // the next goal press reaches the real server with a verdict it doesn't take, as a page older
     // than its server could send one
     await p.ev(`(() => { const f0 = window.fetch; window.__badVerdict = true; window.fetch = (u, o) => { if (window.__badVerdict && String(u) === '/api/goal-decide') { window.__badVerdict = false; o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), verdict: 'yes' }) }; } return f0(u, o); }; })(); void 0`);
-    await p.click(`#q-${GR.q} input[data-pick][value="Refine"]`);
-    await p.click(`#q-${GR.q} textarea[data-q]`);
-    await soon(`document.activeElement === ${card(GR.q)}.querySelector('textarea[data-q]')`, 'the note focused');
-    await p.type('a smaller measure');
+    // the pick, the note's focus and the typing in one still step: no read redraws the card under them
+    await still(async () => {
+      await p.click(`#q-${GR.q} input[data-pick][value="Refine"]`);
+      await p.click(`#q-${GR.q} textarea[data-q]`);
+      await soon(`document.activeElement === ${card(GR.q)}.querySelector('textarea[data-q]')`, 'the note focused');
+      await p.type('a smaller measure');
+    });
     await soon(`${card(GR.q)}.querySelector('textarea[data-q]').value === 'a smaller measure'`, 'the note typed');
     await p.click(`#q-${GR.q} [data-answer]`);
     await soon(`!!${card(GR.q)}?.querySelector('[data-refused]')`, 'the refusal, on the card');
@@ -4465,6 +4468,12 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     assert.equal(asked(GR.q).answer, 'Refine — a smaller measure');
     assert.equal(decided(GR.g, 'refine'), 1, 'one decision');
     assert.equal(answers(GR.q), 1, 'one answer');
+  });
+
+  await t.test("any other press's refusal of a body the server can't read is said plainly too", async () => {
+    // the goal's own Let go and Restore post goal-decide as well: their refusal names no Approve or Refine
+    const said = await p.ev(`(async () => { const s = document.createElement('span'); s.id = 'e-plain-probe'; document.body.append(s); await press('plain-probe', { build: () => ({ action: 'goal-decide', body: { id: '${GR.g}', verdict: 'nonsense' } }), errId: 'plain-probe' }); const t = s.textContent; s.remove(); return t; })()`);
+    assert.equal(said, "Not saved: the server didn't take what this page sent, and nothing was recorded. Reload the page and try again.");
   });
 
   await t.test('the recommended press is recorded once', async () => {
