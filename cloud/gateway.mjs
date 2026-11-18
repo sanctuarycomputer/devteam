@@ -573,7 +573,7 @@ export const PREVIEW_LENS = String.raw`<!doctype html>
   const onKey = (e) => {
     if (e.key !== 'Shift' && e.key !== 'Escape') return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
   const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
