@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>App</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  #to-second { position: absolute; display: block; box-sizing: border-box; left: 40px; top: 40px; width: 160px; height: 32px; }
+</style></head>
+<body>
+<a id="to-second" href="/second">To the second page</a>
+<script>
+// The app is framed by its lens, which fills the stage's frame: a rect in this window is one in that frame.
+const rects = () => { const r = document.getElementById('to-second').getBoundingClientRect(); return { 'to-second': { x: r.left, y: r.top, w: r.width, h: r.height } }; };
+const say = () => top.postMessage({ own: 'at', page: 'app' + location.pathname, hash: location.hash, rects: rects() }, '*');
+// (and again once drawn, and on a resize: a frame laid out before the stage had its size says 0x0)
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+</script>
+</body></html>

@@ -706,7 +706,7 @@ try {
   .sink-cmd pre { background: var(--well); padding: 6px 8px; border-radius: 6px; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
   .md figure.diagram { margin: 12px 0; padding: 12px; background: var(--well); border-radius: 8px; overflow-x: auto; }
   .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-  .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  div.viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
 
@@ -792,8 +792,10 @@ try {
   .lib-link .links { margin: 0; }
   .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
 
-  /* the artifact viewer: a page the fleet drew, centered over the scrim at 80% of the window */
-  #artifact-view:not([hidden]) { position: fixed; inset: 10%; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
+     clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
+     round under 600px, below) */
+  #artifact-view:not([hidden]) { position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
   .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
@@ -808,7 +810,7 @@ try {
   #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
-  @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
@@ -5337,9 +5339,29 @@ async function renderMermaid(root) {
 let AV = null;
 // set by the question link that opens it, read once: the header's "Changed since this question was asked"
 let AV_NOTE = null;
-// a viewer opened from the dashboard closes back to it; one opened from a link goes to the Library
+// a viewer opened from the dashboard closes back to it; one opened from a link goes to the page its stamp names
 let AV_FROM = false;
 let avFocus = null;
+// The frame's own moves add entries to the joint history, so a close by history.back() after one only steps the
+// frame back (kit-141): AV_NAVS counts them since the viewer opened, AV_RET is the head it was opened over (the
+// router's LAST_HEAD then), and AV_LOADS each frame element's loads of a src.
+let AV_NAVS = 0, AV_RET = null;
+// Set once a frame Escape has closed the viewer (kit-141 final-1 F1): the frame's Escapes then close nothing
+// until the next route, the viewer's opening or the stage frame's next load, so a page that posts a burst
+// of them walks the tab back at most once. Only the frame's Escape: X, the scrim and the dashboard's own
+// Escape are never held, so a close that routes nothing (a back that only steps the frame) can't lock it.
+let AV_FRAME_ESC = false;
+const AV_LOADS = new WeakMap();
+// A frame of its own for each page set on it: a new frame's first load replaces its about:blank and adds no
+// entry, where a second src on the same frame adds one. Its load is listened for once it is in the document,
+// so the about:blank load of its insertion is never heard.
+function avFreshFrame(id) {
+  const old = $(id), f = old.cloneNode(false);
+  f.removeAttribute('src');
+  old.replaceWith(f);
+  f.addEventListener('load', avFrameLoad);
+  return f;
+}
 function avHeader() {
   const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
   $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
@@ -5388,7 +5410,7 @@ function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp =
   $('pv-frame').hidden = true;
   $('pv-frame').removeAttribute('src');
   $('av-frame').hidden = false;
-  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
+  if ($('av-frame').getAttribute('src') !== src) avFreshFrame('av-frame').src = src;
   $('artifact-view').hidden = false;
   avHint();
 }
@@ -5437,9 +5459,9 @@ function showPreview(name, info) {
   tsBar();
   $('av-frame').hidden = true;
   $('av-frame').removeAttribute('src');
-  const f = $('pv-frame');
-  f.hidden = !info?.lens;
   const src = info?.lens ? `${info.lens}?${new URLSearchParams({ route: '/' })}` : null;
+  const f = src && $('pv-frame').getAttribute('src') !== src ? avFreshFrame('pv-frame') : $('pv-frame');
+  f.hidden = !info?.lens;
   if (!src) f.removeAttribute('src');
   else if (f.getAttribute('src') !== src) f.src = src;
   $('artifact-view').hidden = false;
@@ -5460,11 +5482,13 @@ async function openPreview(raw) {
   let name = null;
   try { name = decodeURIComponent(raw); } catch {}
   if (!/^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/.test(name ?? '')) return void (location.hash = '#library');
+  // whether the router had routed before this one, read before the await: the router sets it as soon as this returns
+  const routed = ROUTED;
   const info = await previewInfo(name);
   // the owner went elsewhere while it was asked
   if (location.hash !== `#preview/${raw}`) return;
-  // where the stage was opened from, taken now: the await above is long enough for focus and the route to move
-  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
+  // the focus it was opened from, taken now: the await above is long enough for it to move
+  if (!AV) { AV_FROM = routed; avFocus = document.activeElement; }
   showPreview(name, info);
   $('scrim').hidden = false;
   document.body.classList.add('overlay-open');
@@ -5505,9 +5529,9 @@ function closeArtifact() {
   tsSet(null);
   tsPins();
   $('artifact-view').hidden = true;
-  $('av-frame').removeAttribute('src');
-  $('pv-frame').removeAttribute('src');
-  $('pv-frame').hidden = true;
+  // both frames let go of, with their history: the next page shown gets a new one
+  avFreshFrame('av-frame');
+  avFreshFrame('pv-frame').hidden = true;
   // a drawer or a review it was opened over stays, with its scrim
   if (!RV) document.body.classList.remove('overlay-open');
   document.body.classList.remove('av-open');
@@ -5515,14 +5539,41 @@ function closeArtifact() {
   avFocus?.focus?.();
   return true;
 }
-// a viewer tab has nothing to go back to: it never closes. Back to the entry below, which has its own head: the
-// panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5)
+// After a frame move, where the close lands, in place of the viewer's entry: over a page, that page as it was
+// with the panel's th and t as they are now (the carry's rule); over a peek, the peek, over the page its stamp
+// names (kept current while the viewer was up), depth 1. Never goHead (its stamp is from the viewer's own) nor a
+// cold stampFor (a ticket peek would go over #board, without th).
+function avReturn() {
+  const now = history.state?.page || '#library', r = parseHead(AV_RET || '#library', SHELL_ROUTES);
+  if (r.link !== undefined) return { head: AV_RET, stamp: { page: now, depth: 1, openedHere: false } };
+  const c = parseHead(now, SHELL_ROUTES), s = { ...r.state };
+  delete s.th;
+  delete s.t;
+  if (c.link === undefined && c.state.th !== undefined) s.th = c.state.th;
+  if (c.link === undefined && c.state.t !== undefined) s.t = c.state.t;
+  const head = headFor({ page: r.page, state: s });
+  return { head, stamp: { page: head, depth: 0, openedHere: false } };
+}
+// a viewer tab has nothing to go back to: it never closes. Its first route (a cold link, a reload) has nothing
+// of this visit's below it: the page its stamp names, in place. Unmoved, back to the entry below, which has its
+// own head: the panel's th and t from under the viewer go with it, as from under a peek (kit-89 spec §2.5). Once
+// the frame has moved, back would only move the frame: its entry is replaced by the head it was opened over. A
+// thread's card (#talk/) routed again would open the viewer again, moved or not: the page under the card.
 function leaveArtifact() {
-  if (VIEWER) return;
-  if (!AV_FROM) return void (location.hash = '#library');
-  TH_CARRY = history.state?.page ?? null;
-  TH_CARRY_FROM = location.hash;
-  history.back();
+  if (VIEWER || !AV) return;
+  if (!AV_FROM || AV_RET?.startsWith('#talk/')) {
+    const page = history.state?.page || '#library';
+    history.replaceState({ page, depth: 0, openedHere: false }, '', page);
+    return void route();
+  }
+  if (AV_NAVS === 0) {
+    TH_CARRY = history.state?.page ?? null;
+    TH_CARRY_FROM = location.hash;
+    return void history.back();
+  }
+  const { head, stamp } = avReturn();
+  history.replaceState(stamp, '', head);
+  route();
 }
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => {
@@ -5591,7 +5642,10 @@ let ROUTE_N = 0;
 // before its stamp ({ hash, fresh }); TH_CARRY: the page head under a peek being closed by going back
 // TH_CARRY_FROM: the peek's hash it was taken on (a history move that stays on it carries nothing)
 let TH_MADE = null, TH_FRESH = null, TH_CARRY = null, TH_CARRY_FROM = null;
+// LAST_HEAD: the last head routed that isn't the viewer's own (kit-141), what a viewer routed next is opened over
+let LAST_HEAD = null;
 function route() {
+  AV_FRAME_ESC = false;
   thFreshness();
   const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
   TH_FRESH = null;
@@ -5601,6 +5655,8 @@ function route() {
   routeHead({ fresh, carry });
   if (n !== ROUTE_N) return;
   thRoute();
+  // the head a viewer opened next is over, as it stands once routed (after a redirect's or the panel's replace)
+  if (!/^#(artifact|preview)\//.test(location.hash)) LAST_HEAD = location.hash;
 }
 function routeHead({ fresh = false, carry = null } = {}) {
   stampEntry();
@@ -5613,8 +5669,9 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // a link opens over the page in its stamp: the one it was clicked on, or on a cold load its kind's home
   if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
-  if (raw.startsWith('preview/')) { openPreview(raw.slice(8)); ROUTED = true; return; }
-  if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
+  // (a viewer opening takes the head it is over, and counts the frame's moves from none)
+  if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
+  if (raw.startsWith('artifact/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openArtifact(raw); ROUTED = true; return; }
   closeArtifact();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
@@ -5630,7 +5687,8 @@ function routeHead({ fresh = false, carry = null } = {}) {
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
   // (at once: the card replaces the peek, with no slide)
-  if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); return void tlRoute(h.slice(5)); }
+  // (its own head first: a card on a framed page opens the viewer before this route ends)
+  if (h.startsWith('talk/')) { hideDrawer(); peekHide({ now: true }); LAST_HEAD = location.hash; return void tlRoute(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
@@ -5659,6 +5717,8 @@ document.addEventListener('keydown', (e) => {
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
   // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
   if (!AV && !RV && inboxTyping(document.activeElement)) return;
+  // a floating card over the viewer closes first; the next Escape closes the viewer (kit-141 spec §Approach 7)
+  if (AV && tlFloating()) return void tlClose();
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
@@ -6475,7 +6535,8 @@ function tLensMessage(e, frameWin, minted) {
   }
   // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
-  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
+  // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
   return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x.replace(T_UNSAFE, '')), T_ERROR_MAX)) };
@@ -6532,6 +6593,9 @@ const layerField = tlOwn;
 // a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
 const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
+// A thread's card open floating (beside its pin, or a draft), not the panel's in-panel thread: an Escape
+// over the viewer closes it before the viewer (kit-141 spec §Approach 7).
+const tlFloating = () => !tlEl('tl-card').hidden && !tlEl('tl-card').classList.contains('in-panel');
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
   const sec = el?.closest?.('main > section[id]');
@@ -8017,8 +8081,19 @@ function tsDrawSoon() {
   requestAnimationFrame(() => { TS.pinsPending = false; tsBar(); tlDraw(); });
 }
 // Each page the stage's frame loads is asked what it is: its lens answers ready. The other frame's
-// loads (one let go of) are nothing to the stage.
-for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', (e) => { if (e.target !== tsFrame()) return; tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
+// loads (one let go of) are nothing to the stage. Every load of a src after the frame's first is a move of the
+// frame's own (a link in it, the Reload button), counted for the close.
+function avFrameLoad(e) {
+  if (e.target !== tsFrame()) return;
+  if (e.target.hasAttribute('src')) {
+    const n = (AV_LOADS.get(e.target) ?? 0) + 1;
+    AV_LOADS.set(e.target, n);
+    if (n > 1) AV_NAVS++;
+  }
+  AV_FRAME_ESC = false;
+  tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' });
+}
+for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', avFrameLoad);
 window.addEventListener('message', (e) => {
   if (!TS.kind) return;
   // a preview's lens has an origin of its own: only messages from it (an artifact's is opaque, 'null')
@@ -8027,10 +8102,11 @@ window.addEventListener('message', (e) => {
   if (!m) return;
   // a preview's app went to another route (its lens says so, or says ready on the next page): what is
   // pinned there is another set. Taken as often as it comes, drawn once a frame, so a page saying
-  // routes as fast as it can costs a comparison each.
+  // routes as fast as it can costs a comparison each. A route after the first ready is the app's own move, an
+  // entry in the history, counted for the close (one before it, a redirect while it loads, adds none).
   if (TS.kind === 'preview' && (m.type === 'route' || m.type === 'ready')) {
     if (m.type === 'ready' && m.viewport) TS.viewport = m.viewport;
-    if (m.route !== TS.route) { TS.route = m.route; TS.rects.clear(); TS.watch = ''; if (TS.ready) tsDrawSoon(); }
+    if (m.route !== TS.route) { if (TS.ready) AV_NAVS++; TS.route = m.route; TS.rects.clear(); TS.watch = ''; if (TS.ready) tsDrawSoon(); }
     if (m.type === 'route') return;
   }
   if (m.type === 'errors') { if (TS.kind === 'preview') TS.errors = m.errors; return; }
@@ -8047,11 +8123,27 @@ window.addEventListener('message', (e) => {
     tsDrawSoon();
     return;
   }
-  // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
+  // a key only while the frame has the keyboard (decision 20), and never to lower the overlay: the page's own
   // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
   // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
-  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame ends pin mode only.
-  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { if (TL.pin) tlPinMode(false); } else if (m.shift) tsRaise(true); return; }
+  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame (its keydown's message
+  // only, never the keyup's, marked up) ends pin mode; else, with the overlay raised or the chip
+  // showing (Shift may be held), nothing; else it closes a floating card, else the viewer (kit-141
+  // spec §Approach 7). A page that fakes it can only close its own viewer, once, and only when the owner
+  // isn't pointing: once one has closed it, the frame's Escapes close nothing until the next route, open or
+  // frame load (AV_FRAME_ESC), so a burst of them, or an old lens's keyup without up, steps back once at most.
+  if (m.type === 'key') {
+    if (document.activeElement !== tsFrame()) return;
+    if (m.key === 'Escape') {
+      if (m.up) return;
+      if (TL.pin) tlPinMode(false);
+      else if (TS.raised || tlShowing()) {}
+      else if (AV_FRAME_ESC) {}
+      else if (tlFloating()) tlClose();
+      else { AV_FRAME_ESC = true; leaveArtifact(); }
+    } else if (m.shift) tsRaise(true);
+    return;
+  }
   if (m.type === 'hit-reply') {
     // one answer a question: its id let go of as it is taken, so a page that answers it again is
     // dropped by tLensMessage and costs nothing more

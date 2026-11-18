@@ -47,6 +47,8 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
+  // DEVTEAM_TEST_CPU_THROTTLE=n runs the page n times slower, as on a loaded runner
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
   // no classic scrollbar: innerWidth is the window's right edge
   await p.send('Emulation.setScrollbarsHidden', { hidden: true });
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
@@ -54,6 +56,11 @@ async function peekPage(t, { seed, fixture, name = 'peek' } = {}) {
   const evNav = (expr) => p.ev(expr).catch((e) => { if (/navigated or closed|Cannot find context|context was destroyed|Execution context/i.test(e.message)) return false; throw e; });
   const soon = (expr, what) => until(() => evNav(expr), what);
   const load = async (hash) => {
+    // Chrome keeps 50 entries a tab and, when full, prunes the oldest one left without a user gesture (every
+    // hash here is set by script). Over a whole test that can be the entry right under a peek, and its close
+    // then goes back past the page. Each visit starts the tab's history afresh, with this visit's about:blank
+    // right below it, so a close one entry too far still lands off the dashboard and fails
+    await p.send('Page.resetNavigationHistory');
     await p.send('Page.navigate', { url: 'about:blank' });
     await soon("location.href === 'about:blank'", 'about:blank');
     await p.send('Page.navigate', { url: url(hash) });
@@ -486,13 +493,23 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     // the viewer's close (history.back()) moves the frame, not the hash
     await load('#board');
     await openPeek(`#ticket/${T}`);
-    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
-    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
-    await p.click('#av-close');
-    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
-    assert.ok(await p.ev(isOpen), 'the peek is still open');
-    assert.ok(await p.ev(scrimShown), 'with its scrim');
-    await closePeek();
+    // DEVTEAM_TEST_FRAME_LATENCY_MS=n holds the viewer's frame back until after the close is pressed, the order
+    // CI's speed gives
+    const FL = Number(process.env.DEVTEAM_TEST_FRAME_LATENCY_MS) || 0;
+    const latency = (ms) => p.send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 });
+    if (FL) { await p.send('Network.enable'); await latency(FL); }
+    // (taken off again however the section ends, so a later subtest's failure is never the knob's)
+    try {
+      await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+      await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+      await p.click('#av-close');
+      await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
+      assert.ok(await p.ev(isOpen), 'the peek is still open');
+      assert.ok(await p.ev(scrimShown), 'with its scrim');
+      await closePeek();
+    } finally {
+      if (FL) await latency(0).catch(() => {});
+    }
     // the viewer over a review: closing it leaves the review's scrim dark (R1)
     await load('#library');
     await p.ev("location.hash = '#review-preview?path=review%2Fpage.html&ref=main'");

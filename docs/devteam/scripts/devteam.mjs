@@ -877,6 +877,110 @@ function linkOwnerChanges(a = {}, b = {}) {
   }
   return out;
 }
+// The owner-kind link changes from links map a to b, with their values: one per changed field of an
+// entry of an owner's kind on both sides with the same kind (a field no one's class guards, like a
+// repo link's path, left out), and one for the whole entry on an add, a removal or a kind flip
+// (field null, from/to the entries or null). An owner's answer approves these one by one
+// (linkAnswerCovers), so a field the owner already said yes to is never asked about again, and
+// another field landing on main spends nothing.
+function linkFieldChanges(a = {}, b = {}) {
+  const out = [];
+  for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
+    const x = ownEntry(a, id) ?? null, y = ownEntry(b, id) ?? null;
+    if (!ownersKind(x) && !ownersKind(y)) continue;
+    if (!x || !y || x.kind !== y.kind) { if (canonical(x) !== canonical(y)) out.push({ id, field: null, from: x, to: y }); continue; }
+    for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
+      if (canonical(x[f] ?? null) !== canonical(y[f] ?? null) && LINK_KINDS[x.kind].ownerClass(f)) out.push({ id, field: f, from: x[f] ?? null, to: y[f] ?? null });
+    }
+  }
+  return out;
+}
+// The line a question shows the owner for one change, and binds by: a field line for a field, an
+// entry line for the whole entry.
+linkFieldChanges.key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+linkFieldChanges.line = (c) => `${linkFieldChanges.key(c)}: main has ${canonical(c.from ?? null)}; would be ${canonical(c.to ?? null)}`;
+// Whether question qid approves change c ({ id, field, from, to }): the owner answered it, with its
+// recommendation, unchanged since; a line it binds by shows the change; and it was answered after
+// main last changed what it approves (so an old yes never undoes a revert on main). A question the
+// kit worded from now on binds only by the lines of its approves section (HEADER up to a blank
+// line); an older one by its entry lines, each approving every field it shows changing. Either
+// class of the owner's link questions covers: the owner read the exact line and said yes to it.
+function linkAnswerCovers(qid, c) {
+  const q = logGet(qid);
+  if (q?.type !== 'question') return false;
+  const v = questionView(q);
+  if (!linkAnswerCovers.yes(v)) return false;
+  if (linkAnswerCovers.why(qid)) return false;
+  const lines = linkAnswerCovers.lines(qid);
+  const shown = lines.includes(linkFieldChanges.line(c)) || (c.field !== null && lines.some((l) => {
+    const e = linkAnswerCovers.entryLine(l, c.id);
+    return !!e && isObj(e.from) && isObj(e.to) && e.from.kind === e.to.kind && canonical(e.from[c.field] ?? null) === canonical(c.from ?? null) && canonical(e.to[c.field] ?? null) === canonical(c.to ?? null);
+  }));
+  if (!shown) return false;
+  // the owner's later answer to the same line, if not a yes, takes this one back
+  if (questions().some((o) => o.id !== qid && o.status === 'answered' && o.answered_by === 'owner' && String(o.answered_at) > String(v.answered_at) && !linkAnswerCovers.yes(o) && linkAnswerCovers.lines(o.id).includes(linkFieldChanges.line(c)))) return false;
+  const at = c.field === null ? linkChangedOnMain(c.id) : linkAnswerCovers.fieldChangedAt(c.id, c.field);
+  return at === null || Date.parse(v.answered_at) >= at;
+}
+Object.assign(linkAnswerCovers, {
+  HEADER: 'This answer approves exactly these repo link changes, and no other:',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
+  // (a note after " — " aside), never a review, a secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
+  // the lines of a context's approves section, or null when it has none
+  section: (context) => {
+    const ls = String(context ?? '').split('\n');
+    const i = ls.indexOf(linkAnswerCovers.HEADER);
+    if (i < 0) return null;
+    const end = ls.findIndex((l, k) => k > i && !l.trim());
+    return ls.slice(i + 1, end < 0 ? ls.length : end);
+  },
+  // the lines question qid binds by: its approves section, or (asked before it had one) its entry lines
+  lines: (qid) => {
+    const ctx = String(logGet(qid)?.context ?? '');
+    return linkAnswerCovers.section(ctx) ?? ctx.split('\n').filter((l) => /^links\.[a-z0-9-]+: main has /.test(l));
+  },
+  // an entry line's two entries for link id ({ from, to }), or null; the split is the one where both sides parse
+  entryLine: (l, id) => {
+    const pre = `links.${id}: main has `;
+    if (!l.startsWith(pre)) return null;
+    const body = l.slice(pre.length);
+    for (let i = body.indexOf('; would be '); i >= 0; i = body.indexOf('; would be ', i + 1)) {
+      try { return { from: JSON.parse(body.slice(0, i)), to: JSON.parse(body.slice(i + '; would be '.length)) }; } catch {}
+    }
+    return null;
+  },
+  // why question qid approves nothing it shows, whatever it shows: changed after the owner answered it
+  why: (qid) => {
+    const ups = logGet(qid)?.updates ?? [];
+    const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
+    return ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined) ? `${qid}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again` : null;
+  },
+  // when main's first-parent line last changed links.<id>.<field> (ms), over the commits linkChangedOnMain reads; null when none did
+  history: new Map(),
+  fieldChangedAt: (id, field) => {
+    const ref = mainRef();
+    const head = ref ? git(['rev-parse', ref]) : null;
+    const key = `${head}\0${id}\0${field}`;
+    if (linkAnswerCovers.history.has(key)) return linkAnswerCovers.history.get(key);
+    const rows = head ? (git(['log', '--first-parent', '-n', String(LINK_HISTORY_DEPTH), '--format=%H %ct', head, '--', `${projectRel}/settings.md`]) ?? '').split('\n').filter(Boolean) : [];
+    const valueAt = (rev) => {
+      if (!linkEntryAtCache.has(rev)) linkEntryAtCache.set(rev, settingsAt(rev, { orNull: true })?.links ?? {});
+      return canonical(ownEntry(linkEntryAtCache.get(rev), id)?.[field] ?? null);
+    };
+    let at = null;
+    for (const row of rows) {
+      const [sha, ct] = row.split(' ');
+      // a shallow clone's history ends here: what came before is unknown, so nothing is known to have changed
+      if (git(['rev-parse', '--verify', '--quiet', `${sha}^`]) === null) break;
+      if (valueAt(sha) !== valueAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
+    }
+    linkAnswerCovers.history.set(key, at);
+    return at;
+  },
+  // the newest answered question that covers change c, or null
+  any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
+});
 let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
@@ -2021,6 +2125,8 @@ function logFileText(file) {
 let logCache = null;
 function readLog() {
   if (logCache) return logCache;
+  // folds, not calls: wait's trace counts them (kit-594)
+  readLog.reads = (readLog.reads ?? 0) + 1;
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
@@ -2039,6 +2145,19 @@ function readLog() {
   const byType = new Map();
   for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
   return (logCache = { lines, objects, errors, ignored, unknown, byType });
+}
+// What readLog folds, as one string: main's sha (the durable log is read at it, so a merge or a fetch
+// that moves main changes it with no file in the checkout changed) and each log file's name, size and
+// mtime under run/log and project/log. Equal means a fold would read the same lines.
+function logKey() {
+  mainRefCache = undefined;
+  const parts = [`main ${mainSha() ?? '-'}`];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -3910,10 +4029,16 @@ function cmdValidate() {
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
       const L0 = linesOf(componentLink(t.component, S0));
+      // The ticket's own folder (or a file under it) is its to write, when its records are in its
+      // own repo (check-pr's `own`); matched on text, so no empty, . or .. segment may walk out.
+      const ownDir = `${projectRelOf(componentLink(t.component, S0))}/tickets/${id}`;
+      const ownFolder = !recordsHomeSetting(t);
       for (const entry of t.touches ?? []) {
+        const p = trimSlash(touchPath(entry));
+        if (ownFolder && p.split('/').every((x) => x && x !== '.' && x !== '..') && (p === ownDir || p.startsWith(`${ownDir}/`))) continue;
         const owners = prefixOwners(touchPath(entry), L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
-        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
+        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${ownDir}/ may be named from it, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
@@ -5156,19 +5281,24 @@ function remediationBindingFails(base, sha, approved) {
   for (const r of named) if (!changed.includes(r.name)) fails.push(`${approved} names remediations.${r.name}, which this PR doesn't change: ask again, naming only what it changes`);
   return fails;
 }
+// Each repo link change a merge lands (linkFieldChanges, main against the head) needs an owner's
+// answer whose question showed exactly that change (linkAnswerCovers): the --approved one, or an
+// earlier yes for a field it never asked again about; and the --approved answer must cover one of
+// them. A question changed after its answer approves nothing.
 function ownerLinkActFails(changed, sha, approved) {
   const keys = changed.filter((c) => c.key.startsWith('links.'));
   if (!keys.length) return [];
-  const q = logGet(approved);
-  const ups = q?.updates ?? [];
-  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
-  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
-  const shown = String(q?.context ?? '');
+  const why = linkAnswerCovers.why(approved);
+  if (why) return [why];
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
-  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
-  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+  const key = linkFieldChanges.key;
+  const cs = linkFieldChanges(onMain, lands);
+  const mine = cs.filter((c) => linkAnswerCovers(approved, c));
+  const bare = cs.filter((c) => !mine.includes(c) && !linkAnswerCovers.any(c)).map(key);
+  if (bare.length) return [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the changes its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question asks about every repo link change no answer covers yet), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`];
+  if (cs.length && !mine.length) return [`${approved} approves none of the repo link changes this lands (${cs.map(key).join(', ')}): cite an answer that approved one of them`];
+  return [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -5925,6 +6055,10 @@ function cmdMerge() {
   // gates this PR adds as the supervisor's own call (gateAdditions): run at its head below, and
   // logged as their own gate-add act once it lands
   let gateAdds = null;
+  // owner-classed settings changes (home only) and a chore's files outside project/, for the
+  // link-landing rule under --approved below
+  let ownerChanged = null;
+  let choreOutside = [];
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -5935,6 +6069,7 @@ function cmdMerge() {
     const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
     if (gateAdd?.added?.length) { gateAdds = gateAdd.added.map((n) => [n, settingsAt(sha).gates[n]]); out(`adds gate${gateAdds.length > 1 ? 's' : ''} ${gateAdd.added.join(', ')} and leaves main's as they are: a new check is the supervisor's call (constitution.md §4), to be logged as a gate-add act when it lands`); }
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
+    ownerChanged = changed;
     fails.push(...registryActFails(base, sha));
     fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
@@ -5949,7 +6084,9 @@ function cmdMerge() {
       else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        // a landing of repo link changes only: either class of the owner's link questions (each change is bound to the line its answer showed, ownerLinkActFails)
+        const linksOnly = changed.every((c) => c.key.startsWith('links.')) && ['governance-edit', 'gate-change'].includes(q.class);
+        if (!classes.includes(q.class) && !linksOnly) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
         fails.push(...ownerLinkActFails(changed, sha, approved));
         fails.push(...remediationBindingFails(base, sha, approved));
       }
@@ -5996,6 +6133,7 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    choreOutside = outside;
     const kitFiles = outside.filter(isKitFile);
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
@@ -6033,10 +6171,23 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    // a bundle's link acts (one per entry its question showed) are one landing too
+    // A bundle's link acts (one per entry its question showed) are one landing too. A link act binds
+    // the change, not a slug: its entry hashes and its question's diff (ownerLinkActFails), so it
+    // lands on a chore of any name that changes those links and nothing else outside project/. Old
+    // acts that also carry chore-registry follow the same rule.
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
-    if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    const linkIds = new Set(prior.filter(linkAct).flatMap((a) => a.refs.filter((r) => r.startsWith('link:')).map((r) => r.slice(5))));
+    const allLinks = prior.length >= 1 && prior.every(linkAct) && prior.every((a) => a.class === av.class);
+    let landing;
+    if (allLinks) {
+      const extras = [...choreOutside, ...(ownerChanged ?? []).filter((c) => !c.key.startsWith('links.') || !linkIds.has(c.key.split('.')[1])).map((c) => c.key)];
+      const linksLanded = (ownerChanged ?? []).some((c) => c.key.startsWith('links.'));
+      landing = !!chore && !extras.length && linksLanded;
+      if (!landing) fails.push(`${approved} approved repo link entries only (${[...linkIds].map((l) => `links.${l}`).join(', ')}), landing on a chore; this ${chore ? 'chore' : 'merge'} ${extras.length ? `also changes ${extras.slice(0, 6).join(', ')}` : 'lands none of them'}: ask again for this one, or take the rest out`);
+    } else {
+      landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+      if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    }
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
@@ -6548,6 +6699,26 @@ function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, r
   // only when low confidence is the whole reason: a question asked for another reason too stands on that
   if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
+function asksGoalApproval({ goal, kind, question, choices, options, recommendation, def }) {
+  // A yes that would approve a draft goal goes through goal decide, which takes only a goal-approval
+  // answer: an approval asked as another kind wastes the owner's yes. These kinds name a draft goal
+  // for reasons of their own (defining it, a door in its design, something only the owner can do).
+  if (['goal-approval', 'goal-definition', 'one-way-door', 'owner-action'].includes(kind)) return false;
+  const g = goal ? logGet(goal) : null;
+  if (g?.type !== 'goal' || (g.status ?? 'draft') !== 'draft') return false;
+  const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const title = lit(String(g.title ?? '').trim()).replace(/\s+/g, '\\s+');
+  const aim = `(?:${title ? `${title}|` : ''}goal|design|approach|plan)(?!\\w)`;
+  const text = String(question ?? '');
+  // approval words aimed at the goal: "Approve <title>?", "Do you approve the design?"
+  if (new RegExp(`\\b(?:approve|approval\\s+of|sign\\s+off\\s+on|green-?light)\\s+(?:(?:the|this|its|your|our)\\s+)?${aim}`, 'i').test(text)) return true;
+  // a bare Approve answer, on a question that names the goal or its design (a sub-decision of the
+  // design with an Approve choice is the owner's to settle before the approval, so it stays askable)
+  if (!new RegExp(`\\b(?:${title ? `${title}|` : ''}goal|design(?:ed)?|approach|plan)(?!\\w)`, 'i').test(text)) return false;
+  const bare = new RegExp(`^\\s*approv(?:e|ed|al)(?:\\s+(?:it|this|the\\s+${aim}))?\\s*[.!]?\\s*$`, 'i');
+  const labels = Array.isArray(choices) ? choices.map((c) => c?.label) : [];
+  return [...labels, ...[].concat(options ?? []), recommendation, def].some((a) => typeof a === 'string' && bare.test(a));
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
@@ -6560,6 +6731,7 @@ function askLine({ thread } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
@@ -6735,6 +6907,47 @@ function askLine({ thread } = {}) {
     });
     // what the owner reads in the Inbox says exactly what approving this lands
     context = [context, `Approving this lands: ${remediationEntries.map((e) => (e.sha ? `${e.name} (${e.script} at blob ${e.sha})` : `the removal of ${e.name}`)).join('; ')}`].filter(Boolean).join('\n\n');
+  }
+  // A repo link change asked in the supervisor's own words (--link-change): the kit writes the lines
+  // the owner's answer binds by (linkAnswerCovers), from main's settings, and nobody else may: a
+  // binding line typed or quoted in the question's own words is refused, so it never approves by accident.
+  // checked as stored (ownerText turns a typed \n into a line), line by line, on any line break, and
+  // broadly: whatever the binder could read as a line (linkAnswerCovers.lines) is refused
+  const typed = `${q}\n${context ?? ''}`.split(/\r\n|\r|\n/);
+  if (typed.some((l) => l.includes(linkAnswerCovers.HEADER) || (/^\s*links\./.test(l) && /main\s+has/.test(l)))) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
+  if (flagStr('change') !== undefined && ['governance-edit', 'gate-change'].includes(cls)) die('--change belongs on a goal-change question; a repo link change is --link-change \'{"link":"<id>","field":"<field>","value":<value>}\' (or "entry" for an add or a removal)');
+  const linkChange = jsonFlag('link-change');
+  if (linkChange !== undefined) {
+    if (!['governance-edit', 'gate-change'].includes(cls)) die('--link-change goes with --class governance-edit or gate-change: a repo link change is the owner\'s');
+    // its answer approves the change only as a yes: the question recommends yes and offers no other choice
+    if (recommendation.trim().toLowerCase() !== 'yes' || flags.choices !== undefined || flags.options !== undefined) die('--link-change asks yes or no: --recommendation yes, and no --choices or --options (only the owner\'s yes approves the change)');
+    const shape = '--link-change: each item is {"link":"<id>","field":"<field>","value":<value>} or {"link":"<id>","entry":{…} | null}';
+    const items = Array.isArray(linkChange) ? linkChange : [linkChange];
+    if (!items.length) die(shape);
+    const mainLinks = mainSettings(null)?.links ?? {};
+    const after = Object.assign(Object.create(null), structuredClone(mainLinks));
+    for (const it of items) {
+      if (!isObj(it) || typeof it.link !== 'string' || Object.hasOwn(it, 'entry') === (Object.hasOwn(it, 'field') || Object.hasOwn(it, 'value'))) die(shape);
+      const onMain = ownEntry(mainLinks, it.link);
+      if (Object.hasOwn(it, 'field')) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; ask about it whole: {"link":"${it.link}","entry":{…}}`);
+        if (!ownersKind(onMain)) die(`--link-change: ${it.link} is a ${onMain.kind} link, the supervisor's (link set)`);
+        if (!linkFields(onMain.kind).includes(it.field) || !LINK_KINDS[onMain.kind].ownerClass(it.field) || !Object.hasOwn(it, 'value')) die(`--link-change: "${it.field}" is not a field of a ${onMain.kind} link the owner approves, with its value`);
+        after[it.link] = { ...ownEntry(after, it.link), [it.field]: it.value };
+      } else if (it.entry === null) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; there is nothing to remove`);
+        delete after[it.link];
+      } else {
+        if (!isObj(it.entry) || !ownersKind(it.entry) && !ownersKind(onMain)) die('--link-change: an entry is a repo link\'s ({"kind":"repo",…})');
+        after[it.link] = it.entry;
+      }
+    }
+    const { errors } = registryProblems({ ...loadSettings(), links: after });
+    if (errors.length) die(`--link-change: not a valid registry:\n  - ${errors.join('\n  - ')}`);
+    const named = new Set(items.map((it) => it.link));
+    const changes = linkFieldChanges(mainLinks, after).filter((c) => named.has(c.id));
+    if (!changes.length) die('--link-change: main already has that; there is nothing to approve');
+    context = [context, [linkAnswerCovers.HEADER, ...changes.map(linkFieldChanges.line)].join('\n')].filter(Boolean).join('\n\n');
   }
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
@@ -7421,7 +7634,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
@@ -7560,9 +7773,74 @@ const ARTIFACT_LENS = String.raw`(() => {
   const onKey = (e) => {
     if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+
+  // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
+  const POINTER_GAP = 67;
+  const across = (v, from, n) => (n > 0 ? Math.round(Math.max(0, Math.min(1, (v - from) / n)) * 1e4) / 1e4 : 0);
+  // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
+  // it is sent; the page itself (html or body) is no thing to point at, as hit says
+  const pointerOf = (p) => {
+    let el = p.el;
+    // the page replaced it while the gate held it: what is at that point now
+    if (el && el.isConnected === false) el = document.elementFromPoint(p.cx, p.cy);
+    if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
+    // the rect read now, when it is sent, against the point of the move
+    const r = el.getBoundingClientRect();
+    return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
+  };
+  // one gate for every pointer, nulls too: at most one per gap, the newest input replacing what waits
+  // (one timer, nothing queued, so the last word arrives), and never the same message twice running
+  let pointerPending = null;
+  let pointerTimer = 0;
+  let pointerAt = 0;
+  let pointerSent = '';
+  const flushPointer = () => {
+    const p = pointerPending;
+    pointerPending = null;
+    if (!p) return;
+    const m = pointerOf(p);
+    const s = JSON.stringify(m);
+    if (s === pointerSent) return;
+    pointerSent = s;
+    pointerAt = Date.now();
+    tell(Object.assign({ type: 'pointer' }, m));
+  };
+  const sayPointer = (p) => {
+    pointerPending = p;
+    if (pointerTimer) return;
+    // never longer than one gap, whatever the wall clock did since the last send
+    const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
+    if (wait <= 0) flushPointer();
+    else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
+  };
+
+  // --- where others' pointers are: by selector alone, apart from the pins' watch list ----------------
+  const PLACE_MAX = 8;
+  // querySelector only, never find's text search; null for nothing there, a bad selector, or not shown
+  const shownRect = (k) => {
+    let el = null;
+    try { el = document.querySelector(k); } catch (e) { el = null; }
+    if (!el) return null;
+    const hidden = el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility));
+    return hidden ? null : rectOf(el);
+  };
+  let placing = [];
+  let placedSent = '';
+  let placeLoop = false;
+  const placedNow = () => placing.map((x) => ({ id: x.id, rect: shownRect(x.k) }));
+  // once a frame while there is a list, sent only when a rect changed; an empty list ends it
+  const placeFrame = () => {
+    if (!placing.length) { placeLoop = false; return; }
+    // the next frame is asked for whatever this one's measuring did
+    try {
+      const rects = placedNow();
+      const now = JSON.stringify(rects);
+      if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    } finally { requestAnimationFrame(placeFrame); }
+  };
 
   // --- the viewer's questions ------------------------------------------------------------------------
   // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
@@ -7605,6 +7883,15 @@ const ARTIFACT_LENS = String.raw`(() => {
       const f = find(a);
       if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
     },
+    // the newest list stands until the next; one that is no list is ignored
+    place: (m) => {
+      if (!Array.isArray(m.anchors)) return;
+      placing = m.anchors.slice(0, PLACE_MAX).filter((x) => x && idOk(x.id) && typeof x.k === 'string' && x.k.length > 0 && size(x.k) <= CAPS.selector).map((x) => ({ id: x.id, k: x.k }));
+      const rects = placedNow();
+      placedSent = JSON.stringify(rects);
+      tell({ type: 'placed', rects });
+      if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
+    },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -7617,6 +7904,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
+  addEventListener('mousemove', (e) => { if (heard) sayPointer({ el: e.target, cx: e.clientX, cy: e.clientY }); }, true);
+  // no relatedTarget: the pointer left the frame
+  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ el: null }); }, true);
   addEventListener('scroll', soon, true);
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
@@ -8089,7 +8379,7 @@ const PREVIEW_LENS = String.raw`<!doctype html>
   const onKey = (e) => {
     if (e.key !== 'Shift' && e.key !== 'Escape') return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
-    tell({ type: 'key', key: e.key, shift: shiftDown });
+    tell({ type: 'key', key: e.key, shift: shiftDown, ...(e.type === 'keyup' ? { up: true } : {}) });
   };
   const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
   const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
@@ -10075,15 +10365,17 @@ function cmdAct() {
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
-// Returns what is wrong, or null.
+// Header fields written as bullets (Goal, Architecture, Tech stack, Spec, then a colon; bold,
+// underscored or plain, any case) don't count: only the body bullets do. Returns what is wrong, or null.
 function tldrGap(text) {
+  const HEADER_FIELD = /^\s{0,3}[-*+]\s+(?:\*\*|__)?(?:goal|architecture|tech[\s-]?stack|spec)(?:\*\*|__)?\s*:/i;
   const lines = text.split('\n');
   const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
   if (at < 0) return 'has no "## TL;DR" section';
   if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
   const body = [];
   for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
-  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l) && !HEADER_FIELD.test(l)).length;
   if (!bullets) return 'has a TL;DR with no bullets';
   if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
   return null;
@@ -14243,15 +14535,50 @@ function relaunchChild(launch, flag, budget) {
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
+// A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
+// stopped · your login changed or ended · send a prompt to continue". Its process already has the new
+// login and wants only a prompt, so one is typed (nothing is relaunched). False when the pane isn't
+// stopped so, and the caller goes on as before; otherwise what was done: null (not ours, or not due),
+// 'gave-up' (past the restart caps, which it shares), 'continued' or 'failed'. The stop must be the
+// last thing the agent said, matched by its head (the whole line wraps at 80 columns), with an empty
+// input: a draft is someone's and is never typed over, except the kit's own prompt whose Enter was
+// lost, which gets the Enter (the lost-Enter rescues skip a pane that still shows a limit banner).
+function loginChangedStop(target, name, budget, ours) {
+  const prompt = 'The kit: your login changed and the account has room now. Carry on.';
+  const stopHead = /^\s*(?:[⎿⏺●■✖!]\s*)?Automatic continue stopped · your login changed\b/;
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const raw = paneBottom(target);
+  const at = raw.findLastIndex((l) => !PANE_CODE.test(l.trim()) && stopHead.test(l));
+  if (at === -1) return false;
+  const below = raw.slice(at + 1).map((l) => l.trim());
+  if (below.some((l) => /^[⏺●⎿]/.test(l))) return false;
+  const draft = below.map((l) => INPUT_LINE.exec(l)).filter(Boolean).pop()?.[1] ?? '';
+  if (draft && draft !== prompt) return false;
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
+  if (clientActiveOn(target) || !ours()) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget, now);
+  if (verdict !== 'go') return verdict;
+  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
+  if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
+  return ok ? 'continued' : 'failed';
+}
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
 // 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
 // replaces the old process itself, after everything that can refuse, and no key is sent to it.
+// (A session stopped by a login change is another matter: loginChangedStop, above.)
 function restartPane(name, launch, budget) {
   const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  if (problem || !target) return null;
+  // the stop can sit under an old limit banner: it is the newer state, so a prompt, not a relaunch
+  const login = loginChangedStop(target, name, budget, () => launchedByKit(target, name, launch[0]));
+  if (login !== false) return login;
+  if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
   const verdict = claimRestart(name, budget);
   if (verdict !== 'go') return verdict;
@@ -14493,6 +14820,12 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
+  const { target: pane, problem } = resolvePane(supervisorTarget());
+  if (!problem && pane) {
+    const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
+    if (login !== false) return login;
+  }
   const found = supervisorToRestart();
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
@@ -14577,14 +14910,16 @@ function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return super
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
 function supervisorPaneIn(repo, noted, rec, { notedOnly = false, strict = false } = {}) {
-  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
+  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}\t#{@devteam-shell}']);
   if (listed === null) return null;
   if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
   const root = realPath(repo);
   const server = tmuxServerPid();
   let other = null;
   for (const l of listed.split('\n').filter(Boolean)) {
-    const [id, win, start, cmd] = l.split('\t');
+    const [id, win, start, cmd, tag] = l.split('\t');
+    // a pane tagged @devteam-shell is a terminal's own shell, never the supervisor unless noted as it
+    if (tag && id !== noted) continue;
     if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
     const at = realPath(start);
     if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
@@ -16004,6 +16339,146 @@ function memoryFull(s = loadSettings()) {
   if (!m || m.inUse < ceiling * m.max) return null;
   return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
+/* box-memory start */
+// The memory reading's names, here so its check reads nothing outside this region (a test runs it
+// alone). The ceiling's bounds are memoryCeilingProblem's; the test holds the two equal.
+const MEMORY_KINDS = ['agent', 'browser', 'install', 'devteam', 'node', 'other'];
+const MEMORY_SOURCES = ['cgroup', 'meminfo', 'os'];
+const MEMORY_READING_KEYS = ['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects'];
+const MEMORY_PROJECT_KEYS = ['rss', 'sessions', 'devteam'];
+const MEMORY_CEILING_MIN = 0.5, MEMORY_CEILING_MAX = 0.95;
+const MEMORY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const MEMORY_SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+const isBytes = (v) => Number.isSafeInteger(v) && v >= 0;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
+// so a name with a dot can't read as two fields.
+const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
+// A value as the words show it, never a throw (a writer's own object can hold a BigInt or a cycle).
+const memoryShown = (v) => {
+  let s;
+  try { s = JSON.stringify(v) ?? String(v); } catch { try { s = String(v); } catch { s = 'an unprintable value'; } }
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+// A real UTC time in the one form: 2026-02-30 or 24:00 doesn't come back as itself, so it is refused.
+const memoryAtOk = (at) => {
+  if (typeof at !== 'string' || !MEMORY_AT.test(at)) return false;
+  const t = new Date(at);
+  return Number.isFinite(t.getTime()) && t.toISOString().slice(0, 19) === at.slice(0, 19);
+};
+const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
+// A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
+const memoryCountsProblem = (p, e) => {
+  if (!memoryIsMap(e)) return memoryIs(p, e, '{ n, rss }, a count of processes and their integer bytes');
+  if (!isCount(e.n)) return memoryIs(`${p}.n`, e.n, 'a count of processes, an integer, 0 or more');
+  if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+  const other = Object.keys(e).find((k) => k !== 'n' && k !== 'rss');
+  return other === undefined ? null : `${memoryPath(p, other)} is not a field of ${p}: it holds only n and rss`;
+};
+// machine-memory@1, the memory reading: one JSON object a line in
+// ~/.devteam/machine-<hub port>/memory.jsonl, written once a minute by the machine's hub.
+//   `v`            required, `v: 1` (the line's "v":1): the contract's version; any other value is refused
+//   `at`           required, ISO 8601 UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z: when the reading was taken
+//   `working_set`  required, integer bytes, 0 or more: in use as machineMemory() counts it for the
+//                  gate (cgroup working set, /proc/meminfo, or os.totalmem() - os.freemem())
+//   `max`          integer bytes, more than 0: the cap the gate reads
+//   `ceiling`      a number from 0.5 to 0.95: the lowest machine_memory_ceiling among the known
+//                  instances (default 0.8)
+//   `source`       "cgroup", "meminfo" or "os": where `working_set` and `max` came from
+//   `partial`      true: the tick ran past its 2-second budget and wrote what it had
+//   `sessions`     an integer, 0 or more: agent processes (claude, codex, opencode) whose cwd is
+//                  inside <root>/.worktrees/<name> of a known root; a supervisor in its root is not one
+//   `kinds`        { <kind>: { `n`, `rss` } }: every process by its executable's kind; `n` an integer,
+//                  0 or more, `rss` integer bytes, 0 or more
+//   `devteam`      { <subcommand>: { `n`, `rss` } }: the `devteam` kind split by subcommand, machine-wide
+//   `projects`     { <instance name>: { `rss`, `sessions`?, `devteam`? } }: by the known root holding
+//                  the process's cwd; its `devteam` is { <subcommand>: integer bytes }
+// Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
+// `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
+// running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
+// devteam.mjs), `node` (any other node), `other` (everything else). Exactly: an installer is an
+// argv[0] basename whose first word is `npm`, `pnpm`, `yarn`, `bundle`, `pip` or `uv`, or node whose
+// script's basename is `npm-cli.js`, `pnpm.cjs`, `pnpm.js` or `yarn.js`; it is `install` only with an
+// install subcommand, the next word (`install`, `i`, `ci`, `add` or `sync`). An installer with another
+// subcommand (`npm test`) is `other`, and node running an installer script with another subcommand
+// is `node`. The kind comes from cmdline's
+// argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
+// retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
+// command name. Nothing else of a command line, no environment and no file content is ever kept.
+// Sizes are integer bytes (RSS is statm's resident pages times the page size). A field the machine
+// can't read is left out, never zero: on a machine with no /proc (macOS) a line has `working_set`,
+// `max`, "source":"os" and no `sessions`, `kinds` or `projects`. A new field, or a change to one, is
+// machine-memory@2.
+// A line the check refuses (one torn by a hub killed mid-append, a "v":2 line from a newer
+// recorder, anything else memoryReadingProblem has words for) is skipped by every reader, never
+// fatal: the hub's /memory.json serves only passing lines, `machine memory` and `metrics` read past
+// it and say how many lines they skipped, and the Overview draws the readings it was given. A writer
+// starts each line on a fresh line (a torn tail is ended with a newline before the next append), so
+// one torn line spoils only itself.
+// /memory.json, served by the hub with /instances.json's same-origin check (and on a box through
+// the gateway): `{"v":1,"readings":[<reading>, …]}`, oldest first.
+//   `?since=<n>h|<n>d`  the window, default 24 hours, at most 8 days; thinned to one reading per
+//                       5 minutes for readings older than 6 hours, and one per 30 minutes older than 3 days
+//   `?after=<at>`       only readings newer than at, unthinned, for an at up to 6 hours back; an
+//                       older one is answered 400 (the Overview then asks since=24h again)
+//   `?thin=0`           no thinning, for a loopback request whose window is 24 hours or less
+// memoryReadingProblem(line) takes a line's text or a parsed value: null when it is a valid
+// machine-memory@1 reading, else one sentence starting with the first bad field's path and a space
+// (reading, when the line isn't a JSON object). Shape only: it doesn't add up kinds, compare
+// working_set with max, or look a subcommand up in COMMANDS.
+function memoryReadingProblem(line) {
+  let r = line;
+  if (typeof line === 'string') {
+    try { r = JSON.parse(line); } catch { return 'reading is not JSON (a torn line, or no reading at all): it should be one JSON object, a machine-memory@1 reading'; }
+  }
+  if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
+  if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
+  if (!memoryAtOk(r.at)) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
+  const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
+  if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
+  if (r.max !== undefined && !(isBytes(r.max) && r.max > 0)) return memoryIs('max', r.max, 'integer bytes, more than 0, or left out');
+  if (r.ceiling !== undefined && !(typeof r.ceiling === 'number' && r.ceiling >= MEMORY_CEILING_MIN && r.ceiling <= MEMORY_CEILING_MAX)) return memoryIs('ceiling', r.ceiling, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}, or left out`);
+  if (r.source !== undefined && !MEMORY_SOURCES.includes(r.source)) return memoryIs('source', r.source, `one of ${MEMORY_SOURCES.join(', ')}, or left out`);
+  if (r.partial !== undefined && r.partial !== true) return memoryIs('partial', r.partial, 'true, or left out');
+  if (r.sessions !== undefined && !isCount(r.sessions)) return memoryIs('sessions', r.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+  if (r.kinds !== undefined) {
+    if (!memoryIsMap(r.kinds)) return memoryIs('kinds', r.kinds, '{ <kind>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.kinds)) {
+      if (!MEMORY_KINDS.includes(k)) return `${memoryPath('kinds', k)} is not a kind: it should be one of ${MEMORY_KINDS.join(', ')}`;
+      const p = memoryCountsProblem(memoryPath('kinds', k), e); if (p) return p;
+    }
+  }
+  if (r.devteam !== undefined) {
+    if (!memoryIsMap(r.devteam)) return memoryIs('devteam', r.devteam, '{ <subcommand>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.devteam)) {
+      if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath('devteam', k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+      const p = memoryCountsProblem(memoryPath('devteam', k), e); if (p) return p;
+    }
+  }
+  if (r.projects !== undefined) {
+    if (!memoryIsMap(r.projects)) return memoryIs('projects', r.projects, '{ <instance name>: { rss, sessions?, devteam? } }, or left out');
+    for (const [name, e] of Object.entries(r.projects)) {
+      const p = memoryPath('projects', name);
+      if (name === '') return `${p} is an empty name: a project is keyed by its instance's name`;
+      if (!memoryIsMap(e)) return memoryIs(p, e, '{ rss, sessions?, devteam? }');
+      if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+      if (e.sessions !== undefined && !isCount(e.sessions)) return memoryIs(`${p}.sessions`, e.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+      if (e.devteam !== undefined) {
+        if (!memoryIsMap(e.devteam)) return memoryIs(`${p}.devteam`, e.devteam, '{ <subcommand>: integer bytes }, or left out');
+        for (const [k, b] of Object.entries(e.devteam)) {
+          if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath(`${p}.devteam`, k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+          if (!isBytes(b)) return memoryIs(memoryPath(`${p}.devteam`, k), b, 'integer bytes, 0 or more');
+        }
+      }
+      const extra = Object.keys(e).find((k) => !MEMORY_PROJECT_KEYS.includes(k));
+      if (extra !== undefined) return `${memoryPath(p, extra)} is not a field of ${p}: it holds only ${MEMORY_PROJECT_KEYS.join(', ')}`;
+    }
+  }
+  return null;
+}
+/* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -16145,6 +16620,8 @@ function cmdAccountsTick() {
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
+  // sessions sent a prompt after a login change (loginChangedStop), not restarted: in resumed too
+  const continued = new Set();
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   // a ticket's held field holds it too: nothing runs for a held ticket
@@ -16192,16 +16669,19 @@ function cmdAccountsTick() {
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
+        // continued, it is starting a turn as a restarted one is: no limit to report, no held line now
+        if (sup === 'continued') { supervisorRestarted = true; state.resumed.push('supervisor'); continued.add('supervisor'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
           else if (did) tries += 1;
-          if (did === 'restarted') state.resumed.push(name);
+          if (did === 'restarted' || did === 'continued') state.resumed.push(name);
+          if (did === 'continued') continued.add(name);
         }
       }
-      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(continued.has(w) ? `continued ${w}: its login changed while it was stopped` : `restarted ${w}: it had stopped at a usage limit`);
     }
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
@@ -16240,7 +16720,7 @@ function cmdAccountsTick() {
   // tick just restarted, whose agent is still coming up
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
-  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -16649,6 +17129,387 @@ function kitHandOver() {
   }
   return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
 }
+/* term-server start */
+// The dashboard's terminal (terminal@1, test/contracts/terminal.md): the supervisor's pane and the
+// project's Shell, read and typed into over /api/term/*. Sizes in bytes, times in ms.
+const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, CACHE_MS: 100, SETTLE_MS: 50, TMUX_MS: 30000 };
+// What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
+const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
+const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+// What tmuxServerEnv() removes but TMUX_PANE (tmux sets it fresh for the new pane, and the shell
+// needs it): the Shell's command unsets each, since a new window gets the tmux server's environment,
+// never the calling client's (S7); its session markers are found at open, as sessionMarkerPrefix does.
+const TERM_SHELL_UNSET = ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD', 'DEVTEAM_CHANNEL'];
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again', open: 'the shell could not be opened' };
+// A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
+const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
+// The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
+const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
+// A paste without bracketed-paste markers: tmux passes them through, so one inside a paste would end its
+// bracket early and the rest, an Enter too, would arrive typed. A drop can join two halves into a new
+// one (ESC[20 ESC[201~ 0~), so each is dropped as it completes the output so far: one linear pass (each
+// char pushed once, popped at most once; neither marker overlaps itself or the other), the same text as
+// dropping them again until none is left, which is quadratic on nested markers.
+const termUnbracket = (s) => { const o = []; for (const c of s) { o.push(c); const n = o.length; if (c === '~' && n >= 6 && o[n - 6] === '\x1b' && o[n - 5] === '[' && o[n - 4] === '2' && o[n - 3] === '0' && (o[n - 2] === '0' || o[n - 2] === '1')) o.length = n - 6; } return o.join(''); };
+// tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
+const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
+// A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
+// BEL or ESC \ or the line's end, so an OSC 8 link's URL never shows) and any other escape dropped
+// (with its intermediates, so ESC ( B goes whole); then C0 and DEL; then trailing spaces.
+function termLine(s) {
+  return s.replace(/\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g, (m, sgr) => (sgr === undefined ? '' : m))
+    // every ESC left opens a kept SGR
+    .replace(/[\x00-\x1a\x1c-\x1f\x7f]/g, '').replace(/ +$/, '');
+}
+// The /api/term/* routes, for cmdDashboard: `port` a getter (the dashboard re-picks its port when the
+// first is taken), `host` its bind address, `log` its own output (a refusal's reason, never a body).
+function termRoutes({ port, host, log }) {
+  // tests only (P6): a longer cache, so a test can hold a read inside it
+  const cacheMs = Number(process.env.DEVTEAM_TERM_CACHE_MS) || TERM.CACHE_MS;
+  // read once, at the start: tmuxSession() may spawn synchronously, which a request never waits on
+  const session = tmuxSession();
+  const loopback = TERM_LOOPBACK.has(host);
+  // the token's own input, so it is never a pane-answer token; valid until the server restarts
+  const termSecret = crypto.randomBytes(32);
+  const termToken = () => crypto.createHmac('sha256', termSecret).update('devteam-term-token-v1').digest('hex');
+  const tokenOk = (t) => { if (typeof t !== 'string') return false; const a = Buffer.from(t), b = Buffer.from(termToken()); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+  // every terminal route's gateway nonces: each once, pruned after twice the window
+  const nonces = new Map();
+  const json = (res, status, obj, extra = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra }); res.end(JSON.stringify(obj)); };
+  // Every tmux call: async (no request blocks the server), -u (a C locale prints a format's tab as _; P1).
+  const tmuxCall = (args, input = null) => new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile('tmux', ['-u', ...args], { encoding: 'utf8', timeout: TERM.TMUX_MS, maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => {
+        const timedOut = !!e?.killed;
+        resolve({ ok: !e, out: out ?? '', err: err ?? '', timedOut, missing: !!e && !timedOut && typeof e.code === 'number' && TERM_MISSING.test(err ?? '') });
+      });
+    } catch (e) { return resolve({ ok: false, out: '', err: String(e?.message ?? e), timedOut: false, missing: false }); }
+    child.stdin.on('error', () => {});
+    child.stdin.end(typeof input === 'string' ? input : undefined);
+  });
+  const root = realPath(mainRoot);
+  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display line, by field name (a tab in the start path stays in it)
+  const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
+  // the supervisor's: the marked pane only, as an id (S11)
+  const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
+  // the Shell's: remembered, else the lowest-numbered live pane of this session tagged with this root,
+  // not the marked one (a dead one, kept by remain-on-exit, would shadow a live one; T5-1). A lookup
+  // tmux failed (not "isn't there") is { error }, never no pane (P4).
+  let shellPane = null;
+  async function paneOf(which) {
+    if (which === 'supervisor') return marked();
+    if (shellPane) return shellPane;
+    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{@devteam-shell}']);
+    if (!got.ok) { if (got.missing) return null; log(`/api/term/shell: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const m = marked();
+    // the tag last, whole: a tab in a root stays in it
+    const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
+    return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
+  }
+  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  const withEtag = (s, raw) => {
+    const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
+    // raw, the read's fields, for the keys route's 423s and 409s: never sent
+    return Object.defineProperty({ ...s, etag }, 'raw', { value: raw, enumerable: false });
+  };
+  const gone = (which, raw = null) => withEtag({ v: 1, which, pane: null, state: 'gone', cols: 0, rows: 0, cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: held(), lines: [] }, raw);
+  // Why the read pane isn't the route's, or null. Supervisor: resolvePane's checks, the tag, and a
+  // noted id from another server (S1); shell: its tag, session, and never the marked pane.
+  const notOurs = (which, f) => {
+    if (f.pane_dead === '1') return 'dead';
+    if (which === 'shell') return f['@devteam-shell'] !== root || f.session_name !== session || f.pane_id === marked() ? 'moved' : null;
+    if (SHELLS.has(f.pane_current_command.replace(/^-/, ''))) return 'shell';
+    if (f['@devteam-shell']) return 'tagged';
+    const rec = supervisorUpRecord();
+    return (rec?.server ? String(rec.server) !== f.pid : realPath(f.pane_start_path) !== root) ? 'foreign' : null;
+  };
+  // One call: display first, so its line is the first, then capture's rows (S16).
+  async function readNow(which, again = true) {
+    const P = await paneOf(which);
+    if (P?.error) return P;
+    if (!P) return gone(which, { pane: null, why: 'none' });
+    const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
+    if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const out = got.ok ? got.out.split('\n') : [];
+    const f = got.ok ? fieldsOf(out[0]) : null;
+    // a display line that didn't parse is a failed read, never a screen
+    if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
+    const why = f ? notOurs(which, f) : 'missing';
+    // the Shell's pane moved or went: forget it, and look once more
+    if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    if (why) return gone(which, { pane: P, why, fields: f });
+    const rows = Number(f.pane_height);
+    const lines = out.slice(1, 1 + rows).map(termLine);
+    while (lines.length < rows) lines.push('');
+    return withEtag({
+      v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
+      cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
+      modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
+      history_size: Number(f.history_size), held: held(), lines,
+    }, { pane: P, why: null, fields: f });
+  }
+  // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
+  // generation, so a read begun before the send never fills the cache after it (S12); a failed read
+  // is never cached.
+  const screens = { supervisor: { gen: 0, at: 0, val: null, flight: null }, shell: { gen: 0, at: 0, val: null, flight: null } };
+  function readScreen(which, { fresh = false } = {}) {
+    const c = screens[which];
+    if (!fresh && c.val && Date.now() - c.at < cacheMs) return Promise.resolve(c.val);
+    if (!fresh && c.flight) return c.flight;
+    const gen = c.gen;
+    const p = readNow(which).then((s) => { if (c.gen === gen && !s.error) { c.val = s; c.at = Date.now(); } return s; })
+      .finally(() => { if (c.flight === p) c.flight = null; });
+    c.flight = p;
+    return p;
+  }
+  const voidScreen = (which) => { const c = screens[which]; c.gen++; c.val = null; c.flight = null; };
+  // History (§7): lines max(0, n - k) to n - 1, by offsets from history_size, with history_size read
+  // after them in the same call; read once more if it moved.
+  async function readHistory(P, n, k, hs) {
+    for (let again = true; ; again = false) {
+      const a = Math.max(0, n - k), b = n - 1;
+      const got = await tmuxCall(['capture-pane', '-e', '-p', '-S', String(a - hs), '-E', String(b - hs), '-t', P, ';', 'display', '-p', '-t', P, '#{history_size}']);
+      if (!got.ok && !got.missing) log(`/api/term/: tmux failed on history: ${got.timedOut ? 'timed out' : got.err.trim()}`);
+      if (!got.ok) return got.missing ? { gone: true } : { error: TERM_WORDS.read };
+      const out = got.out.split('\n');
+      if (out.at(-1) === '') out.pop();
+      const now = Number(out.pop());
+      if (now === hs || !again || !Number.isInteger(now)) return { lines: out.map(termLine), hs };
+      if (n > now) return { range: true };
+      hs = now;
+    }
+  }
+  // Keys (§8): one post at a time per pane, in arrival order; the last taken seq per page and which,
+  // for the server's life (never pruned, so a late resend never types twice).
+  const chains = { supervisor: Promise.resolve(), shell: Promise.resolve() };
+  const queue = (which, f) => { const p = chains[which].then(f); chains[which] = p.then(() => {}, () => {}); return p; };
+  const lastSeq = new Map();
+  const sendData = (pane, buf) => tmuxCall(['send-keys', '-t', pane, '-H', ...[...buf].map((b) => b.toString(16).padStart(2, '0'))]);
+  // A paste as one buffer, its text on stdin (never a file or an argument); a failed paste deletes its
+  // buffer, so the text never stays in the tmux server.
+  let buffers = 0;
+  async function sendPaste(pane, text) {
+    const name = `devteam-term-${process.pid}-${++buffers}`;
+    const loaded = await tmuxCall(['load-buffer', '-b', name, '-'], text);
+    const sent = loaded.ok ? await tmuxCall(['paste-buffer', '-p', '-d', '-b', name, '-t', pane]) : loaded;
+    if (!sent.ok) {
+      const gone = await tmuxCall(['delete-buffer', '-b', name]);
+      // its name only, so the owner can delete it by hand; never its text
+      if (!gone.ok && !/unknown buffer/.test(gone.err)) log(`/api/term/: tmux buffer ${name} kept after a failed paste; delete it with tmux delete-buffer -b ${name}`);
+    }
+    return sent;
+  }
+  // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
+  // the cache (S2), so keys sent just after the supervisor exits find the shell prompt.
+  async function keys(res, which, b, left) {
+    const no = (status, error, reason) => { log(`refused /api/term/${which}/keys: ${reason}`); return json(res, status, { error }); };
+    // checked at the turn's start and again just before the seq (the read can take a while): a refusal
+    // before the send, so its seq stays free (§8)
+    const went = () => left() && (log(`refused /api/term/${which}/keys: the client went before its turn`), true);
+    if (went()) return;
+    const s = await readScreen(which, { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    // the pane step, in the spec's order (S3); a tagged or marked pane is never the other route's
+    if (which === 'supervisor') {
+      const { pane, fields } = s.raw;
+      if (!pane) return no(409, TERM_WORDS.supervisor, 'no marked pane');
+      if (b.pane !== pane) return no(423, TERM_WORDS.moved, 'not the marked pane');
+      if (fields?.['@devteam-shell']) return no(423, TERM_WORDS.moved, 'the marked pane is the Shell\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.supervisor, `the marked pane is ${s.raw.why}`);
+    } else {
+      if (b.pane === marked()) return no(423, TERM_WORDS.moved, 'the marked pane is the supervisor\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.shell, 'no Shell pane');
+      if (b.pane !== s.pane) return no(423, TERM_WORDS.moved, 'not the Shell\'s pane');
+    }
+    if (went()) return;
+    const key = `${b.page}\n${which}`;
+    if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
+    // taken the moment the send starts: a send that fails part way is never typed again
+    lastSeq.set(key, b.seq);
+    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
+    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    voidScreen(which);
+    if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
+    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
+    // last, so if every read fails the answer is the pre-send screen, taken: the keys went (their seq
+    // is spent), and a 500 would tell the page they may not have; its next poll shows the change
+    let now = s;
+    for (const stop = Date.now() + TERM.SETTLE_MS; ;) {
+      const got = await readScreen(which, { fresh: true });
+      if (got.error) break;
+      now = got;
+      if (now.etag !== s.etag || Date.now() >= stop) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return json(res, 200, { ...now, taken: true });
+  }
+  // Shell open (§9), inside the Shell's turn: the found pane (the read checks a remembered one, and
+  // looks again if it moved), else a new window in this project's session, tagged; sized on every
+  // call (the kit is the only one that sizes it); then the screen.
+  async function openShell(res, b) {
+    const failed = (status, reason) => { log(status === 409 ? `refused /api/term/shell/open: ${reason}` : `/api/term/shell/open: tmux failed: ${reason}`); return json(res, status, { error: TERM_WORDS.open }); };
+    const why = (got) => (got.timedOut ? 'timed out' : got.err.trim());
+    const s = await readScreen('shell', { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    let pane = s.state === 'live' ? s.pane : null;
+    if (!pane) {
+      const has = await tmuxCall(['has-session', '-t', `=${session}`]);
+      if (!has.ok) return has.missing ? failed(409, `no tmux session ${session}`) : failed(500, why(has));
+      // the markers the new window would get: a failed read could miss one, so it is no open
+      const envs = await Promise.all([['-g'], ['-t', `=${session}`]].map((a) => tmuxCall(['show-environment', ...a])));
+      const bad = envs.find((e) => !e.ok);
+      if (bad) return failed(bad.missing ? 409 : 500, why(bad));
+      const markers = [...new Set(envs.flatMap((e) => e.out.split('\n')).map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+      const ds = await tmuxCall(['show-options', '-gv', 'default-shell']);
+      const shell = (ds.ok && ds.out.trim()) || '/bin/sh';
+      const made = await tmuxCall(['new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'shell', '-c', root, '-t', `=${session}:`, 'env', ...[...TERM_SHELL_UNSET, ...markers].flatMap((k) => ['-u', k]), shell, '-l']);
+      pane = made.out.trim();
+      if (!made.ok || !/^%\d+$/.test(pane)) return failed(made.missing ? 409 : 500, made.ok ? `new-window answered ${JSON.stringify(pane)}` : why(made));
+      const tagged = await tmuxCall(['set-option', '-p', '-t', pane, '@devteam-shell', root]);
+      // an untagged window would never be found, and the next open would make another
+      if (!tagged.ok) { await tmuxCall(['kill-pane', '-t', pane]); return failed(500, why(tagged)); }
+    }
+    const sized = await tmuxCall(['resize-window', '-t', pane, '-x', String(b.cols), '-y', String(b.rows)]);
+    if (!sized.ok) { shellPane = null; return failed(sized.missing ? 409 : 500, why(sized)); }
+    shellPane = pane;
+    // a read begun before the open never fills the cache after it
+    voidScreen('shell');
+    const now = await readScreen('shell', { fresh: true });
+    if (now.error) return json(res, 500, { error: now.error });
+    if (now.state !== 'live') return failed(409, `the Shell's pane ${pane} went`);
+    return json(res, 200, now);
+  }
+  function route(pathname) {
+    if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
+    if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
+    const m = /^\/api\/term\/(supervisor|shell)\/(screen|history|keys)$/.exec(pathname);
+    return m ? { name: m[2], method: m[2] === 'keys' ? 'POST' : 'GET', which: m[1] } : null;
+  }
+  // §3 step 3: view, not-loopback, cross-site, the first that applies
+  function whyOf(req, r) {
+    if (req.headers['x-devteam-level'] === 'view') return 'view';
+    if (!loopback) return 'not-loopback';
+    const site = req.headers['sec-fetch-site'];
+    if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
+    if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
+    return site === 'same-origin' && req.headers.origin === `http://${req.headers.host}` ? null : 'cross-site';
+  }
+  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP
+  // cut off. A client that goes first (a destroyed slow body) settles it too, as gone.
+  const readBody = (req) => new Promise((resolve) => {
+    const chunks = [];
+    let n = 0;
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > 4 * TERM.CAP) { chunks.length = 0; resolve({ cut: true }); return req.destroy(); }
+      if (n <= TERM.CAP) chunks.push(c); else chunks.length = 0;
+    });
+    req.on('end', () => resolve(n > TERM.CAP ? { over: true } : { body: Buffer.concat(chunks) }));
+    for (const ev of ['error', 'aborted', 'close']) req.on(ev, () => resolve({ gone: true }));
+  });
+  const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
+  const PAGE = /^[A-Za-z0-9_-]{16,64}$/;
+  const shapeOk = {
+    keys(b, which) {
+      const ks = Object.keys(b).sort().join(',');
+      if (ks !== 'data,page,pane,seq,token,which' && ks !== 'page,pane,paste,seq,token,which') return false;
+      if (b.which !== which || typeof b.pane !== 'string' || !/^%\d+$/.test(b.pane)) return false;
+      if (typeof b.page !== 'string' || !PAGE.test(b.page) || !Number.isSafeInteger(b.seq) || b.seq < 1) return false;
+      if ('data' in b) return typeof b.data === 'string' && /^(?:[0-9a-fA-F]{2})+$/.test(b.data);
+      return typeof b.paste === 'string' && b.paste.length > 0;
+    },
+    open(b) {
+      const ks = Object.keys(b).sort().join(',');
+      return ks === 'cols,page,rows,token,which' && b.which === 'shell' && typeof b.page === 'string' && PAGE.test(b.page)
+        && Number.isInteger(b.cols) && b.cols >= 20 && b.cols <= 500 && Number.isInteger(b.rows) && b.rows >= 5 && b.rows <= 200;
+    },
+  };
+  // §3 step 10, on a box only: the gateway's proof, bound to this route, its which and this port
+  function proofWhy(req, r, body) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    if (!(gw('ts') && gw('nonce') && gw('sig'))) return 'it carries no signature from the gateway';
+    const proof = { port: port(), ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: body.toString('base64') };
+    const why = dashboardProofProblem(proof, termSigned(r.name === 'open' ? 'devteam-term-open-v1' : 'devteam-term-keys-v1', r.which)) ?? (nonces.has(proof.nonce) ? 'its signature was used already' : null);
+    if (why) return why;
+    const now = Date.now();
+    for (const [n, at] of nonces) if (now - at > 2 * OPERATOR_PROOF_MS) nonces.delete(n);
+    nonces.set(proof.nonce, now);
+    return null;
+  }
+  async function serve(req, res, u) {
+    const at = u.pathname.slice('/api/term/'.length);
+    // a refusal: its reason to the dashboard's output, never a body
+    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); termDrain(req); return json(res, status, obj); };
+    const r = route(u.pathname);
+    if (!r) return no(404, { error: 'not found' });
+    if (req.method !== r.method) return no(405, { error: 'not this method' });
+    const why = whyOf(req, r);
+    if (why) return no(403, r.method === 'GET' ? { why } : { error: TERM_WORDS.page, why });
+    if (r.name === 'token') return json(res, 200, { token: termToken() });
+    if (r.name === 'history') {
+      // the shape (§7); before's top, history_size, is the screen read's
+      const before = u.searchParams.get('before'), count = u.searchParams.get('count');
+      if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
+      const n = Number(before), k = Number(count);
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const answer = (pane, hs, lines) => json(res, 200, { v: 1, which: r.which, pane, before: n, history_size: hs, lines });
+      // before=0: nothing above it, no history call, live or gone (S8)
+      if (n === 0) return answer(s.pane, s.history_size, []);
+      if (s.state === 'gone' || n > s.history_size) return no(400, { error: 'before is past the screen\'s top' });
+      const h = await readHistory(s.pane, n, k, s.history_size);
+      if (h.error) return json(res, 500, { error: h.error });
+      if (h.gone) { voidScreen(r.which); return no(400, { error: 'the pane is gone' }); }
+      if (h.range) return no(400, { error: 'before is past the screen\'s top' });
+      return answer(s.pane, h.hs, h.lines);
+    }
+    if (r.name === 'screen') {
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const etag = `"${s.etag}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'cache-control': 'no-store', etag }); return res.end(); }
+      return json(res, 200, s, { etag });
+    }
+    // the two POSTs, §3 steps 4 to 10
+    if (!jsonType(req.headers['content-type'])) return no(403, { error: TERM_WORDS.page }, 'not application/json');
+    const got = await readBody(req);
+    if (got.cut) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.gone) return void log(`refused /api/term/${at}: the client went before its body ended`);
+    if (got.over) return no(413, { error: TERM_WORDS.big }, 'a body over the cap');
+    let b;
+    try { b = JSON.parse(got.body.toString('utf8')); } catch { return no(400, { error: TERM_WORDS.shape }, 'not JSON'); }
+    if (b === null || typeof b !== 'object' || Array.isArray(b)) return no(400, { error: TERM_WORDS.shape }, 'not a JSON object');
+    if (!tokenOk(b.token)) return no(403, { error: TERM_WORDS.token }, 'a missing or wrong token');
+    if (!shapeOk[r.name](b, r.which)) return no(400, { error: TERM_WORDS.shape }, 'not the route\'s shape');
+    // once, with the shape (step 8), before the cap: the cap then measures what would be typed, and a
+    // paste of markers only is the empty paste the shape refuses (400, §4's malformed body)
+    if (r.name === 'keys' && 'paste' in b && !(b.paste = termUnbracket(b.paste))) return no(400, { error: TERM_WORDS.shape }, 'a paste of bracket markers only');
+    if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
+    if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
+    if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
+    if (r.name === 'keys') {
+      // a client that goes while its post waits (a timed-out gateway, a closed tab): its turn types
+      // nothing, so a line the owner types again never arrives twice (B-2)
+      let left = false;
+      res.on('close', () => { left = true; });
+      return queue(r.which, () => keys(res, r.which, b, () => left));
+    }
+    return queue('shell', () => openShell(res, b));
+  }
+  return {
+    // any throw answers 500 and never ends the dashboard (S15)
+    async handle(req, res, u) {
+      try { await serve(req, res, u); } catch (e) {
+        log(`/api/term/ failed: ${e?.message ?? e}`);
+        if (!res.headersSent) json(res, 500, { error: String(e?.message ?? e) }); else res.destroy();
+      }
+    },
+  };
+}
+/* term-server end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -16659,6 +17520,8 @@ async function cmdDashboard() {
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   processLog(log, 'dashboard');
+  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
+  const term = termRoutes({ port: () => port, host, log });
   const page = path.join(kitDir, 'dashboard', 'index.html');
   // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
@@ -17180,10 +18043,15 @@ async function cmdDashboard() {
     req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+    const isTerm = req.url.startsWith('/api/term/');
+    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // the terminal: right after the global guards, before any other route
+    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
     // a file dropped on the page: before every other route, and before a byte of its body is read
     if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
       clearTimeout(bodyTimer);
@@ -21211,7 +22079,18 @@ function cmdWait() {
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
   if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
   const self = fileURLToPath(import.meta.url);
-  const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  // Tests only: a JSON line per snapshot (its children, folds, key and RSS), shorter cycles, and
+  // the first n messages children taken as failed.
+  const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
+  const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
+  let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  const sub = (args) => {
+    if (trace) started.push(args);
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
+    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+  };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
@@ -21229,6 +22108,7 @@ function cmdWait() {
     try { ensureStreams(self); } catch (e) { if (!pollWarned) process.stderr.write(`devteam: a stream collector didn't start: ${e.message}\n`); }
     if (!ms.some((m) => sensorDue(m, sensorState(m.name)))) return [];
     const budget = (Math.max(0, ...ms.filter((m) => m.kind === 'probe').map((m) => m.probe_timeout_s)) + 60) * 1000;
+    if (trace) started.push(['sensor', 'poll', '--due', '--json']);
     const r = spawnSync(process.execPath, [self, 'sensor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: budget, maxBuffer: 8 * 1024 * 1024 });
     // a poll killed after it printed still said its alerts
     try { const j = (r.stdout ?? '').trim() ? JSON.parse(r.stdout) : null; if (r.status === 0 && j) return j.alerts ?? []; if (j?.alerts?.length) { if (!pollWarned) process.stderr.write('devteam: sensor poll ran out of time after it polled; its alerts are below\n'); pollWarned = true; return j.alerts; } } catch {}
@@ -21236,20 +22116,42 @@ function cmdWait() {
     pollWarned = true;
     return [];
   };
+  // The owner's lines and the open messages come only from the log: while its key holds (main's sha,
+  // each log file's name, size and mtime), a cycle keeps the last ones and starts no messages child.
+  // The key is taken before the read, so a line written during the read is read on the next cycle.
+  // A messages child that failed is not kept: the next cycle runs it again. Findings come from
+  // panes, time, accounts and git too, so metrics runs every cycle.
+  let last = null;
+  let cycle = 0;
+  let reads = 0; // the trace's folds since its last line; cycle 0's from just before its snapshot
   const snap = () => {
-    // main's copy of the log as it is now: a wait can outlast many moves of main
-    logCache = null;
-    mainRefCache = undefined;
-    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
-    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
-    const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
-    return { owner, msgs, high };
+    const at = Date.now();
+    const key = logKey();
+    let now;
+    if (last && last.key === key) now = { owner: last.owner, msgs: last.msgs };
+    else {
+      // main's copy of the log as it is now: a wait can outlast many moves of main
+      logCache = null;
+      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
+      const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
+      last = got ? { key, owner, msgs } : null;
+      now = { owner, msgs };
+    }
+    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    if (trace) {
+      const r = readLog.reads ?? 0;
+      try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
+      reads = r;
+    }
+    return now;
   };
   // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
   // keeps its claim fresh, and another machine live on this repo ends the wait
   const hostBeat = () => { if (hostState().refused || !(Date.now() - (Number(hostState().checked) || 0) < HOST_REFRESH_MS)) { const hc = hostCheck(); if (hc.refused) hostRefusedWhileRunning(hc); } };
   hostBeat();
   const firstAlerts = poll();
+  reads = readLog.reads ?? 0;
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
@@ -21264,7 +22166,7 @@ function cmdWait() {
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
-    sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    sleep(Math.min(cycleMs ?? Math.min(Math.max(2000, (minutes * 60000) / 10), 45000), Math.max(0, until - Date.now())));
     hostBeat();
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
@@ -22033,14 +22935,13 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
-// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
-// kind is left alone, to land with the owner's answer.
+// A link of an owner's kind is carried change by change (linkFieldChanges), each only as an owner's
+// answer approved it (linkAnswerCovers), onto the chore's entry: a field main changed since this
+// checkout's copy is never reverted, and one no answer covers is left alone, to land with the
+// owner's answer.
 // A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
 // one: when main's entry changed since the act was made, the act's parent state is gone, and the
 // entry is refused (the run exits 1, after carrying the others).
-// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
-const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -22059,7 +22960,18 @@ function linkLand(slugName) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
       if (ownersKind(h) || ownersKind(t)) {
-        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+        const cs = linkFieldChanges({ [id]: t }, { [id]: h });
+        const ok = cs.filter((c) => linkAnswerCovers.any(c));
+        owners.push(...cs.filter((c) => !ok.includes(c)).map(linkFieldChanges.key));
+        if (!ok.length) continue;
+        let e = t;
+        for (const c of ok) {
+          if (c.field === null) e = c.to ?? undefined;
+          else { e = { ...e }; if (c.to === null) delete e[c.field]; else e[c.field] = c.to; }
+        }
+        if (e === undefined) delete links[id]; else links[id] = e;
+        changed.push(`links.${id} (${t === undefined ? 'added' : e === undefined ? 'removed' : 'changed'})`);
+        continue;
       } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
         const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
         refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
@@ -22087,6 +22999,11 @@ function cmdLink() {
   if (sub === 'land') { supervisorOnly('link'); return linkLand(id ?? 'registry'); }
   // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
   const vals = [...given, ...(rest ?? [])];
+  // a flag of this command after the bare -- is part of the value there, never a flag: refused, so
+  // a value never swallows --approved (and asks again) nor is stored with it
+  const linkFlags = new Set(['approved', 'source', 'reason', ...Object.keys(LINK_KINDS).flatMap((k) => linkFields(k))]);
+  const swallowed = (rest ?? []).find((t) => /^--[a-z_]+(=|$)/.test(t) && linkFlags.has(t.slice(2).split('=')[0]));
+  if (swallowed) die(`${swallowed.split('=')[0]} after -- would be part of the value: put flags before -- (link set <id> <field> --approved <qid> -- <value>), or quote the value as one argument`);
   if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>   |   link land [<chore slug>]');
   supervisorOnly('link');
   if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
@@ -22140,11 +23057,12 @@ function cmdLink() {
 // The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
 // it: a repo link written by an earlier --approved run is here before it lands on main.
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
-// A link of an owner's kind: draft the change and ask a question in the class its
-// field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
-// exactly that change and log the act the chore-registry merge then lands under the same answer.
-// Asking twice for the same draft reuses the open question; applying a draft already written is a
-// no-op. Nothing here names a kind: the table gives fields and classes.
+// A link of an owner's kind: draft the change and ask a question in the class its field takes
+// (gate-change for a gate field, else governance-edit) about the changes no owner's answer covers
+// yet, field by field; with --approved <qid>, an answer covering this change (link set's own, or the
+// supervisor's ask --link-change), apply it and log the acts; the chore merge lands it the same way.
+// Asking twice for the same changes reuses the open question; applying a change already written is
+// a no-op. Nothing here names a kind: the table gives fields and classes.
 function linkByOwner(sub, id, field, vals, kind) {
   const K = LINK_KINDS[kind];
   const raw = rawSettingsBlock().links ?? {};
@@ -22159,33 +23077,56 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
   if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
-  // The bundle the answer covers: every link of an owner's kind that settings.md here, with this
-  // change, would land differently from main, this one included. One answer may approve a bundle,
-  // so the question shows all of it; merge then lands exactly these entries under that answer.
+  // The bundle: every repo link change that settings.md here, with this one, would land against
+  // main, field by field (linkFieldChanges). A change some owner's answer already covers is never
+  // asked about again; the question asks only about the rest, and says it is the one question.
   const mainLinks = mainSettings(null)?.links ?? {};
   const after = Object.assign(Object.create(null), raw);
   if (next) after[id] = next; else delete after[id];
-  const bundleIds = [...new Set(linkOwnerChanges(mainLinks, after).filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)).map((c) => c.key.split('.')[1]))].sort();
-  if (!bundleIds.includes(id)) bundleIds.push(id);
+  const L = linkFieldChanges.line;
+  const changes = linkFieldChanges(mainLinks, after);
+  // this command's own change: the field it sets (or the entry, when the link is new or goes)
+  const own = changes.filter((c) => c.id === id && (sub !== 'set' || c.field === field || c.field === null));
+  const write = () => editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
+  // back to what main has: nothing of it lands, so there is nothing to approve
+  if (!own.length) { write(); return out(`links.${id}${sub === 'set' ? `.${field}` : ''} is back to main's in settings.md here: nothing of it lands, so no question`); }
+  const coveredBy = new Map(changes.map((c) => [L(c), linkAnswerCovers.any(c)]));
+  const bundleIds = [...new Set([id, ...changes.map((c) => c.id)])].sort();
   const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
-  const draft = JSON.stringify(bundle, null, 2);
-  const diff = bundleIds.map((l) => `links.${l}: main has ${canonical(ownEntry(mainLinks, l) ?? null)}; would be ${canonical(ownEntry(after, l) ?? null)}`).join('\n');
   const approved = flagStr('approved');
   // the command to run once answered: this one, every value quoted, plus --approved
-  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  // (before a bare --, so it stays a flag)
+  const again = (qid) => { const w = argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved'); const d = w.indexOf('--'); return `node docs/devteam/scripts/devteam.mjs link ${(d < 0 ? [...w.map(shq), '--approved', qid] : [...w.slice(0, d).map(shq), '--approved', qid, ...w.slice(d).map(shq)]).join(' ')}`; };
   if (!approved) {
-    const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
+    const toAsk = changes.filter((c) => !coveredBy.get(L(c)));
+    if (!toAsk.length) { const by = coveredBy.get(L(own[0])); return out(`${by} already approves this change (${own.map(L).join('; ')}); write it with: ${again(by)}`); }
+    const asking = toAsk.map(L);
+    const open = questions().find((q) => q.status === 'open' && ['governance-edit', 'gate-change'].includes(q.class) && canonical(linkAnswerCovers.section(q.context)) === canonical(asking));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const carried = changes.filter((c) => coveredBy.get(L(c)));
+    const diff = bundleIds.map((l) => L({ id: l, field: null, from: ownEntry(mainLinks, l) ?? null, to: ownEntry(after, l) ?? null })).join('\n');
+    const context = [
+      'This is the one question for this change: nothing else will ask the owner about it.',
+      [linkAnswerCovers.HEADER, ...asking].join('\n'),
+      carried.length ? ['Already approved, not asked again:', ...carried.map((c) => `- ${linkFieldChanges.key(c)} (${coveredBy.get(L(c))})`)].join('\n') : null,
+      `The whole settings diff waiting to land${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}`,
+      `The registry entries, as they would be in settings.md links:\n${JSON.stringify(bundle, null, 2)}`,
+    ].filter(Boolean).join('\n\n');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map(linkFieldChanges.key).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
-  if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
-  if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
-  editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
-  // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
-  // (prior_hash), so merge binds each changed entry to this answer
-  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  if (!['governance-edit', 'gate-change'].includes(v.class)) die(`${approved} was asked in class ${v.class ?? '(none)'}, not governance-edit or gate-change`);
+  if (!own.every((c) => linkAnswerCovers(approved, c))) {
+    const named = linkAnswerCovers.lines(approved);
+    die(`${approved} asked about another change; ask again for this one: it named ${named.length ? named.join('; ') : 'no repo link change'}; this change is ${own.map(L).join('; ')}${linkAnswerCovers.why(approved) ? ` (${linkAnswerCovers.why(approved)})` : ''}`);
+  }
+  const missing = changes.filter((c) => !linkAnswerCovers(approved, c) && !coveredBy.get(L(c)));
+  if (missing.length) die(`not approved yet: ${missing.map(L).join('; ')}; run the command without --approved to ask about it (if main changed since, bring this checkout's settings.md up to date first)`);
+  write();
+  // one act per entry of the bundle, in the answer's class: the entry it lands (entry_hash) from
+  // the one main has (prior_hash), so merge binds each changed entry to this answer
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: v.class, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as approved, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
@@ -22371,6 +23312,277 @@ function cmdInit() {
   out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
 }
 
+/* browser-guard start */
+// The browser's egress guard (browser@1, refusal; design supervisors-can-use-a-browser-with-the-o,
+// Components 1). Chrome reaches the network only through it: a loopback forward proxy for
+// absolute-form HTTP and CONNECT that refuses every destination on this machine's own network.
+// Each dashboard takes owner presses from any same-origin page on its loopback port, so a browser
+// that could load one could press them; this is what stops it. The rules, in the contract's order:
+// own-name and gateway on the name, before resolving; then own-interface and special-purpose on
+// every address the name resolved to (once), and the first that refuses is reported. It dials the
+// address it checked, never the name, so DNS rebinding can't get past it. An answer it can't read
+// is refused: it fails closed.
+//
+// The refused ranges, exactly the contract's range enum: every IANA special-purpose block, and for
+// IPv6 everything outside 2000::/3 (::/3, 4000::/2, 8000::/1 when nothing narrower names it). An
+// address embedding a refused IPv4 one (mapped, NAT64, 6to4, Teredo) falls in a refused IPv6
+// range and is refused whole. The longest matching prefix is the range reported.
+const GUARD_RANGES = [
+  '127.0.0.0/8', '0.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '192.0.0.0/24',
+  '198.18.0.0/15', '224.0.0.0/4', '::/128', '::1/128', 'fc00::/7', 'fe80::/10', '64:ff9b::/96', '::ffff:0:0/96', '192.0.2.0/24',
+  '192.31.196.0/24', '192.52.193.0/24', '192.88.99.0/24', '192.175.48.0/24', '198.51.100.0/24', '203.0.113.0/24', '240.0.0.0/4',
+  '255.255.255.255/32', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001::/32', '2001:db8::/32', '2002::/16', '2620:4f:8000::/48',
+  '3fff::/20', '5f00::/16', 'ff00::/8', '::/3', '4000::/2', '8000::/1',
+];
+// An address as a number: { v, n, text }, text its normal form (what a refusal reports), or null
+// for anything that isn't exactly an IPv4 dotted quad or an IPv6 address. IPv6 goes through WHATWG
+// URL first, which writes a dotted tail (::ffff:127.0.0.1, as libuv may answer) as hex.
+function guardAddr(s) {
+  const raw = String(s ?? '').split('%')[0];
+  if (net.isIPv4(raw)) return { v: 4, n: raw.split('.').reduce((a, x) => (a << 8n) + BigInt(x), 0n), text: raw };
+  if (!net.isIPv6(raw)) return null;
+  let text;
+  try { text = new URL(`http://[${raw}]/`).hostname.replace(/^\[|\]$/g, ''); } catch { return null; }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const groups = halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return { v: 6, n: groups.reduce((a, g) => (a << 16n) + BigInt(parseInt(g, 16)), 0n), text };
+}
+let guardTable = null;
+// The most specific refused range holding a parsed address, or null.
+function guardRange(a) {
+  guardTable ??= GUARD_RANGES.map((cidr) => { const [base, p] = cidr.split('/'); return { cidr, ...guardAddr(base), prefix: Number(p) }; });
+  const bits = a.v === 4 ? 32 : 128;
+  let best = null;
+  for (const r of guardTable) {
+    if (r.v !== a.v) continue;
+    const shift = BigInt(bits - r.prefix);
+    if ((a.n >> shift) === (r.n >> shift) && (!best || r.prefix > best.prefix)) best = r;
+  }
+  return best?.cidr ?? null;
+}
+// Whether a parsed address is one of this machine's own, read on every call (a VPN, Tailscale).
+function guardOwn(a) {
+  return Object.values(os.networkInterfaces() ?? {}).flat().some((e) => { const b = guardAddr(e?.address); return b && b.v === a.v && b.n === a.n; });
+}
+const guardBare = (h) => String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+const GUARD_HOST = /^[A-Za-z0-9._:\[\]-]{1,255}$/;
+// A host as the refusal may name it (browser@1 host's pattern): every other character a -, at most
+// 255. URL lets a name keep characters the contract doesn't (a_b.localhost).
+const guardFit = (h) => (GUARD_HOST.test(h) ? h : String(h).replace(/[^A-Za-z0-9._:\[\]-]/g, '-').slice(0, 255) || '-');
+// What a request asks for: { name, asked, port, connect, hostHeader?, path? }, or null (400). An
+// absolute-form http: URL, or a CONNECT authority of exactly <host>:<port>, with the port read from
+// the authority itself (URL drops a default one, and a ws: page's CONNECT names :80).
+function guardTarget(method, target) {
+  let u;
+  let asked;
+  let port;
+  if (method === 'CONNECT') {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^\[\]:/\\@?#\s]+):(\d{1,5})$/.exec(target ?? '');
+    if (!m) return null;
+    port = Number(m[2]);
+    try { u = new URL(`http://${m[1]}`); } catch { return null; }
+    if (u.pathname !== '/' || u.search || u.hash || u.username || u.password) return null;
+    asked = target;
+  } else {
+    if (!/^http:\/\//i.test(target ?? '')) return null;
+    try { u = new URL(target); } catch { return null; }
+    if (u.protocol !== 'http:') return null;
+    asked = target.slice(7).split(/[/?#]/)[0];
+    port = Number(u.port || 80);
+  }
+  const name = guardBare(u.hostname);
+  if (!name || port < 1 || port > 65535) return null;
+  asked = guardFit(GUARD_HOST.test(asked) ? asked : u.host);
+  if (method === 'CONNECT') return { name, asked, port, connect: true };
+  const rest = target.slice(7 + target.slice(7).split(/[/?#]/)[0].length).split('#')[0];
+  return { name, asked, port, connect: false, hostHeader: u.host, path: rest.startsWith('/') ? rest : `/${rest}` };
+}
+// own-name or gateway, decided on the name before anything resolves it.
+function guardNameRule(name) {
+  const own = guardBare(os.hostname());
+  if (name === 'localhost' || name.endsWith('.localhost') || (own && name === own)) return 'own-name';
+  let gw = '';
+  try { gw = process.env.DEVTEAM_PUBLIC_URL ? guardBare(new URL(process.env.DEVTEAM_PUBLIC_URL).hostname) : ''; } catch {}
+  if (gw && (name === gw || name.endsWith(`.${gw}`))) return 'gateway';
+  return null;
+}
+// The ports no test exception ever opens: the hub, the dashboards' block, ttyd and the gateway, at
+// their defaults and wherever the environment moved them.
+function guardNeverPorts() {
+  const own = process.env.DEVTEAM_PUBLIC_URL && Number(process.env.PORT) > 0 ? [Number(process.env.PORT)] : [];
+  return new Set([4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, HUB_PORT, ...PORT_RANGE, TTYD_PORT, ...own]);
+}
+// The tests' one way out (DEVTEAM_TEST set and non-empty): a loopback port DEVTEAM_TEST_BROWSER_ALLOW
+// lists, for the fixture site, when every address is loopback (127.0.0.0/8, or ::1 exactly).
+function guardAllowed(port, addrs) {
+  if (!process.env.DEVTEAM_TEST) return false;
+  const listed = String(process.env.DEVTEAM_TEST_BROWSER_ALLOW ?? '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,5}$/.test(s)).map(Number);
+  if (!listed.includes(port) || guardNeverPorts().has(port)) return false;
+  return addrs.length > 0 && addrs.every((a) => (a.v === 4 && a.n >> 24n === 127n) || (a.v === 6 && a.n === 1n));
+}
+// A socket to the address it checked (never a name: no second lookup), connected, or an error.
+function guardDial(address, port) {
+  return new Promise((resolve, reject) => {
+    let s;
+    try { s = net.connect({ host: address, port }); } catch (e) { return reject(e); }
+    const timer = setTimeout(() => { s.destroy(); reject(Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' })); }, 30000);
+    const failed = (e) => { clearTimeout(timer); reject(e); };
+    s.once('error', failed);
+    s.once('connect', () => { clearTimeout(timer); s.off('error', failed); s.on('error', () => {}); resolve(s); });
+  });
+}
+// Headers that end at the guard, either way: the hop-by-hop ones and those Connection names.
+const GUARD_HOP = ['connection', 'proxy-connection', 'keep-alive', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'upgrade', 'transfer-encoding'];
+function guardEndToEnd(headers) {
+  const drop = new Set([...GUARD_HOP, ...String(headers.connection ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)]);
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => !drop.has(k.toLowerCase())));
+}
+// A plain request, sent on the socket it dialled (createConnection, no agent: with agent: false Node
+// would ignore it and dial the host itself), its answer streamed back.
+function guardForward(req, res, t, sock, fail) {
+  // the client may have left while the name resolved or the socket dialled: nothing to send it
+  if (req.socket?.destroyed || res.destroyed) return void sock.destroy();
+  const headers = { ...guardEndToEnd(req.headers), host: t.hostHeader };
+  // the body's framing goes out as it came, whatever Connection names (Node frames no body itself
+  // for GET, HEAD, DELETE, OPTIONS; its parser has already refused a request with both or neither)
+  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding'];
+  else if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
+  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers, createConnection: () => sock });
+  up.on('response', (ur) => {
+    // a status line Node reads but won't write (a control character, a code under 100) is the
+    // site's fault: a 502, never a throw out of this listener
+    try { res.writeHead(ur.statusCode, guardEndToEnd(ur.headers)); } catch {
+      ur.destroy();
+      up.destroy();
+      return void fail('the site sent an answer the guard could not pass on');
+    }
+    ur.on('error', () => res.destroy());
+    ur.pipe(res);
+  });
+  up.on('error', (e) => { if (res.headersSent) res.destroy(); else fail(e?.code ?? 'the site closed the connection'); });
+  res.on('close', () => { if (!res.writableFinished) { up.destroy(); sock.destroy(); } });
+  req.pipe(up);
+}
+// A CONNECT tunnel on the socket it dialled.
+function guardTunnel(client, head, sock) {
+  if (client.destroyed) return void sock.destroy();
+  client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  if (head?.length) sock.write(head);
+  for (const [a, b] of [[client, sock], [sock, client]]) { a.on('error', () => b.destroy()); a.on('close', () => b.destroy()); a.pipe(b); }
+}
+// { refuse: { rule, address?, range? } }, { fail: why } (a 502) or { address } to dial. lookup is
+// dns.lookup, called once for a name.
+async function guardDecide(t, lookup) {
+  const named = guardNameRule(t.name);
+  if (named) return { refuse: { rule: named } };
+  const literal = guardAddr(t.name);
+  let addrs = literal ? [literal] : null;
+  if (!addrs) {
+    let list;
+    try { list = await new Promise((resolve, reject) => lookup(t.name, { all: true, verbatim: true }, (e, l) => (e ? reject(e) : resolve(l)))); } catch (e) { return { fail: `no address for it (${e?.code ?? 'lookup failed'})` }; }
+    // before any rule or the test exception: none, or one it can't read, never reaches a dial
+    if (!Array.isArray(list) || !list.length) return { fail: 'no address for it' };
+    addrs = [];
+    for (const x of list) {
+      const a = guardAddr(x?.address);
+      if (!a) return { refuse: { rule: 'special-purpose', address: String(x?.address) } };
+      addrs.push(a);
+    }
+  }
+  if (guardAllowed(t.port, addrs)) return { address: addrs[0].text };
+  for (const a of addrs) if (guardOwn(a)) return { refuse: { rule: 'own-interface', address: a.text } };
+  for (const a of addrs) { const range = guardRange(a); if (range) return { refuse: { rule: 'special-purpose', address: a.text, range } }; }
+  return { address: addrs[0].text };
+}
+const guardEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The refusal page: plain words, and the browser@1 refusal object as JSON with every < escaped.
+function guardRefusal(rule, { asked, address, range } = {}) {
+  // an address as given (a resolver answer that couldn't be read) is 2 to 64 characters there
+  if (address !== undefined) address = String(address).slice(0, 64).padEnd(2, '?');
+  const at = address ? `${asked} (${address})` : asked;
+  const why = {
+    'own-name': `The supervisor's browser can't open ${asked}: it is this machine's own name.`,
+    gateway: `The supervisor's browser can't open ${asked}: it is this box's gateway, where the owner's controls are.`,
+    'own-interface': `The supervisor's browser can't open ${at}: it is an address of this machine.`,
+    'special-purpose': range ? `The supervisor's browser can't open ${at}: ${range} is not on the public internet.` : `The supervisor's browser can't open ${asked}: its address (${address}) could not be read, so it is refused.`,
+    'not-a-proxy-request': "This is the browser's proxy; it answers only proxy requests.",
+  }[rule].slice(0, 500);
+  const o = { browser: 1, rule, why };
+  if (rule !== 'not-a-proxy-request') o.host = asked;
+  if (address) o.address = address;
+  if (range) o.range = range;
+  const title = rule === 'not-a-proxy-request' ? 'Not a proxy request' : 'This page is blocked';
+  const body = `<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n<h1>${title}</h1>\n<p>${guardEsc(why)}</p>\n<script type="application/json" id="devteam-refusal">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>\n</body>\n</html>\n`;
+  return { status: rule === 'not-a-proxy-request' ? 400 : 403, body };
+}
+const guardHead = (status, type, length) => `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\ncontent-type: ${type}\r\ncontent-length: ${length}\r\nconnection: close\r\n\r\n`;
+// An answer on a raw socket (a CONNECT's), then the socket closes.
+function guardSocketAnswer(sock, status, body, type = 'text/html; charset=utf-8') {
+  if (sock.destroyed) return;
+  sock.end(guardHead(status, type, Buffer.byteLength(body)) + body);
+}
+function guardAnswer(res, status, body, type = 'text/html; charset=utf-8') {
+  if (res.headersSent) return void res.destroy();
+  res.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), connection: 'close' });
+  res.end(body);
+}
+// The guard on 127.0.0.1: { port, close() }. browser serve starts it in-process; `browser-guard`
+// runs it alone.
+async function startBrowserGuard({ port = 0 } = {}) {
+  const dns = (await import('node:dns')).default;
+  const lookup = (...a) => dns.lookup(...a);
+  const server = http.createServer();
+  server.on('connection', (s) => s.on('error', () => {}));
+  // a head Node's own parser refuses (a backslash in a CONNECT authority, say) is no proxy request either
+  server.on('clientError', (e, s) => { if (!s.writable) return void s.destroy(); const r = guardRefusal('not-a-proxy-request'); guardSocketAnswer(s, r.status, r.body); });
+  // One request or CONNECT: decided, then refused, failed (502) or passed on. answer(status, body,
+  // type) writes the guard's own answer; pass(t, address) dials. Nothing it throws ends the guard:
+  // whatever goes wrong is a 502, never a pass.
+  const serve = async (method, target, answer, pass) => {
+    const t = guardTarget(method, target);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return answer(r.status, r.body); }
+    const fail = (why) => answer(502, `The supervisor's browser couldn't reach ${t.asked}: ${why}\n`, 'text/plain; charset=utf-8');
+    try {
+      const d = await guardDecide(t, lookup);
+      if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return answer(r.status, r.body); }
+      if (d.fail) return fail(d.fail);
+      return await pass(t, d.address, fail);
+    } catch (e) { return fail(e?.code ?? 'the guard failed'); }
+  };
+  server.on('request', (req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), async (t, address, fail) => guardForward(req, res, t, await guardDial(address, t.port), fail)).catch(() => res.destroy());
+  });
+  server.on('connect', (req, sock, head) => {
+    sock.on('error', () => {});
+    // once the tunnel is open, a fault closes it: no answer is ever written into it
+    let open = false;
+    const answer = (status, body, type) => (open ? sock.destroy() : guardSocketAnswer(sock, status, body, type));
+    serve('CONNECT', req.url, answer, async (t, address) => { const up = await guardDial(address, t.port); open = true; guardTunnel(sock, head, up); }).catch(() => sock.destroy());
+  });
+  // Chrome tunnels ws: and wss: through CONNECT, so an Upgrade in absolute form is none of its own
+  server.on('upgrade', (req, sock) => {
+    sock.on('error', () => {});
+    if (!guardTarget(req.method, req.url)) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
+    guardSocketAnswer(sock, 501, "The supervisor's browser proxy tunnels WebSockets through CONNECT; it doesn't upgrade a request.\n", 'text/plain; charset=utf-8');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+}
+async function cmdBrowserGuard() {
+  const p = flagStr('port');
+  const port = p === undefined ? 0 : Number(p);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a port number, 0 to 65535 (0: any free one)');
+  const g = await startBrowserGuard({ port });
+  out(JSON.stringify({ browser: 1, port: g.port }));
+}
+/* browser-guard end */
+
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
@@ -22431,6 +23643,7 @@ Decide and act (supervisor.md, constitution.md)
   preview list [--json]           this instance's previews, with whether each answers
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
+  browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -22516,7 +23729,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
