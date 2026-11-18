@@ -303,3 +303,163 @@ test('recurring-edit is owner-only, on no ladder and in no standing rule', () =>
   assert.ok(words, 'CLASS_WORDS names recurring-edit');
   assert.doesNotMatch(words, /recurring-edit|owner_only/, 'its words carry no class id');
 });
+
+// ===== C1, C5: the fixtures =====
+// schemaErrors as the kit has it, cut from its source (devteam.mjs exports nothing)
+const schemaErrors = new Function(`${/\nconst asList = .*\n/.exec(SRC)[0]}${/\nfunction schemaErrors\(schema, value, where\) \{[\s\S]*?\n\}\n/.exec(SRC)[0]}; return schemaErrors;`)();
+const FIX = path.join(path.dirname(new URL(import.meta.url).pathname), 'fixtures/recurring');
+const fixture = (f) => JSON.parse(fs.readFileSync(path.join(FIX, f), 'utf8'));
+const ISO = '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$';
+const str = { type: 'string' };
+const time = { type: 'string', pattern: ISO };
+const closed = (properties) => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
+const REGISTERED = closed({ qid: { type: 'string', pattern: '^q-' }, at: time });
+const PEEK_SHAPE = closed({
+  name: str,
+  entry: { type: 'object', properties: { kind: { enum: ['check', 'chore'] }, title: str, what: str, every: str, registered: REGISTERED }, required: ['kind', 'title', 'what', 'every', 'registered'] },
+  runs: {
+    type: 'array', maxItems: 20,
+    items: closed({ status: { enum: ['pass', 'fail', 'error', 'started', 'done', 'nothing', 'abandoned'] }, at: time, slot: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'], maxLength: 200 }, ref: { type: ['string', 'null'] } }),
+  },
+});
+const STATES = ['passing', 'failing', 'due', 'started', 'overdue', 'held', 'never'];
+const SIGNALS = ['flapping', 'erroring', 'slow', 'failing-long', 'idle', 'overdue', 'quiet'];
+const DASHBOARD_SHAPE = closed({
+  entries: {
+    type: 'array',
+    items: closed({
+      name: str, title: str, what: str, kind: { enum: ['check', 'chore'] }, by: { enum: ['supervisor', 'worker', null] },
+      every: str, on: { type: ['string', 'integer', 'null'] }, at: { type: ['string', 'null'] },
+      state: { enum: STATES }, fails_in_a_row: { type: 'integer', minimum: 0 },
+      last: { type: ['object', 'null'], properties: { status: str, at: time, seconds: { type: ['number', 'null'], minimum: 0 }, excerpt: { type: ['string', 'null'] } }, required: ['status', 'at', 'seconds', 'excerpt'], additionalProperties: false },
+      next_at: { type: ['string', 'null'], pattern: ISO }, ticket: { type: ['string', 'null'] }, registered: REGISTERED,
+      signals: { type: 'array', items: closed({ kind: { enum: SIGNALS }, since: time, text: str, may: str, evidence: { type: 'array', minItems: 1, items: { type: 'string', pattern: '^o-' } } }) },
+    }),
+  },
+  builtin: { type: 'array', items: closed({ name: { enum: ['retro', 'research', 'kit-sync', 'sensors'] }, every: str, last_at: { type: ['string', 'null'], pattern: ISO }, next_at: { type: ['string', 'null'], pattern: ISO }, note: { type: 'string', minLength: 1 }, setting: { enum: ['retro_every_days', 'research_every_days', 'upstream_check_hours', null] } }) },
+  proposals: { type: 'array', items: closed({ qid: { type: 'string', pattern: '^q-' }, name: str, title: str, asked_at: time, status: { enum: ['open', 'registering', 'stopping'] } }) },
+});
+
+// C1's slot rule, as the plan writes it: the one reading of the fixture kit-162 to kit-164 must match.
+const WEEK = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const isoOf = (t) => new Date(t).toISOString().replace('.000Z', 'Z');
+function plus(t, n, unit, k) {
+  if (unit === 'h') return t + k * n * 3600e3;
+  if (unit === 'd') return t + k * n * 86400e3;
+  if (unit === 'w') return t + k * n * 7 * 86400e3;
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + k * n, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes());
+}
+function nextSlot(c) {
+  let start = Date.parse(c.land);
+  let entry = c.entry;
+  for (const e of c.edits ?? []) {
+    if (['every', 'on', 'at'].some((f) => JSON.stringify(e.entry[f]) !== JSON.stringify(entry[f]))) start = Date.parse(e.at);
+    entry = e.entry;
+  }
+  const [, nn, unit] = /^(\d+)(h|d|w|mo)$/.exec(entry.every);
+  const n = Number(nn);
+  const now = Date.parse(c.now);
+  const runs = c.runs.filter((r) => Date.parse(r.slot) >= start);
+  if (unit === 'h' || (entry.on === undefined && entry.at === undefined)) {
+    const next = runs.length ? plus(Date.parse(runs.at(-1).at), n, unit, 1) : start;
+    return { due: now >= next, next: isoOf(next) };
+  }
+  const [hh, mm] = (entry.at ?? '00:00').split(':').map(Number);
+  const s = new Date(start);
+  const [Y, M, D] = [s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()];
+  let s0;
+  if (unit === 'd') s0 = Date.UTC(Y, M, D, hh, mm) < start ? Date.UTC(Y, M, D + 1, hh, mm) : Date.UTC(Y, M, D, hh, mm);
+  else if (unit === 'w') {
+    const wd = entry.on !== undefined ? WEEK.indexOf(entry.on) : s.getUTCDay();
+    s0 = Date.UTC(Y, M, D + ((wd - s.getUTCDay() + 7) % 7), hh, mm);
+    if (s0 < start) s0 += 7 * 86400e3;
+  } else {
+    const day = entry.on ?? Math.min(D, 28);
+    s0 = Date.UTC(Y, M, day, hh, mm) < start ? Date.UTC(Y, M + 1, day, hh, mm) : Date.UTC(Y, M, day, hh, mm);
+  }
+  let k = 0;
+  let current = null;
+  while (plus(s0, n, unit, k) <= now) current = plus(s0, n, unit, k++);
+  const due = current !== null && !runs.some((r) => Date.parse(r.slot) === current);
+  return { due, next: isoOf(due ? current : plus(s0, n, unit, k)) };
+}
+
+test('slots.json holds the C1 cases, each one the slot rule gives', () => {
+  const { cases } = fixture('slots.json');
+  assert.deepEqual(cases.map((c) => c.case), ['weekly-mon-run-wednesday', 'fortnightly-mon', 'monthly-1-started-3rd', 'quarterly-15', 'daily-0900-missed-three-days', 'six-hourly', 'weekly-at-no-on', 'monthly-landing-30th', 'edit-changes-every']);
+  for (const c of cases) {
+    for (const k of ['land', 'entry', 'runs', 'now', 'due', 'next']) assert.ok(k in c, `${c.case}.${k}`);
+    for (const t of [c.land, c.now, c.next, ...c.runs.flatMap((r) => [r.slot, r.at]), ...(c.edits ?? []).map((e) => e.at)]) assert.match(t, new RegExp(ISO), c.case);
+    for (const r of c.runs) assert.equal(r.status, c.entry.kind === 'check' ? 'pass' : 'done', c.case);
+    assert.deepEqual(nextSlot(c), { due: c.due, next: c.next }, c.case);
+  }
+  // the rule, not the table: an edit to every restarts the schedule at the edit
+  const edit = cases.find((c) => c.case === 'edit-changes-every');
+  assert.deepEqual(nextSlot({ ...edit, edits: undefined }), { due: false, next: '2026-11-03T00:00:00Z' });
+});
+
+test('every fixture entry passes RECURRING_ENTRY_SHAPE', () => {
+  const block = {};
+  for (const c of fixture('slots.json').cases) {
+    block[c.case] = c.entry;
+    (c.edits ?? []).forEach((e, i) => { block[`${c.case}-edit-${i}`] = e.entry; });
+  }
+  for (const [name, p] of Object.entries(fixture('peek.json'))) {
+    const { registered, ...entry } = p.entry;
+    block[name] = entry;
+  }
+  const dir = proj();
+  withRecurring(dir, block);
+  const r = validate(dir);
+  assert.deepEqual(recurringLines(r.out), []);
+  assert.equal(r.status, 0, r.out);
+});
+
+test('peek.json is peek recurring --json for a failing check and a worker chore', () => {
+  const peek = fixture('peek.json');
+  const dash = fixture('dashboard.json');
+  assert.equal(Object.keys(peek).length, 2);
+  for (const [key, v] of Object.entries(peek)) {
+    assert.deepEqual(schemaErrors(PEEK_SHAPE, v, key), []);
+    assert.equal(v.name, key);
+    assert.ok(!('on' in v.entry && v.entry.on === null) && !('at' in v.entry && v.entry.at === null), `${key}: on and at absent when unset`);
+    const ats = v.runs.map((r) => r.at);
+    assert.deepEqual(ats, [...ats].sort().reverse(), `${key}: newest first`);
+    assert.ok(dash.entries.find((e) => e.name === key)?.signals.length > 0, `${key} is a dashboard entry with signals`);
+  }
+  const chk = Object.values(peek).find((v) => v.entry.kind === 'check');
+  const chr = Object.values(peek).find((v) => v.entry.kind === 'chore' && v.entry.by === 'worker');
+  assert.ok(chk && chr);
+  for (const f of ['timeout_s', 'fail', 'fail_after', 'severity']) assert.ok(f in chk.entry, `check default ${f} filled`);
+  assert.ok('grace_days' in chr.entry, 'chore default grace_days filled');
+  assert.ok(chk.runs.every((r) => ['pass', 'fail', 'error'].includes(r.status)));
+  assert.equal(new Set(chk.runs.map((r) => r.slot)).size, chk.runs.length, 'one row per slot');
+  assert.ok(chr.runs.every((r) => ['started', 'done', 'nothing', 'abandoned'].includes(r.status)));
+  for (const s of ['done', 'nothing']) assert.ok(chr.runs.some((r) => r.status === s), `a ${s} row`);
+  assert.ok(chr.runs.every((r, i) => r.status !== 'started' || i === 0), 'started only on the newest');
+});
+
+test('dashboard.json is C5\'s upkeep.recurring', () => {
+  const d = fixture('dashboard.json');
+  const peek = fixture('peek.json');
+  assert.deepEqual(schemaErrors(DASHBOARD_SHAPE, d, 'recurring'), []);
+  const E = d.entries;
+  for (const s of STATES) assert.ok(E.some((e) => e.state === s), `state ${s}`);
+  assert.ok(E.some((e) => e.state === 'failing' && e.ticket), 'a failing entry with a ticket');
+  assert.ok(E.filter((e) => e.kind === 'chore').every((e) => e.fails_in_a_row === 0 && e.by !== null));
+  assert.ok(E.filter((e) => e.kind === 'check').every((e) => e.by === null));
+  assert.ok(E.some((e) => e.kind === 'check' && e.fails_in_a_row >= 2));
+  const failing = Object.values(peek).find((v) => v.entry.kind === 'check');
+  const streak = failing.runs.slice(0, failing.runs.findIndex((r) => r.status === 'pass'));
+  assert.ok(streak.some((r) => r.status === 'error'), 'the streak includes an error');
+  assert.equal(E.find((e) => e.name === failing.name).fails_in_a_row, streak.length);
+  assert.ok(E.some((e) => e.signals.length === 0) && E.some((e) => e.signals.length === 2));
+  for (const s of SIGNALS) assert.ok(E.some((e) => e.signals.some((g) => g.kind === s)), `signal ${s}`);
+  assert.deepEqual(d.builtin.map((b) => [b.name, b.setting]), [['retro', 'retro_every_days'], ['research', 'research_every_days'], ['kit-sync', 'upstream_check_hours'], ['sensors', null]]);
+  assert.deepEqual(d.proposals.map((p) => p.status).sort(), ['open', 'registering', 'stopping']);
+  for (const v of Object.values(peek)) {
+    const { status, at, seconds, excerpt } = v.runs[0];
+    assert.deepEqual(E.find((e) => e.name === v.name).last, { status, at, seconds, excerpt }, `${v.name}: last is the newest peek row`);
+  }
+});

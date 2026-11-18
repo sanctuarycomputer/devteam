@@ -1,0 +1,328 @@
+{
+  "entries": [
+    {
+      "name": "ci-main",
+      "title": "Main builds and its tests pass",
+      "what": "The full suite on main, every six hours.",
+      "kind": "check",
+      "by": null,
+      "every": "6h",
+      "on": null,
+      "at": null,
+      "state": "failing",
+      "fails_in_a_row": 3,
+      "last": {
+        "status": "error",
+        "at": "2026-11-19T00:27:06Z",
+        "seconds": 1800,
+        "excerpt": "timed out after 1800 s"
+      },
+      "next_at": "2026-11-19T06:27:06Z",
+      "ticket": "ci-04-fix-ci-main",
+      "registered": {
+        "qid": "q-20261101-090000000",
+        "at": "2026-11-01T09:05:00Z"
+      },
+      "signals": [
+        {
+          "kind": "erroring",
+          "since": "2026-11-19T00:27:06Z",
+          "text": "Its last run timed out instead of finishing.",
+          "may": "Raise timeout_s, or look at what hangs.",
+          "evidence": [
+            "o-20261119-002706000-supervisor"
+          ]
+        },
+        {
+          "kind": "failing-long",
+          "since": "2026-11-18T12:27:04Z",
+          "text": "Failing for half a day with a fix ticket open.",
+          "may": "Look at ci-04-fix-ci-main.",
+          "evidence": [
+            "o-20261118-122704000-supervisor",
+            "o-20261118-182705000-supervisor"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lint-docs",
+      "title": "Docs links resolve",
+      "what": "Every link in docs/ answers.",
+      "kind": "check",
+      "by": null,
+      "every": "1d",
+      "on": null,
+      "at": "06:00",
+      "state": "passing",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "pass",
+        "at": "2026-11-19T06:00:41Z",
+        "seconds": 41.2,
+        "excerpt": "0 broken links"
+      },
+      "next_at": "2026-11-20T06:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20261012-090000000",
+        "at": "2026-10-12T09:05:00Z"
+      },
+      "signals": [
+        {
+          "kind": "flapping",
+          "since": "2026-11-12T06:00:38Z",
+          "text": "Passed and failed by turns over the last week.",
+          "may": "Make the check steadier, or stop it.",
+          "evidence": [
+            "o-20261112-060038000-supervisor",
+            "o-20261113-060040000-supervisor"
+          ]
+        },
+        {
+          "kind": "slow",
+          "since": "2026-11-15T06:00:44Z",
+          "text": "Its runs take four times what they took a month ago.",
+          "may": "Look at what grew.",
+          "evidence": [
+            "o-20261115-060044000-supervisor"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "open-advisories",
+      "title": "No open security advisories",
+      "what": "npm audit finds nothing to fix.",
+      "kind": "check",
+      "by": null,
+      "every": "1d",
+      "on": null,
+      "at": "05:00",
+      "state": "passing",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "pass",
+        "at": "2026-11-19T05:00:09Z",
+        "seconds": 9.3,
+        "excerpt": "0"
+      },
+      "next_at": "2026-11-20T05:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20260801-090000000",
+        "at": "2026-08-01T09:05:00Z"
+      },
+      "signals": [
+        {
+          "kind": "quiet",
+          "since": "2026-08-02T05:00:08Z",
+          "text": "It has passed every run for three months.",
+          "may": "Keep it, or run it less often.",
+          "evidence": [
+            "o-20260802-050008000-supervisor"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "smoke-prod",
+      "title": "The site answers",
+      "what": "The home page loads.",
+      "kind": "check",
+      "by": null,
+      "every": "1h",
+      "on": null,
+      "at": null,
+      "state": "never",
+      "fails_in_a_row": 0,
+      "last": null,
+      "next_at": "2026-11-19T12:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20261119-090000000",
+        "at": "2026-11-19T09:05:00Z"
+      },
+      "signals": []
+    },
+    {
+      "name": "deps-bump",
+      "title": "Dependencies are bumped",
+      "what": "A worker bumps patch and minor versions each Monday.",
+      "kind": "chore",
+      "by": "worker",
+      "every": "1w",
+      "on": "mon",
+      "at": null,
+      "state": "started",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "started",
+        "at": "2026-11-16T00:04:00Z",
+        "seconds": null,
+        "excerpt": null
+      },
+      "next_at": "2026-11-23T00:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20261020-090000000",
+        "at": "2026-10-20T09:05:00Z"
+      },
+      "signals": [
+        {
+          "kind": "overdue",
+          "since": "2026-11-19T00:04:00Z",
+          "text": "Started three days ago and not merged.",
+          "may": "Look at deps-07-recurring-deps-bump.",
+          "evidence": [
+            "o-20261116-000400000-supervisor"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tidy-branches",
+      "title": "Merged branches are deleted",
+      "what": "Each Monday at nine.",
+      "kind": "chore",
+      "by": "supervisor",
+      "every": "1w",
+      "on": "mon",
+      "at": "09:00",
+      "state": "due",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "done",
+        "at": "2026-11-09T09:02:00Z",
+        "seconds": null,
+        "excerpt": null
+      },
+      "next_at": "2026-11-16T09:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20261005-090000000",
+        "at": "2026-10-05T09:05:00Z"
+      },
+      "signals": []
+    },
+    {
+      "name": "review-docs",
+      "title": "The docs are read for drift",
+      "what": "Every second Monday.",
+      "kind": "chore",
+      "by": "supervisor",
+      "every": "2w",
+      "on": "mon",
+      "at": null,
+      "state": "overdue",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "started",
+        "at": "2026-11-09T00:06:00Z",
+        "seconds": null,
+        "excerpt": null
+      },
+      "next_at": "2026-11-23T00:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20261005-090000000",
+        "at": "2026-10-05T09:05:00Z"
+      },
+      "signals": []
+    },
+    {
+      "name": "release-notes",
+      "title": "Release notes are drafted",
+      "what": "On the first of each month.",
+      "kind": "chore",
+      "by": "supervisor",
+      "every": "1mo",
+      "on": 1,
+      "at": null,
+      "state": "held",
+      "fails_in_a_row": 0,
+      "last": {
+        "status": "nothing",
+        "at": "2026-11-01T00:03:00Z",
+        "seconds": null,
+        "excerpt": null
+      },
+      "next_at": "2026-12-01T00:00:00Z",
+      "ticket": null,
+      "registered": {
+        "qid": "q-20260901-090000000",
+        "at": "2026-09-01T09:05:00Z"
+      },
+      "signals": [
+        {
+          "kind": "idle",
+          "since": "2026-09-01T00:02:00Z",
+          "text": "Its last three runs found nothing to do.",
+          "may": "Run it less often, or stop it.",
+          "evidence": [
+            "o-20260901-000200000-supervisor",
+            "o-20261001-000300000-supervisor",
+            "o-20261101-000300000-supervisor"
+          ]
+        }
+      ]
+    }
+  ],
+  "builtin": [
+    {
+      "name": "retro",
+      "every": "14d",
+      "last_at": "2026-11-10T17:00:00Z",
+      "next_at": "2026-11-24T17:00:00Z",
+      "note": "A look back over the last two weeks.",
+      "setting": "retro_every_days"
+    },
+    {
+      "name": "research",
+      "every": "30d",
+      "last_at": "2026-10-28T10:00:00Z",
+      "next_at": "2026-11-27T10:00:00Z",
+      "note": "A spike on new tools and practice.",
+      "setting": "research_every_days"
+    },
+    {
+      "name": "kit-sync",
+      "every": "24h",
+      "last_at": "2026-11-19T03:00:00Z",
+      "next_at": "2026-11-20T03:00:00Z",
+      "note": "Checks for a newer kit upstream.",
+      "setting": "upstream_check_hours"
+    },
+    {
+      "name": "sensors",
+      "every": "each cycle",
+      "last_at": "2026-11-19T11:58:00Z",
+      "next_at": null,
+      "note": "Production signals, read while Upkeep runs.",
+      "setting": null
+    }
+  ],
+  "proposals": [
+    {
+      "qid": "q-20261119-101500000",
+      "name": "bundle-size",
+      "title": "The bundle stays under 300 kB",
+      "asked_at": "2026-11-19T10:15:00Z",
+      "status": "open"
+    },
+    {
+      "qid": "q-20261118-160000000",
+      "name": "stale-issues",
+      "title": "Stale issues are closed",
+      "asked_at": "2026-11-18T16:00:00Z",
+      "status": "registering"
+    },
+    {
+      "qid": "q-20261117-140000000",
+      "name": "weekly-report",
+      "title": "The weekly report is sent",
+      "asked_at": "2026-11-17T14:00:00Z",
+      "status": "stopping"
+    }
+  ]
+}
