@@ -5273,19 +5273,24 @@ function remediationBindingFails(base, sha, approved) {
   for (const r of named) if (!changed.includes(r.name)) fails.push(`${approved} names remediations.${r.name}, which this PR doesn't change: ask again, naming only what it changes`);
   return fails;
 }
+// Each repo link change a merge lands (linkFieldChanges, main against the head) needs an owner's
+// answer whose question showed exactly that change (linkAnswerCovers): the --approved one, or an
+// earlier yes for a field it never asked again about; and the --approved answer must cover one of
+// them. A question changed after its answer approves nothing.
 function ownerLinkActFails(changed, sha, approved) {
   const keys = changed.filter((c) => c.key.startsWith('links.'));
   if (!keys.length) return [];
-  const q = logGet(approved);
-  const ups = q?.updates ?? [];
-  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
-  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
-  const shown = String(q?.context ?? '');
+  const why = linkAnswerCovers.why(approved);
+  if (why) return [why];
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
-  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
-  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+  const key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+  const cs = linkFieldChanges(onMain, lands);
+  const mine = cs.filter((c) => linkAnswerCovers(approved, c));
+  const bare = cs.filter((c) => !mine.includes(c) && !linkAnswerCovers.any(c)).map(key);
+  if (bare.length) return [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the changes its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question asks about every repo link change no answer covers yet), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`];
+  if (cs.length && !mine.length) return [`${approved} approves none of the repo link changes this lands (${cs.map(key).join(', ')}): cite an answer that approved one of them`];
+  return [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -6071,7 +6076,9 @@ function cmdMerge() {
       else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        // a landing of repo link changes only: either class of the owner's link questions (each change is bound to the line its answer showed, ownerLinkActFails)
+        const linksOnly = changed.every((c) => c.key.startsWith('links.')) && ['governance-edit', 'gate-change'].includes(q.class);
+        if (!classes.includes(q.class) && !linksOnly) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
         fails.push(...ownerLinkActFails(changed, sha, approved));
         fails.push(...remediationBindingFails(base, sha, approved));
       }
@@ -22449,14 +22456,13 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
-// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
-// kind is left alone, to land with the owner's answer.
+// A link of an owner's kind is carried change by change (linkFieldChanges), each only as an owner's
+// answer approved it (linkAnswerCovers), onto the chore's entry: a field main changed since this
+// checkout's copy is never reverted, and one no answer covers is left alone, to land with the
+// owner's answer.
 // A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
 // one: when main's entry changed since the act was made, the act's parent state is gone, and the
 // entry is refused (the run exits 1, after carrying the others).
-// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
-const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -22475,7 +22481,18 @@ function linkLand(slugName) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
       if (ownersKind(h) || ownersKind(t)) {
-        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+        const cs = linkFieldChanges({ [id]: t }, { [id]: h });
+        const ok = cs.filter((c) => linkAnswerCovers.any(c));
+        owners.push(...cs.filter((c) => !ok.includes(c)).map((c) => `links.${id}${c.field === null ? '' : `.${c.field}`}`));
+        if (!ok.length) continue;
+        let e = t;
+        for (const c of ok) {
+          if (c.field === null) e = c.to ?? undefined;
+          else { e = { ...e }; if (c.to === null) delete e[c.field]; else e[c.field] = c.to; }
+        }
+        if (e === undefined) delete links[id]; else links[id] = e;
+        changed.push(`links.${id} (${t === undefined ? 'added' : e === undefined ? 'removed' : 'changed'})`);
+        continue;
       } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
         const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
         refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
