@@ -271,3 +271,22 @@ test('the merge gate: a change to a part the ticket did not name is refused', ()
     assert.match(own, /changes files outside touches: docs\/devteam\/process\/worker\.md/);
   } finally { F.done(); }
 });
+
+test('planning.md, worker.md, supervisor.md and the schema say the same about parts', () => {
+  const doc = (f) => fs.readFileSync(path.join(kit, f), 'utf8').replace(/\s+/g, ' ');
+  const planning = doc('process/planning.md'), worker = doc('process/worker.md'), supervisor = doc('process/supervisor.md');
+  for (const [name, d] of [['planning.md', planning], ['worker.md', worker], ['supervisor.md', supervisor]]) {
+    assert.match(d, /`split_files`/, `${name} names split_files`);
+    assert.match(d, /`path#name`/, `${name} names the path#name syntax`);
+  }
+  assert.match(planning, /`path#\+name`/);
+  assert.match(planning, /validate` checks each named part exists at main/);
+  for (const [name, d] of [['worker.md', worker], ['supervisor.md', supervisor]]) {
+    assert.match(d, /merges? (`origin\/main`|main) (into your branch )?before each review and before (you ask for the merge|asking for the merge)/, `${name}: merge main before each review and before merge`);
+    assert.match(d, /merge conflict in a part another ticket named/, `${name}: a conflict goes back to the worker`);
+  }
+  assert.match(worker, /one you find you must change is a `design-change`/);
+  const schema = json(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
+  const find = (o) => (o && typeof o === 'object' ? (o.touches?.description ?? Object.values(o).map(find).find(Boolean)) : undefined);
+  assert.match(find(schema), /path#name names one part/);
+});
