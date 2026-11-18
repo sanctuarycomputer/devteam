@@ -488,7 +488,7 @@ if (process.env.DEVTEAM_RUN && command && !['help', '--help', 'machine', 'operat
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'owner-cursor.json', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', 'held', 'held-locks', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -3528,12 +3528,20 @@ function holdLine(key, target, line, paste = null) {
     return path.join(dir, `${name}.json`);
   } catch { return null; }
 }
+// A window's own short lock, for the steps a late line could slip between: a sender's look at what
+// is held and its hold, a flusher's claim, a put-back. Only renames and reads run under it: nothing typed.
+function heldLock(key, fn) {
+  fs.mkdirSync(path.join(runDir, 'held-locks'), { recursive: true });
+  return withLock(path.join(runDir, 'held-locks', encodeURIComponent(key)), fn);
+}
 // Lines back into the window's folder, under their own names: older than anything held since.
-function unclaimHeld(claimed, dir) {
-  const names = heldFiles(claimed);
-  if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
-  for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
-  try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+function unclaimHeld(key, claimed, dir) {
+  heldLock(key, () => {
+    const names = heldFiles(claimed);
+    if (names.length) { try { fs.mkdirSync(dir, { recursive: true }); } catch {} }
+    for (const n of names) { try { fs.renameSync(path.join(claimed, n), path.join(dir, n)); } catch {} }
+    try { fs.rmSync(claimed, { recursive: true, force: true }); } catch {}
+  });
 }
 // A line let go, said in the log by whoever writes as the supervisor (its tick, accounts-tick): any
 // other process leaves it for them.
@@ -3551,11 +3559,26 @@ function dropHeld(key, file, why) {
 // Stale claims back, and what is a day old let go: whoever looks, whatever else holds the window.
 function tidyHeld(key) {
   const dir = heldDir(key);
-  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(c.dir, dir);
+  for (const c of heldClaims(key)) if (c.stale && c.pid !== process.pid) unclaimHeld(key, c.dir, dir);
   for (const n of heldFiles(dir)) if (!(heldAge(n) < HELD_MAX_MS)) dropHeld(key, path.join(dir, n), 'held for over a day');
 }
-// a line still worth typing waits, or someone is typing them now
-const heldPending = (key) => heldFiles(heldDir(key)).some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+// a line still worth typing waits, or someone is typing them now. Tests only
+// (DEVTEAM_HELD_CHECK_DELAY_MS): held open between the two reads, with a held-locks/<k>.checking
+// marker, so a put-back can be tried inside that window.
+function heldPending(key) {
+  const files = heldFiles(heldDir(key));
+  const delay = Number(process.env.DEVTEAM_HELD_CHECK_DELAY_MS ?? 0);
+  if (!(delay > 0)) return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  const marker = path.join(runDir, 'held-locks', `${encodeURIComponent(key)}.checking`);
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, '');
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    return files.some((n) => heldAge(n) < HELD_MAX_MS) || heldClaims(key).some((c) => !c.stale);
+  } finally {
+    fs.rmSync(marker, { force: true });
+  }
+}
 // Types a window's held lines, oldest first, each only into a pane that is ready for it. The number typed.
 function flushHeld(key) {
   const dir = heldDir(key);
@@ -3565,11 +3588,14 @@ function flushHeld(key) {
   if (heldClaims(key).length) return 0;
   for (let stopped = false; !stopped && heldFiles(dir).length;) {
     const claimed = `${dir}.claim-${process.pid}-${Date.now()}`;
-    try { fs.renameSync(dir, claimed); } catch { break; }
+    // taken only while nobody else holds a claim: another flusher's lines go first, in order
+    let took = false;
+    try { took = heldLock(key, () => { if (heldClaims(key).length) return false; fs.renameSync(dir, claimed); return true; }); } catch {}
+    if (!took) break;
     const names = heldFiles(claimed);
     const live = names.filter((n) => heldAge(n) < HELD_MAX_MS);
     // only lines nobody here may let go: left where they are for the supervisor's next look
-    if (!live.length && !heldLogs()) { unclaimHeld(claimed, dir); break; }
+    if (!live.length && !heldLogs()) { unclaimHeld(key, claimed, dir); break; }
     for (const n of names) {
       const f = path.join(claimed, n);
       if (!(heldAge(n) < HELD_MAX_MS)) { dropHeld(key, f, 'held for over a day'); continue; }
@@ -3589,7 +3615,7 @@ function flushHeld(key) {
       try { const now = new Date(); fs.utimesSync(claimed, now, now); } catch {}
       typed++;
     }
-    unclaimHeld(claimed, dir);
+    unclaimHeld(key, claimed, dir);
   }
   return typed;
 }
@@ -17539,8 +17565,10 @@ function typeInto(target, line, paste = null) {
   const key = paneKey(target);
   if (!key) return typeNow(target, line, paste);
   const asking = paneAsking(target);
-  if (!asking && !heldPending(key)) return typeNow(target, line, paste);
-  const file = holdLine(key, target, line, paste);
+  // the look and the hold under the window's lock: a put-back can't fall between them. null: type
+  // now; false: it could not be held
+  const file = heldLock(key, () => (!asking && !heldPending(key)) ? null : holdLine(key, target, line, paste) ?? false);
+  if (file === null) return typeNow(target, line, paste);
   if (!file) return asking ? false : typeNow(target, line, paste);
   if (!asking) flushHeld(key);
   if (!fs.existsSync(file)) return true;
