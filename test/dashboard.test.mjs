@@ -4410,9 +4410,20 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  // DIAG kit-300: every press, release and click the page sees, where, on what, and the scroll
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { window.__taps = []; const d = (el) => el ? el.tagName + (el.id ? '#' + el.id : '') + [...el.attributes].filter((a) => a.name.startsWith('data-') || a.name === 'value' || a.name === 'class').map((a) => '[' + a.name + '=' + a.value.slice(0, 40) + ']').join('') : null; for (const ty of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'scroll', 'touchstart']) window.addEventListener(ty, (e) => { window.__taps.push({ ty, t: Math.round(performance.now()), x: e.clientX, y: e.clientY, sy: scrollY, vv: visualViewport ? [visualViewport.offsetTop, visualViewport.pageTop, visualViewport.scale] : null, on: ty === 'scroll' ? null : d(e.target) }); if (window.__taps.length > 60) window.__taps.shift(); }, true); })()` });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
   const soon = soonIn(p, 30000, () => dash.out());
+  // DIAG kit-300: the point a click aims at, what is there then (same evaluation, so no extra round trip), and the page time
+  p.click = async (sel) => {
+    const at = await p.ev(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); const x = r.left + r.width / 2, y = r.top + r.height / 2; const h = document.elementFromPoint(x, y); (window.__aims ??= []).push({ sel: ${JSON.stringify(sel)}, t: Math.round(performance.now()), x, y, sy: scrollY, vv: visualViewport ? [visualViewport.offsetTop, visualViewport.pageTop, visualViewport.scale] : null, same: h === e, there: h ? h.outerHTML.slice(0, 80) : null, focus: document.activeElement?.tagName }); return { x, y }; })()`);
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...at });
+    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', clickCount: 1 });
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', clickCount: 1 });
+  };
+  const diag = async () => `aims ${await p.ev('JSON.stringify(window.__aims ?? [])')}; taps ${await p.ev('JSON.stringify(window.__taps ?? [])')}`;
   const card = (q) => `document.getElementById('q-${q}')`;
   // a step no read lands in, from finding what to click to the release's own work (pointerup's
   // setTimeout draws what the press held back), as the presses test has it: a redraw can't replace
@@ -4461,7 +4472,7 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     await still(() => p.click(`#q-${GR.q} [data-answer]`));
     // timed out, it says what the card showed instead: its error line, the pick, what was posted
     for (const end = Date.now() + 30000; !(await p.ev(`!!${card(GR.q)}?.querySelector('[data-refused]')`));) {
-      if (Date.now() > end) assert.fail(`timed out: the refusal, on the card; it shows ${await p.ev(`JSON.stringify({ err: document.getElementById('e-${GR.q}')?.textContent ?? null, pick: picks['${GR.q}'] ?? null, posts: (window.__posts ?? []).map((x) => x.url) })`)}`);
+      if (Date.now() > end) assert.fail(`timed out: the refusal, on the card; it shows ${await p.ev(`JSON.stringify({ err: document.getElementById('e-${GR.q}')?.textContent ?? null, pick: picks['${GR.q}'] ?? null, posts: (window.__posts ?? []).map((x) => x.url) })`)}; DIAG ${await diag()}`);
       await new Promise((r) => setTimeout(r, 50));
     }
     const said = await p.ev(`${card(GR.q)}.querySelector('[data-refused]').textContent`);
@@ -4475,6 +4486,7 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     assert.equal(asked(GR.q).answer, 'Refine — a smaller measure');
     assert.equal(decided(GR.g, 'refine'), 1, 'one decision');
     assert.equal(answers(GR.q), 1, 'one answer');
+    t.diagnostic(`DIAG ${await diag()}`);
   });
 
   await t.test("any other press's refusal of a body the server can't read is said plainly too", async () => {
