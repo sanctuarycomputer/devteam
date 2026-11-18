@@ -716,10 +716,10 @@ test('IMAGE_RUNS: the three kinds under the rule, with the parts the design name
 // command's test seam (DEVTEAM_SMOKE_TRACE): one line per reader run.
 const SMOKE_COMMANDS = ['machine status', 'machine status --questions', 'machine status --knowledge', 'recover --machine --dry-run --force'];
 let smokeRuns = 0;
-function smokeRun(args) {
+function smokeRun(args, extra = {}) {
   const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
   const trace = path.join(tmp, `smoke-trace-${++smokeRuns}.jsonl`);
-  const r = changed([...args, '--smoke'], { TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace });
+  const r = changed([...args, '--smoke'], { TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace, ...extra });
   const lines = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   return { r, tmpd, trace: lines };
 }
@@ -839,5 +839,42 @@ test('box-pins changed --smoke stopped by a signal exits 2 and leaves nothing', 
   assert.ok(killed, 'the signal was sent mid-run');
   assert.equal(r.status, 2, `${r.signal} ${r.stderr}${r.stdout}`);
   assert.equal(r.stdout, '');
+  leftNothing(tmpd);
+});
+
+test('box-pins changed --smoke runs from a git hook\'s environment: GIT_DIR and its relatives reach no fixture', () => {
+  cg(['checkout', '-q', '-B', 'smoke-hook', 'v9.1.0']);
+  const head = cg(['rev-parse', 'HEAD']);
+  const gitDir = path.join(changedRepo, '.git');
+  const s = smokeRun(['--since', 'v9.1.0', '--to', 'v9.1.0'], { GIT_DIR: gitDir, GIT_WORK_TREE: changedRepo, GIT_INDEX_FILE: path.join(gitDir, 'index'), GH_TOKEN: 'smoke-not-a-token' });
+  assert.equal(s.r.status, 0, s.r.stderr + s.r.stdout);
+  assert.equal(s.r.stdout, 'kind: patch\n');
+  assert.equal(cg(['rev-parse', 'HEAD']), head, 'the caller\'s repo is untouched');
+  assert.equal(cg(['status', '--porcelain']), '');
+  leftNothing(s.tmpd);
+});
+
+test('box-pins changed --smoke stopped mid-reader kills what the reader started too', async () => {
+  // the --to kit, read by the image as a project's kit (DEVTEAM_ROLE=operator), hangs, then writes
+  onBranch('smoke-orphan', { [SCRIPT]: after('function cmdHello() {\n', "  if (process.env.DEVTEAM_ROLE === 'operator') { execFileSync('sleep', ['6']); const d = path.join(path.dirname(process.argv[1]), '..', 'run', 'late'); fs.mkdirSync(d, { recursive: true }); }\n") });
+  const tmpd = fs.realpathSync(fs.mkdtempSync(path.join(tmp, 'smoke-tmp-')));
+  const trace = path.join(tmp, `smoke-trace-${++smokeRuns}.jsonl`);
+  let killed = false;
+  const r = await new Promise((resolve) => {
+    const c = execFile(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', '--since', 'v9.1.0', '--smoke'], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv({ TMPDIR: tmpd, DEVTEAM_SMOKE_TRACE: trace }), timeout: 600000 }, (err, stdout, stderr) => resolve({ status: err ? err.code : 0, signal: err?.signal ?? null, stdout, stderr }));
+    // the --since fixture's four readers are done: the --to fixture's first reader is hanging in hello
+    let seen = 0;
+    const poll = setInterval(() => {
+      const n = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter(Boolean).length : 0;
+      if (n >= 4 && !seen) seen = Date.now();
+      if (seen && Date.now() - seen > 2000 && !killed) { killed = true; clearInterval(poll); c.kill('SIGTERM'); }
+    }, 50);
+    c.on('close', () => clearInterval(poll));
+  });
+  assert.ok(killed, 'the signal was sent mid-reader');
+  assert.equal(r.status, 2, `${r.signal} ${r.stderr}${r.stdout}`);
+  assert.equal(r.stdout, '');
+  // long enough for an orphaned hello to wake and write
+  await new Promise((resolve) => setTimeout(resolve, 8000));
   leftNothing(tmpd);
 });

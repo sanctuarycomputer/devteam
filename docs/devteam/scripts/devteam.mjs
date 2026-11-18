@@ -17992,7 +17992,7 @@ const IMAGE_RUNS = {
     'operatorStartFile', 'operatorStartNote', 'operatorStarting', 'operatorNoted', 'isShellPane', 'operatorSeat', 'operatorState', 'OPERATOR_OPENING', 'operatorStart', 'typeLine', 'OPERATOR_HELD',
     'operatorHeld', 'deliverToOperator', 'operatorDataFrame', 'operatorThreadUsage',
     // box-pins (installed runs in the image; verify, check and bump beside it)
-    'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
+    'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'timedOut', 'unreachable', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
     'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
     // the guards that let the image's commands run outside a project: the machineWide expression,
     // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list (the helpers homeAt
@@ -18012,7 +18012,9 @@ async function imageChanges(since, to, { smoke = false } = {}) {
   const cant = (why) => die(`box-pins changed: ${why}`, 2);
   const found = new Map();
   const add = (file, part) => found.set(`${file}\0${part ?? ''}`, { file, part });
-  const raw = git(['diff', '-z', '--name-status', '-M', since, to], repoRoot);
+  // git with a deadline and no prompt (a partial clone fetches blobs; a credential prompt would wait)
+  const git = (args) => { try { return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 120000, maxBuffer: 256 * 1024 * 1024 }).replace(/\n$/, ''); } catch { return null; } };
+  const raw = git(['diff', '-z', '--name-status', '-M', since, to]);
   if (raw === null) cant(`git diff ${since} ${to} failed in ${repoRoot}`);
   const tokens = raw.split('\0');
   const paths = [];
@@ -18033,7 +18035,7 @@ async function imageChanges(since, to, { smoke = false } = {}) {
   if (paths.includes(S)) {
     const textAt = (sha, has) => {
       if (!has) return '';
-      const t = git(['show', `${sha}:${S}`], repoRoot);
+      const t = git(['show', `${sha}:${S}`]);
       if (t === null) cant(`git show ${sha}:${S} failed`);
       return t;
     };
@@ -18058,13 +18060,17 @@ async function imageChanges(since, to, { smoke = false } = {}) {
   async function smokeDiffers() {
     const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-smoke-')));
     const tmuxDir = path.join(tmpDir, 'tmux'), imageDir = path.join(tmpDir, 'image');
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^DEVTEAM_/.test(k) && k !== 'TMUX' && k !== 'TMUX_PANE'));
+    // the children's environment is an allowlist: no DEVTEAM_*, no TMUX, no GIT_DIR or its relatives
+    // (a hook's), and none of the caller's tokens
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(PATH|HOME|LANG|LANGUAGE|LC_\w+|TZ|TMPDIR|USER|LOGNAME|SHELL)$/.test(k)));
     let cleaned = false;
     let child = null;
+    // each child leads a process group, so what it started (a fixture's kit under the image) goes too
+    const killGroup = (c) => { try { process.kill(-c.pid, 'SIGKILL'); } catch { try { c.kill('SIGKILL'); } catch {} } };
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      if (child) { try { child.kill('SIGKILL'); } catch {} }
+      if (child) killGroup(child);
       // nothing here starts a tmux server, but one left on this folder's own sockets is stopped
       let socks = [];
       try { socks = fs.readdirSync(tmuxDir).flatMap((d) => { try { return fs.readdirSync(path.join(tmuxDir, d)).map((s) => path.join(tmuxDir, d, s)); } catch { return []; } }); } catch {}
@@ -18083,11 +18089,11 @@ async function imageChanges(since, to, { smoke = false } = {}) {
       Object.assign(env, { DEVTEAM_HUB_PORT: String(port), TMUX_TMPDIR: tmuxDir, GIT_AUTHOR_NAME: 'devteam-smoke', GIT_COMMITTER_NAME: 'devteam-smoke', GIT_AUTHOR_EMAIL: 'devteam-smoke@example.invalid', GIT_COMMITTER_EMAIL: 'devteam-smoke@example.invalid' });
       // spawnSync's result, awaited: { status, signal, stdout (a Buffer when binary), stderr, error }
       const run = (cmd, args, { cwd, home, input, binary = false, childEnv } = {}) => new Promise((resolve) => {
-        const c = spawn(cmd, args, { cwd, env: childEnv ?? { ...env, HOME: home ?? env.HOME }, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+        const c = spawn(cmd, args, { cwd, env: childEnv ?? { ...env, HOME: home ?? env.HOME }, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: true });
         child = c;
         const so = [], se = [];
         let timedOut = false;
-        const timer = setTimeout(() => { timedOut = true; c.kill('SIGKILL'); }, 120000);
+        const timer = setTimeout(() => { timedOut = true; killGroup(c); }, 120000);
         c.stdout.on('data', (d) => so.push(d));
         c.stderr.on('data', (d) => se.push(d));
         const done = (r) => { clearTimeout(timer); if (child === c) child = null; resolve(r); };
@@ -18187,7 +18193,7 @@ async function cmdBoxPins() {
     for (const k of ['smoke', 'json']) if (flags[k] !== undefined && flags[k] !== true) usage();
     if (flags.since === undefined) usage();
     if (!kitsOwnRepoAt(repoRoot)) die(`box-pins changed: ${repoRoot} is not a checkout of the kit's own repo (${KIT_UPSTREAM}); run it there, at --to`, 2);
-    const sha = (k, ref) => git(['rev-parse', '--verify', '-q', `${ref}^{commit}`], repoRoot) ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
+    const sha = (k, ref) => (() => { try { return execFileSync('git', ['rev-parse', '--verify', '-q', `${ref}^{commit}`], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 }).trim(); } catch { return null; } })() ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
     const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
     const changes = await imageChanges(since, to, { smoke: !!flags.smoke });
     const kind = changes.length ? 'minor' : 'patch';
