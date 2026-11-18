@@ -783,3 +783,14 @@ test('an interrupt while a chrome file waits for the cap: it never starts', asyn
   await sleep(1000);
   assert.equal(fs.existsSync(path.join(out, 'start-b.json')), false, 'b never started');
 });
+
+// ---- the Chrome flags (kit-597) ----
+// chrome.mjs loaded by a path, not by name: a test of its arguments starts no browser, and this file
+// stays in the rest group
+test('openChrome starts Chrome with the lower-memory flags', async () => {
+  const C = await import(pathToFileURL(path.join(lib, 'chrome.mjs')).href);
+  const a = C.chromeArgs('/p');
+  for (const f of ['--renderer-process-limit=2', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--js-flags=--max-old-space-size=256', '--headless=new', '--user-data-dir=/p', '--remote-debugging-port=0']) assert.ok(a.includes(f), f);
+  assert.equal(a.at(-1), 'about:blank');
+  assert.match(fs.readFileSync(path.join(lib, 'chrome.mjs'), 'utf8'), /spawn\(chromePath, chromeArgs\(profile\)/, 'openChrome spawns with the seam');
+});
