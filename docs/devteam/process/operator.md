@@ -156,7 +156,7 @@ Also open one for an improvement to the kit that you see across supervisors, wri
 
 - Work in `~/code/devteam` (`gh repo clone sanctuarycomputer/devteam` if it isn't there), on a branch off a fresh `origin/main`. Put a worktree of it in `~/operator/wt`, never `~/code`: anything in `~/code` looks like a repo to the box.
 - First run `gh pr list -R sanctuarycomputer/devteam --state open --search "<words about the cause>"`, and check `~/operator/NOTES.md`. **One open PR per cause.** Note each PR you open there.
-- Before pushing: `node --test --test-timeout=600000 test/<file>` for each test the change touches, one file at a time (the full run hangs here), and `shellcheck` is clean on any script you touched. `accounts`, `dashboard`, `gateway` and `recovery` tests get mixed up with this box's own hub, tmux and cswap and fail the same on an untouched `origin/main`: compare against that before you trust a failure, and leave them to CI. This box has no Docker, so CI builds the image on your PR. Say in the PR what you could not test.
+- Before pushing: `node test/run.mjs <files>` with the test files the change touches (CI runs the whole suite), and `shellcheck` is clean on any script you touched. `accounts`, `dashboard`, `gateway` and `recovery` tests get mixed up with this box's own hub, tmux and cswap and fail the same on an untouched `origin/main`: compare against that before you trust a failure, and leave them to CI. This box has no Docker, so CI builds the image on your PR. Say in the PR what you could not test.
 - Open it and stop. Merging is never yours.
 
 ## Telling the owner
