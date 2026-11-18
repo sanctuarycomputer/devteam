@@ -457,22 +457,51 @@ function startFile(p, run, ctx) {
   return entry;
 }
 
-async function runPool(items, limit, ctx) {
-  const results = [];
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length && !ctx.stopping) {
-      const [p, run] = items[next++];
-      results.push(await startFile(p, run, ctx).done);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+// The first file in the queue whose group is below its cap (a group with no cap always is), or -1.
+export function nextIndex(queue, running, caps) {
+  return queue.findIndex((p) => caps[p.group] === undefined || (running.get(p.group) ?? 0) < caps[p.group]);
 }
 
-// The steps of one run: the `alone` files one at a time, then every other file at the concurrency.
-export function schedule(plan, concurrency) {
-  return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency }].filter((st) => st.files.length);
+// Runs items ([plan entry, run]) up to limit at once, in order but for a file whose group is at its
+// cap, which waits while later files start. A place is filled when a file ends; the pool resolves with
+// the results in end order once nothing runs and nothing more will start, and rejects if a file can't
+// be started (runAll then cleans up what is running).
+export function runPool(items, limit, ctx, caps = {}, start = startFile) {
+  return new Promise((resolve, reject) => {
+    const queue = [...items];
+    const results = [];
+    const running = new Map();
+    let active = 0;
+    let failed = false;
+    const fail = (e) => { if (!failed) { failed = true; reject(e); } };
+    const fill = () => {
+      if (failed) return;
+      try {
+        while (!ctx.stopping && active < limit) {
+          const k = nextIndex(queue.map(([p]) => p), running, caps);
+          if (k < 0) break;
+          const [[p, run]] = queue.splice(k, 1);
+          const entry = start(p, run, ctx);
+          active++;
+          running.set(p.group, (running.get(p.group) ?? 0) + 1);
+          entry.done.then((res) => {
+            results.push(res);
+            active--;
+            running.set(p.group, running.get(p.group) - 1);
+            fill();
+          }, fail);
+        }
+      } catch (e) { return fail(e); }
+      if (active === 0) resolve(results);
+    };
+    fill();
+  });
+}
+
+// The steps of one run: the `alone` files one at a time, then every other file at the concurrency,
+// the `chrome` group's files at most chromeConcurrency at once among them.
+export function schedule(plan, concurrency, chromeConcurrency = concurrency) {
+  return [{ files: plan.filter((p) => p.group === 'alone'), limit: 1 }, { files: plan.filter((p) => p.group !== 'alone'), limit: concurrency, caps: { chrome: chromeConcurrency } }].filter((st) => st.files.length);
 }
 
 async function runAll(opts, plan) {
@@ -510,7 +539,7 @@ async function runFiles(opts, plan, ctx) {
   process.stdout.on('error', (e) => { outClosed = true; if (e.code === 'EPIPE') stopAll(128 + os.constants.signals.SIGPIPE); });
   const results = [];
   for (let run = 1; run <= opts.repeat && !ctx.stopping; run++) {
-    for (const st of schedule(plan, opts.concurrency)) results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx));
+    for (const st of schedule(plan, opts.concurrency, opts.chromeConcurrency)) results.push(...await runPool(st.files.map((p) => [p, run]), st.limit, ctx, st.caps));
   }
   if (!plan.length) say('no files\n');
   else {
