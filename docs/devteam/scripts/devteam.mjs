@@ -14258,15 +14258,50 @@ function relaunchChild(launch, flag, budget) {
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
+// A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
+// stopped · your login changed or ended · send a prompt to continue". Its process already has the new
+// login and wants only a prompt, so one is typed (nothing is relaunched). False when the pane isn't
+// stopped so, and the caller goes on as before; otherwise what was done: null (not ours, or not due),
+// 'gave-up' (past the restart caps, which it shares), 'continued' or 'failed'. The stop must be the
+// last thing the agent said, matched by its head (the whole line wraps at 80 columns), with an empty
+// input: a draft is someone's and is never typed over, except the kit's own prompt whose Enter was
+// lost, which gets the Enter (the lost-Enter rescues skip a pane that still shows a limit banner).
+function loginChangedStop(target, name, budget, ours) {
+  const prompt = 'The kit: your login changed and the account has room now. Carry on.';
+  const stopHead = /^\s*(?:[⎿⏺●■✖!]\s*)?Automatic continue stopped · your login changed\b/;
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const raw = paneBottom(target);
+  const at = raw.findLastIndex((l) => !PANE_CODE.test(l.trim()) && stopHead.test(l));
+  if (at === -1) return false;
+  const below = raw.slice(at + 1).map((l) => l.trim());
+  if (below.some((l) => /^[⏺●⎿]/.test(l))) return false;
+  const draft = below.map((l) => INPUT_LINE.exec(l)).filter(Boolean).pop()?.[1] ?? '';
+  if (draft && draft !== prompt) return false;
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
+  if (clientActiveOn(target) || !ours()) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget, now);
+  if (verdict !== 'go') return verdict;
+  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
+  if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
+  return ok ? 'continued' : 'failed';
+}
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
 // 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
 // replaces the old process itself, after everything that can refuse, and no key is sent to it.
+// (A session stopped by a login change is another matter: loginChangedStop, above.)
 function restartPane(name, launch, budget) {
   const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  if (problem || !target) return null;
+  // the stop can sit under an old limit banner: it is the newer state, so a prompt, not a relaunch
+  const login = loginChangedStop(target, name, budget, () => launchedByKit(target, name, launch[0]));
+  if (login !== false) return login;
+  if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
   const verdict = claimRestart(name, budget);
   if (verdict !== 'go') return verdict;
@@ -14508,6 +14543,12 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
+  const { target: pane, problem } = resolvePane(supervisorTarget());
+  if (!problem && pane) {
+    const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
+    if (login !== false) return login;
+  }
   const found = supervisorToRestart();
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
@@ -16019,6 +16060,146 @@ function memoryFull(s = loadSettings()) {
   if (!m || m.inUse < ceiling * m.max) return null;
   return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
+/* box-memory start */
+// The memory reading's names, here so its check reads nothing outside this region (a test runs it
+// alone). The ceiling's bounds are memoryCeilingProblem's; the test holds the two equal.
+const MEMORY_KINDS = ['agent', 'browser', 'install', 'devteam', 'node', 'other'];
+const MEMORY_SOURCES = ['cgroup', 'meminfo', 'os'];
+const MEMORY_READING_KEYS = ['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects'];
+const MEMORY_PROJECT_KEYS = ['rss', 'sessions', 'devteam'];
+const MEMORY_CEILING_MIN = 0.5, MEMORY_CEILING_MAX = 0.95;
+const MEMORY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const MEMORY_SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+const isBytes = (v) => Number.isSafeInteger(v) && v >= 0;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
+// so a name with a dot can't read as two fields.
+const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
+// A value as the words show it, never a throw (a writer's own object can hold a BigInt or a cycle).
+const memoryShown = (v) => {
+  let s;
+  try { s = JSON.stringify(v) ?? String(v); } catch { try { s = String(v); } catch { s = 'an unprintable value'; } }
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+// A real UTC time in the one form: 2026-02-30 or 24:00 doesn't come back as itself, so it is refused.
+const memoryAtOk = (at) => {
+  if (typeof at !== 'string' || !MEMORY_AT.test(at)) return false;
+  const t = new Date(at);
+  return Number.isFinite(t.getTime()) && t.toISOString().slice(0, 19) === at.slice(0, 19);
+};
+const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
+// A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
+const memoryCountsProblem = (p, e) => {
+  if (!memoryIsMap(e)) return memoryIs(p, e, '{ n, rss }, a count of processes and their integer bytes');
+  if (!isCount(e.n)) return memoryIs(`${p}.n`, e.n, 'a count of processes, an integer, 0 or more');
+  if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+  const other = Object.keys(e).find((k) => k !== 'n' && k !== 'rss');
+  return other === undefined ? null : `${memoryPath(p, other)} is not a field of ${p}: it holds only n and rss`;
+};
+// machine-memory@1, the memory reading: one JSON object a line in
+// ~/.devteam/machine-<hub port>/memory.jsonl, written once a minute by the machine's hub.
+//   `v`            required, `v: 1` (the line's "v":1): the contract's version; any other value is refused
+//   `at`           required, ISO 8601 UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z: when the reading was taken
+//   `working_set`  required, integer bytes, 0 or more: in use as machineMemory() counts it for the
+//                  gate (cgroup working set, /proc/meminfo, or os.totalmem() - os.freemem())
+//   `max`          integer bytes, more than 0: the cap the gate reads
+//   `ceiling`      a number from 0.5 to 0.95: the lowest machine_memory_ceiling among the known
+//                  instances (default 0.8)
+//   `source`       "cgroup", "meminfo" or "os": where `working_set` and `max` came from
+//   `partial`      true: the tick ran past its 2-second budget and wrote what it had
+//   `sessions`     an integer, 0 or more: agent processes (claude, codex, opencode) whose cwd is
+//                  inside <root>/.worktrees/<name> of a known root; a supervisor in its root is not one
+//   `kinds`        { <kind>: { `n`, `rss` } }: every process by its executable's kind; `n` an integer,
+//                  0 or more, `rss` integer bytes, 0 or more
+//   `devteam`      { <subcommand>: { `n`, `rss` } }: the `devteam` kind split by subcommand, machine-wide
+//   `projects`     { <instance name>: { `rss`, `sessions`?, `devteam`? } }: by the known root holding
+//                  the process's cwd; its `devteam` is { <subcommand>: integer bytes }
+// Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
+// `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
+// running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
+// devteam.mjs), `node` (any other node), `other` (everything else). Exactly: an installer is an
+// argv[0] basename whose first word is `npm`, `pnpm`, `yarn`, `bundle`, `pip` or `uv`, or node whose
+// script's basename is `npm-cli.js`, `pnpm.cjs`, `pnpm.js` or `yarn.js`; it is `install` only with an
+// install subcommand, the next word (`install`, `i`, `ci`, `add` or `sync`). An installer with another
+// subcommand (`npm test`) is `other`, and node running an installer script with another subcommand
+// is `node`. The kind comes from cmdline's
+// argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
+// retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
+// command name. Nothing else of a command line, no environment and no file content is ever kept.
+// Sizes are integer bytes (RSS is statm's resident pages times the page size). A field the machine
+// can't read is left out, never zero: on a machine with no /proc (macOS) a line has `working_set`,
+// `max`, "source":"os" and no `sessions`, `kinds` or `projects`. A new field, or a change to one, is
+// machine-memory@2.
+// A line the check refuses (one torn by a hub killed mid-append, a "v":2 line from a newer
+// recorder, anything else memoryReadingProblem has words for) is skipped by every reader, never
+// fatal: the hub's /memory.json serves only passing lines, `machine memory` and `metrics` read past
+// it and say how many lines they skipped, and the Overview draws the readings it was given. A writer
+// starts each line on a fresh line (a torn tail is ended with a newline before the next append), so
+// one torn line spoils only itself.
+// /memory.json, served by the hub with /instances.json's same-origin check (and on a box through
+// the gateway): `{"v":1,"readings":[<reading>, …]}`, oldest first.
+//   `?since=<n>h|<n>d`  the window, default 24 hours, at most 8 days; thinned to one reading per
+//                       5 minutes for readings older than 6 hours, and one per 30 minutes older than 3 days
+//   `?after=<at>`       only readings newer than at, unthinned, for an at up to 6 hours back; an
+//                       older one is answered 400 (the Overview then asks since=24h again)
+//   `?thin=0`           no thinning, for a loopback request whose window is 24 hours or less
+// memoryReadingProblem(line) takes a line's text or a parsed value: null when it is a valid
+// machine-memory@1 reading, else one sentence starting with the first bad field's path and a space
+// (reading, when the line isn't a JSON object). Shape only: it doesn't add up kinds, compare
+// working_set with max, or look a subcommand up in COMMANDS.
+function memoryReadingProblem(line) {
+  let r = line;
+  if (typeof line === 'string') {
+    try { r = JSON.parse(line); } catch { return 'reading is not JSON (a torn line, or no reading at all): it should be one JSON object, a machine-memory@1 reading'; }
+  }
+  if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
+  if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
+  if (!memoryAtOk(r.at)) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
+  const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
+  if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
+  if (r.max !== undefined && !(isBytes(r.max) && r.max > 0)) return memoryIs('max', r.max, 'integer bytes, more than 0, or left out');
+  if (r.ceiling !== undefined && !(typeof r.ceiling === 'number' && r.ceiling >= MEMORY_CEILING_MIN && r.ceiling <= MEMORY_CEILING_MAX)) return memoryIs('ceiling', r.ceiling, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}, or left out`);
+  if (r.source !== undefined && !MEMORY_SOURCES.includes(r.source)) return memoryIs('source', r.source, `one of ${MEMORY_SOURCES.join(', ')}, or left out`);
+  if (r.partial !== undefined && r.partial !== true) return memoryIs('partial', r.partial, 'true, or left out');
+  if (r.sessions !== undefined && !isCount(r.sessions)) return memoryIs('sessions', r.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+  if (r.kinds !== undefined) {
+    if (!memoryIsMap(r.kinds)) return memoryIs('kinds', r.kinds, '{ <kind>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.kinds)) {
+      if (!MEMORY_KINDS.includes(k)) return `${memoryPath('kinds', k)} is not a kind: it should be one of ${MEMORY_KINDS.join(', ')}`;
+      const p = memoryCountsProblem(memoryPath('kinds', k), e); if (p) return p;
+    }
+  }
+  if (r.devteam !== undefined) {
+    if (!memoryIsMap(r.devteam)) return memoryIs('devteam', r.devteam, '{ <subcommand>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.devteam)) {
+      if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath('devteam', k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+      const p = memoryCountsProblem(memoryPath('devteam', k), e); if (p) return p;
+    }
+  }
+  if (r.projects !== undefined) {
+    if (!memoryIsMap(r.projects)) return memoryIs('projects', r.projects, '{ <instance name>: { rss, sessions?, devteam? } }, or left out');
+    for (const [name, e] of Object.entries(r.projects)) {
+      const p = memoryPath('projects', name);
+      if (name === '') return `${p} is an empty name: a project is keyed by its instance's name`;
+      if (!memoryIsMap(e)) return memoryIs(p, e, '{ rss, sessions?, devteam? }');
+      if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+      if (e.sessions !== undefined && !isCount(e.sessions)) return memoryIs(`${p}.sessions`, e.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+      if (e.devteam !== undefined) {
+        if (!memoryIsMap(e.devteam)) return memoryIs(`${p}.devteam`, e.devteam, '{ <subcommand>: integer bytes }, or left out');
+        for (const [k, b] of Object.entries(e.devteam)) {
+          if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath(`${p}.devteam`, k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+          if (!isBytes(b)) return memoryIs(memoryPath(`${p}.devteam`, k), b, 'integer bytes, 0 or more');
+        }
+      }
+      const extra = Object.keys(e).find((k) => !MEMORY_PROJECT_KEYS.includes(k));
+      if (extra !== undefined) return `${memoryPath(p, extra)} is not a field of ${p}: it holds only ${MEMORY_PROJECT_KEYS.join(', ')}`;
+    }
+  }
+  return null;
+}
+/* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -16160,6 +16341,8 @@ function cmdAccountsTick() {
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
+  // sessions sent a prompt after a login change (loginChangedStop), not restarted: in resumed too
+  const continued = new Set();
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   // a ticket's held field holds it too: nothing runs for a held ticket
@@ -16207,16 +16390,19 @@ function cmdAccountsTick() {
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
+        // continued, it is starting a turn as a restarted one is: no limit to report, no held line now
+        if (sup === 'continued') { supervisorRestarted = true; state.resumed.push('supervisor'); continued.add('supervisor'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
           else if (did) tries += 1;
-          if (did === 'restarted') state.resumed.push(name);
+          if (did === 'restarted' || did === 'continued') state.resumed.push(name);
+          if (did === 'continued') continued.add(name);
         }
       }
-      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(continued.has(w) ? `continued ${w}: its login changed while it was stopped` : `restarted ${w}: it had stopped at a usage limit`);
     }
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
@@ -16255,7 +16441,7 @@ function cmdAccountsTick() {
   // tick just restarted, whose agent is still coming up
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
-  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));

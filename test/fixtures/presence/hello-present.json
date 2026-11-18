@@ -1,0 +1,18 @@
+{
+  "devteam": 1,
+  "hub": 1,
+  "name": "example",
+  "present": [
+    {
+      "id": "p-ann",
+      "name": "Ann Lee",
+      "level": "full"
+    },
+    {
+      "id": "p-bo",
+      "name": "Bo Park",
+      "level": "view"
+    }
+  ],
+  "present_more": 0
+}
