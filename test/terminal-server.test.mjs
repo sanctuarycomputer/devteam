@@ -510,6 +510,14 @@ test('terminal A6: the screen reads gone for a killed pane, a shell prompt, a fo
   await screenUntil(T, port, (j) => j.state === 'live', 'live again');
   assert.equal(spawnSync('tmux', ['set-option', '-p', '-t', far, '@devteam-shell', T.root], { env: T.env }).status, 0);
   isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone when tagged')).json);
+  // a dead pane (its program exited, the pane kept): gone
+  const d = T.standIn({ lines: ['about to die'] });
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === d.pane, 'the new stand-in live');
+  assert.equal(spawnSync('tmux', ['set-option', '-p', '-t', d.pane, 'remain-on-exit', 'on'], { env: T.env }).status, 0);
+  process.kill(Number(tmuxOut(T, ['display', '-p', '-t', d.pane, '#{pane_pid}']).trim()));
+  await until(() => tmuxOut(T, ['display', '-p', '-t', d.pane, '#{pane_dead}']).trim() === '1', 'the pane dead');
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone when dead')).json);
+  d.kill();
 });
 
 test('terminal A8: twenty screen GETs share one read; a failed read is 500, a missing pane gone; a slow read blocks nothing', async () => {
@@ -542,6 +550,20 @@ test('terminal A8: twenty screen GETs share one read; a failed read is 500, a mi
   fs.rmSync(fail);
   await pause(150);
   assert.equal((await screenOf(T, port)).json.state, 'live');
+  // the Shell's lookup failing is 500, not "never opened"; tmux saying there's no session is gone (T3-1)
+  write(fail, JSON.stringify({ 'list-panes': 'server exited unexpectedly' }));
+  const sf = await screenOf(T, port, 'shell');
+  assert.equal(sf.status, 500, sf.text);
+  assert.deepEqual(sf.json, READ_FAILED);
+  write(fail, JSON.stringify({ 'list-panes': "can't find session: x" }));
+  const sg = await screenOf(T, port, 'shell');
+  assert.equal(sg.status, 200, sg.text);
+  isGone(sg.json, 'shell');
+  fs.rmSync(fail);
+  // a failed read is no refusal (T3-4)
+  const dlog = fs.readFileSync(path.join(T.root, 'docs/devteam/run/dashboard.log'), 'utf8');
+  assert.match(dlog, /tmux failed/);
+  assert.doesNotMatch(dlog, /refused \/api\/term\/(supervisor|shell)\/(screen|history)/);
   // a held read: the dashboard answers meanwhile
   write(path.join(T.F.base, 'tmux-delay.json'), JSON.stringify({ 'display+capture-pane': 3000 }));
   await pause(150);
@@ -595,4 +617,34 @@ test('terminal A5b: a refusal before the body drains at most 4 x CAP; a client g
   await until(() => /refused \/api\/term\/supervisor\/keys: the client went before its body ended/.test(fs.readFileSync(log, 'utf8')), 'the abort logged');
   assert.doesNotMatch(fs.readFileSync(log, 'utf8'), /far over the cap/);
   assert.equal((await T.req(port, 'GET', '/api/term/token', { headers: SAME })).status, 200, 'the dashboard still answers');
+});
+
+test('terminal A5d: history re-reads when history_size moved, refuses a shrunk range, and voids the screen on a missing pane', async () => {
+  const T = termFixture('term-a5d-moved');
+  after(() => T.done());
+  const s = T.standIn({ lines: L53 });
+  await until(() => tmuxOut(T, ['capture-pane', '-p', '-t', s.pane]).includes('L52'), 'the stand-in drawn');
+  // the screen held a minute, so its history_size goes stale on purpose
+  const { port } = await T.dashboard([], { DEVTEAM_TERM_CACHE_MS: '60000' });
+  const sc = await screenOf(T, port);
+  assert.equal(sc.json.history_size, 30, sc.text);
+  await s.say('M0');
+  const now = Number(tmuxOut(T, ['display', '-p', '-t', s.pane, '#{history_size}']).trim());
+  assert.ok(now > 30, `history moved: ${now}`);
+  assert.equal((await screenOf(T, port)).json.history_size, 30, 'the cached screen is stale');
+  // offsets from 30 would read L29 onwards: the read sees history_size moved and reads again from it
+  const reads = T.historyReads();
+  const h = await historyOf(T, port, 'before=30&count=3');
+  assert.equal(h.status, 200, h.text);
+  assert.deepEqual(h.json, { v: 1, which: 'supervisor', pane: s.pane, before: 30, history_size: now, lines: ['L27', 'L28', 'L29'] });
+  assert.equal(T.historyReads(), reads + 2, 'one read, then one more');
+  // history cleared under a screen that says 30: before=30 is past the top now
+  assert.equal(spawnSync('tmux', ['clear-history', '-t', s.pane], { env: T.env }).status, 0);
+  errorAnswer(await historyOf(T, port, 'before=30&count=1'), 400, 'history shrank');
+  // the pane gone under the cached screen: 400, and the cache is voided, so the screen reads gone now
+  s.kill();
+  errorAnswer(await historyOf(T, port, 'before=1&count=1'), 400, 'the pane gone');
+  const g = await screenOf(T, port);
+  assert.equal(g.status, 200, g.text);
+  isGone(g.json);
 });

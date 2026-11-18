@@ -16706,13 +16706,14 @@ function termRoutes({ port, host, log }) {
   const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
   // the supervisor's: the marked pane only, as an id (S11)
   const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
-  // the Shell's: remembered, else the lowest-numbered pane of this session tagged with this root, not the marked one
+  // the Shell's: remembered, else the lowest-numbered pane of this session tagged with this root, not
+  // the marked one. A lookup tmux failed (not "isn't there") is { error }, never no pane (P4).
   let shellPane = null;
   async function paneOf(which) {
     if (which === 'supervisor') return marked();
     if (shellPane) return shellPane;
     const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{@devteam-shell}']);
-    if (!got.ok) return null;
+    if (!got.ok) { if (got.missing) return null; log(`/api/term/shell: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
     const m = marked();
     const ids = got.out.split('\n').map((l) => l.split('\t')).filter(([id, tag]) => /^%\d+$/.test(id) && tag === root && id !== m).map(([id]) => id);
     return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
@@ -16738,6 +16739,7 @@ function termRoutes({ port, host, log }) {
   // One call: display first, so its line is the first, then capture's rows (S16).
   async function readNow(which, again = true) {
     const P = await paneOf(which);
+    if (P?.error) return P;
     if (!P) return gone(which, { pane: null, why: 'none' });
     const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
     if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
@@ -16780,6 +16782,7 @@ function termRoutes({ port, host, log }) {
     for (let again = true; ; again = false) {
       const a = Math.max(0, n - k), b = n - 1;
       const got = await tmuxCall(['capture-pane', '-e', '-p', '-S', String(a - hs), '-E', String(b - hs), '-t', P, ';', 'display', '-p', '-t', P, '#{history_size}']);
+      if (!got.ok && !got.missing) log(`/api/term/: tmux failed on history: ${got.timedOut ? 'timed out' : got.err.trim()}`);
       if (!got.ok) return got.missing ? { gone: true } : { error: TERM_WORDS.read };
       const out = got.out.split('\n');
       if (out.at(-1) === '') out.pop();
@@ -16862,20 +16865,20 @@ function termRoutes({ port, host, log }) {
       if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
       const n = Number(before), k = Number(count);
       const s = await readScreen(r.which);
-      if (s.error) return no(500, { error: s.error });
+      if (s.error) return json(res, 500, { error: s.error });
       const answer = (pane, hs, lines) => json(res, 200, { v: 1, which: r.which, pane, before: n, history_size: hs, lines });
       // before=0: nothing above it, no history call, live or gone (S8)
       if (n === 0) return answer(s.pane, s.history_size, []);
       if (s.state === 'gone' || n > s.history_size) return no(400, { error: 'before is past the screen\'s top' });
       const h = await readHistory(s.pane, n, k, s.history_size);
-      if (h.error) return no(500, { error: h.error });
+      if (h.error) return json(res, 500, { error: h.error });
       if (h.gone) { voidScreen(r.which); return no(400, { error: 'the pane is gone' }); }
       if (h.range) return no(400, { error: 'before is past the screen\'s top' });
       return answer(s.pane, h.hs, h.lines);
     }
     if (r.name === 'screen') {
       const s = await readScreen(r.which);
-      if (s.error) return no(500, { error: s.error });
+      if (s.error) return json(res, 500, { error: s.error });
       const etag = `"${s.etag}"`;
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'cache-control': 'no-store', etag }); return res.end(); }
       return json(res, 200, s, { etag });
