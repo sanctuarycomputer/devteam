@@ -2021,6 +2021,8 @@ function logFileText(file) {
 let logCache = null;
 function readLog() {
   if (logCache) return logCache;
+  // folds, not calls: wait's trace counts them (kit-594)
+  readLog.reads = (readLog.reads ?? 0) + 1;
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
@@ -2039,6 +2041,19 @@ function readLog() {
   const byType = new Map();
   for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
   return (logCache = { lines, objects, errors, ignored, unknown, byType });
+}
+// What readLog folds, as one string: main's sha (the durable log is read at it, so a merge or a fetch
+// that moves main changes it with no file in the checkout changed) and each log file's name, size and
+// mtime under run/log and project/log. Equal means a fold would read the same lines.
+function logKey() {
+  mainRefCache = undefined;
+  const parts = [`main ${mainSha() ?? '-'}`];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -21211,7 +21226,18 @@ function cmdWait() {
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
   if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
   const self = fileURLToPath(import.meta.url);
-  const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  // Tests only: a JSON line per snapshot (its children, folds, key and RSS), shorter cycles, and
+  // the first n messages children taken as failed.
+  const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
+  const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
+  let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  const started = [];
+  const sub = (args) => {
+    if (trace) started.push(args);
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
+    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+  };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
@@ -21229,6 +21255,7 @@ function cmdWait() {
     try { ensureStreams(self); } catch (e) { if (!pollWarned) process.stderr.write(`devteam: a stream collector didn't start: ${e.message}\n`); }
     if (!ms.some((m) => sensorDue(m, sensorState(m.name)))) return [];
     const budget = (Math.max(0, ...ms.filter((m) => m.kind === 'probe').map((m) => m.probe_timeout_s)) + 60) * 1000;
+    if (trace) started.push(['sensor', 'poll', '--due', '--json']);
     const r = spawnSync(process.execPath, [self, 'sensor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: budget, maxBuffer: 8 * 1024 * 1024 });
     // a poll killed after it printed still said its alerts
     try { const j = (r.stdout ?? '').trim() ? JSON.parse(r.stdout) : null; if (r.status === 0 && j) return j.alerts ?? []; if (j?.alerts?.length) { if (!pollWarned) process.stderr.write('devteam: sensor poll ran out of time after it polled; its alerts are below\n'); pollWarned = true; return j.alerts; } } catch {}
@@ -21236,20 +21263,42 @@ function cmdWait() {
     pollWarned = true;
     return [];
   };
+  // The owner's lines and the open messages come only from the log: while its key holds (main's sha,
+  // each log file's name, size and mtime), a cycle keeps the last ones and starts no messages child.
+  // The key is taken before the read, so a line written during the read is read on the next cycle.
+  // A messages child that failed is not kept: the next cycle runs it again. Findings come from
+  // panes, time, accounts and git too, so metrics runs every cycle.
+  let last = null;
+  let cycle = 0;
+  let reads = 0; // the trace's folds since its last line; cycle 0's from just before its snapshot
   const snap = () => {
-    // main's copy of the log as it is now: a wait can outlast many moves of main
-    logCache = null;
-    mainRefCache = undefined;
-    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
-    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
-    const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
-    return { owner, msgs, high };
+    const at = Date.now();
+    const key = logKey();
+    let now;
+    if (last && last.key === key) now = { owner: last.owner, msgs: last.msgs };
+    else {
+      // main's copy of the log as it is now: a wait can outlast many moves of main
+      logCache = null;
+      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
+      const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
+      last = got ? { key, owner, msgs } : null;
+      now = { owner, msgs };
+    }
+    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    if (trace) {
+      const r = readLog.reads ?? 0;
+      try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
+      reads = r;
+    }
+    return now;
   };
   // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
   // keeps its claim fresh, and another machine live on this repo ends the wait
   const hostBeat = () => { if (hostState().refused || !(Date.now() - (Number(hostState().checked) || 0) < HOST_REFRESH_MS)) { const hc = hostCheck(); if (hc.refused) hostRefusedWhileRunning(hc); } };
   hostBeat();
   const firstAlerts = poll();
+  reads = readLog.reads ?? 0;
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
@@ -21264,7 +21313,7 @@ function cmdWait() {
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
-    sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    sleep(Math.min(cycleMs ?? Math.min(Math.max(2000, (minutes * 60000) / 10), 45000), Math.max(0, until - Date.now())));
     hostBeat();
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
