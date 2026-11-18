@@ -5346,6 +5346,11 @@ let avFocus = null;
 // frame back (kit-141): AV_NAVS counts them since the viewer opened, AV_RET is the head it was opened over (the
 // router's LAST_HEAD then), and AV_LOADS each frame element's loads of a src.
 let AV_NAVS = 0, AV_RET = null;
+// Set once a frame Escape has closed the viewer (kit-141 final-1 F1): the frame's Escapes then close nothing
+// until the next route, the viewer's opening or the stage frame's next load, so a page that posts a burst
+// of them walks the tab back at most once. Only the frame's Escape: X, the scrim and the dashboard's own
+// Escape are never held, so a close that routes nothing (a back that only steps the frame) can't lock it.
+let AV_FRAME_ESC = false;
 const AV_LOADS = new WeakMap();
 // A frame of its own for each page set on it: a new frame's first load replaces its about:blank and adds no
 // entry, where a second src on the same frame adds one. Its load is listened for once it is in the document,
@@ -5640,6 +5645,7 @@ let TH_MADE = null, TH_FRESH = null, TH_CARRY = null, TH_CARRY_FROM = null;
 // LAST_HEAD: the last head routed that isn't the viewer's own (kit-141), what a viewer routed next is opened over
 let LAST_HEAD = null;
 function route() {
+  AV_FRAME_ESC = false;
   thFreshness();
   const fresh = !!TH_FRESH && TH_FRESH.hash === location.hash && TH_FRESH.fresh;
   TH_FRESH = null;
@@ -5664,8 +5670,8 @@ function routeHead({ fresh = false, carry = null } = {}) {
   if (p.link !== undefined) showHead(parseHead(HERE.page, SHELL_ROUTES));
   // before anything that hides the drawer, the scrim or a review: the viewer opens over them
   // (a viewer opening takes the head it is over, and counts the frame's moves from none)
-  if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; } openPreview(raw.slice(8)); ROUTED = true; return; }
-  if (raw.startsWith('artifact/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; } openArtifact(raw); ROUTED = true; return; }
+  if (raw.startsWith('preview/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openPreview(raw.slice(8)); ROUTED = true; return; }
+  if (raw.startsWith('artifact/')) { if (!AV) { AV_RET = ROUTED ? LAST_HEAD : null; AV_NAVS = 0; AV_FRAME_ESC = false; } openArtifact(raw); ROUTED = true; return; }
   closeArtifact();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
@@ -8084,6 +8090,7 @@ function avFrameLoad(e) {
     AV_LOADS.set(e.target, n);
     if (n > 1) AV_NAVS++;
   }
+  AV_FRAME_ESC = false;
   tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' });
 }
 for (const id of ['av-frame', 'pv-frame']) $(id).addEventListener('load', avFrameLoad);
@@ -8122,16 +8129,18 @@ window.addEventListener('message', (e) => {
   // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame (its keydown's message
   // only, never the keyup's, marked up) ends pin mode; else, with the overlay raised or the chip
   // showing (Shift may be held), nothing; else it closes a floating card, else the viewer (kit-141
-  // spec §Approach 7). A page that fakes it can only close its own viewer, and only when the owner
-  // isn't pointing.
+  // spec §Approach 7). A page that fakes it can only close its own viewer, once, and only when the owner
+  // isn't pointing: once one has closed it, the frame's Escapes close nothing until the next route, open or
+  // frame load (AV_FRAME_ESC), so a burst of them, or an old lens's keyup without up, steps back once at most.
   if (m.type === 'key') {
     if (document.activeElement !== tsFrame()) return;
     if (m.key === 'Escape') {
       if (m.up) return;
       if (TL.pin) tlPinMode(false);
       else if (TS.raised || tlShowing()) {}
+      else if (AV_FRAME_ESC) {}
       else if (tlFloating()) tlClose();
-      else leaveArtifact();
+      else { AV_FRAME_ESC = true; leaveArtifact(); }
     } else if (m.shift) tsRaise(true);
     return;
   }
