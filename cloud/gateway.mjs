@@ -1066,16 +1066,34 @@ export function createGateway(opts = {}) {
     spent.set(c, Date.now() + CHALLENGE_MS);
   };
 
+  const isOwner = (person) => person?.role === 'owner';
+  // A claimed file with no owner row (one restored from before people, read while running): its
+  // top-level sessions are still the owner's, until the next start's upgrade writes the row.
+  const STAND_IN = { id: null, role: 'owner', level: 'full', name: 'Owner' };
+  // The one rule for who a session is, for pages, sockets and artifact links alike: a live top-level
+  // session is the owner's; a live peopleSessions entry is its person's, only while that row exists
+  // (so nobody outlives their removal, and an entry naming no one is never taken for the owner).
+  const liveSession = (s, test) => {
+    const now = Date.now();
+    const top = s.sessions.find((x) => x.expires > now && test(x));
+    if (top) return { session: top, person: ownerRow(s) ?? STAND_IN };
+    for (const x of s.peopleSessions ?? []) {
+      if (!(x.expires > now) || !test(x)) continue;
+      const person = (s.people ?? []).find((p) => p.id === x.person);
+      if (person) return { session: x, person };
+    }
+    return null;
+  };
   // Every devteam_session the browser sends: one set by something else can't shadow the real one.
   const sessionOf = (req) => {
-    const live = store.load().sessions.filter((x) => x.expires > Date.now());
+    const s = store.load();
     for (const part of String(req.headers.cookie ?? '').split(';')) {
       const k = part.indexOf('=');
       if (k < 0 || part.slice(0, k).trim() !== COOKIE) continue;
       const tok = unb64u(part.slice(k + 1).trim());
       if (!tok || tok.length !== 32) continue;
       const h = b64u(sha256(tok));
-      const found = live.find((x) => x.hash === h);
+      const found = liveSession(s, (x) => x.hash === h);
       if (found) return found;
     }
     return null;
@@ -1087,11 +1105,16 @@ export function createGateway(opts = {}) {
   // (the kit's helpers, committed images) as cross-site, so a Lax cookie would not go with them.
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
   const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
-  // `method`: the passkey it was opened with, so removing that passkey can end it
-  const newSession = (methodId) => {
+  // `method`: the one it was opened with, so removing that method can end it. The owner's go in
+  // top-level `sessions`, where an older gateway reads them; anyone else's in `peopleSessions`.
+  const newSession = (person, methodId) => {
     const tok = crypto.randomBytes(32);
     const s = store.load();
-    store.save({ ...s, sessions: [...s.sessions, { hash: b64u(sha256(tok)), method: methodId, at: Date.now(), expires: Date.now() + SESSION_MS }] });
+    const hash = b64u(sha256(tok));
+    const at = Date.now();
+    store.save(isOwner(person)
+      ? { ...s, sessions: [...s.sessions, { hash, method: methodId, at, expires: at + SESSION_MS }] }
+      : { ...s, peopleSessions: [...(s.peopleSessions ?? []), { hash, person: person.id, method: methodId, at, expires: at + SESSION_MS }] });
     return cookie(b64u(tok), SESSION_MS / 1000);
   };
 
@@ -1117,11 +1140,12 @@ export function createGateway(opts = {}) {
     return `${PUB}/`;
   };
 
-  const creationOptions = (purpose) => {
+  // The passkey's user names its person, so a password manager doesn't file anyone's as the owner's.
+  const creationOptions = (purpose, person = STAND_IN) => {
     const userId = b64u(crypto.randomBytes(16));
     return {
       challenge: issue(purpose, { userId }), rp: { id: RP_ID, name: 'devteam' },
-      user: { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` },
+      user: isOwner(person) ? { id: userId, name: `owner@${RP_ID}`, displayName: `devteam owner (${RP_ID})` } : { id: userId, name: `${person.name}@${RP_ID}`, displayName: `${person.name} (${RP_ID})` },
       pubKeyCredParams: [-7, -8, -257].map((alg) => ({ type: 'public-key', alg })),
       authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
       attestation: 'none', timeout: CHALLENGE_MS, excludeCredentials: store.load().passkeys.map((p) => ({ type: 'public-key', id: p.id })),
@@ -1160,10 +1184,24 @@ export function createGateway(opts = {}) {
     const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${s.passkeys.length + 1}`;
     return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() };
   };
+  // A credential wherever it lives: the owner's top-level passkeys (`pk`), or a person's passkey
+  // methods (`method`), the owner's row's included.
+  const findCredential = (s, credId) => {
+    if (typeof credId !== 'string') return null;
+    const pk = s.passkeys.find((p) => p.id === credId);
+    if (pk) return { person: ownerRow(s) ?? STAND_IN, method: null, pk };
+    for (const person of s.people ?? []) {
+      const method = (person.methods ?? []).find((m) => m.type === 'passkey' && m.key === credId);
+      if (method) return { person, method, pk: null };
+    }
+    return null;
+  };
   const verifyAssertion = (body) => {
     const s = store.load();
-    const pk = s.passkeys.find((p) => p.id === body?.rawId);
-    if (!pk) throw new Error('unknown passkey');
+    const found = findCredential(s, body?.rawId);
+    if (!found) throw new Error('unknown passkey');
+    const { person, method } = found;
+    const pk = found.pk ?? { id: method.key, ...method.data };
     const { raw, challenge } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
     const adBytes = unb64u(body?.authenticatorData);
     const sig = unb64u(body?.signature);
@@ -1175,8 +1213,11 @@ export function createGateway(opts = {}) {
     // A counter that stopped going up means a cloned authenticator; synced passkeys keep it at 0.
     if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
     spend(challenge);
-    store.save({ ...s, passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: new Date().toISOString() } : p)) });
-    return pk.id;
+    // the counter and last use where the credential lives, and last_seen (neither bumps rev)
+    const iso = new Date().toISOString();
+    const people = s.people?.map((p) => (p.id !== person.id ? p : { ...p, last_seen: iso, methods: method ? p.methods.map((m) => (m.id === method.id ? { ...m, last_used: iso, data: { ...m.data, signCount: ad.signCount } } : m)) : p.methods }));
+    store.save({ ...s, ...(found.pk ? { passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: iso } : p)) } : {}), ...(people ? { people } : {}) });
+    return { person, methodId: method ? method.id : pk.id };
   };
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
@@ -1509,7 +1550,7 @@ export function createGateway(opts = {}) {
     if (!prefix || /\.\.|%2e|%5c|\\/i.test(inner) || Number(exp) < Date.now()) return false;
     const want = Buffer.from(capMac(port, prefix, exp, sid));
     const got = Buffer.from(given);
-    return sameBytes(got, want) && store.load().sessions.some((x) => x.hash.startsWith(sid) && x.expires > Date.now());
+    return sameBytes(got, want) && liveSession(store.load(), (x) => x.hash.startsWith(sid)) !== null;
   };
   const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
@@ -2123,7 +2164,7 @@ export function createGateway(opts = {}) {
           if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
           store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
           log(`claimed with passkey "${pk.name}"`);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(pk.id) });
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(ownerRow(store.load()) ?? STAND_IN, pk.id) });
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
         if (p === '/auth/login/options' && req.method === 'POST') {
@@ -2131,20 +2172,25 @@ export function createGateway(opts = {}) {
           return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
         }
         if (p === '/auth/login/verify' && req.method === 'POST') {
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession(verifyAssertion(await readJson(req))) });
+          const body = await readJson(req);
+          // as options: a challenge fetched before a reclaim must not open a session after it
+          if (!store.load().passkeys.length) return json(res, 409, { error: 'this box is not claimed yet' });
+          const { person, methodId } = verifyAssertion(body);
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(person, methodId) });
         }
       }
       // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and
       // refreshes the worker after a session has ended. Nothing here says anything about the box.
       const installed = isBox && req.method === 'GET' ? INSTALL[p] : null;
       if (installed) return send(res, 200, installed.type, installed.body());
-      const session = claimed ? sessionOf(req) : null;
-      if (!session) {
+      const who = claimed ? sessionOf(req) : null;
+      if (!who) {
         // a lens open in a tab of its own is no use after sign-in: the preview itself is
         const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
         if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
+      const { session, person } = who;
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
       // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
       if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
@@ -2175,12 +2221,15 @@ export function createGateway(opts = {}) {
       if (isAuth) {
         if (p === '/auth/logout' && req.method === 'POST') {
           const now = store.load();
-          store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash) });
+          store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash), ...(now.peopleSessions ? { peopleSessions: now.peopleSessions.filter((x) => x.hash !== session.hash) } : {}) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
+        // Until each person's own methods land (T4), these act on the owner's top-level passkeys only,
+        // so nobody else may reach them.
+        if ((p === '/auth/passkeys' || p.startsWith('/auth/passkeys/')) && !isOwner(person)) return json(res, 403, { error: 'only the owner can change these passkeys for now' });
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if (p.startsWith('/auth/passkeys/') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
-        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`));
+        if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`, person));
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
           const pk = register(await readJson(req), `add:${session.hash}`);
           const now = store.load();

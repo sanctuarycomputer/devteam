@@ -136,10 +136,12 @@ async function gateway(name, extra = {}) {
     r.on('error', reject);
     r.end(body === undefined ? undefined : JSON.stringify(body));
   });
+  // extraBody.token: another claim link's (after a reclaim)
   const claim = async (a, extraBody = {}) => {
-    const o = await req('POST', '/auth/claim/options', { body: { token } });
+    const t = extraBody.token ?? token;
+    const o = await req('POST', '/auth/claim/options', { body: { token: t } });
     assert.equal(o.status, 200, o.body);
-    return req('POST', '/auth/claim/verify', { body: { token, ...a.create(o.json, publicUrl), ...extraBody } });
+    return req('POST', '/auth/claim/verify', { body: { token: t, ...a.create(o.json, publicUrl), ...extraBody } });
   };
   const login = async (a, how) => {
     const o = await req('POST', '/auth/login/options', { body: {}, cookie: '' });
@@ -278,4 +280,179 @@ test('org-access A1: a second start of an upgraded state writes nothing', async 
     assert.ok(fs.readFileSync(claimed.file).equals(bytes2), 'the same bytes');
     assert.deepEqual([now.ino, now.mtimeMs], [st2.ino, st2.mtimeMs]);
   } finally { await again.close(); }
+});
+
+// --- A9: who a session is ------------------------------------------------------------------------
+// today's `reclaim` command, as a shell on the box runs it
+const reclaim = (gw) => spawnSync(process.execPath, [NEW, 'reclaim'], { env: { ...process.env, DEVTEAM_PUBLIC_URL: gw.publicUrl, DEVTEAM_GATEWAY_DIR: gw.dir }, encoding: 'utf8', timeout: 30e3 });
+// the hash a cookie's session is stored under
+const hashOf = (cookie) => u(sha(Buffer.from(cookie.split('=')[1], 'base64url')));
+// The owner claims; Ana (full) and Vic (view) are seeded with a passkey each.
+async function people(name, extra) {
+  const gw = await gateway(name, extra);
+  const owner = authenticator();
+  const ana = authenticator();
+  const vic = authenticator();
+  const c = await gw.claim(owner);
+  assert.equal(c.status, 200, c.body);
+  const ownerCookie = cookieOf(c);
+  const [anaRow, vicRow] = gw.seed([{ name: 'Ana', methods: [ana.method()] }, { name: 'Vic', level: 'view', methods: [vic.method()] }]);
+  return { gw, owner, ana, vic, ownerCookie, anaRow, vicRow };
+}
+const signIn = async (gw, a) => { const r = await gw.login(a); assert.equal(r.status, 200, r.body); return cookieOf(r); };
+// a raw WebSocket upgrade: the status line's code, or 0 when the socket closes without an answer
+const upgrade = (gw, host, headers, route = '/ws') => new Promise((resolve) => {
+  const s = net.connect(gw.port, '127.0.0.1', () => s.write(`GET ${route} HTTP/1.1\r\n${Object.entries({ host, upgrade: 'websocket', connection: 'Upgrade', 'sec-websocket-key': 'x', 'sec-websocket-version': '13', ...headers }).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n\r\n`));
+  let b = '';
+  const done = (code) => { resolve(code); s.destroy(); };
+  s.setTimeout(10e3, () => done(-1));
+  s.on('data', (c) => { b += c; if (b.includes('\r\n')) done(Number(b.split(' ')[1])); });
+  s.on('error', () => done(0));
+  s.on('close', () => done(b ? Number(b.split(' ')[1]) : 0));
+});
+const PV = 'brave-otter';
+const termWs = (gw, cookie) => upgrade(gw, `term.box.localhost:${gw.port}`, { origin: gw.term, cookie });
+const previewWs = (gw, cookie) => upgrade(gw, `${PV}.box.localhost:${gw.port}`, { origin: `http://${PV}.box.localhost:${gw.port}`, cookie }, '/');
+// an artifact opened as a document on an instance's name: its 302 to a capability link
+const artifactLink = async (gw, cookie) => {
+  const r = await gw.req('GET', '/artifact/main/x/index.html', { on: P, cookie, headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+  assert.equal(r.status, 302, r.body);
+  assert.match(r.headers.location, /^\/c\/\d+\.[\w-]+\.[\w-]+\/artifact\/main\/x\/index\.html$/);
+  return r.headers.location;
+};
+
+test('org-access A1: a claim after a reclaim keeps the owner\'s row', async () => {
+  const gw = await gateway('a1-reclaim-claim');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const before = ownerOf(gw.state());
+    assert.equal(before.length, 1);
+    const r = reclaim(gw);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual([gw.state().passkeys, gw.state().sessions], [[], []], 'unclaimed, the owner\'s row still there');
+    const token = /claim#([A-Za-z0-9_-]+)/.exec(r.stdout)?.[1];
+    const a = authenticator();
+    const c = await gw.claim(a, { token });
+    assert.equal(c.status, 200, c.body);
+    const after = gw.state();
+    assert.equal(ownerOf(after).length, 1, 'exactly one owner row');
+    assert.equal(ownerOf(after)[0].id, before[0].id, 'the same row');
+    assert.deepEqual(after.passkeys.map((p) => p.id), [u(a.id)]);
+    assert.equal(after.peopleStamp, stampOf([u(a.id)]));
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a person signs in with their passkey into a session of their own', async () => {
+  const { gw, owner, ana, ownerCookie, anaRow } = await people('a9-signin');
+  try {
+    const before = gw.state();
+    const cookie = await signIn(gw, ana);
+    const s = gw.state();
+    const h = hashOf(cookie);
+    assert.deepEqual(s.peopleSessions.map((x) => [x.hash, x.person, x.method]), [[h, anaRow.id, anaRow.methods[0].id]], 'in peopleSessions, Ana\'s, opened with her method');
+    assert.ok(!s.sessions.some((x) => x.hash === h), 'not in the owner\'s sessions');
+    assert.equal(JSON.stringify(s.passkeys.map(({ signCount, usedAt, ...p }) => p)), JSON.stringify(before.passkeys.map(({ signCount, usedAt, ...p }) => p)), 'the owner\'s passkeys untouched');
+    const row = s.people.find((p) => p.id === anaRow.id);
+    assert.ok(row.last_seen, 'last_seen is set');
+    assert.equal(row.rev, 1, 'and does not bump rev');
+    assert.ok(row.methods[0].last_used, 'the method\'s last use');
+    assert.equal(row.methods[0].data.signCount, 1, 'its counter, where it lives');
+    assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 200);
+    const inst = await gw.req('GET', '/', { on: P, cookie });
+    assert.notEqual(inst.status, 401, 'an instance\'s name lets her past the session check');
+    assert.notEqual(inst.status, 302);
+    assert.equal((await gw.req('GET', '/', { on: P, cookie: '' })).status, 401);
+    // her counter is checked where it lives: a replay of an old count is refused
+    assert.equal((await gw.login(ana, { counter: 1 })).status, 400);
+    // the owner's sign-in stays top-level, and names its passkey
+    const oc = await signIn(gw, owner);
+    const top = gw.state().sessions.find((x) => x.hash === hashOf(oc));
+    assert.equal(top?.method, u(owner.id), 'the owner\'s session names the passkey');
+    assert.equal(gw.state().peopleSessions.length, 1);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ownerCookie })).status, 200);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: expired peopleSessions entries are dropped on save', async () => {
+  const { gw, ana, anaRow, vicRow } = await people('a9-expired');
+  try {
+    const old = mintSession({ person: vicRow.id, method: vicRow.methods[0].id, expires: Date.now() - 1000 });
+    const live = mintSession({ person: vicRow.id, method: vicRow.methods[0].id });
+    gw.write({ ...gw.state(), peopleSessions: [old.row, live.row] });
+    assert.equal((await gw.req('GET', '/box.json', { cookie: old.cookie })).status, 401, 'an expired entry opens nothing');
+    await signIn(gw, ana);
+    const hashes = gw.state().peopleSessions.map((x) => x.hash);
+    assert.ok(!hashes.includes(old.row.hash), 'the expired one went with the write');
+    assert.ok(hashes.includes(live.row.hash), 'the live one stayed');
+    assert.equal(gw.state().peopleSessions.find((x) => x.hash !== live.row.hash).person, anaRow.id);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: sign-out ends only the signed-in person\'s session', async () => {
+  const { gw, ana, vic, ownerCookie } = await people('a9-logout');
+  try {
+    const ac = await signIn(gw, ana);
+    const vc = await signIn(gw, vic);
+    const before = gw.state();
+    const r = await gw.req('POST', '/auth/logout', { cookie: ac, body: {} });
+    assert.equal(r.status, 200, r.body);
+    const s = gw.state();
+    assert.deepEqual(s.peopleSessions.map((x) => x.hash), [hashOf(vc)], 'Ana\'s entry is gone, Vic\'s stays');
+    assert.deepEqual(s.sessions, before.sessions, 'the owner\'s untouched');
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ac })).status, 401);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ownerCookie })).status, 200);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: vc })).status, 200);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a person\'s session opens artifact links, the terminal\'s socket and a preview\'s', async () => {
+  const { gw, ana } = await people('a9-paths');
+  try {
+    const cookie = await signIn(gw, ana);
+    const link = await artifactLink(gw, cookie);
+    assert.notEqual((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'capOk accepts a person\'s session');
+    assert.notEqual(await termWs(gw, cookie), 401, 'the terminal\'s upgrade passes the session check');
+    assert.equal(await termWs(gw, undefined), 401, 'and without a session it is refused');
+    assert.equal(await previewWs(gw, cookie), 503, 'a preview\'s upgrade gets past the session check to "no such preview"');
+    assert.equal(await previewWs(gw, undefined), 401);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a person whose row is deleted has every session and link refused at once', async () => {
+  const { gw, ana, anaRow, ownerCookie } = await people('a9-removed');
+  try {
+    const cookie = await signIn(gw, ana);
+    const link = await artifactLink(gw, cookie);
+    assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 200);
+    const s = gw.state();
+    gw.write({ ...s, people: s.people.filter((p) => p.id !== anaRow.id) });
+    assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 401);
+    assert.equal((await gw.req('GET', '/', { on: P, cookie })).status, 401, 'an instance\'s name');
+    assert.equal((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'the /c/ link issued before');
+    assert.equal(await termWs(gw, cookie), 401);
+    assert.equal(await previewWs(gw, cookie), 401);
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ownerCookie })).status, 200, 'the owner is still in');
+    // an entry naming nobody (a hand-edited file) is nobody's, never the owner's
+    const ghost = mintSession({ person: 'p-aaaaaaaaaaaa', method: rid('m-') });
+    gw.write({ ...gw.state(), peopleSessions: [ghost.row] });
+    assert.equal((await gw.req('GET', '/box.json', { cookie: ghost.cookie })).status, 401);
+    assert.equal(await termWs(gw, ghost.cookie), 401);
+  } finally { await gw.close(); }
+});
+
+test('org-access A9: a sign-in on a box unclaimed since its challenge is refused', async () => {
+  const { gw, ana } = await people('a9-unclaimed');
+  try {
+    await signIn(gw, ana);
+    const o = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
+    assert.equal(o.status, 200, o.body);
+    const r = reclaim(gw);
+    assert.equal(r.status, 0, r.stderr);
+    const before = gw.state().peopleSessions;
+    const v = await gw.req('POST', '/auth/login/verify', { body: ana.get(o.json, gw.publicUrl), cookie: '' });
+    assert.equal(v.status, 409, v.body);
+    assert.equal(v.json?.error, 'this box is not claimed yet');
+    assert.equal(cookieOf(v), null);
+    assert.deepEqual(gw.state().peopleSessions, before, 'no session written');
+  } finally { await gw.close(); }
 });
