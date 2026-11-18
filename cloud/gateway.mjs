@@ -37,11 +37,14 @@
 // ties each page to the one project folder that published it). A preview whose generated name is a
 // project's is not served under it: the name is the project's. A host is known from the hub's list
 // (projects first, then previews) or the gateway's store (published pages).
-// Reserved first segments, the dashboard's: `api`, `artifact`, `c`, `healthz`, `index.html`,
-// `public-manifest`, `review`, `upload`, `view`. They are checked before the store, so a page stored
-// under one never answers on a project's host, and Publish refuses those names. The order on a
-// project's host: a reserved segment goes to the dashboard; a published page of that name is served
-// to anyone; anything else needs the session and goes to the project's dashboard.
+// Reserved first segments, the paths the dashboard and the gateway answer on a project's host: `api`,
+// `artifact`, `c`, `healthz`, `index.html`, `public-manifest`, `review`, `upload`, `view`. They are
+// checked before the store, so a page stored under one never answers on a project's host, and
+// Publish refuses those names. The path decides first, in this order. A reserved segment is never a
+// published page: it is checked as on today's names (`healthz` is the gateway's own answer, a `c`
+// link keeps its own check, every other one needs the session) and goes to the project's port. A
+// published page of that name is then served to anyone. Anything else needs the session and goes to
+// the project's port, for a name only one listed project has.
 // Gone, and not redirected: <port>.<box> (all-digit labels) and public.<box>, both 421.
 // The box's own name keeps the hub, sign-in (/auth), passkeys, pushes and /dev/. Publish's pages name
 // the project: /public/publish?project=<project>&...; ?port= is still accepted from older dashboards.
