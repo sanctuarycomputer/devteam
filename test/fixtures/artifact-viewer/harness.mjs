@@ -87,6 +87,7 @@ const WATCH = `(() => {
 
 // Resolves after two frames: whatever was just set has been drawn.
 export const FRAMES = 'new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))';
+const VIEWER_TAB = 'document.documentElement.classList.contains("viewer") && typeof TL === "object" && TL.have > 0';
 const LOADED = 'typeof DATA === "object" && DATA !== null && TL.have > 0';
 export const VIEW = "document.getElementById('artifact-view')";
 export const VIEWER_UP = `(!${VIEW}.hidden && document.body.classList.contains('av-open'))`;
@@ -145,7 +146,7 @@ export async function harness(t, fixture) {
   // T: a thread with no subject (it opens in the panel); TA: one on viewer-a's #pin-me (DW3 g, DW4, DW6)
   const T = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', T, 'Here, I think.']);
-  const TA = idOf(F.owner(['thread', 'new', 'This button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-me', tag: 'button', text: 'Pin me' } })]));
+  const TA = idOf(F.owner(['thread', 'new', 'This button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-me', tag: 'button', text: 'Pin me', point: { x: 60, y: 20 } } })]));
   const TK = 'ch-01-tidy-docs';
   F.sup(['ticket', 'add', TK, '--json', J({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
   const A = await app();
@@ -163,7 +164,8 @@ export async function harness(t, fixture) {
   // A tab of its own for a case (the last one's closed), at 1280x800, on the dashboard at hash.
   let tab = null;
   later(async () => { if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); } });
-  async function visit(hash) {
+  // (a viewer tab, opts.path 'view/artifact/viewer-a', is ready when the page says it is the viewer and has read its threads)
+  async function visit(hash, { path = '', width = 1280, height = 800 } = {}) {
     if (tab) { await tab.send('Page.close').catch(() => {}); tab.close(); tab = null; }
     const p = await chrome.newPage();
     tab = p;
@@ -171,14 +173,16 @@ export async function harness(t, fixture) {
     await p.send('Page.bringToFront');
     await p.send('Page.enable');
     await p.send('Runtime.enable');
-    await p.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH });
-    await p.send('Page.navigate', { url: `${B}/${hash}` });
+    await p.send('Page.navigate', { url: `${B}/${path}${hash}` });
     const soon = soonIn(p, 20000, () => dash.out());
     const settle = settleIn(p);
-    await soon(LOADED, 'setup: the dashboard and its threads read');
+    await soon(path.startsWith('view/') ? VIEWER_TAB : LOADED, path ? 'setup: the viewer tab and its threads read' : 'setup: the dashboard and its threads read');
     const V = { p, soon, settle, state: () => p.ev(STATE) };
+    // the window resized, and the page told of it
+    V.size = async (w, h) => { await p.send('Emulation.setDeviceMetricsOverride', { width: w, height: h, deviceScaleFactor: 1, mobile: false }); await soon(`innerWidth === ${w} && innerHeight === ${h}`, `setup: the window ${w}x${h}`); await p.ev(FRAMES); };
     // how many words the frames' pages have said so far
     V.mark = () => p.ev('window.__own.length');
     const said = (from, page, hash = null) => `window.__own.slice(${from}).some((m) => m.own === 'at' && m.page === ${J(page)}${hash === null ? '' : ` && m.hash === ${J(hash)}`})`;
@@ -269,13 +273,12 @@ export async function harness(t, fixture) {
     // CDP press, so the lens sends what a real press sends: plan-1 P1-1, P1-5); a click on the scrim.
     V.close = async (kind) => {
       if (kind === 'x') {
-        const at = await p.ev("(() => { const b = document.getElementById('av-close'), r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { x, y, shown: r.width > 0 && r.height > 0, top: !!document.elementFromPoint(x, y)?.closest('#av-close') }; })()");
+        const at = await p.ev("(() => { const b = document.getElementById('av-close'), r = b.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2; return { x, y, shown: r.width > 0 && r.height > 0, top: !!document.elementFromPoint(x, y)?.closest('#av-close'), on: (() => { const e = document.elementFromPoint(x, y); return e ? e.id || e.className || e.tagName : null; })() }; })()");
         assert.ok(at.shown, 'setup: the X is not shown');
-        // On main the viewer's box (inset: 10%) runs under the open panel above 900px, so the X can be
-        // under the panel (T4's box, var(--av-right), moves it clear): then a DOM click on it, which
-        // reaches the same listener. DW6 checks the box itself.
-        if (at.top) await V.press(at.x, at.y, 'av-close');
-        else { t.diagnostic('the X was under something: pressed by a DOM click'); await p.ev("document.getElementById('av-close').click(), true"); }
+        // the viewer's box leaves room for the open panel (--av-right), so nothing covers the X: a real press
+        // on it, after checking it is what the point shows (a DOM click would pass with the X covered)
+        assert.ok(at.top, `setup: the X is covered: the element at its centre is ${at.on}`);
+        await V.press(at.x, at.y, 'av-close');
       } else if (kind === 'escape-dash') {
         await V.focusBody();
         await p.key('Escape');
