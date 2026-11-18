@@ -5329,6 +5329,52 @@ function missingPins(root = mainRoot) {
   return [];
 }
 const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
+// The setup marker (kit-596): <git dir>/devteam-setup in a session or chore worktree says its
+// worktree_setup passed for this setup string and these lockfiles ({ v: 1, setup, files }, each a
+// sha256), so a resume skips it unless one changed or worktree_setup_always. Only in a checkout of
+// its own: a plain folder inside another checkout would share that one's git dir, and always runs
+// its setup. s is the repo's effective settings. Runtime state, safe to delete.
+const setupMarker = Object.freeze({
+  FILE: 'devteam-setup',
+  LOCKFILES: ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Gemfile.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'go.sum', 'composer.lock'],
+  gitDir(wt) {
+    const top = sh('git', ['rev-parse', '--show-toplevel'], { cwd: wt });
+    if (!top || realPath(top) !== realPath(wt)) return null;
+    return sh('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt }) || null;
+  },
+  // the lockfiles at the root and one folder down (dot-folders and symlinks left out), and each
+  // worktree_copy key there
+  state(wt, s) {
+    const files = {};
+    const add = (rel) => { try { const f = path.join(wt, rel); if (fs.lstatSync(f).isFile()) files[rel.split(path.sep).join('/')] = sha256(fs.readFileSync(f)); } catch {} };
+    for (const l of setupMarker.LOCKFILES) add(l);
+    let tops = [];
+    try { tops = fs.readdirSync(wt, { withFileTypes: true }); } catch {}
+    for (const d of tops) if (d.isDirectory() && !d.name.startsWith('.')) for (const l of setupMarker.LOCKFILES) add(path.join(d.name, l));
+    for (const e of Array.isArray(s.worktree_copy) ? s.worktree_copy : []) if (isObj(e) && typeof e.key === 'string' && e.key && !path.isAbsolute(e.key) && !path.normalize(e.key).split(/[\\/]/).includes('..')) add(path.normalize(e.key));
+    return { v: 1, setup: sha256(String(s.worktree_setup ?? '')), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) };
+  },
+  needed(wt, s) {
+    if (s.worktree_setup_always === true) return true;
+    const g = setupMarker.gitDir(wt);
+    if (!g) return true;
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(g, setupMarker.FILE), 'utf8')); } catch { return true; }
+    const now = setupMarker.state(wt, s);
+    if (!isObj(m) || m.v !== 1 || m.setup !== now.setup || !isObj(m.files)) return true;
+    const keys = Object.keys(now.files);
+    return keys.length !== Object.keys(m.files).length || keys.some((k) => m.files[k] !== now.files[k]);
+  },
+  write(wt, s) {
+    const g = setupMarker.gitDir(wt);
+    if (!g) return;
+    try { fs.writeFileSync(path.join(g, setupMarker.FILE), `${JSON.stringify(setupMarker.state(wt, s))}\n`); } catch (e) { warn(`could not write the setup marker in ${g}: ${e.message}`); }
+  },
+  clear(wt) {
+    const g = setupMarker.gitDir(wt);
+    if (g) try { fs.rmSync(path.join(g, setupMarker.FILE), { force: true }); } catch {}
+  },
+});
 // Machine-wide setup slots (kit-596): on one machine at most N worktree_setups of session and chore
 // worktrees run at once, each through a runner (setupRunner) that holds a slot for its run. A slot is
 // the folder ~/.devteam/setup-slots/<n> holding holder.json ({ id, pid, start, at }, then pgid and
@@ -5593,8 +5639,49 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
     fs.copyFileSync(from, path.join(wt, rel));
   }
   if (setup && s.worktree_setup && session) {
+    // a resume whose setup already passed for this setup string and these lockfiles skips it
+    if (!setupMarker.needed(wt, s)) return;
+    setupMarker.clear(wt);
     const d = process.env.DEVTEAM_SETUP_DEADLINE;
-    const config = { cmd: s.worktree_setup, dir: setupSlots.dir(), deadline: d && Number.isFinite(Number(d)) ? Number(d) : null, maxWaitMs: 900000 };
+    const deadline = d && Number.isFinite(Number(d)) ? Number(d) : null;
+    // worktree_copy: main's installed folder into a worktree whose key file is byte-identical to
+    // main's, through a temp sibling renamed into place, under the same deadline; any failure warns
+    // and the setup runs without it
+    const filesOf = (s.worktree_files ?? []).map((f) => path.normalize(String(f)).replace(/\/+$/, ''));
+    const okRel = (p) => typeof p === 'string' && p !== '' && !path.isAbsolute(p) && !path.normalize(p).split(/[\\/]/).includes('..');
+    for (const e of Array.isArray(s.worktree_copy) ? s.worktree_copy : []) {
+      if (!isObj(e) || !okRel(e.path) || !okRel(e.key)) { warn(`worktree_copy: ${JSON.stringify(e)} is not { "path": "<dir>", "key": "<file>" } with both relative paths; skipped`); continue; }
+      const rel = path.normalize(e.path).replace(/\/+$/, '');
+      if (filesOf.some((f) => f === rel || f.startsWith(`${rel}/`) || rel.startsWith(`${f}/`))) { warn(`worktree_copy: ${e.path} is or holds a worktree_files entry, which stays the owner's to name; not copied`); continue; }
+      const from = path.join(R.root, rel);
+      const to = path.join(wt, rel);
+      const tmp = `${to}.devteam-copy-${process.pid}`;
+      try {
+        const mainKey = path.join(R.root, e.key);
+        const wtKey = path.join(wt, e.key);
+        if (!fs.existsSync(mainKey) || !fs.existsSync(wtKey) || !fs.readFileSync(mainKey).equals(fs.readFileSync(wtKey))) continue;
+        if (!fs.existsSync(from)) continue;
+        try { fs.lstatSync(to); continue; } catch {}
+        // a copy a killed process left (its pid gone), and one of this pid's from before
+        const prefix = `${path.basename(to)}.devteam-copy-`;
+        for (const x of fs.readdirSync(path.dirname(to))) {
+          const pid = x.startsWith(prefix) ? Number(x.slice(prefix.length)) : NaN;
+          if (Number.isInteger(pid) && (pid === process.pid || !pidAlive(pid))) fs.rmSync(path.join(path.dirname(to), x), { recursive: true, force: true });
+        }
+        const left = deadline === null ? undefined : deadline - Date.now();
+        if (left !== undefined && left <= 0) { warn(`worktree_copy: no time left before the deadline to copy ${e.path}`); continue; }
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        const cp = (args) => spawnSync('cp', [...args, from, tmp], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: left, killSignal: 'SIGKILL' });
+        let r = os.platform() === 'darwin' ? cp(['-cR']) : os.platform() === 'linux' ? cp(['-a', '--reflink=auto']) : cp(['-R']);
+        if (os.platform() === 'darwin' && r.status !== 0 && !r.error) { fs.rmSync(tmp, { recursive: true, force: true }); r = cp(['-R']); }
+        if (r.status !== 0) throw new Error(r.error?.code === 'ETIMEDOUT' ? 'cut short at the deadline' : (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200));
+        fs.renameSync(tmp, to);
+      } catch (err) {
+        try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+        warn(`worktree_copy: could not copy ${e.path} from ${R.root} (${err.message}); worktree_setup runs without it`);
+      }
+    }
+    const config = { cmd: s.worktree_setup, dir: setupSlots.dir(), deadline, maxWaitMs: 900000 };
     const r = spawnSync(process.execPath, ['-e', `const lib = (${setupSlots.lib})(); (${setupRunner})(JSON.parse(process.argv[1]), lib)`, JSON.stringify(config)], { cwd: wt, env: gateEnv(null, R), stdio: ['ignore', 'inherit', 'inherit', 'pipe'] });
     // decided from the report, never the exit code alone; none at all is a runner that crashed
     let rep = null;
@@ -5602,7 +5689,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
     for (const t of rep?.took_over ?? []) {
       try { appendLog({ type: 'observation', source: 'kit', kind: 'setup-slot-taken-over', subject: `setup-slot-${t.slot}`, detail: `a worktree_setup for ${wt} took over setup slot ${t.slot}, held since ${t.since} by pid ${t.pid} (past 15 minutes)`, detector: 'kit', severity: 2, valence: -1, source_key: `setup-slot-taken-over ${t.slot} ${t.pid} ${t.since}` }); } catch {}
     }
-    if (rep?.outcome === 'ran' && rep.code === 0) return;
+    if (rep?.outcome === 'ran' && rep.code === 0) { setupMarker.write(wt, s); return; }
     if (rep?.outcome === 'no-slot') die('setup-slot-wait: no setup slot free before the deadline', setupSlots.SLOT_WAIT);
     if (rep?.outcome === 'deadline') die(`worktree_setup ran past its deadline in ${wt}`, setupSlots.PAST_DEADLINE);
     const hint = pinsHint(missingPins(R.root), R.root);
@@ -14707,12 +14794,14 @@ function plannerAwaitsOwner(name, feature) {
   return threadViews(readLog().objects).some((t) => t.status === 'open' && on(t.subject));
 }
 // Whether a resume of this session runs a worktree_setup: its repo's setting (a worker's ticket's
-// repo, a planner's home). repo() exits on a link it can't read, so that is checked first, and a
-// repo that can't be read counts as having one.
+// repo, a planner's home), unless its worktree's setup marker matches (the resume skips it). repo()
+// exits on a link it can't read, so that is checked first, and a repo that can't be read counts as
+// having one.
 function hasWorktreeSetup(name, [role]) {
   const t = role === 'worker' ? tickets().get(name) : null;
   if (t && !repoReadable(repoOfTicketLink(t))) return true;
-  return !!(t ? repoOfTicket(t) : repo('home')).settings.worktree_setup;
+  const s = (t ? repoOfTicket(t) : repo('home')).settings;
+  return !!s.worktree_setup && setupMarker.needed(path.join(mainRoot, '.worktrees', name), s);
 }
 // Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
@@ -19114,7 +19203,9 @@ function makeSession(role) {
     warn(`no ${role} session to resume for ${name}: its worktree was just made here, so the agent has no earlier session in it (a new machine, or the worktree was removed); starting it fresh with agent_command${handoffFor(name) ? ' and its handoff note' : ''} instead`);
     resume = false;
   }
-  seedWorktree(wt, { repo: R });
+  seedWorktree(wt, { repo: R, session: true });
+  // the relaunch's deadline is the setup's alone: no tmux server, window or agent started below inherits it
+  delete process.env.DEVTEAM_SETUP_DEADLINE;
   // records in home: home's ticket/<id> in its own worktree, made on its own (a resume whose
   // records worktree was removed gets it back)
   if (role === 'worker' && recordsInHomeId(id)) ensureRecordsWorktree(id);
