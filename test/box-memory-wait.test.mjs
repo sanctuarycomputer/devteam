@@ -117,6 +117,7 @@ test('an append to run/log changes the key, reads the log once and starts messag
     assert.equal(hit.children.length, 2);
     const entry = (k) => k.split('\n').find((l) => l.startsWith(`run/${TICKET}.jsonl `));
     assert.ok(entry(hit.key) && entry(hit.key) !== entry(w.lines()[0].key), 'the appended file\'s entry is what changed');
+    assert.equal(hit.key.split('\n')[0], w.lines()[0].key.split('\n')[0], 'main did not move');
     const next = await untilLine(w, (l) => l.cycle === hit.cycle + 1, 'the cycle after');
     assert.ok(isQuiet(next), `the cycle after is quiet: ${JSON.stringify(next)}`);
   } finally { w.kill(); }
@@ -180,7 +181,7 @@ test('a due sensor adds exactly one sensor poll child, and none while it is not 
   t.after(() => X.F.done());
   const port = await freePort();
   // in a child process: the test's own event loop is blocked during its synchronous kit calls
-  const srv = spawn(process.execPath, ['-e', `require('http').createServer((q, s) => s.end('ok')).listen(${port}, '127.0.0.1')`], { stdio: 'ignore' });
+  const srv = spawn(process.execPath, ['-e', `require('http').createServer((q, s) => s.end('ok')).listen(${port}, '127.0.0.1'); setTimeout(() => process.exit(0), 600000).unref()`], { stdio: 'ignore' });
   let w = null;
   try {
     await serverUp(`http://127.0.0.1:${port}/`);
