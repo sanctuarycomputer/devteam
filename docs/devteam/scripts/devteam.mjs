@@ -7592,31 +7592,33 @@ const ARTIFACT_LENS = String.raw`(() => {
   // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
   const POINTER_GAP = 67;
   const across = (v, from, n) => (n > 0 ? Math.round(Math.max(0, Math.min(1, (v - from) / n)) * 1e4) / 1e4 : 0);
-  // the page itself (html or body) is no thing to point at, as hit says
-  const pointerOf = (e) => {
-    const el = e.target;
+  // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
+  // it is sent; the page itself (html or body) is no thing to point at, as hit says
+  const pointerOf = (p) => {
+    const el = p.el;
     if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
     const r = el.getBoundingClientRect();
-    return { k: selectorOf(el), x: across(e.clientX, r.left, r.width), y: across(e.clientY, r.top, r.height) };
+    return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
   };
-  // one gate for every pointer, nulls too: at most one per gap, the newest replacing what waits (one
-  // timer, nothing queued, so the last word arrives), and never the same message twice running
+  // one gate for every pointer, nulls too: at most one per gap, the newest input replacing what waits
+  // (one timer, nothing queued, so the last word arrives), and never the same message twice running
   let pointerPending = null;
   let pointerTimer = 0;
   let pointerAt = 0;
   let pointerSent = '';
   const flushPointer = () => {
-    const m = pointerPending;
+    const p = pointerPending;
     pointerPending = null;
-    if (!m) return;
+    if (!p) return;
+    const m = pointerOf(p);
     const s = JSON.stringify(m);
     if (s === pointerSent) return;
     pointerSent = s;
     pointerAt = Date.now();
     tell(Object.assign({ type: 'pointer' }, m));
   };
-  const sayPointer = (m) => {
-    pointerPending = m;
+  const sayPointer = (p) => {
+    pointerPending = p;
     if (pointerTimer) return;
     // never longer than one gap, whatever the wall clock did since the last send
     const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
@@ -7711,9 +7713,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
-  addEventListener('mousemove', (e) => { if (heard) sayPointer(pointerOf(e)); }, true);
+  addEventListener('mousemove', (e) => { if (heard) sayPointer({ el: e.target, cx: e.clientX, cy: e.clientY }); }, true);
   // no relatedTarget: the pointer left the frame
-  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ k: null }); }, true);
+  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ el: null }); }, true);
   addEventListener('scroll', soon, true);
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }

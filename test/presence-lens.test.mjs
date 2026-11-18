@@ -42,6 +42,7 @@ function landArtifact(F, slug, files) {
 //                     setTimeout(0) (the lens hears the move first), by a mouseout with no
 //                     relatedTarget on that move's target
 //   tags           -> { n }, getElementsByTagName calls so far
+//   at { x, y }    -> { tag }, the localName of what is at that point
 //   move { n }     -> { frames: n }, once #mover has moved 1 px a frame for n frames
 //   text           -> {}, once #a reads "A2"
 const OWN_SCRIPT = [
@@ -62,6 +63,7 @@ const OWN_SCRIPT = [
   '    else if (d.ask === "leave") { leaveOn(lastTarget || document.documentElement); say("leave", {}); }',
   '    else if (d.ask === "leaveAfter") { leaves = d.n; say("leaveAfter", {}); }',
   '    else if (d.ask === "tags") say("tags", { n: window.__tags });',
+  '    else if (d.ask === "at") { var hit = document.elementFromPoint(d.x, d.y); say("at", { tag: hit ? hit.localName : null }); }',
   '    else if (d.ask === "move") {',
   '      var mover = document.getElementById("mover"), left = parseFloat(mover.style.left) || 0, done = 0, n = d.n;',
   '      var step = function () { if (done >= n) { say("move", { frames: n }); return; } left += 1; mover.style.left = left + "px"; done++; requestAnimationFrame(step); };',
@@ -74,7 +76,7 @@ const OWN_SCRIPT = [
 const at = (x, y, w, h) => `position:absolute;margin:0;left:${x}px;top:${y}px;width:${w}px;height:${h}px`;
 export const LENS_MOCK = {
   'artifact.json': JSON.stringify({ v: 1, title: 'Lens mock', summary: 'A page to point at, and to place others on', by: 'supervisor', for: [] }),
-  'index.html': '<!doctype html><html><head><title>Lens mock</title><style>body { margin: 0 }</style><script>' + OWN_SCRIPT + '</script></head><body>'
+  'index.html': '<!doctype html><html><head><title>Lens mock</title><style>body { margin: 0; height: 500px }</style><script>' + OWN_SCRIPT + '</script></head><body>'
     + `<div id="box" style="${at(100, 100, 200, 100)}"></div>`
     + `<section><p style="${at(400, 100, 100, 50)}">plain</p></section>`
     + `<div id="a" style="${at(100, 300, 100, 40)}">A</div>`
@@ -134,8 +136,9 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   // A15a: before hello, nothing (these first moves also absorb a fresh frame's missed first move)
   await mouse(150, 125);
   await mouse(200, 150);
+  await own({ ask: 'leave' });
   await sleep(300);
-  assert.deepEqual(await ptr(), [], 'A15a: no pointer told before hello');
+  assert.deepEqual(await ptr(), [], 'A15a: no pointer told before hello, nor a leave');
 
   // A15b: a selector alone, and the fractions across it
   await ask({ lens: 1, type: 'hello' });
@@ -153,6 +156,7 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   lastP = all[all.length - 1];
   assert.match(String(lastP.k), /:nth-of-type\(/, 'A15b: an element with no id gets a path');
   assert.equal((await own({ ask: 'is', k: lastP.k, sel: 'section > p' })).is, true, 'A15b: the path finds that element in the frame');
+  const pSel = lastP.k;
 
   // A15c: 40 moves across #box, back to back (far above 15 a second, under any load): throttled, and
   // the last position arrives
@@ -182,15 +186,24 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   assert.ok(got.length >= 1, 'A15e: something said');
   assert.deepEqual(bare(got[got.length - 1]), { lens: 1, type: 'pointer', k: null }, 'A15e: the leave is the last word');
 
-  // A15d: over the page itself, null; a null after a null, nothing; then #box and a leave, two
+  // A15d: over the page itself (body, then html), null; a null after a null, nothing; then #box and a
+  // leave, two. The body is 500 px tall: (700,450) is on it, (700,560) below it on html.
+  assert.deepEqual([(await own({ ask: 'at', x: 700, y: 450 })).tag, (await own({ ask: 'at', x: 700, y: 560 })).tag], ['body', 'html'], 'A15d: the points are on body and on html');
   await mouse(150, 125);
   await sleep(200);
   all = await ptr();
   assert.equal(all[all.length - 1].k, '#box', 'A15d: from #box');
-  await mouse(700, 550);
+  from = all.length;
+  await mouse(700, 450);
+  await sleep(200);
+  assert.deepEqual((await ptr()).slice(from).map(bare), [{ lens: 1, type: 'pointer', k: null }], 'A15d: over body, exactly one null');
+  await mouse(150, 125);
+  await sleep(200);
+  from = (await ptr()).length;
+  await mouse(700, 560);
   await sleep(200);
   all = await ptr();
-  assert.deepEqual(bare(all[all.length - 1]), { lens: 1, type: 'pointer', k: null }, 'A15d: over html, null');
+  assert.deepEqual(all.slice(from).map(bare), [{ lens: 1, type: 'pointer', k: null }], 'A15d: from #box over html, exactly one null');
   from = all.length;
   await own({ ask: 'leave' });
   await sleep(300);
@@ -201,6 +214,15 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   await sleep(300);
   got = (await ptr()).slice(from);
   assert.deepEqual(got.map(bare), [{ lens: 1, type: 'pointer', k: '#box', x: 0.25, y: 0.25 }, { lens: 1, type: 'pointer', k: null }], 'A15d: #box, then exactly one null');
+
+  // A15g: a move from one element to another (a mouseout with a relatedTarget) is no leave: no null
+  // between them, each move apart from the last by more than a gap
+  from = (await ptr()).length;
+  for (const [x, y] of [[150, 125], [450, 125], [150, 320], [150, 125]]) { await mouse(x, y); await sleep(150); }
+  await sleep(150);
+  got = (await ptr()).slice(from);
+  assert.ok(got.every((m) => m.k !== null), `A15g: no null between elements: ${JSON.stringify(got.map((m) => m.k))}`);
+  assert.deepEqual(got.map((m) => m.k), ['#box', pSel, '#a', '#box'], 'A15g: each element in turn');
 });
 
 test('presence A16: place answers each selector\'s rect, once a frame and only on change, apart from the pins', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
