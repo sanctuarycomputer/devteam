@@ -21,9 +21,10 @@ import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
 const argv = process.argv.slice(2);
 if (argv.includes('dashboard-data') && process.env.ZQ_BUILDS) {
-  fs.appendFileSync(process.env.ZQ_BUILDS, 'start ' + Math.round(performance.timeOrigin) + '\\n');
+  // the sleep read before start is written: a test that changes it once it sees start changes the next build's
   let ms = 0;
   try { ms = Number(fs.readFileSync(process.env.ZQ_SLEEP, 'utf8')) || 0; } catch {}
+  fs.appendFileSync(process.env.ZQ_BUILDS, 'start ' + Math.round(performance.timeOrigin) + '\\n');
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   process.on('exit', () => fs.appendFileSync(process.env.ZQ_BUILDS, 'end ' + Date.now() + '\\n'));
 } else if (argv.includes('dashboard') && process.env.ZQ_WATCH) {
