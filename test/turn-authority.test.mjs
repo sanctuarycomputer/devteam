@@ -405,6 +405,17 @@ test('turn authority', async (t) => {
         const more = unbound();
         assert.match(more.find((x) => x.subject === A0)?.detail ?? '', new RegExp(`carried out ${D0}`));
         assert.match(more.find((x) => x.subject === D0)?.detail ?? '', /written after it/);
+        // a span past the turn's end, its words still right, since slice clamps (final-1b F2)
+        const T2x = id('t', '12:20:00.000', 'owner');
+        const U2x = id('u', '12:20:00.001', 'owner');
+        const Q2x = id('q', '12:21:00.000', 'supervisor');
+        writeLines([
+          { v: 1, id: T2x, at: at('12:20:00.000'), by: 'owner', channel: 'cli', type: 'thread', title: 'Past the end', op: 'new' },
+          { v: 1, id: U2x, at: at('12:20:00.001'), by: 'owner', channel: 'cli', type: 'turn', thread: T2x, text: 'Ship it.', op: 'new' },
+          { v: 1, id: Q2x, at: at('12:21:00.000'), by: 'supervisor', type: 'question', kind: 'owner-decision', question: 'Ship?', thread: T2x, about_turn: U2x, seen: U2x, recommendation: 'Yes', stake: 1, urgency: 1, op: 'new' },
+          { v: 1, id: Q2x, at: at('12:22:00.000'), by: 'owner', channel: 'thread', type: 'question', answer: 'Yes', said: 'Ship it.', turn: U2x, said_at: [0, 9999], answer_seen: U2x, op: 'set' },
+        ]);
+        assert.match(unbound().find((x) => x.subject === Q2x)?.detail ?? '', /aren't what the turn says/);
       } finally { F.restoreLog(snap); }
     });
   } finally { F.done(); }

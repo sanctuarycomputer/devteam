@@ -13086,7 +13086,8 @@ function threadAnswersUnbound() {
   const before = (a, b) => String(a.at) < String(b.at) || (a.at === b.at && order.get(a) < order.get(b));
   const bindings = new Map();
   const boundBefore = (l, uid) => (bindings.get(uid) ?? (bindings.set(uid, turnBindings(sorted, uid)), bindings.get(uid))).filter((b) => before(b.line, l));
-  const sliceWhy = (u, said, at, what) => (!Array.isArray(at) || typeof said !== 'string' || u.text.slice(at[0], at[1]) !== said ? `gives words that aren't what the turn says${what}`
+  // slice clamps, so the span must also lie inside the turn (final-1b F2)
+  const sliceWhy = (u, said, at, what) => (!Array.isArray(at) || typeof said !== 'string' || at[1] > u.text.length || u.text.slice(at[0], at[1]) !== said ? `gives words that aren't what the turn says${what}`
     : !clauseBounds(u.text, at[0], at[1]) ? `binds part of a clause${what}, not whole clauses` : null);
   const overlapWhy = (l, uid, span) => { const b = boundBefore(l, uid).find((x) => spansOverlap(x.span, span)); return b ? `overlaps words of the turn that already bound ${b.id}` : null; };
   const turnWhy = (uid) => { const u = typeof uid === 'string' ? logGet(uid) : null; return u?.type !== 'turn' ? [null, `names no turn that exists (${uid ?? 'none'})`] : u.created_by !== 'owner' ? [u, "cites a turn that is the supervisor's, not the owner's"] : [u, null]; };
