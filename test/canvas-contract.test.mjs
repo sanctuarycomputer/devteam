@@ -15,7 +15,7 @@ import {
   TYPES, PROPS, CLASSES, TOKEN_TYPES, DOC_RULES, OPS, PAGE_KINDS, SERVER_KINDS, HTTP_KINDS, REFUSALS, ROUTES, LIMITS, LIMIT_ANSWERS, RANGES,
   NODE_ID_RE, SLUG_RE, CLIENT_RE, SESSION_RE, BY_RE, IMAGE_FILE_RE, HOSTILE_MARKERS, PAUSE_WHYS, CLOSE_WHYS,
   docErrors, opErrors, applyEdit, resolve, makeSeqBook, shapeErrors, freeTexts, skipProblems, measureProblems, SKIP_CASES, MEASURE_CASES,
-  startCanvasFake, openCanvas, request, playHttp,
+  startCanvasFake, openCanvas, request, playHttp, playExchange, exchangeOptions, exchangeProblems,
 } from './lib/canvas-fake.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -920,6 +920,13 @@ const LIMIT_CHECKS = {
 };
 // The http-<route key>-<case>.json fixtures, and the route each names (the longest key its name starts with).
 const httpFixtures = () => fixtureFiles().filter((f) => (fixtureKind(f) || {}).kind === 'http');
+const EXCHANGE_NAMES = ['edit', 'resend', 'refusals', 'whole-edit', 'view', 'select', 'pause', 'reload', 'closed', 'restart', 'hostile', 'pages', 'tokens', 'local'];
+const exchangeFixtures = () => fixtureFiles().filter((f) => (fixtureKind(f) || {}).kind === 'exchange');
+// One exchange on its own fake, closed after it whatever happens.
+async function playOne(x, name, waitMs) {
+  const fake = await startCanvasFake(exchangeOptions(x, { fixturesDir: FIX }));
+  try { await playExchange(fake, x, { fixturesDir: FIX, name, waitMs }); } finally { await fake.close(); }
+}
 const routeOf = (f) => ROUTES.filter((r) => f.startsWith(`http-${r.key}-`)).sort((a, b) => b.key.length - a.key.length)[0];
 
 test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one another, and no canvas test skips', async (t) => {
@@ -1618,6 +1625,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'An `edit` whose `client` or `seq` breaks its rule is a message a page must not send: the connection is closed 1008.',
       'a longer list or a bad id and the whole `select` is ignored; ids that name no node are dropped',
       'their latest `select` from any of their connections (empty until one), in the order they first connected',
+      'A person whose last connection closed and who connects again is listed anew: after the people already there, with an empty selection.',
       "at most one per 250 ms window (the first change opens it, and one message at its end carries all), like presence's `people`",
       'A deleted node leaves every selection.',
       'at most 500 ms after an applied edit (the first unsaved edit opens the window), to every connection; none while saving is paused; when the pause ends, at once if anything is unsaved',
@@ -1735,6 +1743,16 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'An expected list may end with `{ "$close": <code> }`',
       'In expected messages `"$session"` matches the canvas\'s current session id and `"$conn:<name>"` that connection\'s conn; nothing else is a placeholder.',
       '**An HTTP fixture** (`http-<route key>-<case>.json`)',
+      "An `open`'s `person` and `level` are the `x-devteam-person` and `x-devteam-level` headers, null for none (both null is the owner).",
+      'A `local` step posts its body with the fake\'s token and `Content-Type: application/json`; a step with no `body` expects an answer with no JSON body.',
+      "A `do`'s `arg` is the `why` for `pause` (`branch-moved` when absent) and a document fixture's name for `replace`; the other controls take none.",
+      'A connection name is opened once; one refused (a `status` other than 101) receives nothing.',
+      "a `welcome` on a canvas with no open connection, and every `reload`, carries an id not seen before in the exchange; any other `welcome` carries the open session's",
+      'The ticks of an exchange add up to less than 20000 ms, so no ping falls due and no exchange expects one',
+      'the exchanges together cover every other message kind, every op (pages included), every refusal code, every `via` and every `paused` and `closed` why',
+      "No two windows (`saved`, `selections`) end at the same instant, since their order then is the server's to choose.",
+      '`exchangeOptions(exchange, { fixturesDir })` gives the fake\'s options for an exchange',
+      '`exchangeProblems(exchange, { fixturesDir })` lists every way it breaks these rules; `playExchange` refuses an exchange with any',
     ]);
   });
 
@@ -2268,6 +2286,113 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     }
     const repos = files.filter((f) => routeOf(f).key === 'doc').map(readFix).filter((fx) => fx.status === 200).map((fx) => fx.response.repo.public);
     for (const v of [true, false, null]) assert.ok(repos.includes(v), `a doc fixture with repo.public ${v}`);
+  });
+
+  await t.test('fixtures: exchange files hold to the rules', () => {
+    const files = exchangeFixtures();
+    sameSet(files, EXCHANGE_NAMES.map((n) => `exchange-${n}.json`), 'the exchanges');
+    for (const f of files) assert.deepEqual(exchangeProblems(readFix(f), { fixturesDir: FIX }), [], `${f} holds to the rules`);
+    // the rules catch each break: a broken copy of exchange-edit.json, and the needle its problem names
+    const base = readFix('exchange-edit.json');
+    const stepOf = (x, pred) => x.steps.find(pred);
+    const editStep = (x) => stepOf(x, (s) => s.send && s.send.t === 'edit');
+    const broken = [
+      ['an expected message off its shape', (x) => { stepOf(x, (s) => s.expect && s.expect.a && s.expect.a.some((m) => m.t === 'saved')).expect.a.find((m) => m.t === 'saved').rev = -1; }, 'saved.rev'],
+      ['an expected kind no server sends', (x) => { x.steps[0].expect.a.push({ t: 'hello' }); }, 'unknown kind'],
+      ['an expected ping', (x) => { x.steps[0].expect.a.push({ t: 'ping' }); }, 'ping'],
+      ['a sent edit off its shape, neither refused shape nor closed 1008', (x) => { editStep(x).send.client = 'BAD'; }, 'edit.client'],
+      ['a sent select off its shape', (x) => { x.steps.splice(2, 0, { as: 'a', send: { t: 'select', ids: ['no good'] } }); }, 'select.ids'],
+      ['an invalid doc', (x) => { stepOf(x, (s) => s.doc).doc.rev = -1; }, 'doc'],
+      ['an invalid canvas', (x) => { x.canvas = 'msg-ping.json'; }, 'canvas'],
+      ['an expect naming no connection', (x) => { x.steps[0].expect.zz = []; }, 'zz'],
+      ['a $close not last', (x) => { x.steps[0].expect.a.unshift({ $close: 1000 }); }, '$close'],
+      ['a step of no known action', (x) => { x.steps.push({ wait: 1 }); }, 'action'],
+      ['an extra key on a step', (x) => { x.steps[0].extra = 1; }, 'extra'],
+      ['a connection named twice', (x) => { x.steps.splice(1, 0, clone(x.steps[0])); }, 'twice'],
+      ['a send as no connection', (x) => { editStep(x).as = 'zz'; }, 'zz'],
+      ['ticks that let a ping fall due', (x) => { x.steps.push({ tick: LIMITS.pingMs }); }, 'ping'],
+      ['a local body off its shape with status 200', (x) => { x.steps.push({ local: { by: 'bad by', via: 'apply', ops: [] }, status: 200, body: { rev: 1, edits: 1, saved: true } }); }, 'local-request.by'],
+      ['a local response off its shape', (x) => { x.steps.push({ local: { by: 'supervisor', via: 'apply', ops: [] }, status: 409, body: { why: 'nope' } }); }, 'error-response.why'],
+      ['a do of no known control', (x) => { x.steps.push({ do: 'explode' }); }, 'explode'],
+      ['a pause of an unknown why', (x) => { x.steps.push({ do: 'pause', arg: 'tired' }); }, 'tired'],
+      ['an unknown placeholder conn', (x) => { x.steps[0].expect.a[0].you.conn = '$conn:zz'; }, '$conn:zz'],
+    ];
+    for (const [label, mutate, needle] of broken) {
+      const x = clone(base);
+      mutate(x);
+      const p = exchangeProblems(x, { fixturesDir: FIX });
+      assert.ok(p.some((s) => s.includes(needle)), `${label}: a problem naming ${JSON.stringify(needle)} in ${JSON.stringify(p)}`);
+    }
+    // and allow what §14 allows: a sent message off its shape the same step refuses shape, or closes 1008
+    const allowed = clone(base);
+    allowed.steps.push(
+      { as: 'a', send: { t: 'edit', client: 'abcdefghij012345', seq: 9, ops: 'nope' }, expect: { a: [{ t: 'refused', client: 'abcdefghij012345', seq: 9, why: 'shape' }] } },
+      { as: 'a', send: { t: 'edit', client: 'BAD', seq: 1, ops: [] }, expect: { a: [{ $close: 1008 }] } },
+    );
+    assert.deepEqual(exchangeProblems(allowed, { fixturesDir: FIX }), [], 'refused shape and closed 1008 excuse a broken send');
+  });
+
+  await t.test('exchanges: the fake answers each', async () => {
+    for (const f of exchangeFixtures()) await playOne(readFix(f), f);
+    // the runner fails an exchange the fake doesn't answer, naming the step and the connection
+    const base = readFix('exchange-edit.json');
+    const savedStep = base.steps.findIndex((s) => s.expect && s.expect.b && s.expect.b.some((m) => m.t === 'saved'));
+    const opsStep = base.steps.findIndex((s) => s.send && s.send.t === 'edit');
+    const broken = [
+      ['a field differs', (x) => { x.steps[savedStep].expect.b.find((m) => m.t === 'saved').rev += 1; }, `step ${savedStep + 1}`, 'connection b'],
+      ['a message missing', (x) => { x.steps[opsStep].expect.b = []; }, `step ${opsStep + 1}`, 'connection b'],
+      ['a message too many', (x) => { x.steps[opsStep].expect.b.push(x.steps[opsStep].expect.b[0]); }, `step ${opsStep + 1}`, 'connection b'],
+      ['a document differs', (x) => { x.steps.find((s) => s.doc).doc.pages[0].name = 'Other'; }, 'step ', 'doc'],
+      ['a close expected that never comes', (x) => { x.steps[opsStep].expect.a.push({ $close: 1000 }); }, `step ${opsStep + 1}`, 'connection a'],
+      ['a session placeholder for a wrong id', (x) => { x.steps[0].expect.a[0].session = 'zzzzzzzzzzzzzzzz'; }, 'step 1', 'connection a'],
+    ];
+    for (const [label, mutate, ...needles] of broken) {
+      const x = clone(base);
+      mutate(x);
+      await assert.rejects(playOne(x, 'exchange-edit.json', 300), (e) => {
+        for (const n of needles) assert.ok(String(e.message).includes(n), `${label}: the failure names ${JSON.stringify(n)}: ${e.message}`);
+        return true;
+      }, label);
+    }
+  });
+
+  await t.test('coverage: every op, message kind and refusal code', () => {
+    const ops = new Set();
+    const kinds = new Set();
+    const whys = new Set();
+    const vias = new Set();
+    const closes = new Set();
+    const pauses = new Set();
+    for (const f of exchangeFixtures()) {
+      const x = readFix(f);
+      const pages = new Set(readFix(x.canvas).pages.map((pg) => pg.id));
+      const opKind = (op) => {
+        if (op.op === 'add' && op.node.type === 'page') { pages.add(op.node.id); return 'add page'; }
+        return op.op !== 'token' && op.op !== 'add' && pages.has(op.id) ? `${op.op} page` : op.op;
+      };
+      for (const s of x.steps) {
+        if (s.send) kinds.add(s.send.t);
+        if (s.local && s.body && REFUSALS.includes(s.body.why)) whys.add(s.body.why);
+        for (const list of Object.values(s.expect || {})) {
+          for (const m of list) {
+            if (!m.t) continue;
+            kinds.add(m.t);
+            if (m.t === 'ops') { vias.add(m.by.via); for (const op of m.ops) ops.add(opKind(op)); }
+            if (m.t === 'refused') whys.add(m.why);
+            if (m.t === 'closed') closes.add(m.why);
+            if (m.t === 'paused') pauses.add(m.why);
+          }
+        }
+      }
+    }
+    for (const op of [...OPS, 'add page', 'del page', 'set page', 'move page']) assert.ok(ops.has(op), `an exchange applies ${op}`);
+    // pings never fall due inside an exchange (§14); every other kind is sent or expected
+    assert.ok(!kinds.has('ping'), 'no exchange expects a ping');
+    sameSet([...kinds], [...PAGE_KINDS, ...SERVER_KINDS].filter((k) => k !== 'ping'), 'every message kind but ping, in the exchanges');
+    sameSet([...whys], REFUSALS, 'every refusal code, in the exchanges');
+    sameSet([...vias], ['page', 'apply', 'take'], 'every via');
+    sameSet([...closes], CLOSE_WHYS, 'every closed why');
+    sameSet([...pauses], PAUSE_WHYS, 'every paused why');
   });
 
   await t.test('rules: Object.prototype is untouched', () => {

@@ -1,0 +1,554 @@
+{
+  "canvas": "doc-minimal.json",
+  "slug": "pages-board",
+  "steps": [
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 0,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 1,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "p2",
+              "type": "page",
+              "parent": null,
+              "name": "Two"
+            },
+            "after": "p1"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 1,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 1
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "p2",
+                  "type": "page",
+                  "parent": null,
+                  "name": "Two"
+                },
+                "after": "p1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 2,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "p2",
+              "type": "page",
+              "parent": null,
+              "name": "Second"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 2,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 2
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "p2",
+                  "type": "page",
+                  "parent": null,
+                  "name": "Second"
+                },
+                "after": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 3,
+        "ops": [
+          {
+            "op": "set",
+            "id": "p1",
+            "prop": "name",
+            "value": "First"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 3,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 3
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "p1",
+                "prop": "name",
+                "value": "First"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 4,
+        "ops": [
+          {
+            "op": "move",
+            "id": "p2",
+            "parent": null,
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 4,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 4
+            },
+            "ops": [
+              {
+                "op": "move",
+                "id": "p2",
+                "parent": null,
+                "after": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 4,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p2",
+            "name": "Second",
+            "children": []
+          },
+          {
+            "id": "p1",
+            "name": "First",
+            "children": []
+          }
+        ],
+        "nodes": {}
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 5,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p2"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 5,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 5
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "r1",
+                  "type": "rect",
+                  "parent": "p2"
+                },
+                "after": null
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 5,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p2",
+            "name": "Second",
+            "children": [
+              "r1"
+            ]
+          },
+          {
+            "id": "p1",
+            "name": "First",
+            "children": []
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p2"
+          }
+        }
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 6,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "p1",
+              "type": "rect",
+              "parent": "p2"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 6,
+            "why": "exists"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 7,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "page",
+              "parent": null,
+              "name": "X"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 7,
+            "why": "exists"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 8,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "p3",
+              "type": "page",
+              "parent": "p1",
+              "name": "X"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 8,
+            "why": "parent"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 9,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r2",
+              "type": "rect",
+              "parent": null
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 9,
+            "why": "parent"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 10,
+        "ops": [
+          {
+            "op": "set",
+            "id": "p1",
+            "prop": "children",
+            "value": []
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 10,
+            "why": "prop"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 11,
+        "ops": [
+          {
+            "op": "del",
+            "id": "p2"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 6,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 11
+            },
+            "ops": [
+              {
+                "op": "del",
+                "id": "p2"
+              }
+            ]
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 6,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "First",
+            "children": []
+          }
+        ],
+        "nodes": {}
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 12,
+        "ops": [
+          {
+            "op": "del",
+            "id": "p1"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 12,
+            "why": "limit"
+          }
+        ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 6,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "First",
+            "children": []
+          }
+        ],
+        "nodes": {}
+      }
+    },
+    {
+      "tick": 500,
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 6
+          }
+        ]
+      }
+    }
+  ]
+}

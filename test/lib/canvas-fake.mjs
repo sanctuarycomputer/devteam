@@ -5,7 +5,8 @@
 // may fill), and the canvas test-file rule (`skipProblems`, `measureProblems`) with the cases it is
 // tested on. Tree walks use explicit stacks and queues, never recursion. Then the fake server
 // (`startCanvasFake`: the `/canvas` socket and the `/api/canvas/…` routes), its client (`openCanvas`),
-// `request` over `net`, and `playHttp` for the http-*.json fixtures. Node built-ins only; consumes
+// `request` over `net`, `playHttp` for the http-*.json fixtures, and `exchangeOptions`, `exchangeProblems`
+// and `playExchange` for the exchange-*.json ones. Node built-ins only; consumes
 // presence@1 through its fake's `ID_RE`, `CONN_RE`, `cutName` and `shapeErrors`.
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -2518,5 +2519,270 @@ export async function playHttp(file, { fixturesDir }) {
     if (own(fx, 'response')) assert.deepEqual(res.json, fx.response, `${name}: the response`);
   } finally {
     await fake.close();
+  }
+}
+
+// ---- the exchanges (§14) ----
+
+const EXCHANGE_KEYS = ['canvas', 'slug', 'images', 'steps'];
+const STEP_KEYS = {
+  open: ['open', 'person', 'level', 'status'],
+  as: ['as', 'send', 'close'],
+  local: ['local', 'status', 'body'],
+  do: ['do', 'arg'],
+  tick: ['tick'],
+};
+const CONTROLS = ['save', 'pause', 'resume', 'replace', 'land', 'remove', 'restart'];
+const BROKEN_BODY = [403, 413, 400]; // a local step's statuses that may exercise a broken body
+const DOC_FIXTURE_RE = /^(?:doc-[a-z0-9-]+|hostile)\.json$/;
+const actionOf = (s) => Object.keys(STEP_KEYS).filter((k) => own(s, k));
+const readFixture = (fixturesDir, f) => JSON.parse(fs.readFileSync(path.join(fixturesDir, f), 'utf8'));
+// The folder an exchange's documents are judged with: its images, by name, and their bytes.
+function exchangeFolder(x, fixturesDir) {
+  const names = Array.isArray(x.images) ? x.images : [];
+  const bytes = Object.fromEntries(names.map((n) => [n, fs.readFileSync(path.join(fixturesDir, 'images', n))]));
+  return { bytes, images: new Set(names), folderBytes: Object.values(bytes).reduce((s, b) => s + b.length, 0) };
+}
+
+// The fake's options for an exchange: its canvas open for editing under its slug, with its images, on
+// the manual clock.
+export function exchangeOptions(x, { fixturesDir }) {
+  const { bytes } = exchangeFolder(x, fixturesDir);
+  return { clock: 'manual', canvases: { [x.slug]: readFixture(fixturesDir, x.canvas) }, images: { [x.slug]: bytes } };
+}
+
+// A copy of an expected message with its placeholders filled: "$session" by `session`, "$conn:<name>"
+// by that connection's conn (`conns` name -> conn, or a stand-in when only the shape matters).
+function filled(v, session, conns) {
+  if (typeof v === 'string') {
+    if (v === '$session') return session;
+    if (v.startsWith('$conn:') && conns.has(v.slice('$conn:'.length))) return conns.get(v.slice('$conn:'.length));
+    return v;
+  }
+  if (Array.isArray(v)) return v.map((x) => filled(x, session, conns));
+  if (isObj(v)) return Object.fromEntries(Object.keys(v).map((k) => [k, filled(v[k], session, conns)]));
+  return v;
+}
+const isClose = (m) => isObj(m) && own(m, '$close');
+
+// Every way an exchange breaks §14's rules, as strings naming the step; empty when it holds: its keys
+// and steps, the connections it names, every sent and expected message's shape (a sent one off its
+// shape only when the same step expects a `refused` `shape` for it or the sender's `$close` 1008),
+// every document valid, a local step's body and response by their kinds, and no ping falling due.
+export function exchangeProblems(x, { fixturesDir }) {
+  const out = [];
+  if (!isObj(x)) return ['not an object'];
+  for (const k of ['canvas', 'slug', 'steps']) if (!own(x, k)) out.push(`no ${k}`);
+  for (const k of Object.keys(x)) if (!EXCHANGE_KEYS.includes(k)) out.push(`an extra key ${k}`);
+  if (typeof x.slug !== 'string' || !SLUG_RE.test(x.slug)) out.push('slug: not a slug');
+  if (own(x, 'images') && (!Array.isArray(x.images) || !x.images.every((n) => typeof n === 'string' && IMAGE_FILE_RE.test(n) && fs.existsSync(path.join(fixturesDir, 'images', n))))) {
+    out.push('images: not names of files in the fixtures\' images/');
+    return out;
+  }
+  const folder = exchangeFolder(x, fixturesDir);
+  const docProblem = (where, d) => { const e = docErrors(d, folder); if (e.length) out.push(`${where}: doc: ${e[0].rule}: ${e[0].where}: ${e[0].message}`); };
+  const fixtureDoc = (where, f) => {
+    if (typeof f !== 'string' || !DOC_FIXTURE_RE.test(f) || !fs.existsSync(path.join(fixturesDir, f))) { out.push(`${where}: not a document fixture`); return; }
+    docProblem(where, readFixture(fixturesDir, f));
+  };
+  fixtureDoc('canvas', x.canvas);
+  if (!Array.isArray(x.steps) || x.steps.length === 0) { out.push('steps: not a list of steps'); return out; }
+  const named = new Set(); // every connection opened so far
+  const stand = new Map();
+  let ticks = 0;
+  x.steps.forEach((s, i) => {
+    const where = `step ${i + 1}`;
+    if (!isObj(s)) { out.push(`${where}: not an object`); return; }
+    const acts = actionOf(s);
+    if (acts.length !== 1) { out.push(`${where}: not one action of ${Object.keys(STEP_KEYS).join(', ')}`); return; }
+    const act = acts[0];
+    for (const k of Object.keys(s)) if (![...STEP_KEYS[act], 'expect', 'doc'].includes(k)) out.push(`${where}: an extra key ${k}`);
+    const expect = own(s, 'expect') ? s.expect : {};
+    if (act === 'open') {
+      if (typeof s.open !== 'string' || s.open.length === 0) out.push(`${where}: open: not a name`);
+      else if (named.has(s.open)) out.push(`${where}: open: ${s.open} named twice`);
+      if (!own(s, 'person') || (s.person !== null && typeof s.person !== 'string')) out.push(`${where}: person: a header value or null`);
+      if (!own(s, 'level') || ![null, 'full', 'view'].includes(s.level)) out.push(`${where}: level: full, view or null`);
+      if (own(s, 'status') && !Number.isInteger(s.status)) out.push(`${where}: status: not a status`);
+      if (!own(s, 'status') || s.status === 101) { named.add(s.open); stand.set(s.open, `c${stand.size + 1}`); }
+      else if (own(expect, s.open)) out.push(`${where}: expect: ${s.open} is refused, so it receives nothing`);
+    } else if (act === 'as') {
+      if (!named.has(s.as)) out.push(`${where}: as: ${s.as} is no connection opened before`);
+      if (own(s, 'send') === own(s, 'close')) out.push(`${where}: as: one of send or close`);
+      if (own(s, 'close') && s.close !== true) out.push(`${where}: close: true`);
+    } else if (act === 'local') {
+      if (!Number.isInteger(s.status)) out.push(`${where}: status: not a status`);
+      if (!BROKEN_BODY.includes(s.status)) for (const e of shapeErrors('local-request', s.local)) out.push(`${where}: local: ${e}`);
+      if (own(s, 'body')) for (const e of shapeErrors(s.status === 200 ? 'local-response' : 'error-response', s.body)) out.push(`${where}: body: ${e}`);
+    } else if (act === 'do') {
+      if (!CONTROLS.includes(s.do)) out.push(`${where}: do: ${JSON.stringify(s.do)} is not one of ${CONTROLS.join(', ')}`);
+      else if (s.do === 'pause') { if (own(s, 'arg') && !PAUSE_WHYS.includes(s.arg)) out.push(`${where}: arg: ${JSON.stringify(s.arg)} is not a paused why`); }
+      else if (s.do === 'replace') fixtureDoc(`${where}: arg`, s.arg);
+      else if (own(s, 'arg')) out.push(`${where}: arg: ${s.do} takes none`);
+    } else if (act === 'tick') {
+      if (!Number.isInteger(s.tick) || s.tick <= 0) out.push(`${where}: tick: not a positive integer of ms`);
+      else ticks += s.tick;
+      if (ticks >= LIMITS.pingMs) out.push(`${where}: tick: ${ticks} ms in all lets a ping fall due`);
+    }
+    if (!isObj(expect)) { out.push(`${where}: expect: not an object`); return; }
+    for (const [name, list] of Object.entries(expect)) {
+      if (!named.has(name)) { out.push(`${where}: expect: ${name} is no connection opened by then`); continue; }
+      if (!Array.isArray(list)) { out.push(`${where}: expect ${name}: not a list`); continue; }
+      list.forEach((m, j) => {
+        const w = `${where}: expect ${name}[${j}]`;
+        if (isClose(m)) {
+          if (j !== list.length - 1) out.push(`${w}: a $close only last`);
+          if (Object.keys(m).length !== 1 || !Number.isInteger(m.$close)) out.push(`${w}: exactly { "$close": <code> }`);
+          return;
+        }
+        if (!isObj(m) || !SERVER_KINDS.includes(m.t)) { out.push(`${w}: unknown kind ${JSON.stringify(isObj(m) ? m.t : m)}`); return; }
+        if (m.t === 'ping') out.push(`${w}: a ping never falls due inside an exchange`);
+        JSON.stringify(m).replace(/"\$conn:([^"]*)"/g, (all, n) => { if (!named.has(n)) out.push(`${w}: ${all.slice(1, -1)} names no connection`); return all; });
+        for (const e of shapeErrors(m.t, filled(m, 'aaaaaaaaaaaaaaaa', stand))) out.push(`${w}: ${e}`);
+      });
+    }
+    if (act === 'as' && own(s, 'send')) {
+      const m = s.send;
+      const errs = isObj(m) && PAGE_KINDS.includes(m.t) ? shapeErrors(m.t, m) : [`unknown kind ${JSON.stringify(isObj(m) ? m.t : m)}`];
+      const mine = Array.isArray(expect[s.as]) ? expect[s.as] : [];
+      const excused = mine.some((r) => isObj(r) && r.t === 'refused' && r.why === 'shape' && isObj(m) && r.client === m.client && r.seq === m.seq)
+        || (mine.length > 0 && isClose(mine[mine.length - 1]) && mine[mine.length - 1].$close === 1008);
+      if (errs.length && !excused) for (const e of errs) out.push(`${where}: send: ${e}`);
+    }
+    if (own(s, 'doc')) docProblem(where, s.doc);
+  });
+  return out;
+}
+
+// Waits (polling, on the real clock) until `fn()` is truthy or `ms` pass; whether it became so.
+async function waitFor(fn, ms) {
+  const end = Date.now() + ms;
+  while (!fn()) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  return true;
+}
+const quiet = async () => { await settle(); await new Promise((r) => setTimeout(r, 3)); await settle(); };
+let exchangeTrips = 0;
+
+// Plays one exchange (§14) against `fake` (started with `exchangeOptions`, or a server with the same
+// controls): each step's action, then every open connection's new messages compared with its `expect`
+// list exactly, in order (none for a connection not named), a `$close` awaited with its code, and the
+// document compared when the step gives one. It also holds `welcome` and `reload` to §3's session rule:
+// a welcome on a canvas with no open connection, and every reload, carries an id not seen before in the
+// exchange; any other welcome the open session's. A failure names the exchange, the step and the
+// connection. `waitMs` bounds each wait for a message, a close or a pong. Every connection it opens is
+// closed when it ends, however it ends.
+export async function playExchange(fake, x, { fixturesDir, name = 'exchange', waitMs = 3000 } = {}) {
+  const problems = exchangeProblems(x, { fixturesDir });
+  assert.deepEqual(problems, [], `${name}: holds to the exchange rules`);
+  const conns = new Map(); // name -> { c, mark, code, done }
+  const connOf = new Map(); // name -> its conn, for "$conn:<name>"
+  const seen = new Set(); // every session id a welcome or reload carried
+  let current = null; // the open session's id, as the runner has seen it
+  const live = () => [...conns.entries()].filter(([, e]) => !e.done);
+  const sessionNow = () => { try { return fake.session(x.slug); } catch { return null; } };
+  const roundTrip = async (e, where) => {
+    const tag = `x-${++exchangeTrips}`;
+    e.c.frame(Buffer.from(tag), { opcode: 9 });
+    const ok = await waitFor(() => e.code !== null || e.c.controls.some((k) => k.opcode === 10 && k.payload.toString() === tag), waitMs);
+    assert.ok(ok, `${where}: the round trip's pong`);
+  };
+  try {
+    for (let i = 0; i < x.steps.length; i++) {
+      const s = x.steps[i];
+      const act = actionOf(s)[0];
+      const where = `${name} step ${i + 1} (${act} ${JSON.stringify(s[act]).slice(0, 60)})`;
+      const expect = s.expect || {};
+      const liveBefore = live().length;
+      let sender = null;
+      if (act === 'open') {
+        const headers = {};
+        if (s.person !== null) headers['x-devteam-person'] = s.person;
+        if (s.level !== null) headers['x-devteam-level'] = s.level;
+        const c = await openCanvas(fake.url, { slug: x.slug, headers });
+        const status = own(s, 'status') ? s.status : 101;
+        assert.equal(c.status, status, `${where}: connection ${s.open}: the upgrade's status`);
+        if (status !== 101) c.destroy();
+        else {
+          const e = { c, mark: 0, code: null, done: false };
+          c.closed.then((code) => { e.code = code; });
+          conns.set(s.open, e);
+          if (c.you) connOf.set(s.open, c.you.conn);
+        }
+      } else if (act === 'as') {
+        const e = conns.get(s.as);
+        assert.ok(e && !e.done, `${where}: connection ${s.as} is open`);
+        if (s.close) {
+          e.c.close(1000);
+          assert.ok(await waitFor(() => e.code !== null, waitMs), `${where}: connection ${s.as}: the close answered`);
+          e.done = true;
+          assert.deepEqual(e.c.messages.slice(e.mark), [], `${where}: connection ${s.as}: nothing before its close`);
+        } else {
+          e.c.send(s.send);
+          sender = s.as;
+        }
+      } else if (act === 'local') {
+        const res = await request(`${fake.url}/api/canvas/local?slug=${x.slug}`, {
+          method: 'POST', headers: { 'x-devteam-canvas-token': fake.token, 'Content-Type': 'application/json' }, body: s.local,
+        });
+        assert.equal(res.status, s.status, `${where}: the local route's status`);
+        if (own(s, 'body')) assert.deepEqual(res.json, s.body, `${where}: the local route's body`);
+        else assert.equal(res.json, undefined, `${where}: the local route's answer has no JSON body`);
+      } else if (act === 'do') {
+        const arg = s.do === 'replace' ? readFixture(fixturesDir, s.arg) : s.arg;
+        await (own(s, 'arg') ? fake[s.do](x.slug, arg) : fake[s.do](x.slug));
+      } else {
+        await fake.tick(s.tick);
+      }
+      // a sender that expects nothing gets a round trip, so the server has judged its message
+      if (sender !== null) {
+        const mine = expect[sender] || [];
+        if (mine.length === 0) await roundTrip(conns.get(sender), `${where}: connection ${sender}`);
+      }
+      for (const [cn] of Object.entries(expect)) assert.ok(conns.has(cn) && (!conns.get(cn).done || false), `${where}: connection ${cn} is open`);
+      // every open connection: its messages arrive, then exactly the expected ones
+      for (const [cn, e] of live()) {
+        const want = expect[cn] || [];
+        const closeWant = want.length && isClose(want[want.length - 1]) ? want[want.length - 1].$close : null;
+        const msgs = closeWant === null ? want : want.slice(0, -1);
+        await waitFor(() => e.c.messages.length - e.mark >= msgs.length && (closeWant === null || e.code !== null), waitMs);
+      }
+      await quiet();
+      for (const [cn, e] of live()) {
+        const want = expect[cn] || [];
+        const closeWant = want.length && isClose(want[want.length - 1]) ? want[want.length - 1].$close : null;
+        const got = e.c.messages.slice(e.mark);
+        e.mark = e.c.messages.length;
+        for (const m of got) {
+          if (m.t === 'welcome' && act === 'open' && cn === s.open) {
+            if (liveBefore === 0) assert.ok(!seen.has(m.session), `${where}: connection ${cn}: a new session's id, never seen before`);
+            else assert.equal(m.session, current, `${where}: connection ${cn}: the open session's id`);
+            current = m.session;
+            seen.add(m.session);
+            connOf.set(cn, m.you.conn);
+          } else if (m.t === 'reload') {
+            assert.ok(m.session === current || !seen.has(m.session), `${where}: connection ${cn}: a reload's session is new`);
+            if (m.session !== current) { current = m.session; seen.add(m.session); }
+          }
+        }
+        const msgs = (closeWant === null ? want : want.slice(0, -1)).map((m) => filled(m, sessionNow(), connOf));
+        assert.deepEqual(got, msgs, `${where}: connection ${cn}: its messages`);
+        if (closeWant !== null) {
+          assert.equal(e.code, closeWant, `${where}: connection ${cn}: closed by the server with ${closeWant}`);
+          e.done = true;
+        } else assert.equal(e.code, null, `${where}: connection ${cn}: not closed`);
+      }
+      if (live().length === 0) current = null;
+      if (own(s, 'doc')) assert.deepEqual(fake.doc(x.slug), s.doc, `${where}: the canvas's doc`);
+    }
+    // nothing more after the last step
+    for (const [cn, e] of live()) {
+      await roundTrip(e, `${name} end: connection ${cn}`);
+      assert.deepEqual(e.c.messages.slice(e.mark), [], `${name} end: connection ${cn}: nothing after the last step`);
+    }
+  } finally {
+    for (const e of conns.values()) e.c.destroy();
   }
 }

@@ -1,0 +1,514 @@
+{
+  "canvas": "doc-every-type.json",
+  "slug": "hostile-board",
+  "images": [
+    "429be16d0a91e377.png"
+  ],
+  "steps": [
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 57,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 1,
+        "ops": [
+          {
+            "op": "set",
+            "id": "title",
+            "prop": "color",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 1,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 2,
+        "ops": [
+          {
+            "op": "set",
+            "id": "card",
+            "prop": "x",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 2,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 3,
+        "ops": [
+          {
+            "op": "set",
+            "id": "card",
+            "prop": "radius",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 3,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 4,
+        "ops": [
+          {
+            "op": "set",
+            "id": "icon",
+            "prop": "path",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 4,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 5,
+        "ops": [
+          {
+            "op": "set",
+            "id": "photo",
+            "prop": "src",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 5,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 6,
+        "ops": [
+          {
+            "op": "token",
+            "path": "color.brand",
+            "value": {
+              "$type": "color",
+              "$value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 6,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 7,
+        "ops": [
+          {
+            "op": "set",
+            "id": "title",
+            "prop": "font",
+            "value": {
+              "family": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+              "size": 16,
+              "weight": 400,
+              "lineHeight": 1.4
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 7,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 8,
+        "ops": [
+          {
+            "op": "set",
+            "id": "button",
+            "prop": "props",
+            "value": {
+              "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n": {
+                "type": "text",
+                "default": "x",
+                "target": {
+                  "id": "button-label",
+                  "prop": "text"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 8,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 9,
+        "ops": [
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "variant",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 9,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 10,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+              "type": "rect",
+              "parent": "card"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 10,
+            "why": "shape"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 11,
+        "ops": [
+          {
+            "op": "set",
+            "id": "card",
+            "prop": "figma",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 11,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 12,
+        "ops": [
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "overrides.button-label.name",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 12,
+            "why": "prop"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 13,
+        "ops": [
+          {
+            "op": "set",
+            "id": "p-main",
+            "prop": "name",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          },
+          {
+            "op": "set",
+            "id": "card",
+            "prop": "name",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          },
+          {
+            "op": "set",
+            "id": "title",
+            "prop": "text",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          },
+          {
+            "op": "set",
+            "id": "button",
+            "prop": "props.label",
+            "value": {
+              "type": "text",
+              "default": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+              "target": {
+                "id": "button-label",
+                "prop": "text"
+              }
+            }
+          },
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "props.label",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          },
+          {
+            "op": "set",
+            "id": "button",
+            "prop": "variants.primary.button-label.text",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          },
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "overrides.button-label.text",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 58,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 13
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "p-main",
+                "prop": "name",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              },
+              {
+                "op": "set",
+                "id": "card",
+                "prop": "name",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              },
+              {
+                "op": "set",
+                "id": "title",
+                "prop": "text",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              },
+              {
+                "op": "set",
+                "id": "button",
+                "prop": "props.label",
+                "value": {
+                  "type": "text",
+                  "default": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+                  "target": {
+                    "id": "button-label",
+                    "prop": "text"
+                  }
+                }
+              },
+              {
+                "op": "set",
+                "id": "buy",
+                "prop": "props.label",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              },
+              {
+                "op": "set",
+                "id": "button",
+                "prop": "variants.primary.button-label.text",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              },
+              {
+                "op": "set",
+                "id": "buy",
+                "prop": "overrides.button-label.text",
+                "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500,
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 58
+          }
+        ]
+      }
+    }
+  ]
+}
