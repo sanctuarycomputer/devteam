@@ -2888,6 +2888,13 @@ const features = () => memo('features', () => new Map(logObjects('feature').map(
 const isActive = (t) => !t.superseded_by;
 // A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
+// The owner questions a hold on a ticket waits on: the q-… ids its reason names, and the open
+// questions asked about the ticket (--ticket) or that --blocks it.
+const ownerQuestionsHolding = (id, reason) => {
+  const named = String(reason ?? '').match(/\bq-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [];
+  const open = logObjects('question').filter((q) => (q.ticket === id || (q.blocks ?? []).includes(id)) && questionView(q).status === 'open').map((q) => q.id);
+  return [...new Set([...named, ...open])];
+};
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
 
@@ -4494,7 +4501,7 @@ function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
   const by = logWriter();
-  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'${type === 'ticket' ? ' [--whole "<why>"]' : ''}   |   ${type} show <id>`);
   if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
   if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
   if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
@@ -4519,6 +4526,13 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
+  // A hold on the owner holds only what the answer gates: split the rest off first, or say why none of it can go
+  if (type === 'ticket' && typeof body.held === 'string' && body.held.trim()) {
+    const qs = ownerQuestionsHolding(id, body.held);
+    const whole = flagStr('whole')?.trim();
+    if (qs.length && !whole) die(`${id} waits on ${qs.join(', ')}: hold only the part the answer gates. Split the rest into its own ticket and let it run (ticket add <new-id> with the touches and done_when that don't need the answer, then ticket set ${id} with what is left, before holding it); or, if no part can go ahead without the answer, pass --whole "<why>"`);
+    if (whole) body.held = `${body.held.trim()} (whole: ${whole})`;
+  }
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
