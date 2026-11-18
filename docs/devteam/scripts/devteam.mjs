@@ -22371,6 +22371,181 @@ function cmdInit() {
   out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
 }
 
+/* browser-guard start */
+// The browser's egress guard (browser@1, refusal; design supervisors-can-use-a-browser-with-the-o,
+// Components 1). Chrome reaches the network only through it: a loopback forward proxy for
+// absolute-form HTTP and CONNECT that refuses every destination on this machine's own network.
+// Each dashboard takes owner presses from any same-origin page on its loopback port, so a browser
+// that could load one could press them; this is what stops it. The rules, in the contract's order:
+// own-name and gateway on the name, before resolving; then own-interface and special-purpose on
+// every address the name resolved to (once), and the first that refuses is reported. It dials the
+// address it checked, never the name, so DNS rebinding can't get past it. An answer it can't read
+// is refused: it fails closed.
+//
+// The refused ranges, exactly the contract's range enum: every IANA special-purpose block, and for
+// IPv6 everything outside 2000::/3 (::/3, 4000::/2, 8000::/1 when nothing narrower names it). An
+// address embedding a refused IPv4 one (mapped, NAT64, 6to4, Teredo) falls in a refused IPv6
+// range and is refused whole. The longest matching prefix is the range reported.
+const GUARD_RANGES = [
+  '127.0.0.0/8', '0.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '192.0.0.0/24',
+  '198.18.0.0/15', '224.0.0.0/4', '::/128', '::1/128', 'fc00::/7', 'fe80::/10', '64:ff9b::/96', '::ffff:0:0/96', '192.0.2.0/24',
+  '192.31.196.0/24', '192.52.193.0/24', '192.88.99.0/24', '192.175.48.0/24', '198.51.100.0/24', '203.0.113.0/24', '240.0.0.0/4',
+  '255.255.255.255/32', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001::/32', '2001:db8::/32', '2002::/16', '2620:4f:8000::/48',
+  '3fff::/20', '5f00::/16', 'ff00::/8', '::/3', '4000::/2', '8000::/1',
+];
+// An address as a number: { v, n, text }, text its normal form (what a refusal reports), or null
+// for anything that isn't exactly an IPv4 dotted quad or an IPv6 address. IPv6 goes through WHATWG
+// URL first, which writes a dotted tail (::ffff:127.0.0.1, as libuv may answer) as hex.
+function guardAddr(s) {
+  const raw = String(s ?? '').split('%')[0];
+  if (net.isIPv4(raw)) return { v: 4, n: raw.split('.').reduce((a, x) => (a << 8n) + BigInt(x), 0n), text: raw };
+  if (!net.isIPv6(raw)) return null;
+  let text;
+  try { text = new URL(`http://[${raw}]/`).hostname.replace(/^\[|\]$/g, ''); } catch { return null; }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const groups = halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return { v: 6, n: groups.reduce((a, g) => (a << 16n) + BigInt(parseInt(g, 16)), 0n), text };
+}
+let guardTable = null;
+// The most specific refused range holding a parsed address, or null.
+function guardRange(a) {
+  guardTable ??= GUARD_RANGES.map((cidr) => { const [base, p] = cidr.split('/'); return { cidr, ...guardAddr(base), prefix: Number(p) }; });
+  const bits = a.v === 4 ? 32 : 128;
+  let best = null;
+  for (const r of guardTable) {
+    if (r.v !== a.v) continue;
+    const shift = BigInt(bits - r.prefix);
+    if ((a.n >> shift) === (r.n >> shift) && (!best || r.prefix > best.prefix)) best = r;
+  }
+  return best?.cidr ?? null;
+}
+// Whether a parsed address is one of this machine's own, read on every call (a VPN, Tailscale).
+function guardOwn(a) {
+  return Object.values(os.networkInterfaces() ?? {}).flat().some((e) => { const b = guardAddr(e?.address); return b && b.v === a.v && b.n === a.n; });
+}
+const guardBare = (h) => String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+const GUARD_HOST = /^[A-Za-z0-9._:\[\]-]{1,255}$/;
+// What a request asks for: { name, asked, port, connect, hostHeader?, path? }, or null (400). An
+// absolute-form http: URL, or a CONNECT authority of exactly <host>:<port>, with the port read from
+// the authority itself (URL drops a default one, and a ws: page's CONNECT names :80).
+function guardTarget(method, target) {
+  let u;
+  let asked;
+  let port;
+  if (method === 'CONNECT') {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^\[\]:/\\@?#\s]+):(\d{1,5})$/.exec(target ?? '');
+    if (!m) return null;
+    port = Number(m[2]);
+    try { u = new URL(`http://${m[1]}`); } catch { return null; }
+    if (u.pathname !== '/' || u.search || u.hash || u.username || u.password) return null;
+    asked = target;
+  } else {
+    if (!/^http:\/\//i.test(target ?? '')) return null;
+    try { u = new URL(target); } catch { return null; }
+    if (u.protocol !== 'http:') return null;
+    asked = target.slice(7).split(/[/?#]/)[0];
+    port = Number(u.port || 80);
+  }
+  const name = guardBare(u.hostname);
+  if (!name || port < 1 || port > 65535) return null;
+  if (!GUARD_HOST.test(asked)) asked = u.host;
+  if (method === 'CONNECT') return { name, asked, port, connect: true };
+  const rest = target.slice(7 + target.slice(7).split(/[/?#]/)[0].length).split('#')[0];
+  return { name, asked, port, connect: false, hostHeader: u.host, path: rest.startsWith('/') ? rest : `/${rest}` };
+}
+// own-name or gateway, decided on the name before anything resolves it.
+function guardNameRule(name) {
+  const own = guardBare(os.hostname());
+  if (name === 'localhost' || name.endsWith('.localhost') || (own && name === own)) return 'own-name';
+  let gw = '';
+  try { gw = process.env.DEVTEAM_PUBLIC_URL ? guardBare(new URL(process.env.DEVTEAM_PUBLIC_URL).hostname) : ''; } catch {}
+  if (gw && (name === gw || name.endsWith(`.${gw}`))) return 'gateway';
+  return null;
+}
+// { refuse: { rule, address?, range? } }, { fail: why } (a 502) or { address } to dial. lookup is
+// dns.lookup, called once for a name.
+async function guardDecide(t, lookup) {
+  const named = guardNameRule(t.name);
+  if (named) return { refuse: { rule: named } };
+  const literal = guardAddr(t.name);
+  if (!literal) return { fail: 'names are not resolved yet' };
+  const addrs = [literal];
+  for (const a of addrs) if (guardOwn(a)) return { refuse: { rule: 'own-interface', address: a.text } };
+  for (const a of addrs) { const range = guardRange(a); if (range) return { refuse: { rule: 'special-purpose', address: a.text, range } }; }
+  return { address: addrs[0].text };
+}
+const guardEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The refusal page: plain words, and the browser@1 refusal object as JSON with every < escaped.
+function guardRefusal(rule, { asked, address, range } = {}) {
+  const at = address ? `${asked} (${address})` : asked;
+  const why = {
+    'own-name': `The supervisor's browser can't open ${asked}: it is this machine's own name.`,
+    gateway: `The supervisor's browser can't open ${asked}: it is this box's gateway, where the owner's controls are.`,
+    'own-interface': `The supervisor's browser can't open ${at}: it is an address of this machine.`,
+    'special-purpose': range ? `The supervisor's browser can't open ${at}: ${range} is not on the public internet.` : `The supervisor's browser can't open ${asked}: its address (${address}) could not be read, so it is refused.`,
+    'not-a-proxy-request': "This is the browser's proxy; it answers only proxy requests.",
+  }[rule].slice(0, 500);
+  const o = { browser: 1, rule, why };
+  if (rule !== 'not-a-proxy-request') o.host = asked;
+  if (address) o.address = address;
+  if (range) o.range = range;
+  const title = rule === 'not-a-proxy-request' ? 'Not a proxy request' : 'This page is blocked';
+  const body = `<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n<h1>${title}</h1>\n<p>${guardEsc(why)}</p>\n<script type="application/json" id="devteam-refusal">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>\n</body>\n</html>\n`;
+  return { status: rule === 'not-a-proxy-request' ? 400 : 403, body };
+}
+const guardHead = (status, type, length) => `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\ncontent-type: ${type}\r\ncontent-length: ${length}\r\nconnection: close\r\n\r\n`;
+// An answer on a raw socket (a CONNECT's), then the socket closes.
+function guardSocketAnswer(sock, status, body, type = 'text/html; charset=utf-8') {
+  if (sock.destroyed) return;
+  sock.end(guardHead(status, type, Buffer.byteLength(body)) + body);
+}
+function guardAnswer(res, status, body, type = 'text/html; charset=utf-8') {
+  if (res.headersSent) return void res.destroy();
+  res.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), connection: 'close' });
+  res.end(body);
+}
+// The guard on 127.0.0.1: { port, close() }. browser serve starts it in-process; `browser-guard`
+// runs it alone.
+async function startBrowserGuard({ port = 0 } = {}) {
+  const dns = (await import('node:dns')).default;
+  const lookup = (...a) => dns.lookup(...a);
+  const server = http.createServer();
+  server.on('connection', (s) => s.on('error', () => {}));
+  // a head Node's own parser refuses (a backslash in a CONNECT authority, say) is no proxy request either
+  server.on('clientError', (e, s) => { if (!s.writable) return void s.destroy(); const r = guardRefusal('not-a-proxy-request'); guardSocketAnswer(s, r.status, r.body); });
+  server.on('request', async (req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    const t = guardTarget(req.method, req.url);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return guardAnswer(res, r.status, r.body); }
+    const d = await guardDecide(t, lookup);
+    if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return guardAnswer(res, r.status, r.body); }
+    return guardAnswer(res, 502, `The supervisor's browser couldn't reach ${t.asked}: ${d.fail ?? 'not dialled yet'}\n`, 'text/plain; charset=utf-8');
+  });
+  server.on('connect', async (req, sock) => {
+    sock.on('error', () => {});
+    const t = guardTarget('CONNECT', req.url);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
+    const d = await guardDecide(t, lookup);
+    if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return guardSocketAnswer(sock, r.status, r.body); }
+    return guardSocketAnswer(sock, 502, `The supervisor's browser couldn't reach ${t.asked}: ${d.fail ?? 'not dialled yet'}\n`, 'text/plain; charset=utf-8');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+}
+async function cmdBrowserGuard() {
+  const p = flagStr('port');
+  const port = p === undefined ? 0 : Number(p);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a port number, 0 to 65535 (0: any free one)');
+  const g = await startBrowserGuard({ port });
+  out(JSON.stringify({ browser: 1, port: g.port }));
+}
+/* browser-guard end */
+
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
@@ -22431,6 +22606,7 @@ Decide and act (supervisor.md, constitution.md)
   preview list [--json]           this instance's previews, with whether each answers
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
+  browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -22516,7 +22692,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
