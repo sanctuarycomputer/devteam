@@ -280,6 +280,11 @@ test('turn authority', async (t) => {
       // the correction binds its clause for answers too, and the turn for a whole-turn answer (task-3 T3-1)
       refused(answer(askAbout(T9, U9, 'Was it wrong?'), U9, 'Wrong.'), new RegExp(`overlap what already corrected ${D9}`));
       refused(['answer', F.sup(['thread', 'ask', T9, ...q('Whole turn?')]), 'Yes', '--from-turn', U9], /already settled/);
+      // a turn that carries only a correction takes no whole-turn answer either (task-3-2 R3-1)
+      const D7 = call('decision');
+      const { T: T7, U: U7 } = on(`decision:${D7}`, 'Wrong. Fine otherwise.');
+      F.sup(['correct', D7, '--from-turn', U7, '--said', 'Wrong.']);
+      refused(['answer', F.sup(['thread', 'ask', T7, ...q('Anything else to fix?')]), 'Yes', '--from-turn', U7], new RegExp(`already settled ${D7}`));
       // A15: the act that carried a decision out; a standalone act from a turn, and another from chat
       const D2 = call('decision');
       const A = call('act', { decision: D2 });

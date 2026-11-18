@@ -153,7 +153,7 @@ test('a new rating never reopens an answered question, and the hash the owner sa
     const S = json(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
     assert.deepEqual(S['x-authority'].set.question.supervisor, ['status', 'reason', 'stake', 'urgency', 'settles', 'settles_if']);
     for (const k of ['stake', 'urgency', 'settles', 'settles_if']) assert.ok(S.$defs.types.question.properties[k].description && !S['x-authority'].set.question.owner.includes(k), k);
-    assert.deepEqual(Object.keys(S.$defs.types.decision.properties.corrected.properties), ['reason', 'severity', 'impact']);
+    assert.deepEqual(Object.keys(S.$defs.types.decision.properties.corrected.properties), ['reason', 'severity', 'impact', 'said', 'said_at', 'turn']);
     const L = json(/`{3}json devteam\s*\n([\s\S]*?)\n`{3}/.exec(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8'))[1]);
     assert.ok(L.constitutional.includes('goal-impact') && !L.classes['goal-impact'], 'goal-impact is constitutional, never a ladder class');
     assert.ok(L.owner_only.includes('strategy-change'));
