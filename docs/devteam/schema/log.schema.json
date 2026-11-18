@@ -1486,6 +1486,40 @@
             "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
             "x-tip": "The message in a thread your answer came from."
           },
+          "said_at": {
+            "description": "turn-authority-1. On an answer recorded from a whole clause of a thread turn (answer --from-turn --said): where said sits in the turn, as [start, end) raw UTF-16 offsets. said is exactly the turn's text in that span, whole clauses, and overlaps no other binding on the turn.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "answer_seen": {
+            "description": "turn-authority-1. On an answer recorded from a clause (answer --from-turn --said): the newest owner turn in the thread when the answer was recorded, so a later \"no, hold off\" was read first.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "about_turn": {
+            "description": "turn-authority-1. The owner's turn this question asks about (thread ask --turn): the question is asked in that turn's thread, and its answer may be a whole clause of that turn.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "seen": {
+            "description": "turn-authority-1. With about_turn: the newest owner turn in the thread when the question was asked, so later turns were read before relying on the earlier one.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_turn": {
+            "description": "turn-authority-1. When owner_said came from a clause of the owner's turn in a thread (thread ask --turn --owner-said): that turn, newer than the no it lifts. Checked against the turn, not the transcript.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "owner_said_at": {
+            "description": "turn-authority-1. With owner_said_turn: where owner_said sits in that turn, as [start, end) raw UTF-16 offsets.",
+            "type": "array",
+            "items": { "type": "integer", "minimum": 0 },
+            "minItems": 2,
+            "maxItems": 2
+          },
           "autonomy": {
             "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
             "type": [
@@ -1814,7 +1848,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "decision": {
@@ -1922,6 +1958,23 @@
                 "minimum": 1,
                 "maximum": 4,
                 "description": "On the owner's correction of a goal-impact decision: the impact the owner gives the goal. It stands until the owner changes it."
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2012,6 +2065,23 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4
+              },
+              "said": {
+                "description": "turn-authority-1. On the owner's correction recorded by the supervisor from a thread turn or from chat (correct --from-turn|--from-chat --said): the owner's words, verbatim; reason is the same words.",
+                "type": "string",
+                "minLength": 1
+              },
+              "said_at": {
+                "description": "turn-authority-1. On a correction from a thread turn: where said sits in the turn, as [start, end) raw UTF-16 offsets.",
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 2,
+                "maxItems": 2
+              },
+              "turn": {
+                "description": "turn-authority-1. On a correction from a thread turn: the owner's turn, in a thread about this record (or the act that carried it out).",
+                "type": "string",
+                "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$"
               }
             },
             "required": [
@@ -2931,7 +3001,9 @@
           "declined",
           "question_hash",
           "turn",
-          "files"
+          "files",
+          "said_at",
+          "answer_seen"
         ]
       },
       "thread": {
