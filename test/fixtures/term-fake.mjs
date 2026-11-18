@@ -157,11 +157,11 @@ export async function startTermFake(opts = {}) {
       res.writeHead(404, { 'content-type': 'text/plain' });
       return res.end('not found');
     }
+    if (o.gatewayView) { req.resume(); res.writeHead(403, { 'content-type': 'application/json' }); return res.end('{"why":"view"}'); }
+    const global = globalWhy(req);
+    if (global) { req.resume(); return sendJson(res, 403, req.method === 'POST' ? { error: 'the terminal answers only on this page', why: global } : { why: global }); }
     const body = req.method === 'POST' ? await readBody(req) : Buffer.alloc(0);
     if (body === null) return;
-    if (o.gatewayView) { res.writeHead(403, { 'content-type': 'application/json' }); return res.end('{"why":"view"}'); }
-    const global = globalWhy(req);
-    if (global) return sendJson(res, 403, req.method === 'POST' ? { error: 'the terminal answers only on this page', why: global } : { why: global });
     const r = route(u.pathname);
     if (!r) return sendJson(res, 404, { error: 'not found' });
     if (req.method !== r.method) return sendJson(res, 405, { error: 'not this method' });
