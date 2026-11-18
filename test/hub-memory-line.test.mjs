@@ -154,6 +154,9 @@ test('kinds in plain names, the subcommand only in a title', () => {
   const r = { ...DESIGN, kinds: { devteam: { n: 3, rss: 3 * GB } }, devteam: { wait: { n: 1, rss: GB } } };
   assert.deepEqual(plain(memoryView([r], T0).kinds.filter((x) => x.sub)), [{ name: 'Supervisors waiting', gb: '1.0', share: 33, title: 'devteam.mjs wait', sub: true }, { name: 'Other devteam commands', gb: '2.0', share: 67, title: '', sub: true }]);
   assert.deepEqual(plain(memoryView([{ ...r, kinds: { devteam: { n: 1, rss: GB } } }], T0).kinds.map((x) => x.name)), ['devteam\'s own processes', 'Supervisors waiting']);
+  // a split that adds up to more than the kind (two reads a moment apart): the other subcommands, no less
+  const over = { ...r, kinds: { devteam: { n: 2, rss: GB } }, devteam: { wait: { n: 1, rss: GB }, metrics: { n: 1, rss: GB / 2 } } };
+  assert.equal(memoryView([over], T0).kinds.find((x) => x.name === 'Other devteam commands').gb, '0.5');
 });
 
 test('projects largest first', () => {
@@ -339,6 +342,8 @@ async function hubPage(t, url, { width = 1440, height = 900, scheme = 'light' } 
   await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__errs = []; addEventListener("error", (e) => __errs.push(String(e.message))); addEventListener("unhandledrejection", (e) => __errs.push(String(e.reason)));' });
+  // every setInterval the page sets, by its function's name and delay
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: 'window.__timers = []; const si = window.setInterval; window.setInterval = function (f, ms, ...a) { __timers.push([f && f.name, ms]); return si.call(this, f, ms, ...a); };' });
   await p.send('Page.navigate', { url });
   p.until = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
   return p;
@@ -392,6 +397,12 @@ test('the memory line on the Overview', CHROME, async (t) => {
   assert.equal(await p.ev(`getComputedStyle(document.querySelector('.mem-spark path')).stroke`), await p.ev(tokenColor('color', '--amber')));
   assert.match(await p.ev(`document.querySelector('.mem-words .amber').textContent`), /new work waits for room$/);
   assert.equal(await p.ev(`getComputedStyle(document.querySelector('.mem-words .amber')).color`), await p.ev(tokenColor('color', '--amber-fg')));
+  // the mark sits at the reading's own ceiling, and a tick repaints at once (no wait for the redraw)
+  F.readings = shifted(READINGS).map((r) => ({ ...r, ceiling: 0.6 }));
+  await p.ev('(async () => { MEM.day = []; MEM.askedAt = 0; await memoryTick(); })()');
+  const at = await p.ev(`(() => { const b = document.querySelector('.mem-bar').getBoundingClientRect(), c = document.querySelector('.mem-bar > .ceil').getBoundingClientRect(); return (c.left + c.width / 2 - b.left) / b.width; })()`);
+  assert.ok(Math.abs(at - 0.6) < 0.02, `ceiling mark at ${at}`);
+  assert.match(await p.ev(`document.querySelector('.mem-bar').getAttribute('aria-label')`), /waits at 28\.8 GB$/);
   assert.deepEqual(await p.ev('window.__errs'), []);
 });
 
@@ -414,6 +425,11 @@ test('What holds it: open across the redraw, closed by its button and Escape', C
   await p.ev('paintOverview()');
   assert.deepEqual(await p.ev(`[document.getElementById('mem-holds').hidden, document.activeElement?.dataset.k]`), [false, 'overview:memory']);
   assert.deepEqual(F.asks, ['since=24h'], 'one request: the redraw asks nothing');
+  assert.deepEqual(await p.ev(`__timers.filter(([n]) => n === 'memoryTick')`), [['memoryTick', 60000]], 'one minute timer, however many redraws');
+  assert.equal(await p.ev(`document.querySelector('.mem-open').getAttribute('aria-controls')`), 'mem-holds');
+  // a hidden page asks nothing
+  await p.ev(`(async () => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); MEM.askedAt = 1; await memoryTick(); delete document.hidden; })()`);
+  assert.deepEqual(F.asks, ['since=24h'], 'nothing while hidden');
   // its button closes it
   await p.click('.mem-open');
   await p.until('closed', `document.getElementById('mem-holds').hidden === true`);
@@ -424,6 +440,14 @@ test('What holds it: open across the redraw, closed by its button and Escape', C
   await p.until('open by Enter', `document.getElementById('mem-holds').hidden === false`);
   await p.key('Escape');
   await p.until('closed by Escape', `document.getElementById('mem-holds').hidden === true`);
+  assert.equal(await p.ev('document.activeElement?.dataset.k'), 'overview:memory');
+  // with the keyboard nowhere (on the page's body): Escape closes it and puts the keyboard on its button
+  await p.click('.mem-open');
+  await p.until('open from a click', `document.getElementById('mem-holds').hidden === false`);
+  await p.ev('document.activeElement.blur()');
+  assert.equal(await p.ev('document.activeElement === document.body'), true);
+  await p.key('Escape');
+  await p.until('closed from the body', `document.getElementById('mem-holds').hidden === true`);
   assert.equal(await p.ev('document.activeElement?.dataset.k'), 'overview:memory');
   // with the ⋯ menu open too, one Escape closes only the menu
   await p.click('.mem-open');
@@ -473,11 +497,11 @@ test('the after request, and a refused after reloads the day', CHROME, async (t)
   assert.match(F.asks.at(-1), /^after=/);
   // refused (400): the day again
   F.mode = 'refuse-after';
+  const n = F.asks.length;
   await tick(p);
-  assert.match(F.asks.at(-1), /^after=/);
-  F.mode = 'ok';
-  await p.ev('memoryTick()');
-  await until(() => F.asks.at(-1) === 'since=24h', 'the day asked again at once');
+  assert.match(F.asks[n], /^after=/);
+  assert.equal(F.asks[n + 1], 'since=24h', 'the day asked again at once, by the same tick');
+  assert.equal(await p.ev(`!!document.querySelector('.mem')`), true, 'and drawn again');
   assert.deepEqual(await p.ev('window.__errs'), []);
 });
 

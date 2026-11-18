@@ -1480,13 +1480,18 @@ async function memoryTick() {
   MEM.inFlight = true;
   MEM.askedAt = Date.now();
   let status = 0, body = null;
+  // a hub that never answers costs this ask, not every one after it
+  const stop = new AbortController();
+  const limit = setTimeout(() => stop.abort(), 20000);
   try {
-    const r = await fetch(url, { cache: 'no-store' });
+    const r = await fetch(url, { cache: 'no-store', signal: stop.signal });
     status = r.status;
     try { body = await r.json(); } catch { body = null; }
-  } catch { status = 0; }
+  } catch { status = 0; } finally { clearTimeout(limit); }
   Object.assign(MEM, memoryAnswer(MEM, url, status, body, Date.now()));
   paintOverview();
+  // an after refused (the page slept past 6 hours): the day again now, not in a minute
+  if (status === 400 && !MEM.day.length && !MEM.askedAt) return memoryTick();
 }
 // once, from draw: the day at once, then a tick a minute; and Escape closes the table
 function memoryStart() {
