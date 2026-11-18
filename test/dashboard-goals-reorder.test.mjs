@@ -363,6 +363,9 @@ test('saving the goal order: the menu and the keyboard', { ...CHROME, timeout: 4
 const mouse = (p, type, x, y, buttons) => p.send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, ...(type === 'mouseMoved' ? {} : { clickCount: 1 }) });
 // The centres of what the selectors find, read in one go after one scroll of the goals list into view
 // (no scrolling after, so the points stay true)
+// Counts, in window.__clicks, every click that reaches the document in the bubble phase (so reaches a card
+// and the page's card-open handler); the drag's swallow stops one in the capture phase, before any of that.
+const countClicks = (p) => p.ev(`(() => { window.__clicks = []; document.addEventListener('click', (e) => window.__clicks.push(e.target?.closest?.('[data-goal-card]')?.dataset.goalCard ?? e.target?.tagName ?? '?')); })()`);
 const centres = (p, sels) => p.ev(`(() => {
   document.querySelector('#goals-list').scrollIntoView({ block: 'start' });
   return ${JSON.stringify(sels)}.map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
@@ -386,6 +389,7 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
   await t.test('dragging a grip reorders with one post, opens no peek, and persists', async () => {
     await fresh();
     const acts = dashOrderActs(root);
+    await countClicks(p);
     const [from, to] = await centres(p, [`${card(C)} .goal-grip`, card(A)]);
     await mouse(p, 'mouseMoved', from.x, from.y, 0);
     await mouse(p, 'mousePressed', from.x, from.y, 1);
@@ -394,6 +398,8 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
     assert.deepEqual(await order(p), ['upkeep', C, A, B, D], 'the live preview, before the drop');
     assert.equal((await p.ev('window.__orders')).length, 0, 'nothing posted before the drop');
     await mouse(p, 'mouseReleased', to.x, to.y, 0);
+    await pause(300);
+    assert.deepEqual(await p.ev('window.__clicks'), [], "the release's click reached nothing (swallowed)");
     await settled(p, port, [C, A, B, D], 'the order after the drag');
     await shows([C, A, B, D], 'the cards after the drag');
     assert.deepEqual(await p.ev('window.__orders'), [{ ids: [C, A, B, D] }], 'one post, the whole order');
@@ -406,6 +412,26 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
     await reload();
     await shows([C, A, B, D], 'the cards after reload');
     assert.deepEqual(await order(p), ['upkeep', C, A, B, D]);
+  });
+
+  // A drop that changes the order replaces the list in the release itself (the save's redraw), and Chrome then
+  // makes no click at all. A moved drag dropped in place keeps its nodes: its release does make a click (on
+  // the grip, which holds the pointer), and the drop's swallow is what stops it.
+  await t.test('a moved drag dropped in place posts nothing, and its click reaches nothing', async () => {
+    await fresh();
+    await countClicks(p);
+    const [from] = await centres(p, [`${card(C)} .goal-grip`]);
+    await mouse(p, 'mouseMoved', from.x, from.y, 0);
+    await mouse(p, 'mousePressed', from.x, from.y, 1);
+    for (let i = 1; i <= 4; i++) await mouse(p, 'mouseMoved', from.x + 6 * i, from.y, 1);
+    assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'no preview: the pointer stayed on C');
+    await mouse(p, 'mouseReleased', from.x + 24, from.y, 0);
+    await pause(500);
+    assert.deepEqual(await p.ev('window.__clicks'), [], "the release's click reached nothing (swallowed)");
+    assert.deepEqual(await p.ev('window.__orders'), [], 'no post');
+    assert.equal(await p.ev('location.hash'), '#goals', 'no peek');
+    assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'the order unchanged');
+    assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal.dragging').length`), 0, 'no card left marked');
   });
 
   await t.test('Escape cancels a drag, and only the drag', async () => {
@@ -458,6 +484,7 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
       return null;
     })()`);
     assert.ok(body, "a plain point on B's card body");
+    await countClicks(p);
     // press, move a little within B's card (not over another), Escape, release on the body
     await mouse(p, 'mouseMoved', from.x, from.y, 0);
     await mouse(p, 'mousePressed', from.x, from.y, 1);
@@ -466,6 +493,7 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
     await p.key('Escape');
     await mouse(p, 'mouseReleased', body.x, body.y, 0);
     await pause(500);
+    assert.deepEqual(await p.ev('window.__clicks'), [], "the release's click reached nothing (swallowed)");
     assert.equal(await p.ev('location.hash'), '#goals', 'the release opened no peek');
     assert.deepEqual(await p.ev('window.__orders'), [], 'no post');
     // the same point, a plain click: it does open B's peek (so the release above was a click that would have)

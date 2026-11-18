@@ -3677,8 +3677,10 @@ function cancelGoalDrag(held) {
   if (d.moved) { if (held) GOAL_SWALLOW_UP = d.pointerId; else swallowNextClick(); }
   const grip = d.card.querySelector('.goal-grip');
   try { if (grip?.hasPointerCapture(d.pointerId)) grip.releasePointerCapture(d.pointerId); } catch {}
+  // put back only when the preview moved them: a card moved for nothing loses the press's click, and the
+  // swallow above is what keeps that click from opening a peek
   const grid = d.card.parentNode;
-  for (const id of d.start) { const c = goalCardEl(id); if (c && grid && c.parentNode === grid) grid.appendChild(c); }
+  if (!sameIds(drawnGoalOrder(), d.start)) for (const id of d.start) { const c = goalCardEl(id); if (c && grid && c.parentNode === grid) grid.appendChild(c); }
   d.card.classList.remove('dragging');
   renderGoals();
 }
