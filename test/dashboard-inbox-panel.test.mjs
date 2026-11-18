@@ -952,6 +952,8 @@ test('the Inbox in the panel', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.doesNotMatch(await p.ev(`document.querySelector('#ask-inbox [data-ask="${m.digest}"]').textContent`), /or Esc/, `the copy as today for "${hint}"`);
     }
     await p.ev('window.__pane = null; void 0');
+    // the terminal's card goes before the next press, or the cards below it move up under the pointer
+    await soon("!document.querySelector('#ask-inbox [data-ask]')", "the terminal's card gone");
 
     // the review: opened full size over the panel; closed, back to the page with the panel on Inbox
     await press(IN(`[data-open-review="${fx.r}"]`), 'Open the review');
