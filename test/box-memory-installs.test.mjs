@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { write, json, multiFixture, fleetFixture, hasTmux } from './lib/kit.mjs';
 
 test('the two settings: defaults, a repo link may carry them, and validate types them', () => {
@@ -273,6 +274,75 @@ test('4f\': a slot folder whose holder.json is empty or not JSON, a minute old, 
       assert.equal(fs.existsSync(path.join(S.slots, '0')), false);
     }
   } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+test('a non-folder at a slot (a file, a symlink to a folder, a dangling symlink), a minute old, is freed at once: the slots stay on, and a link\'s target is left alone', () => {
+  const S = slotFleet('installs-nondir', () => 'true');
+  try {
+    const target = path.join(S.F.base, 'slot-target');
+    fs.mkdirSync(target);
+    const kinds = [
+      ['file', (p) => { fs.writeFileSync(p, 'stray\n'); }],
+      ['dirlink', (p) => { fs.symlinkSync(target, p); }],
+      ['dangling', (p) => { fs.symlinkSync(path.join(S.F.base, 'no-such-folder'), p); }],
+    ];
+    for (const [slug, plant] of kinds) {
+      fs.mkdirSync(S.slots, { recursive: true });
+      const p = path.join(S.slots, '0');
+      plant(p);
+      const old = new Date(Date.now() - 60000);
+      fs.lutimesSync(p, old, old);
+      const t0 = Date.now();
+      const r = S.start(slug, { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
+      assert.equal(r.status, 0, `${slug}: ${r.err}`);
+      assert.doesNotMatch(r.err, /no usable setup slots folder/, `${slug}: the slots stay on`);
+      assert.doesNotMatch(r.err, /waiting for a setup slot/, `${slug}: freed at once, with no wait for a slot`);
+      assert.ok(Date.now() - t0 < 10000, `${slug}: took ${Date.now() - t0} ms`);
+      assert.throws(() => fs.lstatSync(p), /ENOENT/, `${slug}: no slot left`);
+    }
+    assert.ok(fs.statSync(target).isDirectory(), 'the symlink\'s target folder is still there');
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+test('M8: a young unreadable holder (a rewrite may be in flight) holds its slot: the deadline gives 75', () => {
+  const S = slotFleet('installs-young', () => 'true');
+  try {
+    fs.mkdirSync(path.join(S.slots, '0'), { recursive: true });
+    fs.writeFileSync(path.join(S.slots, '0', 'holder.json'), '');
+    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(2000) });
+    assert.equal(r.status, 75, r.err);
+    assert.match(r.err, /setup-slot-wait/);
+    assert.ok(fs.existsSync(path.join(S.slots, '0', 'holder.json')), 'the young holder is left in place');
+    fs.rmSync(path.join(S.slots, '0'), { recursive: true, force: true });
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+// setupSlots.lib, taken as text from the kit as the runner takes it, to drive a race step by step
+function slotsLib() {
+  const src = fs.readFileSync(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url), 'utf8');
+  const end = 'return { count, take, judge, free, release, sweep, startTime };';
+  const from = src.indexOf('  lib: function () {') + '  lib: '.length;
+  const body = `${src.slice(from, src.indexOf(end, from))}${end}\n}`;
+  return new Function('require', `return (${body})()`)(createRequire(import.meta.url));
+}
+
+test('M11: an unreadable holder re-taken between the judging and the move is put back, never removed', () => {
+  const lib = slotsLib();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-slots-'));
+  try {
+    fs.mkdirSync(path.join(dir, '0'));
+    fs.writeFileSync(path.join(dir, '0', 'holder.json'), 'not json');
+    const old = new Date(Date.now() - 60000);
+    fs.utimesSync(path.join(dir, '0'), old, old);
+    const memo = {};
+    assert.equal(lib.judge(dir, 0, memo), 'gone');
+    assert.equal(memo.judged[0], null, 'judged as unreadable');
+    // meanwhile its slot is freed and taken by a runner whose holder reads whole
+    fs.rmSync(path.join(dir, '0'), { recursive: true, force: true });
+    assert.equal(lib.take(dir, 1, { id: 'retaker', pid: process.pid, start: 'x' }), 0);
+    assert.equal(lib.free(dir, 0, memo.judged[0]), false);
+    assert.equal(readHolder(dir, 0)?.id, 'retaker', 'the re-taken slot is put back');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('4g: a slot whose holder pid is alive with another start time (a reused pid) is freed at once', () => {
@@ -621,6 +691,31 @@ test('the copy refuses what it must: invalid entries, worktree_files, a symlinke
     assert.equal(fs.lstatSync(path.join(wc, 'node_modules')).isSymbolicLink(), false);
     assert.equal(fs.existsSync(path.join(store, 'w.txt')), false, 'the setup wrote nothing into main\'s store');
     assert.deepEqual(fs.readdirSync(store), ['marker.txt']);
+  } finally { I.finish(); }
+});
+
+test('M9, M14: the copy stays inside its checkouts: no sweep through a symlinked folder, no key that resolves outside', () => {
+  const dead = spawnSync('true').pid;
+  let elsewhere = null;
+  const I = installFleet('installs-inside', (F) => {
+    // a folder of the worktree that is a symlink to another tree, holding a stale temp copy's name
+    elsewhere = path.join(F.base, 'elsewhere');
+    write(path.join(elsewhere, `x.devteam-copy-${dead}`, 'half.txt'), 'not the worktree\'s\n');
+    fs.symlinkSync(elsewhere, path.join(F.old, 'linked'));
+    // a copy key that is a symlink to a file outside both checkouts, the same file from each
+    write(path.join(F.base, 'outside-key.txt'), 'outside\n');
+    fs.symlinkSync(path.join(F.base, 'outside-key.txt'), path.join(F.old, 'outkey'));
+    write(path.join(F.old, 'outnm/o.txt'), 'main\'s\n');
+    write(path.join(F.old, '.gitignore'), `${fs.readFileSync(path.join(F.old, '.gitignore'), 'utf8')}outnm/\n`);
+    return { worktree_setup: RECORD(F), worktree_copy: [{ path: 'linked/x', key: 'package-lock.json' }, { path: 'outnm', key: 'outkey' }] };
+  });
+  const { F } = I;
+  try {
+    const r = F.run(F.old, ['chore', 'start', 'one'], I.role());
+    assert.equal(r.status, 0, r.err);
+    assert.ok(fs.existsSync(path.join(elsewhere, `x.devteam-copy-${dead}`, 'half.txt')), 'the sweep never reaches through a symlinked folder');
+    assert.match(r.err, /worktree_copy: outnm not copied: its key outkey resolves outside the checkout/);
+    assert.equal(fs.existsSync(path.join(I.wt('chore-one'), 'outnm')), false, 'no copy on a key outside the checkout');
   } finally { I.finish(); }
 });
 

@@ -5517,6 +5517,10 @@ const setupSlots = Object.freeze({
     let attempts = 0;
     const rand = () => `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
     const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+    // a slot entry is a real folder or nothing the protocol made (a file, a symlink: a hand edit),
+    // which holds no holder and is judged by its own (lstat) age
+    const isDir = (p) => { try { return fs.lstatSync(p).isDirectory(); } catch { return false; } };
+    const holderOf = (p) => (isDir(p) ? readJson(path.join(p, 'holder.json')) : null);
     const atMs = (h) => (typeof h?.at === 'number' ? h.at : Date.parse(h?.at));
     // a holder the protocol wrote whole: an id, a numeric pid and a readable at
     const whole = (h) => !!h && typeof h === 'object' && typeof h.id === 'string' && h.id !== '' && Number.isInteger(h.pid) && h.pid > 0 && Number.isFinite(atMs(h));
@@ -5548,7 +5552,7 @@ const setupSlots = Object.freeze({
     function take(dir, n, me, only = null) {
       for (let slot = only ?? 0; slot < (only === null ? n : only + 1); slot++) {
         const to = path.join(dir, String(slot));
-        try { if (fs.readdirSync(to).length) continue; } catch {}
+        try { if (!fs.lstatSync(to).isDirectory() || fs.readdirSync(to).length) continue; } catch {}
         const tmp = path.join(dir, `.take-${me.id}-${++attempts}`);
         try {
           fs.mkdirSync(tmp);
@@ -5558,7 +5562,7 @@ const setupSlots = Object.freeze({
           return slot;
         } catch (e) {
           try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-          if (!(e.syscall === 'rename' && ['ENOTEMPTY', 'EEXIST'].includes(e.code))) throw e;
+          if (!(e.syscall === 'rename' && ['ENOTEMPTY', 'EEXIST', 'ENOTDIR'].includes(e.code))) throw e;
         }
       }
       return null;
@@ -5571,11 +5575,11 @@ const setupSlots = Object.freeze({
       memo.seen ??= new Map();
       memo.judged ??= {};
       const at = path.join(dir, String(slot));
-      const h = readJson(path.join(at, 'holder.json'));
+      const h = holderOf(at);
       if (!whole(h)) {
         memo.judged[slot] = null;
         let st;
-        try { st = fs.statSync(at); } catch { memo.judged[slot] = undefined; return 'gone'; }
+        try { st = fs.lstatSync(at); } catch { memo.judged[slot] = undefined; return 'gone'; }
         // younger, it may be a rewrite in flight
         return now - st.mtimeMs > UNREADABLE_MS ? 'gone' : 'held';
       }
@@ -5601,9 +5605,9 @@ const setupSlots = Object.freeze({
       const at = path.join(dir, String(slot));
       const away = path.join(dir, `.free-${Date.now()}-${rand()}`);
       try { fs.renameSync(at, away); } catch { return false; }
-      const h = readJson(path.join(away, 'holder.json'));
+      const h = holderOf(away);
       const judged = judgedId === null ? !whole(h) : whole(h) && h.id === judgedId;
-      if (judged) { try { fs.rmSync(away, { recursive: true, force: true }); } catch {} return true; }
+      if (judged) { try { if (isDir(away)) fs.rmSync(away, { recursive: true, force: true }); else fs.unlinkSync(away); } catch {} return true; }
       // <n> taken again meanwhile: the leftover is swept in a minute (the protocol's one gap)
       try { fs.renameSync(away, at); } catch {}
       return false;
@@ -5703,7 +5707,7 @@ async function setupRunner(config, slots) {
       }
       if (!told || Date.now() - told >= 60000) {
         let inUse = 0;
-        for (let s = 0; s < n; s++) if (fs.existsSync(path.join(dir, String(s)))) inUse++;
+        for (let s = 0; s < n; s++) try { fs.lstatSync(path.join(dir, String(s))); inUse++; } catch {}
         say(`waiting for a setup slot (${inUse} of ${n} in use on this machine)`);
         told = Date.now();
       }
