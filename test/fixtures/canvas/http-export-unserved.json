@@ -1,0 +1,15 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    }
+  },
+  "request": {
+    "method": "GET",
+    "path": "/api/canvas/export?slug=board&target=web",
+    "headers": {}
+  },
+  "status": 404,
+  "requestKind": null,
+  "responseKind": null
+}
