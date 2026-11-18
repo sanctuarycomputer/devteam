@@ -16658,7 +16658,7 @@ const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, 
 // What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
 const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
 const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
-const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again' };
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again' };
 // A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
 const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
 // The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
@@ -16792,6 +16792,59 @@ function termRoutes({ port, host, log }) {
       hs = now;
     }
   }
+  // Keys (§8): one post at a time per pane, in arrival order; the last taken seq per page and which,
+  // for the server's life (never pruned, so a late resend never types twice).
+  const chains = { supervisor: Promise.resolve(), shell: Promise.resolve() };
+  const queue = (which, f) => { const p = chains[which].then(f); chains[which] = p.then(() => {}, () => {}); return p; };
+  const lastSeq = new Map();
+  const sendData = (pane, buf) => tmuxCall(['send-keys', '-t', pane, '-H', ...[...buf].map((b) => b.toString(16).padStart(2, '0'))]);
+  // A paste as one buffer, its text on stdin (never a file or an argument); a failed paste deletes its
+  // buffer, so the text never stays in the tmux server.
+  let buffers = 0;
+  async function sendPaste(pane, text) {
+    const name = `devteam-term-${process.pid}-${++buffers}`;
+    const loaded = await tmuxCall(['load-buffer', '-b', name, '-'], text);
+    const sent = loaded.ok ? await tmuxCall(['paste-buffer', '-p', '-d', '-b', name, '-t', pane]) : loaded;
+    if (!sent.ok) await tmuxCall(['delete-buffer', '-b', name]);
+    return sent;
+  }
+  // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
+  // the cache (S2), so keys sent just after the supervisor exits find the shell prompt.
+  async function keys(res, which, b) {
+    const no = (status, error, reason) => { log(`refused /api/term/${which}/keys: ${reason}`); return json(res, status, { error }); };
+    const s = await readScreen(which, { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    // the pane step, in the spec's order (S3); a tagged or marked pane is never the other route's
+    if (which === 'supervisor') {
+      const { pane, fields } = s.raw;
+      if (!pane) return no(409, TERM_WORDS.supervisor, 'no marked pane');
+      if (b.pane !== pane) return no(423, TERM_WORDS.moved, 'not the marked pane');
+      if (fields?.['@devteam-shell']) return no(423, TERM_WORDS.moved, 'the marked pane is the Shell\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.supervisor, `the marked pane is ${s.raw.why}`);
+    } else {
+      if (b.pane === marked()) return no(423, TERM_WORDS.moved, 'the marked pane is the supervisor\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.shell, 'no Shell pane');
+      if (b.pane !== s.pane) return no(423, TERM_WORDS.moved, 'not the Shell\'s pane');
+    }
+    const key = `${b.page}\n${which}`;
+    if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
+    // taken the moment the send starts: a send that fails part way is never typed again
+    lastSeq.set(key, b.seq);
+    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
+    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    voidScreen(which);
+    if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
+    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the last
+    let now = s;
+    for (const stop = Date.now() + TERM.SETTLE_MS; ;) {
+      const got = await readScreen(which, { fresh: true });
+      if (got.error) break;
+      now = got;
+      if (now.etag !== s.etag || Date.now() >= stop) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return json(res, 200, { ...now, taken: true });
+  }
   function route(pathname) {
     if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
     if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
@@ -16897,6 +16950,7 @@ function termRoutes({ port, host, log }) {
     if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
     if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
     if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
+    if (r.name === 'keys') return queue(r.which, () => keys(res, r.which, b));
     return json(res, 501, { error: 'not yet' });
   }
   return {

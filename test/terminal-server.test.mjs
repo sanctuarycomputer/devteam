@@ -4,6 +4,7 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -647,4 +648,410 @@ test('terminal A5d: history re-reads when history_size moved, refuses a shrunk r
   const g = await screenOf(T, port);
   assert.equal(g.status, 200, g.text);
   isGone(g.json);
+});
+
+// ---- keys and paste (terminal@1 §3 steps 4 to 12, §8) ----
+const PAGE_ID = 'page-0123456789abcdef';
+const hex = (s) => Buffer.from(s, 'utf8').toString('hex');
+const W = {
+  page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste',
+  down: "the supervisor isn't running", shut: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again',
+};
+const JT = { 'content-type': 'application/json' };
+const tokenOf = async (T, port) => { const r = await T.req(port, 'GET', '/api/term/token', { headers: SAME }); assert.equal(r.status, 200, r.text); return r.json.token; };
+const keysBody = (token, pane, seq, more = { data: '61' }, which = 'supervisor') => ({ which, pane, page: PAGE_ID, seq, token, ...more });
+const keysTo = (T, port, which, body, extra = {}) => T.post(port, `/api/term/${which}/keys`, body, { ...SAME, ...extra });
+const openBody = (token) => ({ which: 'shell', page: PAGE_ID, cols: 80, rows: 24, token });
+// a refusal (or a failure): its status, exactly { error } (and why, when given), never cached
+const refusedWith = (r, status, error, what, why) => {
+  assert.equal(r.status, status, `${what}: ${r.status} ${r.text}`);
+  assert.match(r.headers['content-type'] ?? '', JSON_TYPE, what);
+  assert.equal(r.headers['cache-control'], 'no-store', what);
+  assert.deepEqual(r.json, why ? { error, why } : { error }, what);
+};
+// the terminal's sends so far, from the call log
+const sends = (T) => T.callLog().filter((c) => c.cmds.some((x) => x === 'send-keys' || x === 'paste-buffer' || x === 'load-buffer')).length;
+// what a post could change: the stand-in's bytes, the screen's etag (read fresh: past the 100 ms cache), the sends
+const typedState = async (T, port, s) => { const bytes = String(await s.received()); await pause(120); const sc = await screenOf(T, port); assert.equal(sc.status, 200, sc.text); return { bytes, etag: sc.json.etag, sends: sends(T) }; };
+const nothingTyped = async (T, port, s, base, what) => assert.deepEqual(await typedState(T, port, s), base, `${what}: nothing typed`);
+// The gateway's proof for a terminal POST (§3), as cloud/gateway.mjs signs an owner setting's
+const termSig = (priv, domain, port, which, body, { ts = Date.now(), nonce = crypto.randomBytes(24).toString('base64url') } = {}) => {
+  const msg = Buffer.from(`${domain}\n${port}\n${which}\n${ts}\n${nonce}\n${crypto.createHash('sha256').update(body).digest('hex')}`);
+  return { 'x-devteam-gateway-ts': String(ts), 'x-devteam-gateway-nonce': nonce, 'x-devteam-gateway-sig': crypto.sign(null, msg, crypto.createPrivateKey(priv)).toString('base64url') };
+};
+const shellWindows = (T) => tmuxOut(T, ['list-windows', '-t', `=${T.session}`, '-F', '#{window_name}']).split('\n').filter((n) => n === 'shell').length;
+const markPane = (T, pane) => { const run = path.join(T.root, 'docs/devteam/run'); write(path.join(run, 'supervisor-pane'), `${pane}\n`); write(path.join(run, 'supervisor-pane-role'), `${pane}\n`); };
+
+test('terminal A4: a supervisor key post types with -H and answers the screen after its change', async () => {
+  const T = termFixture('term-a4');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A4 stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  const r = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 1, { data: '6563686f2068690d' }));
+  assert.equal(r.status, 200, r.text);
+  assert.match(r.headers['content-type'] ?? '', JSON_TYPE);
+  assert.equal(r.headers['cache-control'], 'no-store');
+  assert.equal(r.json.taken, true);
+  assert.equal(r.json.state, 'live');
+  assert.equal(r.json.pane, s.pane);
+  assert.match(r.json.etag, /^[0-9a-f]{20}$/);
+  assert.ok(r.json.lines.includes('echo hi'), `the answer is the screen after the change: ${JSON.stringify(r.json.lines)}`);
+  assert.equal(String(await s.received()), 'echo hi\r');
+  assert.equal(T.callSpans('send-keys').length, 1, 'one send-keys');
+  // application/json with a parameter, in any case, is the type (§3)
+  const p = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 2, { data: '78' }), { 'content-type': 'Application/JSON; charset=utf-8' });
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json.taken, true);
+  assert.equal(String(await s.received()), 'echo hi\rx');
+  s.kill();
+});
+
+test.todo('terminal A4: on the Shell (opened by shell/open), echo hi shows a line exactly hi (Task 5)');
+
+test('terminal A5: every guard on a key post refuses, in terminal@1 §3 order, and nothing is typed', async () => {
+  const T = termFixture('term-a5k');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A5 stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  const base = await typedState(T, port, s);
+  const origin = `http://127.0.0.1:${port}`;
+  const own = { ...SAME, origin, ...JT };
+  const good = (more) => JSON.stringify(keysBody(tok, s.pane, 1, more));
+  const raw = (p, headers, body) => T.req(port, 'POST', p, { headers, body });
+  const big = (n, c = ' ') => c.repeat(n);
+  const cases = [
+    // step 1: the global guards, then step 3: view, not-loopback, cross-site
+    ['another host', { ...own, host: `evil.test:${port}` }, good(), 403, W.page, 'host'],
+    ['the relay mark', { ...own, 'x-devteam-relay': '1' }, good(), 403, W.page, 'relay'],
+    ['View', { ...own, 'x-devteam-level': 'view' }, good(), 403, W.page, 'view'],
+    ['relay before view', { ...own, 'x-devteam-relay': '1', 'x-devteam-level': 'view' }, good(), 403, W.page, 'relay'],
+    ['view before cross-site', { ...own, 'sec-fetch-site': 'cross-site', 'x-devteam-level': 'view' }, good(), 403, W.page, 'view'],
+    ['no Sec-Fetch-Site', { origin, ...JT }, good(), 403, W.page, 'cross-site'],
+    ['a cross-site one', { ...own, 'sec-fetch-site': 'cross-site' }, good(), 403, W.page, 'cross-site'],
+    ['a same-site one', { ...own, 'sec-fetch-site': 'same-site' }, good(), 403, W.page, 'cross-site'],
+    ['a wrong Origin', { ...own, origin: `http://evil.test:${port}` }, good(), 403, W.page, 'cross-site'],
+    ['another loopback name as Origin', { ...own, origin: `http://localhost:${port}` }, good(), 403, W.page, 'cross-site'],
+    ['no Origin', { ...SAME, ...JT }, good(), 403, W.page, 'cross-site'],
+    // step 3 before 4: cross-site and the wrong type read cross-site
+    ['cross-site before the content type', { ...own, 'sec-fetch-site': 'cross-site', 'content-type': 'text/plain' }, good(), 403, W.page, 'cross-site'],
+    // step 4: the content type, no why
+    ['text/plain', { ...own, 'content-type': 'text/plain' }, good(), 403, W.page],
+    ['a form post', { ...own, 'content-type': 'application/x-www-form-urlencoded' }, good(), 403, W.page],
+    ['application/json-patch+json', { ...own, 'content-type': 'application/json-patch+json' }, good(), 403, W.page],
+    ['no content type', { ...SAME, origin }, good(), 403, W.page],
+    ['the content type before the body cap', { ...own, 'content-type': 'text/plain' }, big(102401), 403, W.page],
+    // step 5: the body cap; its edge is JSON's business
+    ['a body over the cap', own, big(102401), 413, W.big],
+    ['a body over the cap before bad JSON', own, big(102401, 'x'), 413, W.big],
+    ['a body at the cap, not JSON', own, big(102400, 'x'), 400, W.shape],
+    // step 6: JSON, an object
+    ['not JSON', own, `{"token":"${tok}",`, 400, W.shape],
+    ['null', own, 'null', 400, W.shape],
+    ['a string', own, '"x"', 400, W.shape],
+    ['an array', own, '[]', 400, W.shape],
+    ['a number', own, '7', 400, W.shape],
+    // step 7: the token, before the shape
+    ['a missing token', own, JSON.stringify({ ...keysBody(tok, s.pane, 1), token: undefined }), 403, W.token],
+    ['a wrong token', own, JSON.stringify(keysBody('0'.repeat(64), s.pane, 1)), 403, W.token],
+    ['a short token', own, JSON.stringify(keysBody(tok.slice(1), s.pane, 1)), 403, W.token],
+    ['a token not a string', own, JSON.stringify(keysBody(7, s.pane, 1)), 403, W.token],
+    ['a wrong token before the shape', own, JSON.stringify({ token: '0'.repeat(64), x: 1 }), 403, W.token],
+    ['a missing token before the shape', own, JSON.stringify({ x: 1 }), 403, W.token],
+    // step 8 before 9: the shape before the caps
+    ['data over its cap, with an extra key', own, JSON.stringify({ ...keysBody(tok, s.pane, 1, { data: '61'.repeat(4097) }), x: 1 }), 400, W.shape],
+    ['a paste over its cap, with another which', own, JSON.stringify(keysBody(tok, s.pane, 1, { paste: 'a'.repeat(65537) }, 'shell')), 400, W.shape],
+    // step 9: the caps, before the pane (step 11)
+    ['data of 4097 bytes', own, good({ data: '61'.repeat(4097) }), 413, W.big],
+    ['data over its cap, to a stale pane', own, JSON.stringify(keysBody(tok, '%9999', 1, { data: '61'.repeat(4097) })), 413, W.big],
+  ];
+  for (const [what, headers, body, status, error, why] of cases) {
+    refusedWith(await raw('/api/term/supervisor/keys', headers, body), status, error, what, why);
+    await nothingTyped(T, port, s, base, what);
+  }
+  // the same guards on shell/open: refused, and no shell window (S5)
+  const ob = JSON.stringify(openBody(tok));
+  for (const [what, headers, body, why, error = W.page] of [
+    ['no Sec-Fetch-Site', { origin, ...JT }, ob, 'cross-site'],
+    ['a wrong Origin', { ...own, origin: `http://evil.test:${port}` }, ob, 'cross-site'],
+    ['View', { ...own, 'x-devteam-level': 'view' }, ob, 'view'],
+    ['the relay mark', { ...own, 'x-devteam-relay': '1' }, ob, 'relay'],
+    ['a wrong token', own, JSON.stringify(openBody('0'.repeat(64))), undefined, W.token],
+    ['the content type', { ...own, 'content-type': 'text/plain' }, ob, undefined],
+  ]) {
+    refusedWith(await raw('/api/term/shell/open', headers, body), 403, error, `shell/open: ${what}`, why);
+    assert.equal(shellWindows(T), 0, `shell/open: ${what}: no shell window`);
+  }
+  await nothingTyped(T, port, s, base, 'after shell/open');
+  // a dashboard bound beyond loopback: not-loopback, after view (127.0.0.2, never every interface)
+  const wide = await T.dashboard(['--host', '127.0.0.2']);
+  const at2 = `http://127.0.0.2:${wide.port}`;
+  refusedWith(await T.req(wide.port, 'POST', '/api/term/supervisor/keys', { to: '127.0.0.2', headers: { ...SAME, origin: at2, ...JT }, body: good() }), 403, W.page, 'keys on 127.0.0.2', 'not-loopback');
+  refusedWith(await T.req(wide.port, 'POST', '/api/term/supervisor/keys', { to: '127.0.0.2', headers: { ...SAME, origin: at2, ...JT, 'x-devteam-level': 'view' }, body: good() }), 403, W.page, 'view on 127.0.0.2', 'view');
+  await nothingTyped(T, port, s, base, 'the wide dashboard');
+  // and the guarded post itself, sent right, types
+  const ok = await raw('/api/term/supervisor/keys', own, good());
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.json.taken, true);
+  assert.equal(String(await s.received(1)), 'a');
+  s.kill();
+});
+
+test("terminal A5: on a box a post needs the gateway's proof, bound to its route, which, port and body, each nonce once", async () => {
+  const T = termFixture('term-a5-box');
+  after(() => T.done());
+  const pair = crypto.generateKeyPairSync('ed25519');
+  const priv = pair.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const other = crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const pub = path.join(T.F.base, 'thread-key.pub');
+  fs.writeFileSync(pub, pair.publicKey.export({ type: 'spki', format: 'pem' }));
+  const s = T.standIn({ lines: ['A5 box stand-in'] });
+  const { port } = await T.dashboard([], { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: pub });
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  const base = await typedState(T, port, s);
+  const K = 'devteam-term-keys-v1', O = 'devteam-term-open-v1';
+  const body = JSON.stringify(keysBody(tok, s.pane, 1));
+  const send = (sig, b = body) => keysTo(T, port, 'supervisor', b, sig);
+  const sig = (b = body, o = {}) => termSig(priv, K, port, 'supervisor', b, o);
+  const { 'x-devteam-gateway-sig': _, ...noSig } = sig();
+  for (const [what, headers, b = body, status = 403, error = W.page] of [
+    ['no proof', {}],
+    ['a proof without its signature', noSig],
+    ['a proof for the other which', termSig(priv, K, port, 'shell', body)],
+    ['a proof for the other domain', termSig(priv, O, port, 'supervisor', body)],
+    ['a proof for another port', termSig(priv, K, port + 1, 'supervisor', body)],
+    ['a proof over a different body', sig(JSON.stringify(keysBody(tok, s.pane, 2)))],
+    ['a proof by another key', termSig(other, K, port, 'supervisor', body)],
+    ['a proof too old', sig(body, { ts: Date.now() - 10 * 60000 })],
+    // the caps before the proof (§3 steps 9, 10), the proof before the pane (10, 11)
+    ['data over its cap, no proof', {}, JSON.stringify(keysBody(tok, s.pane, 1, { data: '61'.repeat(4097) })), 413, W.big],
+    ['a stale pane, no proof', {}, JSON.stringify(keysBody(tok, '%9999', 1))],
+    ['a wrong token, no proof', {}, JSON.stringify(keysBody('0'.repeat(64), s.pane, 1)), 403, W.token],
+  ]) {
+    refusedWith(await send(headers, b), status, error, what);
+    await nothingTyped(T, port, s, base, what);
+  }
+  // the valid proof types once; its nonce again is refused, before the repeat drop
+  const good = sig();
+  const r = await send(good);
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.taken, true);
+  assert.equal(String(await s.received(1)), 'a', 'typed once');
+  const after1 = await typedState(T, port, s);
+  refusedWith(await send(good), 403, W.page, 'the nonce a second time');
+  await nothingTyped(T, port, s, after1, 'the nonce a second time');
+  // a fresh proof for the same seq: a repeat, which types nothing
+  const again = await send(sig());
+  assert.equal(again.status, 200, again.text);
+  assert.equal(again.json.taken, false);
+  await nothingTyped(T, port, s, after1, 'a repeat');
+  // shell/open: no proof, and a keys-domain proof, are refused, and no shell window (S5)
+  const ob = JSON.stringify(openBody(tok));
+  for (const [what, headers] of [['no proof', {}], ['a keys-domain proof', termSig(priv, K, port, 'shell', ob)], ['an open proof for another port', termSig(priv, O, port + 1, 'shell', ob)]]) {
+    refusedWith(await T.post(port, '/api/term/shell/open', ob, { ...SAME, ...headers }), 403, W.page, `shell/open: ${what}`);
+    assert.equal(shellWindows(T), 0, `shell/open: ${what}: no shell window`);
+  }
+  await nothingTyped(T, port, s, after1, 'after shell/open');
+  s.kill();
+});
+
+test('terminal A5c: a key post of the wrong shape is 400, a paste over its cap 413, a tagged supervisor pane 423; none types', async () => {
+  const T = termFixture('term-a5c-keys');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A5c stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  let base = await typedState(T, port, s);
+  const k = (more = {}, which) => ({ ...keysBody(tok, s.pane, 1, { data: '61' }, which), ...more });
+  const shapes = [
+    ['not JSON', '{'],
+    ['an array', [k()]],
+    ['an extra key', { ...k(), x: 1 }],
+    ['both data and paste', { ...k(), paste: 'a' }],
+    ['neither data nor paste', { ...k(), data: undefined }],
+    ['odd-length data', k({ data: '616' })],
+    ['empty data', k({ data: '' })],
+    ['data not hex', k({ data: 'zz' })],
+    ['data not a string', k({ data: 97 })],
+    ['an empty paste', { ...k(), data: undefined, paste: '' }],
+    ['a paste not a string', { ...k(), data: undefined, paste: ['a'] }],
+    ['a which unlike the path', k({ which: 'shell' })],
+    ['no which', k({ which: undefined })],
+    ['a pane not %<n>', k({ pane: s.pane.slice(1) })],
+    ['a pane not a string', k({ pane: 1 })],
+    ['a page too short', k({ page: 'short' })],
+    ['a page of other characters', k({ page: 'page/0123456789abcdef' })],
+    ['seq 0', k({ seq: 0 })],
+    ['seq -1', k({ seq: -1 })],
+    ['seq 1.5', k({ seq: 1.5 })],
+    ['seq as a string', k({ seq: '1' })],
+    ['seq past the safe integers', k({ seq: 2 ** 53 })],
+  ];
+  for (const [what, body] of shapes) {
+    refusedWith(await keysTo(T, port, 'supervisor', body), 400, W.shape, what);
+    await nothingTyped(T, port, s, base, what);
+  }
+  // a paste is capped in UTF-8 bytes, not characters
+  for (const [what, paste] of [['a 65537-byte paste', 'a'.repeat(65537)], ['32769 two-byte characters', 'é'.repeat(32769)]]) {
+    refusedWith(await keysTo(T, port, 'supervisor', { ...k(), data: undefined, paste }), 413, W.paste, what);
+    await nothingTyped(T, port, s, base, what);
+  }
+  // the marked pane carrying @devteam-shell: 423 from both routes (the edge case: neither's)
+  assert.equal(spawnSync('tmux', ['set-option', '-p', '-t', s.pane, '@devteam-shell', T.root], { env: T.env }).status, 0);
+  await screenUntil(T, port, (j) => j.state === 'gone', 'gone when tagged');
+  base = await typedState(T, port, s);
+  refusedWith(await keysTo(T, port, 'supervisor', k()), 423, W.moved, 'a tagged supervisor pane');
+  await nothingTyped(T, port, s, base, 'a tagged supervisor pane');
+  refusedWith(await keysTo(T, port, 'shell', k({}, 'shell')), 423, W.moved, 'a shell post naming the tagged marked pane');
+  await nothingTyped(T, port, s, base, 'a shell post naming the tagged marked pane');
+  // untagged, the same post types: so the 423 was the tag
+  assert.equal(spawnSync('tmux', ['set-option', '-p', '-u', '-t', s.pane, '@devteam-shell'], { env: T.env }).status, 0);
+  const ok = await keysTo(T, port, 'supervisor', k());
+  assert.equal(ok.status, 200, ok.text);
+  assert.equal(ok.json.taken, true);
+  assert.equal(String(await s.received(1)), 'a');
+  s.kill();
+});
+
+test.todo("terminal A5c: a shell post naming the marked supervisor pane, the Shell's own pane made the marked one, is 423 (Task 5)");
+
+test('terminal A6: supervisor keys to no, a foreign, a killed or an exited pane get 409, a stale pane 423; each post reads fresh', async () => {
+  const T = termFixture('term-a6-keys');
+  after(() => T.done());
+  const { dash, port } = await T.dashboard();
+  const tok = await tokenOf(T, port);
+  // nothing marked: 409 on the supervisor, and the shell isn't open: 409
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, '%0', 1)), 409, W.down, 'no marked pane');
+  refusedWith(await keysTo(T, port, 'shell', keysBody(tok, '%0', 1, undefined, 'shell')), 409, W.shut, 'no Shell pane');
+  const s = T.standIn({ lines: ['A6 stand-in'] });
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  let base = await typedState(T, port, s);
+  assert.equal(base.sends, 0);
+  for (const [what, which, pane, status, error] of [
+    ['an unknown pane', 'supervisor', '%9999', 423, W.moved],
+    // the pane step's order (S3): a shell post naming the marked pane is 423 before "no Shell"
+    ['a shell post naming the marked pane', 'shell', s.pane, 423, W.moved],
+    ['a shell post, no Shell open', 'shell', '%9999', 409, W.shut],
+  ]) {
+    refusedWith(await keysTo(T, port, which, keysBody(tok, pane, 1, undefined, which)), status, error, what);
+    await nothingTyped(T, port, s, base, what);
+  }
+  // a foreign pane: noted, started outside the root, its record naming another server
+  const made = spawnSync('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', `=${T.session}:`, '-n', 'far', '-c', T.F.base, process.execPath, '-e', 'setInterval(() => {}, 1000)'], { env: T.env, encoding: 'utf8' });
+  assert.equal(made.status, 0, made.stderr);
+  const far = made.stdout.trim();
+  await until(() => tmuxOut(T, ['display', '-p', '-t', far, '#{pane_current_command}']).trim() === 'node', 'node in the far pane');
+  markPane(T, far);
+  const up = path.join(T.root, 'docs/devteam/run/supervisor-up.json');
+  write(up, JSON.stringify({ up: true, kind: 'tmux', pane: far, server: '1' }));
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, far, 1)), 409, W.down, 'a foreign pane');
+  assert.equal(sends(T), 0, 'a foreign pane: nothing sent');
+  fs.rmSync(up);
+  // a second stand-in marked: the first's id is stale (423), and it is never typed into
+  const s2 = T.standIn({ lines: ['A6 second stand-in'] });
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s2.pane, 'the second live');
+  base = await typedState(T, port, s2);
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 1)), 423, W.moved, 'the old pane');
+  await nothingTyped(T, port, s2, base, 'the old pane');
+  assert.equal(String(await s.received()), '', 'the old pane got nothing');
+  // killed: 409, and the screen reads gone
+  s2.kill();
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, s2.pane, 1)), 409, W.down, 'a killed pane');
+  isGone((await screenUntil(T, port, (j) => j.state === 'gone', 'gone when killed')).json);
+  assert.equal(sends(T), 0, 'a killed pane: nothing sent');
+  // a post just after a screen GET, inside a long cache, makes its own read (S2, S2-1): the stand-in
+  // has exited to a shell since the GET, which only a fresh read sees
+  await dash.stop();
+  const s3 = T.standIn({ lines: ['A6 third stand-in'] });
+  const long = await T.dashboard([], { DEVTEAM_TERM_CACHE_MS: '10000' });
+  const tok2 = await tokenOf(T, long.port);
+  const g = await screenUntil(T, long.port, (j) => j.state === 'live' && j.pane === s3.pane, 'the third live');
+  assert.equal(g.json.pane, s3.pane);
+  const reads = T.oneCallReads();
+  await s3.exit();
+  assert.equal((await screenOf(T, long.port)).json.state, 'live', 'the cache still holds the live screen');
+  assert.equal(T.oneCallReads(), reads, 'and read nothing');
+  refusedWith(await keysTo(T, long.port, 'supervisor', keysBody(tok2, s3.pane, 1, { data: hex('echo typed\r') })), 409, W.down, 'exited to a shell, inside the cache');
+  assert.equal(T.oneCallReads(), reads + 1, 'the post made its own one-call read');
+  await pause(300);
+  assert.equal(sends(T), 0, 'an exited pane: nothing sent');
+  assert.doesNotMatch(tmuxOut(T, ['capture-pane', '-p', '-t', s3.pane]), /typed/, 'the shell got nothing');
+  s3.kill();
+  s.kill();
+});
+
+test.todo('terminal A6: shell keys to a stale pane id get 423; shell/open makes one clean window per project (Task 5)');
+
+test('terminal A7c: posts one at a time in arrival order, each seq taken once; a paste whole and bracketed; a failed send keeps its seq', async () => {
+  const T = termFixture('term-a7c');
+  after(() => T.done());
+  const s = T.standIn({ lines: ['A7c stand-in'] });
+  const { port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  const delay = path.join(T.F.base, 'tmux-delay.json');
+  write(delay, JSON.stringify({ 'send-keys': 150 }));
+  T.clearCalls();
+  const answers = await Promise.all(Array.from({ length: 10 }, (_, i) => keysTo(T, port, 'supervisor', keysBody(tok, s.pane, i + 1, { data: hex(String(i)) }))));
+  const got = String(await s.received(1));
+  assert.match(got, /^[0-9]+$/, got);
+  for (let i = 1; i < got.length; i++) assert.ok(got[i] > got[i - 1], `strictly increasing: ${got}`);
+  answers.forEach((r, i) => { assert.equal(r.status, 200, r.text); assert.equal(r.json.taken, got.includes(String(i)), `seq ${i + 1}: taken ${r.json.taken}, received ${got}`); });
+  assert.ok(got.includes('9'), 'the highest seq is always taken');
+  const spans = T.callSpans('send-keys').sort((a, b) => a.start - b.start);
+  assert.equal(spans.length, got.length, 'one send-keys per taken post');
+  for (let i = 1; i < spans.length; i++) assert.ok(spans[i].start >= spans[i - 1].end, `send-keys overlap: ${JSON.stringify(spans)}`);
+  // the highest taken seq again: taken false, nothing more typed
+  const base = await typedState(T, port, s);
+  const rep = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 10, { data: hex('9') }));
+  assert.equal(rep.status, 200, rep.text);
+  assert.equal(rep.json.taken, false);
+  assert.equal(rep.json.state, 'live');
+  assert.equal(rep.json.pane, s.pane);
+  await nothingTyped(T, port, s, base, 'a repeat');
+  // another page counts its own seqs
+  const other = await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 1, { data: hex('p') }), page: 'another-page-0123456789' });
+  assert.equal(other.json.taken, true, other.text);
+  fs.rmSync(delay);
+  // a two-line paste into a program that asked for bracketed paste: one bracketed paste, no Enter after
+  await s.say('\x1b[?2004hbracketed');
+  const before = String(await s.received());
+  const p = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 11, { paste: 'one\ntwo' }));
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.json.taken, true);
+  const pasted = String(await s.received(before.length + 1)).slice(before.length);
+  assert.match(pasted, /^\x1b\[200~one[\r\n]two\x1b\[201~$/, JSON.stringify(pasted));
+  assert.equal(T.callSpans('paste-buffer').length, 1, 'one paste-buffer');
+  assert.equal(T.callSpans('load-buffer').length, 1, 'one load-buffer');
+  const buffers = () => tmuxOut(T, ['list-buffers', '-F', '#{buffer_name}']);
+  assert.doesNotMatch(buffers(), /devteam-term-/, 'no buffer left');
+  // a paste-buffer that fails: 500, its buffer deleted, its seq used
+  const fail = path.join(T.F.base, 'tmux-fail.json');
+  let b2 = await typedState(T, port, s);
+  write(fail, JSON.stringify({ 'paste-buffer': 'server exited unexpectedly' }));
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 12, { paste: 'three' })), 500, W.sent, 'a failed paste');
+  assert.equal(T.callSpans('delete-buffer').length, 1, 'the buffer deleted');
+  assert.doesNotMatch(buffers(), /devteam-term-/, 'no buffer left after a failed paste');
+  fs.rmSync(fail);
+  const rp = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 12, { paste: 'three' }));
+  assert.equal(rp.status, 200, rp.text);
+  assert.equal(rp.json.taken, false, 'a failed send keeps its seq');
+  b2 = { ...b2, sends: b2.sends + 2 };
+  await nothingTyped(T, port, s, b2, 'a failed paste and its resend');
+  // a send-keys that fails: the same
+  write(fail, JSON.stringify({ 'send-keys': 'server exited unexpectedly' }));
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 13, { data: hex('z') })), 500, W.sent, 'a failed send-keys');
+  fs.rmSync(fail);
+  const rk = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 13, { data: hex('z') }));
+  assert.equal(rk.json.taken, false, rk.text);
+  await nothingTyped(T, port, s, { ...b2, sends: b2.sends + 1 }, 'a failed send-keys and its resend');
+  const next = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 14, { data: hex('z') }));
+  assert.equal(next.json.taken, true, next.text);
+  assert.ok(String(await s.received()).endsWith('z'));
+  s.kill();
 });
