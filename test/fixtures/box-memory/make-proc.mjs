@@ -42,8 +42,10 @@ export const PROCESSES = [
   [1311, ['/usr/local/bin/opencode'], 'opencode', `${MS}/.worktrees/m-3-fixture`, 45000, { kind: 'agent', project: 'mothership', session: true }],
   [1350, ['node', DT(MS), 'gate', 'ci', '--', 'npm', 'test'], 'MainThread', `${MS}/.worktrees/m-3-fixture`, 30000, { kind: 'devteam', subcommand: 'gate', project: 'mothership' }],
   [1388, ['npm ci'], 'npm ci', `${DEV}/.worktrees/kit-1-fixture`, 36000, { kind: 'install', project: 'devteam-dev' }],
+  [1395, ['npm test'], 'npm test', `${DEV}/.worktrees/kit-1-fixture`, 14000, { kind: 'other', project: 'devteam-dev' }],
   [1420, ['/usr/lib/chromium/chromium', '--headless=new', '--remote-debugging-port=0', '--user-data-dir=/tmp/chromium-fixture'], 'chromium',
     `${MS}/.worktrees/m-2-fixture`, 75000, { kind: 'browser', project: 'mothership' }],
+  [1440, ['node', '/usr/lib/node_modules/npm/bin/npm-cli.js', 'install'], 'node', `${MS}/.worktrees/m-3-fixture`, 33000, { kind: 'install', project: 'mothership' }],
   [1466, ['node', 'server.js'], 'node', `${MS}/.worktrees/m-2-fixture/app`, 15000, { kind: 'node', project: 'mothership' }],
   [1490, ['node', DT(MS), '--help'], 'node', MS, 11000, { kind: 'devteam', project: 'mothership' }],
 ];

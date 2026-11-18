@@ -187,7 +187,8 @@ test('check 10: the comment states every field, kind and /memory.json rule', () 
     ...['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects', 'n', 'rss'].map((f) => `\`${f}\``),
     ...KINDS.map((k) => `\`${k}\``),
     '`{"v":1,"readings":[', 'oldest first', '`?since=', '`?after=', '`?thin=0`', '24 hours', '8 days', '5 minutes', '6 hours',
-    '30 minutes', '3 days', '400', 'loopback', '/instances.json'];
+    '30 minutes', '3 days', '400', 'loopback', '/instances.json',
+    ...['npm', 'pnpm', 'yarn', 'bundle', 'pip', 'uv', 'npm-cli.js', 'pnpm.cjs', 'pnpm.js', 'yarn.js', 'install', 'i', 'ci', 'add', 'sync', 'npm test'].map((w) => `\`${w}\``)];
   for (const w of words) assert.ok(c.includes(w), `the contract comment holds ${w}`);
 });
 
@@ -353,8 +354,10 @@ const ROWS = {
   1302: { kind: 'agent', project: 'mothership', session: true }, // codex in .worktrees/m-2-fixture/app: a subfolder counts
   1311: { kind: 'agent', project: 'mothership', session: true }, // opencode in .worktrees/m-3-fixture
   1350: { kind: 'devteam', subcommand: 'gate', project: 'mothership' }, // comm MainThread: devteam.mjs gate ci -- npm test
-  1388: { kind: 'install', project: 'devteam-dev' }, // cmdline and comm "npm ci": argv[0]'s first word is npm
+  1388: { kind: 'install', project: 'devteam-dev' }, // cmdline and comm "npm ci": argv[0]'s first word is npm, ci an install subcommand
+  1395: { kind: 'other', project: 'devteam-dev' }, // cmdline and comm "npm test": an installer with another subcommand is other
   1420: { kind: 'browser', project: 'mothership' }, // chromium --headless in a worktree: not a session
+  1440: { kind: 'install', project: 'mothership' }, // node /usr/lib/node_modules/npm/bin/npm-cli.js install: an installer script, install
   1466: { kind: 'node', project: 'mothership' }, // node server.js
   1490: { kind: 'devteam', project: 'mothership' }, // devteam.mjs --help: --help is no command name, so no subcommand
 };
@@ -371,6 +374,9 @@ test('check 8: the fake /proc holds what the done-when lists', () => {
   assert.ok(ps.some((p) => p.comm === 'MainThread\n' && argv0(p) === 'node' && isScript(p, 'gate')), 'a MainThread node running devteam.mjs gate');
   assert.ok(ps.some((p) => argv0(p) === 'chromium' && p.argv.some((a) => a.startsWith('--headless')) && inWorktree(p.cwd)), 'a headless chromium in a worktree');
   assert.ok(ps.some((p) => p.comm === 'npm ci\n' && p.cmdline === 'npm ci\0'), 'an npm ci, comm and cmdline');
+  assert.ok(ps.some((p) => p.comm === 'npm test\n' && p.cmdline === 'npm test\0'), 'an npm test, comm and cmdline');
+  assert.ok(ps.some((p) => argv0(p) === 'node' && p.comm === 'node\n' && path.basename(p.argv[1] ?? '') === 'npm-cli.js' && p.argv[2] === 'install' && inWorktree(p.cwd)),
+    'a node running npm-cli.js install in a worktree');
   assert.ok(ps.some((p) => argv0(p) === 'bash'), 'a bash');
   assert.ok(ps.some((p) => p.cwd && !Object.values(ROOTS).some((r) => p.cwd === r || p.cwd.startsWith(`${r}/`))), 'a process outside every root');
   assert.ok(ps.some((p) => p.cwd === null && p.argv.length > 0), 'a pid with a readable cmdline and no cwd');
@@ -475,8 +481,20 @@ test('check 10: every top-level key of the expected reading is named in the comm
 });
 
 test('the proc generator, imported, gives the committed files and writes nothing', async () => {
+  // Read the committed files, and their times, before the import: a generator that wrote on import
+  // would remove proc/ and write it again, changing every mtime and ctime.
   const before = expectedText();
+  const watched = [[expectedPath, fs.statSync], [path.join(procDir, '1203', 'cmdline'), fs.statSync],
+    [path.join(procDir, '1203', 'statm'), fs.statSync], [path.join(procDir, '1203', 'cwd'), fs.lstatSync],
+    [path.join(cgroupDir, 'memory.stat'), fs.statSync]];
+  const times = () => watched.map(([p, st]) => { const s = st(p, { bigint: true }); return [p, s.mtimeNs, s.ctimeNs]; });
+  const t0 = times();
   const mod = await import(new URL('./fixtures/box-memory/make-proc.mjs', import.meta.url).href);
+  const t1 = times();
+  for (const [i, [p, m, c]] of t0.entries()) {
+    assert.equal(t1[i][1], m, `the import did not touch ${path.relative(fixDir, p)} (mtime)`);
+    assert.equal(t1[i][2], c, `the import did not touch ${path.relative(fixDir, p)} (ctime)`);
+  }
   assert.equal(expectedText(), before, 'importing the generator writes nothing');
   assert.equal(mod.makeExpected(), before, 'makeExpected() is proc-expected.json, byte for byte');
   const files = mod.procFiles();

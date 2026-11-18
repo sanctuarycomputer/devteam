@@ -16062,7 +16062,12 @@ const memoryCountsProblem = (p, e) => {
 // Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
 // `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
 // running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
-// devteam.mjs), `node` (any other node), `other` (everything else). The kind comes from cmdline's
+// devteam.mjs), `node` (any other node), `other` (everything else). Exactly: an installer is an
+// argv[0] basename whose first word is `npm`, `pnpm`, `yarn`, `bundle`, `pip` or `uv`, or node whose
+// script's basename is `npm-cli.js`, `pnpm.cjs`, `pnpm.js` or `yarn.js`; it is `install` only with an
+// install subcommand, the next word (`install`, `i`, `ci`, `add` or `sync`). An installer with another
+// subcommand (`npm test`) is `other`, and node running an installer script with another subcommand
+// is `node`. The kind comes from cmdline's
 // argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
 // retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
 // command name. Nothing else of a command line, no environment and no file content is ever kept.

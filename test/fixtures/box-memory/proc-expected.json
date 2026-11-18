@@ -64,8 +64,16 @@
       "kind": "install",
       "project": "devteam-dev"
     },
+    "1395": {
+      "kind": "other",
+      "project": "devteam-dev"
+    },
     "1420": {
       "kind": "browser",
+      "project": "mothership"
+    },
+    "1440": {
+      "kind": "install",
       "project": "mothership"
     },
     "1466": {
@@ -94,8 +102,8 @@
         "rss": 307200000
       },
       "install": {
-        "n": 1,
-        "rss": 147456000
+        "n": 2,
+        "rss": 282624000
       },
       "devteam": {
         "n": 5,
@@ -106,8 +114,8 @@
         "rss": 110592000
       },
       "other": {
-        "n": 4,
-        "rss": 9011200
+        "n": 5,
+        "rss": 66355200
       }
     },
     "devteam": {
@@ -130,7 +138,7 @@
     },
     "projects": {
       "devteam-dev": {
-        "rss": 1438105600,
+        "rss": 1495449600,
         "sessions": 1,
         "devteam": {
           "dashboard": 212992000,
@@ -138,7 +146,7 @@
         }
       },
       "mothership": {
-        "rss": 1044480000,
+        "rss": 1179648000,
         "sessions": 2,
         "devteam": {
           "wait": 73728000,
