@@ -16993,6 +16993,10 @@ const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'rel
 const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
 // The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
 const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
+// A paste without bracketed-paste markers: tmux passes them through, so one inside a paste would end its
+// bracket early and the rest, an Enter too, would arrive typed. Dropped again until none is left, since
+// a drop can join two halves into a new one (ESC[20 ESC[201~ 0~).
+const termUnbracket = (s) => { for (let t; (t = s.replace(/\x1b\[20[01]~/g, '')) !== s;) s = t; return s; };
 // tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
 const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
 // A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
@@ -17146,8 +17150,12 @@ function termRoutes({ port, host, log }) {
   }
   // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
   // the cache (S2), so keys sent just after the supervisor exits find the shell prompt.
-  async function keys(res, which, b) {
+  async function keys(res, which, b, left) {
     const no = (status, error, reason) => { log(`refused /api/term/${which}/keys: ${reason}`); return json(res, status, { error }); };
+    // checked at the turn's start and again just before the seq (the read can take a while): a refusal
+    // before the send, so its seq stays free (§8)
+    const went = () => left() && (log(`refused /api/term/${which}/keys: the client went before its turn`), true);
+    if (went()) return;
     const s = await readScreen(which, { fresh: true });
     if (s.error) return json(res, 500, { error: s.error });
     // the pane step, in the spec's order (S3); a tagged or marked pane is never the other route's
@@ -17162,6 +17170,7 @@ function termRoutes({ port, host, log }) {
       if (s.state === 'gone') return no(409, TERM_WORDS.shell, 'no Shell pane');
       if (b.pane !== s.pane) return no(423, TERM_WORDS.moved, 'not the Shell\'s pane');
     }
+    if (went()) return;
     const key = `${b.page}\n${which}`;
     if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
     // taken the moment the send starts: a send that fails part way is never typed again
@@ -17321,10 +17330,19 @@ function termRoutes({ port, host, log }) {
     if (b === null || typeof b !== 'object' || Array.isArray(b)) return no(400, { error: TERM_WORDS.shape }, 'not a JSON object');
     if (!tokenOk(b.token)) return no(403, { error: TERM_WORDS.token }, 'a missing or wrong token');
     if (!shapeOk[r.name](b, r.which)) return no(400, { error: TERM_WORDS.shape }, 'not the route\'s shape');
+    // once, with the shape (step 8), before the cap: the cap then measures what would be typed, and a
+    // paste of markers only is the empty paste the shape refuses (400, §4's malformed body)
+    if (r.name === 'keys' && 'paste' in b && !(b.paste = termUnbracket(b.paste))) return no(400, { error: TERM_WORDS.shape }, 'a paste of bracket markers only');
     if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
     if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
     if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
-    if (r.name === 'keys') return queue(r.which, () => keys(res, r.which, b));
+    if (r.name === 'keys') {
+      // a client that goes while its post waits (a timed-out gateway, a closed tab): its turn types
+      // nothing, so a line the owner types again never arrives twice (B-2)
+      let left = false;
+      res.on('close', () => { left = true; });
+      return queue(r.which, () => keys(res, r.which, b, () => left));
+    }
     return queue('shell', () => openShell(res, b));
   }
   return {

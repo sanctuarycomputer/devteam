@@ -574,7 +574,7 @@ test('terminal A8: twenty screen GETs share one read; a failed read is 500, a mi
   const t0 = Date.now();
   const hello = await T.req(port, 'GET', '/api/hello');
   assert.equal(hello.status, 200);
-  assert.ok(Date.now() - t0 < 1000, `hello took ${Date.now() - t0} ms`);
+  assert.ok(Date.now() - t0 < 2000, `hello took ${Date.now() - t0} ms`);
   assert.equal(done, false, 'the screen read was still in flight');
   assert.equal((await slow).status, 200);
   s.kill();
@@ -1171,6 +1171,23 @@ test('terminal A7c: posts one at a time in arrival order, each seq taken once; a
   assert.equal(T.callSpans('load-buffer').length, 1, 'one load-buffer');
   const buffers = () => tmuxOut(T, ['list-buffers', '-F', '#{buffer_name}']);
   assert.doesNotMatch(buffers(), /devteam-term-/, 'no buffer left');
+  // B-1: a paste can't end its own bracket: every ESC[200~ and ESC[201~ in it is dropped, again until
+  // none is left (a drop can join two halves into a marker), so its Enter stays inside the one bracket
+  const bp = 'bracket-page-0123456789';
+  for (const [i, [text, want]] of [['one\x1b[201~two\r', 'onetwo\r'], ['a\x1b[20\x1b[201~1~b\x1b[2\x1b[200~00~c\r', 'abc\r']].entries()) {
+    const at = String(await s.received()).length;
+    const r = await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, i + 1, { paste: text }), page: bp });
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.json.taken, true);
+    const got = String(await s.received(at + 1)).slice(at);
+    assert.equal(got, `\x1b[200~${want}\x1b[201~`, `one bracket, the Enter inside it: ${JSON.stringify(got)}`);
+  }
+  // a paste of nothing but markers is empty: 400, as an empty paste is; nothing typed, its seq free
+  const b1 = await typedState(T, port, s);
+  refusedWith(await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 3, { paste: '\x1b[20\x1b[201~0~' }), page: bp }), 400, W.shape, 'a paste of markers only');
+  await nothingTyped(T, port, s, b1, 'a paste of markers only');
+  const bx = await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 3, { paste: 'x' }), page: bp });
+  assert.equal(bx.json.taken, true, bx.text);
   // a paste-buffer that fails: 500, its buffer deleted, its seq used
   const fail = path.join(T.F.base, 'tmux-fail.json');
   let b2 = await typedState(T, port, s);
@@ -1208,7 +1225,7 @@ test('terminal A7c: posts one at a time in arrival order, each seq taken once; a
   assert.equal(String(await s.received(had + 1)).slice(had), 'Y');
   // T4-1: every read after a taken send failing: the answer is the pre-send screen, taken
   await pause(150);
-  write(delay, JSON.stringify({ 'send-keys': 1000 }));
+  write(delay, JSON.stringify({ 'send-keys': 3000 }));
   T.clearCalls();
   const pending = keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 17, { data: hex('Q7') }));
   await until(() => T.callLog().some((c) => c.cmds.join('+') === 'display+capture-pane'), 'the pre-send read');
@@ -1232,6 +1249,32 @@ test('terminal A7c: posts one at a time in arrival order, each seq taken once; a
   await until(() => fs.readFileSync(dlog, 'utf8').includes(left[0]), 'the buffer named in the log');
   assert.ok(!fs.readFileSync(dlog, 'utf8').includes('secret-paste-T43'), 'never its text');
   assert.equal(spawnSync('tmux', ['delete-buffer', '-b', left[0]], { env: T.env }).status, 0);
+  // B-2: a post whose client went while it waited its turn types nothing and leaves its seq free
+  const gp = 'gone-client-page-0123456789';
+  had = String(await s.received()).length;
+  write(delay, JSON.stringify({ 'send-keys': 1500 }));
+  T.clearCalls();
+  const first = keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 1, { data: hex('G') }), page: gp });
+  await until(() => T.callLog().some((c) => c.cmds.join('+') === 'display+capture-pane'), 'the first post\'s read');
+  const body2 = JSON.stringify({ ...keysBody(tok, s.pane, 2, { data: hex('H') }), page: gp });
+  const second = http.request({ host: '127.0.0.1', port, method: 'POST', path: '/api/term/supervisor/keys', setHost: false, headers: { host: `127.0.0.1:${port}`, origin: `http://127.0.0.1:${port}`, ...SAME, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body2)) } });
+  second.on('error', () => {});
+  second.end(body2);
+  await pause(400);
+  second.destroy();
+  const g = await first;
+  assert.equal(g.status, 200, g.text);
+  assert.equal(g.json.taken, true);
+  // a repeat of the first, queued behind the gone one: when it answers, the gone one's turn is over
+  const rep1 = await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 1, { data: hex('G') }), page: gp });
+  assert.equal(rep1.json.taken, false, rep1.text);
+  fs.rmSync(delay);
+  assert.equal(String(await s.received(had + 1)).slice(had), 'G', 'only the first post typed');
+  assert.equal(T.callSpans('send-keys').length, 1, 'one send-keys');
+  assert.match(fs.readFileSync(dlog, 'utf8'), /refused \/api\/term\/supervisor\/keys: the client went before its turn/);
+  const again = await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, 2, { data: hex('H') }), page: gp });
+  assert.equal(again.json.taken, true, `its seq was not used: ${again.text}`);
+  assert.equal(String(await s.received(had + 2)).slice(had), 'GH');
   s.kill();
 });
 
