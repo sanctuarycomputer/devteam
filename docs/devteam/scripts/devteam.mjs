@@ -3910,10 +3910,16 @@ function cmdValidate() {
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
       const L0 = linesOf(componentLink(t.component, S0));
+      // The ticket's own folder (or a file under it) is its to write, when its records are in its
+      // own repo (check-pr's `own`); matched on text, so no empty, . or .. segment may walk out.
+      const ownDir = `${projectRelOf(componentLink(t.component, S0))}/tickets/${id}`;
+      const ownFolder = !recordsHomeSetting(t);
       for (const entry of t.touches ?? []) {
+        const p = trimSlash(touchPath(entry));
+        if (ownFolder && p.split('/').every((x) => x && x !== '.' && x !== '..') && (p === ownDir || p.startsWith(`${ownDir}/`))) continue;
         const owners = prefixOwners(touchPath(entry), L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
-        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
+        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${ownDir}/ may be named from it, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }

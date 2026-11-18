@@ -1403,3 +1403,37 @@ test('the plan TL;DR limit counts its own bullets, not header fields', () => {
     assert.equal(a.status, 0, a.text);
   } finally { F.done(); }
 });
+// kit-204 A5-A7: a spike's document goes in its own ticket folder, which validate accepts as its
+// whole touches; no other path in the kit's line (another's folder, a design, a prefix, dot
+// segments) is accepted, and planning.md D9 says the same.
+test('a spike whose touches are only its own ticket folder validates; D9 says the same', () => {
+  const F = monoFixture('spike-folder');
+  const { old } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    F.lines(F.STD);
+    const T = 'docs/devteam/project/tickets';
+    const spike = (id, touches) => F.run(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'api', kind: 'spike', size: 'S', risk: 'normal', serves: [], depends_on: [], touches, done_when: ['findings.md answers the question'], notes: 'findings for the api' })], SUP);
+    const validate = () => { const r = F.run(old, ['validate'], SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+    // A5: its own folder, then a file under it
+    const a = spike('api-01-spike', [`${T}/api-01-spike/`]);
+    assert.equal(a.status, 0, `${a.out}\n${a.err}`);
+    const v1 = validate();
+    assert.doesNotMatch(v1.text, /api-01-spike:/, v1.text);
+    F.ok(old, ['ticket', 'set', 'api-01-spike', '--json', JSON.stringify({ touches: [`${T}/api-01-spike/findings.md`] })], SUP);
+    const v2 = validate();
+    assert.doesNotMatch(v2.text, /api-01-spike:/, v2.text);
+    // A6: every other kit-line path is still refused
+    const bad = { 'api-02-spike': `${T}/api-01-spike/`, 'api-03-spike': 'docs/devteam/project/designs/x.md', 'api-04-spike': `${T}/api-04-spike-x/`, 'api-05-spike': `${T}/api-05-spike/../../scripts/devteam.mjs`, 'api-06-spike': `${T}/api-06-spike/./x.md` };
+    const added = Object.entries(bad).filter(([id, p]) => spike(id, [p]).status === 0);
+    const v3 = validate();
+    if (added.length) assert.notEqual(v3.status, 0, v3.text);
+    for (const [id, p] of added) assert.ok(v3.text.includes(`${id}: touches "${p}" lies in the kit's own line`), `${id} refused:\n${v3.text}`);
+    assert.doesNotMatch(v3.text, /api-01-spike:/, v3.text);
+    // A7: D9 names the ticket folder, not designs
+    const d9 = fs.readFileSync(path.join(old, 'docs/devteam/process/planning.md'), 'utf8').split('\n').find((l) => l.startsWith('- **D9'));
+    assert.ok(d9, 'planning.md has a D9 line');
+    assert.match(d9, /project\/tickets\/<id>\//);
+    assert.doesNotMatch(d9, /project\/designs\//);
+  } finally { F.done(); }
+});
