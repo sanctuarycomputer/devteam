@@ -488,9 +488,8 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon(`!document.getElementById('review-view').hidden && ${scrimShown}`, 'the review over the scrim');
     await scrimClick();
     await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim');
-    // the viewer over a peek: closing it shows the peek again. Each viewer opens in a fresh visit: once a
-    // visit's viewer frame has loaded a page, the next page it loads is a history entry of its own, and
-    // the viewer's close (history.back()) moves the frame, not the hash
+    // the viewer over a peek: closing it shows the peek again (a fresh visit, so each case's history is short;
+    // see load())
     await load('#board');
     await openPeek(`#ticket/${T}`);
     // DEVTEAM_TEST_FRAME_LATENCY_MS=n holds the viewer's frame back until after the close is pressed, the order
@@ -529,8 +528,11 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     await soon("document.getElementById('artifact-view').hidden && location.hash.startsWith('#review-preview')", 'back to the review');
     await new Promise((r) => setTimeout(r, 400));
     assert.ok(await p.ev(`!document.getElementById('review-view').hidden && document.body.classList.contains('overlay-open') && ${scrimShown}`), 'the review keeps its scrim');
-    // (not closed here by the scrim: the viewer's frame left an entry in the joint history, so the review's
-    // history.back() would move that frame; a fresh visit instead)
+    // and the review's own close then lands on the page under it: the viewer's close left no frame entry for
+    // its history.back() to step instead (kit-303)
+    await scrimClick();
+    await soon("document.getElementById('review-view').hidden && document.getElementById('scrim').hidden && !document.body.classList.contains('overlay-open')", 'the review closed by the scrim after the viewer');
+    assert.equal(await p.ev('location.hash'), '#library', 'the review closed to #library');
     await load('#board');
   });
 
