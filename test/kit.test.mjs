@@ -1336,6 +1336,11 @@ test('a repo link approved by the owner lands under any chore slug, still only a
     assert.notEqual(a3b.status, 0, a3b.text);
     assert.match(a3b.text, /approved repo link entries only/);
     assert.match(a3b.text, /docs\/devteam\/scripts\/x\.mjs/);
+    // A3b': the approved entry plus another owner setting of the answer's class (governance-edit)
+    chore('docs-setting', (wt) => { okIn(old, ['link', 'land', 'docs-setting'], SUP); F.edit((j) => { j.agent_command = 'echo other'; }, wt); });
+    const a3s = dry('docs-setting');
+    assert.notEqual(a3s.status, 0, a3s.text);
+    assert.match(a3s.text, /approved repo link entries only[^\n]*also changes agent_command/);
     // A3c: a chore that lands no link at all
     chore('docs-none', (wt) => write(path.join(wt, 'docs/devteam/project/notes.md'), 'notes\n'));
     const a3c = dry('docs-none');
