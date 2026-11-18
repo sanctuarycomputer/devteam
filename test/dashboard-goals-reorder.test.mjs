@@ -196,7 +196,8 @@ test('the reorder controls: on active goal cards only', { ...CHROME, timeout: 30
     await p.click(`${card(B)} [data-goal-move="up"]`);
     await pause(400);
     assert.equal(await p.ev('location.hash'), '#goals', 'a click on Move up keeps #goals');
-    if (await p.ev('!!window.__held')) await p.ev("window.__held.resolve(false, 400, { error: 'x' })");
+    await soon('!!window.__held', 'the Move up post, held');
+    await p.ev("window.__held.resolve(false, 400, { error: 'x' })");
     await p.ev('window.__holdOrder = false');
     await settled(p, port, [A, B, C, D], 'the order after a refused move');
     await soon(`JSON.stringify([...document.querySelectorAll('#goals .card.goal[data-subject]')].map((c) => c.dataset.subject.replace(/^goal:/, ''))) === ${JSON.stringify(JSON.stringify(['upkeep', A, B, C, D]))}`, 'the cards back in the fixture order');
@@ -210,5 +211,139 @@ test('the reorder controls: on active goal cards only', { ...CHROME, timeout: 30
       const text = await p.ev(`document.querySelector('#goals').textContent`);
       assert.doesNotMatch(text, /Move up|Move down/, `${hash}: no Move up or Move down`);
     }
+  });
+});
+
+// Enter, as a keyboard sends it (with its character, so a focused button or summary is activated)
+const enter = async (p) => {
+  const common = { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 };
+  await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...common, text: '\r' });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common });
+};
+// The log's lines, every file of it
+const logOf = (root) => {
+  const dir = path.join(root, 'docs/devteam/run/log');
+  return fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+};
+const dashOrderActs = (root) => logOf(root).filter((l) => l.type === 'act' && l.class === 'goal-order' && l.by === 'owner' && l.channel === 'dashboard').length;
+// what document.activeElement is: a goal's handle or ⋯ summary ({ grip | menu: id }), the body, or other
+const focusOf = (p) => p.ev(`(() => {
+  const a = document.activeElement;
+  if (!a || a === document.body) return 'body';
+  if (a.matches('.goal-grip')) return { grip: a.dataset.goalGrip };
+  if (a.matches('details.menu > summary') && a.closest('[data-goal-card]')) return { menu: a.closest('[data-goal-card]').dataset.goalCard };
+  return a.outerHTML.slice(0, 80);
+})()`);
+
+test('saving the goal order: the menu and the keyboard', { ...CHROME, timeout: 400000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goals-reorder-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids, dt } = reorderFixture(base);
+  const { A, B, C, D } = ids;
+  const { p, soon, port, go, reload } = await openOn(later, root, env);
+  const shows = (ids, what) => soon(`JSON.stringify([...document.querySelectorAll('#goals .card.goal[data-subject]')].map((c) => c.dataset.subject.replace(/^goal:/, ''))) === ${JSON.stringify(JSON.stringify(['upkeep', ...ids]))}`, what);
+  // each check starts from A, B, C, D, put back by the owner from the command line
+  const fresh = async () => {
+    dt(['goal', 'order', A, B, C, D], null);
+    await go('#goals');
+    await shows([A, B, C, D], 'the cards in the order A, B, C, D');
+    await settled(p, port, [A, B, C, D], 'the order put back');
+  };
+  // Move up or down on a goal by keyboard: its ⋯ summary focused, Enter, Tab to the button, Enter
+  const keyMove = async (id, dir) => {
+    await p.ev(`document.querySelector(${JSON.stringify(`${card(id)} details.menu > summary`)}).focus()`);
+    await enter(p);
+    await soon(`!!document.querySelector(${JSON.stringify(`${card(id)} details.menu[open]`)})`, 'the menu open');
+    let on = false;
+    for (let n = 0; n < 6 && !on; n++) {
+      await p.key('Tab');
+      on = await p.ev(`document.activeElement?.dataset?.goalMove === ${JSON.stringify(dir)} && document.activeElement?.dataset?.goalId === ${JSON.stringify(id)}`);
+    }
+    assert.ok(on, `Move ${dir} on the goal reached by Tab within 6`);
+    await enter(p);
+  };
+  // Move up or down on a goal by the pointer: a click on its ⋯, then on the button
+  const clickMove = async (id, dir) => {
+    await p.click(`${card(id)} details.menu > summary`);
+    await soon(`!!document.querySelector(${JSON.stringify(`${card(id)} details.menu[open]`)})`, 'the menu open');
+    await p.click(`${card(id)} [data-goal-move="${dir}"]`);
+  };
+
+  await t.test('AC3: Move up by keyboard saves one order, keeps focus, and persists', async () => {
+    await fresh();
+    const acts = dashOrderActs(root);
+    await keyMove(B, 'up');
+    await settled(p, port, [B, A, C, D], 'the order after Move up');
+    assert.deepEqual(await p.ev('window.__orders'), [{ ids: [B, A, C, D] }], 'one post, the whole order');
+    assert.equal(dashOrderActs(root), acts + 1, 'one goal-order act by the owner on the dashboard');
+    assert.deepEqual(await focusOf(p), { menu: B }, "focus on the moved card's ⋯ summary");
+    assert.equal(await p.ev(`!!document.querySelector(${JSON.stringify(`${card(B)} details.menu[open]`)})`), false, 'the menu closed');
+    await reload();
+    await shows([B, A, C, D], 'the cards after reload');
+    assert.deepEqual(await order(p), ['upkeep', B, A, C, D]);
+  });
+
+  await t.test('AC4: ArrowUp on the grip saves one order and keeps focus on the grip', async () => {
+    await fresh();
+    await p.ev(`document.querySelector(${JSON.stringify(`${card(C)} .goal-grip`)}).focus()`);
+    await p.key('ArrowUp');
+    await settled(p, port, [A, C, B, D], 'the order after ArrowUp');
+    assert.deepEqual(await p.ev('window.__orders'), [{ ids: [A, C, B, D] }], 'one post');
+    assert.deepEqual(await order(p), ['upkeep', A, C, B, D]);
+    assert.deepEqual(await focusOf(p), { grip: C }, "focus on the moved card's handle");
+    // and ArrowDown, back
+    await p.key('ArrowDown');
+    await settled(p, port, [A, B, C, D], 'the order after ArrowDown');
+    assert.deepEqual(await p.ev('window.__orders'), [{ ids: [A, C, B, D] }, { ids: [A, B, C, D] }], 'one more post');
+    assert.deepEqual(await focusOf(p), { grip: C }, 'focus still on the handle');
+  });
+
+  await t.test('focus that moved on stays where the owner put it', async () => {
+    await fresh();
+    await keyMove(A, 'down');
+    await p.ev(`document.querySelector(${JSON.stringify(`${card(D)} .goal-grip`)}).focus()`);
+    await settled(p, port, [B, A, C, D], 'the order after Move down');
+    // a redraw that replaces the cards keeps D's handle focused
+    await p.ev(`(() => { GOALS_HTML = ''; renderGoals(); })()`);
+    assert.deepEqual(await focusOf(p), { grip: D }, "D's handle, not A's summary");
+    // and the moved goal's record is gone: focus dropped to the page stays there through a redraw
+    await p.ev('document.activeElement.blur()');
+    await p.ev(`(() => { GOALS_HTML = ''; renderGoals(); })()`);
+    assert.equal(await focusOf(p), 'body', "no jump back to A's summary");
+  });
+
+  await t.test('AC6: a refused order goes back and says why', async () => {
+    await fresh();
+    await p.ev('window.__holdOrder = true');
+    await clickMove(C, 'down');
+    await soon('!!window.__held', 'the post, held');
+    await shows([A, B, D, C], 'the moved order while held (the overlay)');
+    await p.ev("window.__held.resolve(false, 400, { error: 'nope' })");
+    await shows([A, B, C, D], "the cards back in the server's order");
+    await soon(`document.querySelector('#e-goal-order')?.textContent === 'Not saved: nope'`, 'the reason');
+    await settled(p, port, [A, B, C, D], 'the order after the refusal');
+    await p.ev(`(() => { GOALS_HTML = ''; renderGoals(); })()`);
+    assert.equal(await p.ev(`document.querySelector('#e-goal-order').textContent`), 'Not saved: nope', 'a redraw keeps the reason');
+    assert.equal((await p.ev('window.__orders')).length, 1);
+  });
+
+  await t.test('AC12: two quick moves post their own orders', async () => {
+    await fresh();
+    await p.ev('window.__holdOrder = true');
+    await clickMove(A, 'down');
+    await soon('!!window.__held', 'the first post, held');
+    await shows([B, A, C, D], 'the first move shown');
+    await p.ev('window.__holdOrder = true');
+    await clickMove(A, 'down');
+    await shows([B, C, A, D], 'the second move shown');
+    assert.equal((await p.ev('window.__orders')).length, 1, 'the second waits for the first');
+    await p.ev('window.__held.resolve(true)');
+    await soon('!!window.__held && window.__orders.length === 2', 'the second post, held');
+    await p.ev('window.__held.resolve(true)');
+    await settled(p, port, [B, C, A, D], 'the order after both');
+    assert.deepEqual(await p.ev('window.__orders'), [{ ids: [B, A, C, D] }, { ids: [B, C, A, D] }], 'each the order shown when it was made');
+    assert.deepEqual(await order(p), ['upkeep', B, C, A, D]);
+    assert.equal(await p.ev(`document.querySelector('#e-goal-order').textContent`), '', 'no error');
   });
 });

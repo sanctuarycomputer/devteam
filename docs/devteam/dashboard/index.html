@@ -3511,10 +3511,95 @@ function renderGoals() {
     const list = GOALS_TAB === 'met' ? met : gone;
     body = list.length ? grid(list.map((g) => closedGoalCardHtml(g, R, openQs))) : '<p class="empty">None</p>';
   }
-  // the Active tab's reorder errors, right under the tab bar
-  const html = tabs + (GOALS_TAB === 'active' ? '<span class="err" id="e-goal-order"></span>' : '') + body;
-  if (html !== GOALS_HTML) { $('goals-list').innerHTML = html; GOALS_HTML = html; }
+  // the Active tab's reorder error (GOAL_ORDER_ERR, kept in page memory so every redraw keeps it), right under the tab bar
+  const html = tabs + (GOALS_TAB === 'active' ? `<span class="err" id="e-goal-order">${esc(GOAL_ORDER_ERR)}</span>` : '') + body;
+  const list = $('goals-list');
+  const ae = document.activeElement;
+  const inList = !!ae && ae !== document.body && list.contains(ae);
+  // the goal control that has focus (put back on its new copy), and whether focus is on the moved goal
+  const had = inList ? goalControlOf(ae) : null;
+  const onMoved = inList && !!GOAL_FOCUS && ae.closest('[data-goal-card]')?.dataset.goalCard === GOAL_FOCUS.id;
+  if (html !== GOALS_HTML) { list.innerHTML = html; GOALS_HTML = html; }
+  // focus, across the redraw: the control that had it; else, fallen to the page or on the moved goal, the moved goal's
+  const now = document.activeElement;
+  const lost = !now || now === document.body;
+  const to = had && lost ? had : (lost || onMoved) && GOAL_FOCUS ? GOAL_FOCUS : null;
+  const el = to && goalControlEl(to);
+  if (el && el !== now) el.focus(to === had ? { preventScroll: true } : undefined);
 }
+// ---- the goal order (kit-234): Move up / Move down in a goal's ⋯, ArrowUp / ArrowDown on its handle ----
+// A refused order's reason, drawn under the Active tab's bar on every redraw until the next move.
+let GOAL_ORDER_ERR = '';
+// Where focus belongs after a move ({ id, what: 'grip' | 'menu' }): the moved goal's handle or ⋯ summary.
+// Cleared once the owner moves on: focus anywhere else (not the page, which is a redraw dropping it), or a
+// press off it.
+let GOAL_FOCUS = null;
+// The goal control el is in: { id, what } for an active goal card's handle or ⋯ summary, else null.
+function goalControlOf(el) {
+  const grip = el?.closest?.('.goal-grip[data-goal-grip]');
+  if (grip) return { id: grip.dataset.goalGrip, what: 'grip' };
+  const sum = el?.closest?.('details.menu > summary');
+  const c = sum?.closest('[data-goal-card]');
+  return c ? { id: c.dataset.goalCard, what: 'menu' } : null;
+}
+// The element for { id, what } in the goals list, or null.
+function goalControlEl({ id, what }) {
+  const list = $('goals-list');
+  if (what === 'grip') return list.querySelector(`.goal-grip[data-goal-grip="${CSS.escape(id)}"]`);
+  return list.querySelector(`[data-goal-card="${CSS.escape(id)}"] details.menu > summary`);
+}
+const sameGoalControl = (a, b) => !!a && !!b && a.id === b.id && a.what === b.what;
+document.addEventListener('focusin', (e) => {
+  if (!GOAL_FOCUS || !(e.target instanceof Element) || e.target === document.body) return;
+  if (!sameGoalControl(goalControlOf(e.target), GOAL_FOCUS)) GOAL_FOCUS = null;
+}, true);
+window.addEventListener('pointerdown', (e) => {
+  if (GOAL_FOCUS && !sameGoalControl(goalControlOf(e.target), GOAL_FOCUS)) GOAL_FOCUS = null;
+}, true);
+// The Active tab's goal ids as drawn (DATA, overlays and all; Upkeep left out), first to last.
+function activeGoalOrder() {
+  if (!DATA) return [];
+  const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
+  return DATA.ooda.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b)).map((g) => g.id);
+}
+// Save ids (every active goal, first to last) as the goal order: one POST /api/goal-order through press (all
+// keyed goal-order, so moves post in turn, each with the order it was made with). The overlay draws the
+// order at once (each goal's priority its new place); a refusal drops it and keeps the reason. focus: where
+// focus goes after (the moved goal id's 'grip' or 'menu'), null for none.
+function saveGoalOrder(ids, { id = null, focus = null } = {}) {
+  ids = [...ids];
+  GOAL_FOCUS = id && focus ? { id, what: focus } : null;
+  return press('goal-order', {
+    build: () => ({ action: 'goal-order', body: { ids } }),
+    overlay: {
+      data: (d) => ({ ...d, ooda: { ...d.ooda, goals: d.ooda.goals.map((g) => (ids.includes(g.id) ? { ...g, priority: ids.indexOf(g.id) + 1 } : g)) } }),
+      agrees: (raw) => ids.every((g, i) => raw.ooda.goals.find((x) => x.id === g)?.priority === i + 1),
+    },
+    apply: () => { GOAL_ORDER_ERR = ''; redrawNow(); },
+    onError: (e) => { GOAL_ORDER_ERR = `Not saved: ${e}`; },
+  });
+}
+// Move goal id to index to among the active goals and save; null (nothing done) when to is out of range or
+// its place already.
+function moveGoal(id, to, focus = null) {
+  const cur = activeGoalOrder();
+  const at = cur.indexOf(id);
+  if (at < 0 || to < 0 || to >= cur.length || to === at) return null;
+  const ids = cur.filter((x) => x !== id);
+  ids.splice(to, 0, id);
+  GOAL_FOCUS = focus ? { id, what: focus } : null;
+  return saveGoalOrder(ids, { id, focus });
+}
+// ArrowUp / ArrowDown on a goal's handle (by e.key; no modifier) moves it one place
+document.addEventListener('keydown', (e) => {
+  if (!['ArrowUp', 'ArrowDown'].includes(e.key) || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+  const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
+  if (!grip) return;
+  e.preventDefault();
+  const id = grip.dataset.goalGrip;
+  const at = activeGoalOrder().indexOf(id);
+  if (at >= 0) moveGoal(id, e.key === 'ArrowUp' ? at - 1 : at + 1, 'grip');
+});
 // Selecting a tab is a new entry (#goals, #goals?gt=met), so Back restores the tab before and a reload keeps it.
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
@@ -8078,6 +8163,16 @@ document.addEventListener('click', async (ev) => {
       onOk: () => { redraw(); },
       errId: `met-${id}`,
     });
+    return;
+  }
+  // Move up / Move down in a goal's ⋯: the menu closes, the goal moves one place and the order is saved
+  const gm = ev.target.closest('[data-goal-move]');
+  if (gm) {
+    if (gm.disabled) return;
+    const id = gm.dataset.goalId;
+    gm.closest('details')?.removeAttribute('open');
+    const at = activeGoalOrder().indexOf(id);
+    if (at >= 0) moveGoal(id, gm.dataset.goalMove === 'up' ? at - 1 : at + 1, 'menu');
     return;
   }
   const mv = ev.target.closest('[data-mdview]');
