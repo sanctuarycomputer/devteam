@@ -5379,10 +5379,12 @@ const setupSlots = Object.freeze({
       warn(`DEVTEAM_SETUP_SLOTS "${v}" is not a whole number from 1 to ${MAX}; using ${DEFAULT}`);
       return DEFAULT;
     }
-    // The first free slot, taken: holder.json written and fsynced in a private folder, then that
-    // folder renamed to <n>, which succeeds only where <n> is missing (or an empty folder).
-    function take(dir, n, me) {
-      for (let slot = 0; slot < n; slot++) {
+    // The first free slot (or only slot `only`), taken: holder.json written and fsynced in a private
+    // folder, then that folder renamed to <n>, which succeeds only where <n> is missing (or an empty
+    // folder). A failure other than <n> being occupied (a read-only or full disk) is thrown: the
+    // slots folder is broken, not busy.
+    function take(dir, n, me, only = null) {
+      for (let slot = only ?? 0; slot < (only === null ? n : only + 1); slot++) {
         const to = path.join(dir, String(slot));
         try { if (fs.readdirSync(to).length) continue; } catch {}
         const tmp = path.join(dir, `.take-${me.id}-${++attempts}`);
@@ -5392,8 +5394,9 @@ const setupSlots = Object.freeze({
           try { fs.writeSync(fd, JSON.stringify({ ...me, at: new Date().toISOString() })); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
           fs.renameSync(tmp, to);
           return slot;
-        } catch {
+        } catch (e) {
           try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+          if (!(e.syscall === 'rename' && ['ENOTEMPTY', 'EEXIST'].includes(e.code))) throw e;
         }
       }
       return null;
@@ -5490,11 +5493,15 @@ async function setupRunner(config, slots) {
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, onSignal);
   let slot = null;
+  // a slots folder that can't be made or written to stops no install: the setup runs without a slot
   let haveDir = true;
-  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {
+  const broken = (e) => {
     haveDir = false;
-    warn(`no setup slots folder (${dir}: ${e.code ?? e.message}); running worktree_setup without a slot`);
-  }
+    warn(`no usable setup slots folder (${dir}: ${e.code ?? e.message}); running worktree_setup without a slot`);
+    return null;
+  };
+  const take = (only) => { try { return slots.take(dir, n, me, only); } catch (e) { return broken(e); } };
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { broken(e); }
   if (haveDir) {
     const limit = config.deadline ?? Date.now() + config.maxWaitMs;
     const memo = {};
@@ -5502,22 +5509,32 @@ async function setupRunner(config, slots) {
     for (;;) {
       const now = Date.now();
       slots.sweep(dir, now);
-      slot = slots.take(dir, n, me);
-      if (slot !== null) break;
+      slot = take();
+      if (slot !== null || !haveDir) break;
+      // gone ones are freed for anyone; an old one is freed and taken at once, at most one a round,
+      // so a takeover never frees a slot for another waiter
       let freed = false;
+      const old = [];
       for (let s = 0; s < n; s++) {
         const verdict = slots.judge(dir, s, memo, now);
-        if (verdict === 'held') continue;
+        if (verdict === 'old') old.push([s, memo.judged[s]]);
+        else if (verdict === 'gone' && slots.free(dir, s, memo.judged[s])) freed = true;
+      }
+      if (freed) { slot = take(); if (slot !== null || !haveDir) break; }
+      if (old.length) {
+        const [s, id] = old[0];
         let h = null;
         try { h = JSON.parse(fs.readFileSync(path.join(dir, String(s), 'holder.json'), 'utf8')); } catch {}
-        if (!slots.free(dir, s, memo.judged[s])) continue;
-        freed = true;
-        if (verdict === 'old' && h?.id === memo.judged[s]) {
-          warn(`took over setup slot ${s}, held since ${h.at} by pid ${h.pid}`);
-          tookOver.push({ slot: s, pid: h.pid, since: h.at });
+        if (h?.id === id && slots.free(dir, s, id)) {
+          slot = take(s);
+          if (slot !== null) {
+            warn(`took over setup slot ${s}, held since ${h.at} by pid ${h.pid}`);
+            tookOver.push({ slot: s, pid: h.pid, since: h.at });
+            break;
+          }
+          if (!haveDir) break;
         }
       }
-      if (freed) { slot = slots.take(dir, n, me); if (slot !== null) break; }
       if (!told || Date.now() - told >= 60000) {
         let inUse = 0;
         for (let s = 0; s < n; s++) if (fs.existsSync(path.join(dir, String(s)))) inUse++;

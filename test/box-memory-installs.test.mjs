@@ -91,11 +91,12 @@ function slotFleet(name, setup) {
   const kids = [];
   // a live process of the test's own (a slot's holder), killed at the end
   const live = (opts = {}) => { const p = spawn('sleep', ['30'], { stdio: 'ignore', ...opts }); kids.push(p); return p; };
-  // 4j: no runner leaves a slot folder (or a half-taken one); the test's own holders are its to remove
+  // 4j: no runner leaves a slot folder (or a half-taken or half-freed one); the test's own holders are
+  // its to remove. Checked only when the test's body passed, so its own failure is the one reported.
   const finish = () => {
     try {
-      if (fs.existsSync(slots)) {
-        const left = fs.readdirSync(slots).filter((e) => e.startsWith('.take-') || (/^\d+$/.test(e) && !String(readHolder(slots, e)?.id ?? '').startsWith('test-')));
+      if (!S.failed && fs.existsSync(slots)) {
+        const left = fs.readdirSync(slots).filter((e) => /^\.(take|free)-/.test(e) || (/^\d+$/.test(e) && !String(readHolder(slots, e)?.id ?? '').startsWith('test-')));
         assert.deepEqual(left, [], `setup-slots holds ${left.join(', ')}: ${left.map((e) => JSON.stringify(readHolder(slots, e))).join(' ')}`);
       }
     } finally {
@@ -104,7 +105,8 @@ function slotFleet(name, setup) {
       F.done();
     }
   };
-  return { F, home, slots, role, start, startAsync, wt, live, finish };
+  const S = { F, home, slots, role, start, startAsync, wt, live, finish, failed: null };
+  return S;
 }
 const deadlineIn = (ms) => ({ DEVTEAM_SETUP_DEADLINE: String(Date.now() + ms) });
 const clock = '$(node -e "process.stdout.write(String(Date.now()))")';
@@ -120,7 +122,7 @@ test('4a: the setup leads its own process group under a node runner, and a long 
     assert.match(comm, /^node/);
     assert.notEqual(Number(ppid), r.pid, 'its parent is not the chore start process');
     assert.equal(Number(gp), r.pid, 'its parent is a child of chore start (the runner)');
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4b: at the deadline the setup\'s whole group is killed and chore start exits 124', async () => {
@@ -135,7 +137,7 @@ test('4b: at the deadline the setup\'s whole group is killed and chore start exi
     const gc = Number(fs.readFileSync(path.join(S.wt('one'), 'gc.pid'), 'utf8'));
     const ours = () => pgrep('sleep 61').filter((p) => p === gc || pgidOf(p) === sh);
     await until(() => !alive(sh) && ours().length === 0, 2000, 'the setup\'s shell and sleeps to be gone').catch((e) => { for (const p of ours()) try { process.kill(p, 'SIGKILL'); } catch {} throw e; });
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4c: with one slot, two chore starts run their setups one after the other', async () => {
@@ -148,7 +150,7 @@ test('4c: with one slot, two chore starts run their setups one after the other',
     const iv = (s) => { const t = Object.fromEntries(fs.readFileSync(path.join(S.F.base, `4c-chore-${s}.txt`), 'utf8').trim().split('\n').map((l) => l.split(' ')).map(([k, v]) => [k, Number(v)])); return [t.start, t.end]; };
     const [[s1, e1], [s2, e2]] = [iv('a'), iv('b')];
     assert.ok(e1 <= s2 || e2 <= s1, `the setups overlap: a ${s1}-${e1}, b ${s2}-${e2}`);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4d: with the one slot held by a live process, the deadline gives exit 75 and setup-slot-wait', () => {
@@ -160,7 +162,7 @@ test('4d: with the one slot held by a live process, the deadline gives exit 75 a
     assert.equal(r.status, 75, r.err);
     assert.match(r.err, /setup-slot-wait/);
     assert.match(r.err, /waiting for a setup slot \(1 of 1 in use on this machine\)/);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4e: SIGTERM to the runner ends the setup\'s whole group', async () => {
@@ -176,7 +178,7 @@ test('4e: SIGTERM to the runner ends the setup\'s whole group', async () => {
     await until(() => ours().length === 0, 3000, 'the setup\'s group (sleep 62) to be gone').catch((e) => { for (const p of ours()) try { process.kill(p, 'SIGKILL'); } catch {} throw e; });
     const r = await run;
     assert.notEqual(r.status, 0);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4e: SIGINT to a runner waiting for a slot ends chore start and leaves no half-taken slot', async () => {
@@ -188,11 +190,16 @@ test('4e: SIGINT to a runner waiting for a slot ends chore start and leaves no h
     const run = S.startAsync('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     const [runner] = await until(() => { const l = pgrep(token); return l.length && l; }, 10000, `a runner whose argv names ${token}`);
     await sleepMs(1000); // its signal handlers are set before it waits
+    const t0 = Date.now();
     process.kill(runner, 'SIGINT');
     const r = await run;
+    // ended by the signal, not by the deadline 20 s ahead
+    assert.ok(Date.now() - t0 < 8000, `chore start ended ${Date.now() - t0} ms after the SIGINT`);
     assert.notEqual(r.status, 0);
+    assert.notEqual(r.status, 75, r.stderr);
+    assert.doesNotMatch(r.stderr, /setup-slot-wait/);
     assert.deepEqual(fs.readdirSync(S.slots).filter((e) => e.startsWith('.take-')), []);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4f: a slot whose holder is dead with no live group is freed at once', () => {
@@ -200,9 +207,10 @@ test('4f: a slot whose holder is dead with no live group is freed at once', () =
   try {
     const dead = spawnSync('true').pid;
     hold(S.slots, 0, { pid: dead, start: '1' });
-    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(3000) });
+    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     assert.equal(r.status, 0, r.err);
-  } finally { S.finish(); }
+    assert.doesNotMatch(r.err, /waiting for a setup slot/, 'freed at once, with no wait for a slot');
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4f\': a slot folder whose holder.json is empty or not JSON, a minute old, is freed at once', () => {
@@ -213,11 +221,12 @@ test('4f\': a slot folder whose holder.json is empty or not JSON, a minute old, 
       fs.writeFileSync(path.join(S.slots, '0', 'holder.json'), text);
       const old = new Date(Date.now() - 60000);
       fs.utimesSync(path.join(S.slots, '0'), old, old);
-      const r = S.start(slug, { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(3000) });
+      const r = S.start(slug, { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
       assert.equal(r.status, 0, `${slug}: ${r.err}`);
+      assert.doesNotMatch(r.err, /waiting for a setup slot/, 'freed at once, with no wait for a slot');
       assert.equal(fs.existsSync(path.join(S.slots, '0')), false);
     }
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4g: a slot whose holder pid is alive with another start time (a reused pid) is freed at once', () => {
@@ -225,9 +234,10 @@ test('4g: a slot whose holder pid is alive with another start time (a reused pid
   try {
     const p = S.live();
     hold(S.slots, 0, { pid: p.pid, start: 'not-its-start' });
-    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(3000) });
+    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     assert.equal(r.status, 0, r.err);
-  } finally { S.finish(); }
+    assert.doesNotMatch(r.err, /waiting for a setup slot/, 'freed at once, with no wait for a slot');
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4g\': a dead runner whose group lives holds its slot only while the group leader\'s start time matches', () => {
@@ -236,12 +246,13 @@ test('4g\': a dead runner whose group lives holds its slot only while the group 
     const dead = spawnSync('true').pid;
     const g = S.live({ detached: true });
     hold(S.slots, 0, { pid: dead, start: '1', pgid: g.pid, leader_start: 'not-its-start' });
-    const freed = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(3000) });
+    const freed = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     assert.equal(freed.status, 0, freed.err);
+    assert.doesNotMatch(freed.err, /waiting for a setup slot/, 'freed at once, with no wait for a slot');
     hold(S.slots, 0, { pid: dead, start: '1', pgid: g.pid, leader_start: startOf(g.pid) });
     const held = S.start('two', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(2000) });
     assert.equal(held.status, 75, held.err);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4h: a slot held past 15 minutes is taken over, warned and logged', () => {
@@ -250,8 +261,9 @@ test('4h: a slot held past 15 minutes is taken over, warned and logged', () => {
     const p = S.live();
     const at = new Date(Date.now() - 16 * 60000).toISOString();
     hold(S.slots, 0, { pid: p.pid, start: startOf(p.pid), at });
-    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(3000) });
+    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     assert.equal(r.status, 0, r.err);
+    assert.doesNotMatch(r.err, /waiting for a setup slot/, 'freed at once, with no wait for a slot');
     assert.match(r.err, new RegExp(`took over setup slot 0, held since ${at.replace(/\./g, '\\.')} by pid ${p.pid}`));
     const logDir = path.join(S.F.old, 'docs/devteam/run/log');
     const obs = fs.readdirSync(logDir).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).filter((o) => o.type === 'observation' && o.kind === 'setup-slot-taken-over');
@@ -259,7 +271,7 @@ test('4h: a slot held past 15 minutes is taken over, warned and logged', () => {
     assert.equal(obs[0].source, 'kit');
     assert.equal(obs[0].subject, 'setup-slot-0');
     assert.match(obs[0].detail, new RegExp(`${p.pid}`));
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4h\': a runner whose slot was taken over leaves the taker\'s slot alone', async () => {
@@ -284,7 +296,7 @@ test('4h\': a runner whose slot was taken over leaves the taker\'s slot alone', 
     assert.equal(c.status, 0, c.stderr);
     assert.match(b.stderr, /took over setup slot 0/);
     assert.ok(times('c').start >= times('b').end, `C started at ${times('c').start}, before B ended at ${times('b').end}`);
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
 test('4i: DEVTEAM_SETUP_SLOTS outside 1-8 warns naming the value and gives two slots', async () => {
@@ -301,7 +313,22 @@ test('4i: DEVTEAM_SETUP_SLOTS outside 1-8 warns naming the value and gives two s
       const [[s1, e1], [s2, e2]] = [iv(`${v}-a`), iv(`${v}-b`)];
       assert.ok(s1 < e2 && s2 < e1, `${v}: the two setups ran one after the other (a ${s1}-${e1}, b ${s2}-${e2})`);
     }
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+test('a slots folder that can\'t be written to stops no install: warned, run without a slot', { skip: process.getuid?.() === 0 && 'root writes through a read-only folder' }, () => {
+  const S = slotFleet('installs-ro', (F) => `touch ${F.base}/ro.ran`);
+  try {
+    fs.mkdirSync(S.slots, { recursive: true });
+    fs.chmodSync(S.slots, 0o555);
+    const t0 = Date.now();
+    const r = S.start('one', { DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
+    assert.equal(r.status, 0, r.err);
+    assert.ok(Date.now() - t0 < 15000, `took ${Date.now() - t0} ms`);
+    assert.match(r.err, /no usable setup slots folder .*running worktree_setup without a slot/);
+    assert.doesNotMatch(r.err, /waiting for a setup slot/);
+    assert.ok(fs.existsSync(path.join(S.F.base, 'ro.ran')), 'the setup ran');
+  } catch (e) { S.failed = e; throw e; } finally { try { fs.chmodSync(S.slots, 0o755); } catch {} S.finish(); }
 });
 
 test('2g: a setup that itself exits 75 or 124 is an ordinary failure (exit 1)', () => {
@@ -313,5 +340,5 @@ test('2g: a setup that itself exits 75 or 124 is an ordinary failure (exit 1)', 
       assert.equal(r.status, 1, `${code}: ${r.err}`);
       assert.match(r.err, /worktree_setup failed in /);
     }
-  } finally { S.finish(); }
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
