@@ -4,6 +4,9 @@
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
 # workers run), and each project at a host of its own. What lasts lives on /data.
 #
+# Until the gateway change (kit-277) ships, the project hosts below don't answer and the older addresses
+# do (<box> is the box's name): <port>.<box> for a project's dashboard, public.<box>/<project>/<slug>/ for
+# a public page, <box>/public/publish?port=... for Publish, and /box.json says box: 1.
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
 # at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
 # pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
