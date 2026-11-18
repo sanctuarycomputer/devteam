@@ -906,6 +906,9 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       ['Authorization: Basic YWRtaW46c2VjcmV0', 'Authorization: [redacted] [token]'],
       ['Token validation failed; Basic authentication required', null],
       ['set address=12 Main St, then', 'set address=[redacted] Main St, then'],
+      ['deploy 3a1b1fc44309722f3961514907971e2eb6fc442a went out', null],
+      ['cc4242424242424242 end', 'cc[card] end'],
+      ['card_4242 4242 4242 4242', 'card_[card]'],
       // what stays: classes, paths, line numbers, timestamps, versions, ids, shas, hosts
       ['ActiveRecord::RecordNotFound in Admin::UsersController#show at app/models/user.rb:42', null],
       ['at 2026-11-05T12:34:56.789Z (12:30:00) v1.2.3 order 12345678 req 9f86d081-884c-4d63-a0e3-37b3f1d5e6a2', null],

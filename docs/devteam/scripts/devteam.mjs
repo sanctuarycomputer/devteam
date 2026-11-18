@@ -19439,6 +19439,8 @@ const sensorObserveOnce = (m, fields) => (sensorKeys().has(fields.source_key) ? 
 // well (ids and numbers out of its fingerprints and templates) gives it less to find.
 const SCRUB_KEY = String.raw`[\w-]*?(?:password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|session(?:[_-]?id)?|ssn|dob|date[_-]?of[_-]?birth|birth[_-]?date|address)`;
 const luhn = (digits) => { let s = 0; for (let i = 0; i < digits.length; i++) { let d = +digits[digits.length - 1 - i]; if (i % 2) { d *= 2; if (d > 9) d -= 9; } s += d; } return s % 10 === 0; };
+// The alphanumeric token around s[off, off+len) is exactly 40 or 64 hex characters: a full sha.
+const inFullSha = (s, off, len) => { let a = off; let b = off + len; while (a > 0 && /[0-9A-Za-z]/.test(s[a - 1])) a--; while (b < s.length && /[0-9A-Za-z]/.test(s[b])) b++; return (b - a === 40 || b - a === 64) && /^[0-9A-Fa-f]+$/.test(s.slice(a, b)); };
 const entropy = (s) => { const c = {}; for (const ch of s) c[ch] = (c[ch] ?? 0) + 1; return Object.values(c).reduce((e, n) => e - (n / s.length) * Math.log2(n / s.length), 0); };
 const SCRUB_RULES = [
   // headers and URLs first, while their shape is intact
@@ -19457,7 +19459,8 @@ const SCRUB_RULES = [
   [/\b(?:(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|sntry[su]_[A-Za-z0-9=_+/-]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{36}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|HRKU-[A-Za-z0-9_-]{20,})/g, '[key]'],
   [/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,254}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/g, '[email]'],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
-  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x) => (luhn(x.replace(/\D/g, '')) ? '[card]' : x)],
+  // a Luhn-valid run inside a whole 40- or 64-hex git sha is the sha's, not a card (inFullSha)
+  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x, off, s) => (luhn(x.replace(/\D/g, '')) && !inFullSha(s, off, x.length) ? '[card]' : x)],
   [/(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.])/g, '[ip]'],
   [/(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])/g, (x) => (/\d/.test(x) && net.isIPv6(x) ? '[ip]' : x)],
   [/(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])\d{3,4}[ .-]\d{3,4}(?!\w)/g, '[phone]'],
