@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { findings, fixture, MENU } from './lib/accounts-fixture.mjs';
+import { findings, fixture, FULL, MENU, ROOM } from './lib/accounts-fixture.mjs';
 import { hasTmux, json, until, write } from './lib/kit.mjs';
 
 test('a stopped supervisor: reported, in tmux or not, with or without cswap, and never typed into', { skip: !hasTmux }, async () => {
@@ -222,5 +222,132 @@ test("the supervisor's own pane: a lost Enter is pressed again while only the ha
       assert.equal(s.keys(), '', `left alone: ${why}`);
       assert.ok(fs.existsSync(sent), `the text is still there, so the record is kept: ${why}`);
     }
+  } finally { F.done(); }
+});
+
+// After an account switch Claude Code can stop a session that waited on its limit with this line:
+// the process has the new login and wants only a prompt, so the kit types one (kit-290).
+const PROMPT = 'The kit: your login changed and the account has room now. Carry on.';
+const STOP = 'Automatic continue stopped · your login changed or ended · send a prompt to continue';
+const RULE = '─'.repeat(60);
+// the old limit banner above the stop, as on the incident's panes
+const stop = (mark = '⎿  ', input = '❯ ') => [MENU[0], `${mark}${STOP}`, RULE, input, RULE];
+// A supervisor's pane, made here: the fixture's agent sets no environment. The role is always set,
+// to the supervisor's or to nothing, so the tmux server's own environment can't decide it.
+function supPane(F, win, shown, { role = 'supervisor', cwd = F.root } = {}) {
+  const keys = path.join(F.base, `${win}.keys`);
+  const prog = path.join(F.base, `${win}.cjs`);
+  write(keys, '');
+  write(prog, `const fs=require('fs');console.log(${JSON.stringify(shown)}.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>fs.appendFileSync(${JSON.stringify(keys)},d));`);
+  if (spawnSync('tmux', ['has-session', '-t', `=${F.session}`]).status !== 0) execFileSync('tmux', ['new-session', '-d', '-s', F.session, '-n', 'dashboard', '-x', '120', '-y', '30', 'sleep 600']);
+  fs.mkdirSync(cwd, { recursive: true });
+  execFileSync('tmux', ['new-window', '-d', '-t', `=${F.session}:`, '-n', win, '-c', cwd, '-e', `DEVTEAM_ROLE=${role}`, process.execPath, prog]);
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:${win}`);
+  return { keys: () => fs.readFileSync(keys, 'utf8'), shows: () => spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:${win}`], { encoding: 'utf8' }).stdout };
+}
+const drawn = (...panes) => until(() => panes.every((p) => /Automatic|continue|\[y\/n\]|Stop and wait/.test(p.shows())), 'the panes drawn');
+
+test('a supervisor stopped by a login change is sent one continue prompt once the account has room', { skip: !hasTmux }, async () => {
+  const F = fixture('login-sup');
+  try {
+    // its transcript ends on the limit, so supervisor_limit reads set until it is continued
+    const slug = fs.realpathSync(F.root).replace(/[^a-zA-Z0-9]/g, '-');
+    const rl = { type: 'assistant', timestamp: new Date(Date.now() - 3600000).toISOString(), error: 'rate_limit', isApiErrorMessage: true, message: { content: [{ type: 'text', text: "You've hit your weekly limit" }] } };
+    write(path.join(F.base, 'claude', 'projects', slug, 's.jsonl'), `${JSON.stringify({ type: 'user', message: { content: 'You are the supervisor for this repository' } })}\n${JSON.stringify(rl)}\n`);
+    F.set(FULL);
+    const s = supPane(F, 'sup', stop());
+    await drawn(s);
+    F.tick();
+    F.tick();
+    assert.equal(s.keys(), '', 'the account is still full');
+    assert.match(F.state().supervisor_limit?.text ?? '', /weekly limit/);
+    F.set(ROOM, `${JSON.stringify({ event: 'switch', to: 'b' })}\n`, 0);
+    F.tick('--rotate');
+    assert.equal(s.keys(), '', 'not in the tick that switched');
+    F.set(ROOM);
+    const out = F.tick();
+    await until(() => s.keys() === `${PROMPT}\r`, 'the prompt and one Enter');
+    assert.match(out, /continued supervisor: its login changed/);
+    assert.doesNotMatch(out, /restarted supervisor/);
+    assert.deepEqual(F.state().resumed, ['supervisor']);
+    assert.equal(F.state().supervisor_limit, null, 'it is carrying on');
+    assert.ok(json(F.run(['log', '--json']).stdout).some((o) => o.kind === 'login-continued' && o.subject === 'supervisor'));
+    assert.deepEqual(F.relaunched(), [], 'nothing relaunched');
+    F.tick();
+    F.tick();
+    assert.equal(s.keys(), `${PROMPT}\r`, 'once per stop');
+  } finally { F.done(); }
+  // only the supervisor's own pane: its process has the role, and it started in the main checkout
+  const G = fixture('login-sup-who');
+  try {
+    const norole = supPane(G, 'norole', stop(), { role: '' });
+    await drawn(norole);
+    for (let i = 0; i < 3; i++) G.tick();
+    const away = supPane(G, 'away', stop(), { cwd: path.join(G.base, 'away') });
+    await drawn(away);
+    for (let i = 0; i < 3; i++) G.tick();
+    assert.equal(norole.keys(), '', 'a process without the role');
+    assert.equal(away.keys(), '', 'a pane started outside the main checkout');
+    const right = supPane(G, 'right', stop());
+    await drawn(right);
+    for (let i = 0; i < 3 && right.keys() === ''; i++) G.tick();
+    await until(() => right.keys() === `${PROMPT}\r`, 'the real one continued');
+    assert.equal(norole.keys() + away.keys(), '');
+  } finally { G.done(); }
+});
+
+test("a worker or planner the kit launched, stopped by a login change, is sent one continue prompt; never one it didn't launch", { skip: !hasTmux }, async () => {
+  const F = fixture('login-panes');
+  try {
+    // a bare stop under the banner: limitStop alone would read it as a limit stop and relaunch
+    const w = F.worker('kit-9-w', stop(''));
+    const p = F.planner('p', stop());
+    const wrapped = F.planner('wrap', [MENU[0], '⎿  Automatic continue stopped · your login changed or ended · send a prompt', '   to continue', RULE, '❯ ', RULE]);
+    const enter = F.planner('enter', stop('⎿  ', `❯ ${PROMPT}`));
+    const nw = F.worker('kit-9-n', stop(), { launched: false });
+    const np = F.planner('n', stop(), { launched: false });
+    const seen = F.planner('seen', [...stop().slice(0, 2), `> ${PROMPT}`, '⏺ Carrying on.', RULE, '❯ ', RULE]);
+    const later = F.planner('later', [...stop().slice(0, 2), '⏺ Done with that.', RULE, '❯ ', RULE]);
+    const indented = F.planner('indented', [...stop().slice(0, 2), '  ⎿  Read 3 files', RULE, '❯ ', RULE]);
+    await drawn(w, p, wrapped, enter, nw, np, seen, later, indented);
+    const want = [[w, `${PROMPT}\r`], [p, `${PROMPT}\r`], [wrapped, `${PROMPT}\r`], [enter, '\r']];
+    const resumed = [];
+    F.tick();
+    for (let i = 0; i < 8 && !want.every(([x, k]) => x.keys() === k); i++) {
+      const out = F.tick();
+      assert.ok((out.match(/continued /g) ?? []).length <= 1, 'one a tick');
+      resumed.push(...F.state().resumed);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    for (const [x, k] of want) await until(() => x.keys() === k, `keys ${JSON.stringify(k)}`);
+    assert.deepEqual(resumed.sort(), ['kit-9-w', 'plan-enter', 'plan-p', 'plan-wrap']);
+    F.tick();
+    F.tick();
+    for (const [x, k] of want) assert.equal(x.keys(), k, 'once per stop');
+    for (const x of [nw, np, seen, later, indented]) assert.equal(x.keys(), '');
+    assert.deepEqual(F.relaunched(), [], 'a prompt, never a relaunch');
+  } finally { F.done(); }
+});
+
+test("a login-change stop with someone's text in the input, quoted, as content, busy or under a prompt is left alone", { skip: !hasTmux }, async () => {
+  const F = fixture('login-not');
+  try {
+    const panes = [
+      stop('⎿  ', "❯ hold on, I'm looking"),
+      [MENU[0], `⎿  ${STOP}`, '╭──╮', '│ > some text │', '╰──╯'],
+      [MENU[0], '⏺ It said "Automatic continue stopped · your login changed"', RULE, '❯ ', RULE],
+      [`> ${STOP}`, RULE, '❯ ', RULE],
+      [`12 ${STOP}`, RULE, '❯ ', RULE],
+      [...stop(), '✻ Thinking… (esc to interrupt)'],
+      [...stop().slice(0, 2), 'Allow this? [y/n]', RULE, '❯ ', RULE],
+      [...stop().slice(0, 2), '  1. Upgrade your plan', '  2. Stop and wait for limit to reset', RULE, '❯ ', RULE],
+    ].map((shown, i) => F.planner(`not${i}`, shown));
+    const ctl = F.planner('ctl', stop());
+    await drawn(...panes, ctl);
+    for (let i = 0; i < 6 && ctl.keys() === ''; i++) F.tick();
+    await until(() => ctl.keys() === `${PROMPT}\r`, 'the control continued');
+    for (let i = 0; i < 3; i++) F.tick();
+    panes.forEach((x, i) => assert.equal(x.keys(), '', `left alone: pane ${i}`));
+    assert.deepEqual(F.relaunched(), []);
   } finally { F.done(); }
 });
