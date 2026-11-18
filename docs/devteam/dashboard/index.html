@@ -1844,8 +1844,10 @@ document.addEventListener('click', (e) => {
   effSuggGo(it, e.clientX, e.clientY);
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key !== 'Enter' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   const t = e.target;
+  // Space presses a focused card that is a button (a Board ticket or planner card), as a <button> would
+  const space = e.key === ' ' && !!t?.matches?.('[data-open][role="button"][tabindex]');
+  if ((e.key !== 'Enter' && !space) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
   // a focused suggestion starts its thread; a focused row with a record (data-open, focusable) opens it
   if (t?.matches?.('#efficiency [data-sugg]')) { e.preventDefault(); const r = t.getBoundingClientRect(); effSuggGo(t, r.right, r.top + 10); return; }
   if (t?.matches?.('[data-open][tabindex]')) { e.preventDefault(); location.hash = t.dataset.open; }
@@ -2145,6 +2147,7 @@ function filtersNow(page) {
   const f = {};
   if (h.page === page) for (const k of STATE_KEYS[page] || []) if (h.state[k]) f[k] = h.state[k];
   if (f.goal && !filterGoals().some((g) => g.id === f.goal)) delete f.goal;
+  if (f.att && f.att !== '1') delete f.att; // the toggle writes att=1; any other value is no filter
   if (page === 'progress') {
     if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
     if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;

@@ -304,6 +304,22 @@ test('header filters on the Board: Goal, Feature, Repo and Needs attention, each
   await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&repo=devteam-kit&att=1`)}`, 'the remembered filters in the hash');
   await soon(`${CARDS} === 1`, 'and the cards they leave');
   assert.deepEqual(await p.ev('JSON.parse(localStorage.getItem("devteam.board.filters"))'), { goal: ids.goal2, feat: 'receipts', repo: 'devteam-kit', att: '1' });
+
+  // a read that changes nothing leaves the controls as they are (a select replaced under a press loses the press)
+  await p.ev(`window.__sel = ${ctl('goal')}`);
+  await new Promise((r) => setTimeout(r, 1200)); // four reads at the init's 300 ms
+  assert.equal(await p.ev(`window.__sel === ${ctl('goal')} && window.__sel.isConnected`), true, 'the Goal select is the same element after reads');
+
+  // a goal change clears the feature (the old goal's); the repo and the toggle stay
+  await pick(p, 'goal', ids.goal1);
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal1}&repo=devteam-kit&att=1`)}`, 'goal1: no feat');
+  assert.equal(await p.ev(`${ctl('feat')}.value`), '', 'All features');
+
+  // att=1 only: a hand-made att=0 is no filter
+  await p.ev('localStorage.clear()');
+  await go('#board?att=0');
+  await soon(`${CARDS} === ${patch.tickets.length}`, 'att=0: every card');
+  assert.equal(await p.ev(`${ctl('att')}.getAttribute('aria-pressed')`), 'false', 'the toggle off');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
@@ -632,12 +648,27 @@ test('the Board on the shell: planners strip, columns, card heads and pills, hel
     assert.equal(await p.ev("document.body.classList.contains('peek-open') || !document.getElementById('drawer').hidden || location.hash.includes('planner/')"), false, 'no planner peek');
   });
 
-  await t.test('a click and Enter on a planner card open its peek', async () => {
+  await t.test('the status pills keep their order when a card has several: usage limit, held, high risk, then the component', async () => {
+    await board();
+    // a card the fixture doesn't hold, drawn by the page's own pills: every status at once
+    const words = await p.ev(`(() => { const d = document.createElement('div'); d.innerHTML = pillsOf(ticketPills({ id: 'x-1', stage: 'building', phase: 'build', task: 'T2', waiting: { kind: 'limit', line: 'limit' }, held: 'later', risk: 'high', component: 'pay' }, new Set(['x-1']))); return [...d.querySelectorAll('.pill')].map((x) => x.textContent); })()`);
+    assert.deepEqual(words, ['critical path', 'building, task 2', 'usage limit', 'held', 'high risk', 'pay']);
+    const prompt = await p.ev(`(() => { const d = document.createElement('div'); d.innerHTML = pillsOf(ticketPills({ id: 'x-2', stage: 'building', phase: 'build', waiting: { kind: 'prompt', line: 'p' }, held: 'later', risk: 'high', component: 'pay' }, new Set())); return [...d.querySelectorAll('.pill')].map((x) => x.textContent); })()`);
+    assert.deepEqual(prompt, ['building', 'stuck on a prompt', 'held', 'high risk', 'pay']);
+  });
+
+  await t.test('a click, Enter and Space on a planner card open its peek', async () => {
     await board();
     const card = `document.querySelector('#planners [data-planner="${ids.planNoWindow}"]')`;
     assert.deepEqual(await p.ev(`[${card}.tagName, ${card}.getAttribute('role'), ${card}.getAttribute('tabindex')]`), ['DIV', 'button', '0']);
     assert.equal(await p.ev(`(() => { const c = ${card}; c.focus(); if (document.activeElement !== c) return 'not focused'; c.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); return true; })()`), true);
     await soon(`decodeURIComponent(location.hash) === ${J(`#planner/${ids.planNoWindow}`)} && !document.getElementById('drawer').hidden`, 'Enter: the planner peek');
+    // Space, as on a <button>; a ticket card too
+    for (const sel of [`#planners [data-planner="${ids.planNoWindow}"]`, `#board-cols [data-ticket="${ids.tPlain}"]`]) {
+      await board();
+      assert.equal(await p.ev(`(() => { const c = document.querySelector(${J(sel)}); c.focus(); if (document.activeElement !== c) return 'not focused'; return c.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, cancelable: true })); })()`), false, 'Space is taken (no page scroll)');
+      await soon(`!document.getElementById('drawer').hidden && /^#(planner|ticket)[/]/.test(location.hash)`, `Space on ${sel}: its peek`);
+    }
     await board();
     await p.click(`#planners [data-planner="${ids.planNoWindow}"] .pl-head`);
     await soon(`decodeURIComponent(location.hash) === ${J(`#planner/${ids.planNoWindow}`)} && !document.getElementById('drawer').hidden`, 'a click: the planner peek');
