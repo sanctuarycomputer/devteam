@@ -19494,7 +19494,8 @@ const sensorObserveOnce = (m, fields) => (sensorKeys().has(fields.source_key) ? 
 const SCRUB_KEY = String.raw`[\w-]*?(?:password|passwd|passphrase|secret|token|api[_-]?key|authorization|cookie|session(?:[_-]?id)?|ssn|dob|date[_-]?of[_-]?birth|birth[_-]?date|address)`;
 const luhn = (digits) => { let s = 0; for (let i = 0; i < digits.length; i++) { let d = +digits[digits.length - 1 - i]; if (i % 2) { d *= 2; if (d > 9) d -= 9; } s += d; } return s % 10 === 0; };
 // The alphanumeric token around s[off, off+len) is exactly 40 or 64 hex characters: a full sha.
-const inFullSha = (s, off, len) => { let a = off; let b = off + len; while (a > 0 && /[0-9A-Za-z]/.test(s[a - 1])) a--; while (b < s.length && /[0-9A-Za-z]/.test(s[b])) b++; return (b - a === 40 || b - a === 64) && /^[0-9A-Fa-f]+$/.test(s.slice(a, b)); };
+// The scan stops once the run passes 64 (never a full sha), so each match costs a constant.
+const inFullSha = (s, off, len) => { let a = off; let b = off + len; while (a > 0 && b - a <= 64 && /[0-9A-Za-z]/.test(s[a - 1])) a--; while (b < s.length && b - a <= 64 && /[0-9A-Za-z]/.test(s[b])) b++; return (b - a === 40 || b - a === 64) && /^[0-9A-Fa-f]+$/.test(s.slice(a, b)); };
 const entropy = (s) => { const c = {}; for (const ch of s) c[ch] = (c[ch] ?? 0) + 1; return Object.values(c).reduce((e, n) => e - (n / s.length) * Math.log2(n / s.length), 0); };
 const SCRUB_RULES = [
   // headers and URLs first, while their shape is intact
