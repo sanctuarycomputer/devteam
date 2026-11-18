@@ -114,6 +114,20 @@ test('parseArgs', () => {
   assert.equal(R.parseArgs([], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 3);
   assert.equal(R.parseArgs(['--concurrency', '4'], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 4);
   assert.deepEqual(R.parseArgs(['--shard', '2/3'], {}, root).shard, { i: 2, n: 3 });
+  // the chrome group's cap: the flag, then the variable, then --concurrency on CI, else 1
+  const cc = (argv, env) => R.parseArgs(argv, env, root).chromeConcurrency;
+  assert.equal(cc([], {}), 1);
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true' }), 3);
+  assert.equal(cc(['--concurrency', '3'], { CI: 'TRUE' }), 3);
+  assert.equal(cc(['--concurrency', '3'], { CI: '1' }), 3);
+  for (const ci of ['', '0', 'false', 'False']) assert.equal(cc(['--concurrency', '3'], { CI: ci }), 1, `CI=${ci}`);
+  assert.equal(cc([], { DEVTEAM_TEST_CONCURRENCY: '4', CI: 'true' }), 4, 'CI follows the concurrency from the variable too');
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true', DEVTEAM_TEST_CHROME_CONCURRENCY: '2' }), 2, 'the variable beats CI');
+  assert.equal(cc([], { DEVTEAM_TEST_CHROME_CONCURRENCY: '' }), 1, 'empty is unset');
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true', DEVTEAM_TEST_CHROME_CONCURRENCY: '' }), 3, 'empty is unset, so CI decides');
+  assert.equal(cc(['--chrome-concurrency', '3'], { DEVTEAM_TEST_CHROME_CONCURRENCY: '2' }), 3, 'the flag beats the variable');
+  for (const bad of [['--chrome-concurrency', '0'], ['--chrome-concurrency', 'abc'], ['--chrome-concurrency']]) assert.throws(() => R.parseArgs(bad, {}, root), R.UsageError, bad.join(' '));
+  assert.throws(() => R.parseArgs([], { DEVTEAM_TEST_CHROME_CONCURRENCY: '0' }, root), R.UsageError);
   const link = path.join(fresh('link'), 'kit');
   fs.symlinkSync(root, link);
   try {
@@ -168,6 +182,30 @@ test('alone files run first, one at a time', () => {
   const plan = R.planRun({ files: ['test/search.test.mjs', 'test/bounds.test.mjs', 'test/kit.test.mjs'], groups: null, shard: null }, root);
   const steps = R.schedule(plan, 3);
   assert.deepEqual(steps.map((st) => [st.files.map((p) => p.file), st.limit]), [[['test/bounds.test.mjs'], 1], [['test/search.test.mjs', 'test/kit.test.mjs'], 3]]);
+  assert.equal(steps[0].caps, undefined, 'the alone step has no caps');
+  assert.deepEqual(steps[1].caps, { chrome: 3 }, 'no chrome concurrency given: no tighter cap than the step');
+  assert.deepEqual(R.schedule(plan, 3, 1)[1].caps, { chrome: 1 });
+});
+
+test('nextIndex skips a group at its cap', () => {
+  const q = [{ group: 'chrome' }, { group: 'chrome' }, { group: 'rest' }];
+  assert.equal(R.nextIndex(q, new Map(), { chrome: 1 }), 0);
+  assert.equal(R.nextIndex(q, new Map([['chrome', 1]]), { chrome: 1 }), 2);
+  assert.equal(R.nextIndex(q.slice(0, 2), new Map([['chrome', 1]]), { chrome: 1 }), -1);
+  assert.equal(R.nextIndex(q, new Map([['chrome', 1]]), { chrome: 5 }), 0, 'a cap above what runs');
+  assert.equal(R.nextIndex(q, new Map([['chrome', 1]]), {}), 0, 'no caps');
+  assert.equal(R.nextIndex([], new Map(), { chrome: 1 }), -1);
+});
+
+test('runPool rejects when a file cannot start, and settles when it starts nothing', { timeout: 5000 }, async () => {
+  const stub = (p) => { if (p.file === 'b') throw new Error('boom'); return { done: Promise.resolve({ file: p.file }) }; };
+  const items = [[{ file: 'a', group: 'rest' }, 1], [{ file: 'b', group: 'rest' }, 1]];
+  await assert.rejects(R.runPool(items, 1, { running: new Set(), stopping: false }, {}, stub), /boom/);
+  assert.deepEqual(await R.runPool([], 2, { running: new Set(), stopping: false }, {}, stub), []);
+  assert.deepEqual(await R.runPool(items, 2, { running: new Set(), stopping: true }, {}, stub), [], 'a stopping pool starts nothing');
+  const ok = (p) => ({ done: new Promise((r) => setTimeout(() => r({ file: p.file }), p.file === 'a' ? 50 : 10)) });
+  const three = [[{ file: 'a', group: 'chrome' }, 1], [{ file: 'b', group: 'chrome' }, 1], [{ file: 'c', group: 'rest' }, 1]];
+  assert.deepEqual((await R.runPool(three, 2, { running: new Set(), stopping: false }, { chrome: 1 }, ok)).map((x) => x.file), ['c', 'a', 'b'], 'c beside a, b after a; results in end order');
 });
 
 test('childArgs', () => {
@@ -206,8 +244,9 @@ const waitFor = async (f, ms) => { for (let i = 0; i < ms / 100; i++) { if (fs.e
 // its leader, hasn't exited, so the group can't be someone else's) and the call rejects.
 function runRunner(args, { env, cwd = root, deadline = 60000, umask, script = runMjs } = {}) {
   const argv = umask ? ['sh', ['-c', `umask ${umask}; exec "$0" "$@"`, process.execPath, script, ...args]] : [process.execPath, [script, ...args]];
-  // the caller's DEVTEAM_TEST_CONCURRENCY would change what the runner prints; a test sets its own
-  const child = spawn(argv[0], argv[1], { cwd, env: nodeEnv({ DEVTEAM_TEST_CONCURRENCY: undefined, ...env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // the caller's DEVTEAM_TEST_CONCURRENCY would change what the runner prints, and its CI (GitHub's
+  // CI=true) or DEVTEAM_TEST_CHROME_CONCURRENCY the chrome group's cap; a test sets its own
+  const child = spawn(argv[0], argv[1], { cwd, env: nodeEnv({ DEVTEAM_TEST_CONCURRENCY: undefined, DEVTEAM_TEST_CHROME_CONCURRENCY: undefined, CI: undefined, ...env }), detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const out = [], err = [];
   child.stdout.on('data', (b) => out.push(b));
   child.stderr.on('data', (b) => err.push(b));
@@ -633,7 +672,8 @@ test('a hung file is killed with its tree, and a survivor is refused tmux', asyn
 
 test('an output pipe that closes stops the run and cleans up every running file', async (t) => {
   const { out, env, S } = hangEnv(t);
-  const run = runRunner(['--concurrency', '2', '--file-timeout', '20', fx('hang.mjs'), fx('slow.mjs')], { env, deadline: 45000 });
+  const timings = path.join(S, 'timings.json');
+  const run = runRunner(['--concurrency', '2', '--file-timeout', '20', '--timings', timings, fx('hang.mjs'), fx('slow.mjs')], { env, deadline: 45000 });
   // once the hung file is under way, our end of the runner's stdout goes; its next write hits EPIPE:
   // slow.mjs ending at about 6 s or, if it ended first, hang.mjs's timeout at 20 s
   assert.ok(await waitFor(path.join(out, 'pids.json'), 30000), 'the fixture started');
@@ -641,6 +681,7 @@ test('an output pipe that closes stops the run and cleans up every running file'
   run.child.stdout.destroy();
   const r = await run;
   assert.equal(r.code, 141, r.stderr);
+  assert.equal(fs.existsSync(timings), false, 'an interrupted run writes no timings');
   await allDead(readJson(path.join(out, 'pids.json')), S);
 });
 
@@ -654,6 +695,109 @@ for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTER
     const r = await run;
     assert.equal(r.code, code, r.stdout + r.stderr);
     assert.match(r.stdout, /^interrupted$/m);
+    assert.doesNotMatch(r.stdout, /^summary:/m, 'an interrupted run prints no summary');
     await allDead(readJson(path.join(out, 'pids.json')), S);
   });
 }
+
+// ---- the chrome group's cap (kit-597) ----
+// Fixtures written at run time, into a folder of the test's own. Each records its start, waits until
+// another fixture's run overlaps its own (a start, and no end yet or an end at or after its own start)
+// or its wait passes, then records its end and whether it saw one. Files are written whole (renamed
+// into place). The chrome line is a quoted one-line string here, so this file still groups as rest.
+const CHROME_LINE = "if (process.env.DTR_NEVER) await import('./lib/chrome.mjs');";
+const TIMED_BODY = [
+  "import fs from 'node:fs';",
+  "import path from 'node:path';",
+  "import { test } from 'node:test';",
+  'const out = process.env.DTR_FIXTURE_OUT;',
+  "const write = (f, o) => { const t = path.join(out, '.tmp-' + NAME); fs.writeFileSync(t, JSON.stringify(o)); fs.renameSync(t, path.join(out, f)); };",
+  "const read = (f) => { try { return JSON.parse(fs.readFileSync(path.join(out, f), 'utf8')); } catch { return null; } };",
+  "test('timed', async () => {",
+  '  const start = Date.now();',
+  "  write('start-' + NAME + '.json', { at: start });",
+  "  const overlaps = () => fs.readdirSync(out).some((f) => { const m = /^start-(.+)\\.json$/.exec(f); if (!m || m[1] === NAME) return false; const end = read('end-' + m[1] + '.json'); return !end || end.at >= start; });",
+  '  let saw = overlaps();',
+  '  while (!saw && Date.now() - start < WAIT_MS) { await new Promise((r) => setTimeout(r, 50)); saw = overlaps(); }',
+  "  write('end-' + NAME + '.json', { at: Date.now(), saw });",
+  '});',
+];
+const timedSource = (name, { chrome, waitMs }) => [...(chrome ? [CHROME_LINE] : []), `const NAME = ${JSON.stringify(name)}, WAIT_MS = ${waitMs};`, ...TIMED_BODY, ''].join('\n');
+const writeTimed = (dir, name, opts) => { const f = path.join(dir, `${name}.mjs`); fs.writeFileSync(f, timedSource(name, opts)); return f; };
+const windowOf = (out, name) => ({ start: readJson(path.join(out, `start-${name}.json`)).at, ...(({ at, saw }) => ({ end: at, saw }))(readJson(path.join(out, `end-${name}.json`))) });
+// at or after, as the fixtures count it: two files can start and end in the same millisecond
+const overlap = (a, b) => a.start <= b.end && b.start <= a.end;
+const timedEnv = (t) => {
+  const f = fixtureEnv(t);
+  const dir = fresh('timed');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  return { ...f, dir };
+};
+
+test('the timed fixtures group as chrome and rest', () => {
+  assert.equal(R.groupOf('/x/a.mjs', timedSource('a', { chrome: true, waitMs: 1 })), 'chrome');
+  assert.equal(R.groupOf('/x/r.mjs', timedSource('r', { chrome: false, waitMs: 1 })), 'rest');
+});
+
+test('off CI, two chrome files run one after the other', async (t) => {
+  const { out, env, dir } = timedEnv(t);
+  const files = ['a', 'b'].map((n) => writeTimed(dir, n, { chrome: true, waitMs: 1500 }));
+  const r = await runRunner(['--concurrency', '2', ...files], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const [a, b] = ['a', 'b'].map((n) => windowOf(out, n));
+  assert.ok(a.end <= b.start || b.end <= a.start, `windows apart: ${JSON.stringify({ a, b })}`);
+  assert.ok(!a.saw && !b.saw, 'neither saw the other running');
+});
+
+for (const [how, args, extra] of [
+  ['--chrome-concurrency 2', ['--chrome-concurrency', '2'], {}],
+  ['DEVTEAM_TEST_CHROME_CONCURRENCY=2', [], { DEVTEAM_TEST_CHROME_CONCURRENCY: '2' }],
+  ['CI=true', [], { CI: 'true' }],
+]) {
+  test(`with ${how}, two chrome files run side by side`, async (t) => {
+    const { out, env, dir } = timedEnv(t);
+    const files = ['a', 'b'].map((n) => writeTimed(dir, n, { chrome: true, waitMs: 10000 }));
+    const r = await runRunner(['--concurrency', '2', ...args, ...files], { env: { ...env, ...extra } });
+    assert.equal(r.code, 0, r.stdout + r.stderr);
+    const [a, b] = ['a', 'b'].map((n) => windowOf(out, n));
+    assert.ok(overlap(a, b), `windows overlap: ${JSON.stringify({ a, b })}`);
+    assert.ok(a.saw && b.saw, 'each saw the other running');
+  });
+}
+
+test('off CI, a rest file runs beside a chrome file while the next chrome file waits', async (t) => {
+  const { out, env, dir } = timedEnv(t);
+  const files = [writeTimed(dir, 'a', { chrome: true, waitMs: 10000 }), writeTimed(dir, 'b', { chrome: true, waitMs: 1500 }), writeTimed(dir, 'r', { chrome: false, waitMs: 10000 })];
+  const r = await runRunner(['--concurrency', '2', ...files], { env });
+  assert.equal(r.code, 0, r.stdout + r.stderr);
+  const [a, b, rr] = ['a', 'b', 'r'].map((n) => windowOf(out, n));
+  assert.ok(overlap(a, rr), `r beside a: ${JSON.stringify({ a, rr })}`);
+  assert.ok(b.start >= a.end, `b after a: ${JSON.stringify({ a, b })}`);
+});
+
+test('an interrupt while a chrome file waits for the cap: it never starts', async (t) => {
+  const { out, env, dir } = timedEnv(t);
+  const files = [writeTimed(dir, 'a', { chrome: true, waitMs: 10000 }), writeTimed(dir, 'b', { chrome: true, waitMs: 1500 })];
+  const timings = path.join(dir, 'timings.json');
+  const run = runRunner(['--concurrency', '2', '--timings', timings, ...files], { env, deadline: 45000 });
+  assert.ok(await waitFor(path.join(out, 'start-a.json'), 20000), 'a started');
+  assert.ok(run.alive(), 'the runner is still running');
+  process.kill(run.child.pid, 'SIGINT');
+  const r = await run;
+  assert.equal(r.code, 130, r.stdout + r.stderr);
+  await sleep(1000);
+  assert.equal(fs.existsSync(path.join(out, 'start-b.json')), false, 'b never started');
+  assert.doesNotMatch(r.stdout, /^summary:/m, 'an interrupted run prints no summary');
+  assert.equal(fs.existsSync(timings), false, 'and writes no timings');
+});
+
+// ---- the Chrome flags (kit-597) ----
+// chrome.mjs loaded by a path, not by name: a test of its arguments starts no browser, and this file
+// stays in the rest group
+test('openChrome starts Chrome with the lower-memory flags', async () => {
+  const C = await import(pathToFileURL(path.join(lib, 'chrome.mjs')).href);
+  const a = C.chromeArgs('/p');
+  for (const f of ['--renderer-process-limit=2', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--js-flags=--max-old-space-size=256', '--headless=new', '--user-data-dir=/p', '--remote-debugging-port=0']) assert.ok(a.includes(f), f);
+  assert.equal(a.at(-1), 'about:blank');
+  assert.match(fs.readFileSync(path.join(lib, 'chrome.mjs'), 'utf8'), /spawn\(chromePath, chromeArgs\(profile\)/, 'openChrome spawns with the seam');
+});
