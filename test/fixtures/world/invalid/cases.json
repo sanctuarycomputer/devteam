@@ -1,0 +1,166 @@
+[
+  {
+    "file": "self-no-block.md",
+    "expect": "no self block"
+  },
+  {
+    "file": "self-two-blocks.md",
+    "expect": "more than one self block"
+  },
+  {
+    "file": "self-not-json.md",
+    "expect": "not JSON"
+  },
+  {
+    "file": "self-not-object.md",
+    "expect": "not a JSON object"
+  },
+  {
+    "file": "self-unclosed.md",
+    "expect": "never closes"
+  },
+  {
+    "file": "self-no-parts.md",
+    "expect": "self.parts needs at least 1"
+  },
+  {
+    "file": "self-exterior-block.md",
+    "expect": "belongs in exterior.md"
+  },
+  {
+    "file": "self-bad-id.md",
+    "expect": "self.parts[0].id"
+  },
+  {
+    "file": "self-shared-id.md",
+    "expect": "is shared"
+  },
+  {
+    "file": "self-long-what.md",
+    "expect": "self.what must be at most 200"
+  },
+  {
+    "file": "self-long-makes.md",
+    "expect": "self.makes must be at most 200"
+  },
+  {
+    "file": "self-long-controls.md",
+    "expect": "self.controls[0] must be at most 200"
+  },
+  {
+    "file": "self-long-not.md",
+    "expect": "self.not[0] must be at most 200"
+  },
+  {
+    "file": "self-long-part-what.md",
+    "expect": "self.parts[0].what must be at most 200"
+  },
+  {
+    "file": "self-newer.md",
+    "expect": "newer kit"
+  },
+  {
+    "file": "exterior-no-block.md",
+    "expect": "no exterior block"
+  },
+  {
+    "file": "exterior-two-blocks.md",
+    "expect": "more than one exterior block"
+  },
+  {
+    "file": "exterior-not-json.md",
+    "expect": "not JSON"
+  },
+  {
+    "file": "exterior-self-block.md",
+    "expect": "belongs in self.md"
+  },
+  {
+    "file": "exterior-unnamed.md",
+    "expect": "never names it"
+  },
+  {
+    "file": "exterior-named-word-start.md",
+    "expect": "never names it"
+  },
+  {
+    "file": "exterior-named-word-end.md",
+    "expect": "never names it"
+  },
+  {
+    "file": "exterior-person.md",
+    "expect": "kind must be one of"
+  },
+  {
+    "file": "exterior-bad-relation.md",
+    "expect": "relation must be one of"
+  },
+  {
+    "file": "exterior-other-no-word.md",
+    "expect": "relation_word is required"
+  },
+  {
+    "file": "exterior-other-two-words.md",
+    "expect": "relation_word \"fan club\" does not match"
+  },
+  {
+    "file": "exterior-word-not-other.md",
+    "expect": "only for relation other"
+  },
+  {
+    "file": "exterior-bad-id.md",
+    "expect": "exterior.entities[0].id"
+  },
+  {
+    "file": "exterior-shared-id.md",
+    "expect": "is shared"
+  },
+  {
+    "file": "exterior-shared-signal-id.md",
+    "expect": "is shared"
+  },
+  {
+    "file": "exterior-bad-signal-id.md",
+    "expect": "signals[0].id"
+  },
+  {
+    "file": "exterior-weight-high.md",
+    "expect": "weight must be at most 4"
+  },
+  {
+    "file": "exterior-weight-low.md",
+    "expect": "weight must be at least 1"
+  },
+  {
+    "file": "exterior-value-high.md",
+    "expect": "value must be at most 4"
+  },
+  {
+    "file": "exterior-value-low.md",
+    "expect": "value must be at least 1"
+  },
+  {
+    "file": "exterior-no-quote.md",
+    "expect": "strategy needs at least 1"
+  },
+  {
+    "file": "exterior-long-matters.md",
+    "expect": "matters must be at most 200"
+  },
+  {
+    "file": "exterior-long-signal-what.md",
+    "expect": "what must be at most 200"
+  },
+  {
+    "file": "exterior-signal-sensor.md",
+    "expect": "sensor is not a field here"
+  },
+  {
+    "file": "exterior-signal-pages.md",
+    "expect": "pages is not a field here"
+  },
+  {
+    "file": "exterior-newer.md",
+    "expect": "newer kit"
+  }
+]

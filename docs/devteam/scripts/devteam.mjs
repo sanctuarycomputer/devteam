@@ -2021,6 +2021,8 @@ function logFileText(file) {
 let logCache = null;
 function readLog() {
   if (logCache) return logCache;
+  // folds, not calls: wait's trace counts them (kit-594)
+  readLog.reads = (readLog.reads ?? 0) + 1;
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
@@ -2039,6 +2041,19 @@ function readLog() {
   const byType = new Map();
   for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
   return (logCache = { lines, objects, errors, ignored, unknown, byType });
+}
+// What readLog folds, as one string: main's sha (the durable log is read at it, so a merge or a fetch
+// that moves main changes it with no file in the checkout changed) and each log file's name, size and
+// mtime under run/log and project/log. Equal means a fold would read the same lines.
+function logKey() {
+  mainRefCache = undefined;
+  const parts = [`main ${mainSha() ?? '-'}`];
+  for (const [tag, d] of [['run', liveLogDir()], ['project', durableLogDir()]]) {
+    let names = [];
+    try { names = fs.readdirSync(d).filter((f) => f.endsWith('.jsonl')).sort(); } catch {}
+    for (const f of names) { try { const st = fs.statSync(path.join(d, f)); parts.push(`${tag}/${f} ${st.size} ${st.mtimeMs}`); } catch {} }
+  }
+  return parts.join('\n');
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -3910,10 +3925,16 @@ function cmdValidate() {
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
       const L0 = linesOf(componentLink(t.component, S0));
+      // The ticket's own folder (or a file under it) is its to write, when its records are in its
+      // own repo (check-pr's `own`); matched on text, so no empty, . or .. segment may walk out.
+      const ownDir = `${projectRelOf(componentLink(t.component, S0))}/tickets/${id}`;
+      const ownFolder = !recordsHomeSetting(t);
       for (const entry of t.touches ?? []) {
+        const p = trimSlash(touchPath(entry));
+        if (ownFolder && p.split('/').every((x) => x && x !== '.' && x !== '..') && (p === ownDir || p.startsWith(`${ownDir}/`))) continue;
         const owners = prefixOwners(touchPath(entry), L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
-        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
+        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${ownDir}/ may be named from it, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
@@ -5925,6 +5946,10 @@ function cmdMerge() {
   // gates this PR adds as the supervisor's own call (gateAdditions): run at its head below, and
   // logged as their own gate-add act once it lands
   let gateAdds = null;
+  // owner-classed settings changes (home only) and a chore's files outside project/, for the
+  // link-landing rule under --approved below
+  let ownerChanged = null;
+  let choreOutside = [];
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -5935,6 +5960,7 @@ function cmdMerge() {
     const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
     if (gateAdd?.added?.length) { gateAdds = gateAdd.added.map((n) => [n, settingsAt(sha).gates[n]]); out(`adds gate${gateAdds.length > 1 ? 's' : ''} ${gateAdd.added.join(', ')} and leaves main's as they are: a new check is the supervisor's call (constitution.md §4), to be logged as a gate-add act when it lands`); }
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
+    ownerChanged = changed;
     fails.push(...registryActFails(base, sha));
     fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
@@ -5996,6 +6022,7 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    choreOutside = outside;
     const kitFiles = outside.filter(isKitFile);
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
@@ -6033,10 +6060,23 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    // a bundle's link acts (one per entry its question showed) are one landing too
+    // A bundle's link acts (one per entry its question showed) are one landing too. A link act binds
+    // the change, not a slug: its entry hashes and its question's diff (ownerLinkActFails), so it
+    // lands on a chore of any name that changes those links and nothing else outside project/. Old
+    // acts that also carry chore-registry follow the same rule.
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
-    if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    const linkIds = new Set(prior.filter(linkAct).flatMap((a) => a.refs.filter((r) => r.startsWith('link:')).map((r) => r.slice(5))));
+    const allLinks = prior.length >= 1 && prior.every(linkAct) && prior.every((a) => a.class === av.class);
+    let landing;
+    if (allLinks) {
+      const extras = [...choreOutside, ...(ownerChanged ?? []).filter((c) => !c.key.startsWith('links.') || !linkIds.has(c.key.split('.')[1])).map((c) => c.key)];
+      const linksLanded = (ownerChanged ?? []).some((c) => c.key.startsWith('links.'));
+      landing = !!chore && !extras.length && linksLanded;
+      if (!landing) fails.push(`${approved} approved repo link entries only (${[...linkIds].map((l) => `links.${l}`).join(', ')}), landing on a chore; this ${chore ? 'chore' : 'merge'} ${extras.length ? `also changes ${extras.slice(0, 6).join(', ')}` : 'lands none of them'}: ask again for this one, or take the rest out`);
+    } else {
+      landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+      if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    }
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
@@ -6548,6 +6588,26 @@ function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, r
   // only when low confidence is the whole reason: a question asked for another reason too stands on that
   if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
+function asksGoalApproval({ goal, kind, question, choices, options, recommendation, def }) {
+  // A yes that would approve a draft goal goes through goal decide, which takes only a goal-approval
+  // answer: an approval asked as another kind wastes the owner's yes. These kinds name a draft goal
+  // for reasons of their own (defining it, a door in its design, something only the owner can do).
+  if (['goal-approval', 'goal-definition', 'one-way-door', 'owner-action'].includes(kind)) return false;
+  const g = goal ? logGet(goal) : null;
+  if (g?.type !== 'goal' || (g.status ?? 'draft') !== 'draft') return false;
+  const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const title = lit(String(g.title ?? '').trim()).replace(/\s+/g, '\\s+');
+  const aim = `(?:${title ? `${title}|` : ''}goal|design|approach|plan)(?!\\w)`;
+  const text = String(question ?? '');
+  // approval words aimed at the goal: "Approve <title>?", "Do you approve the design?"
+  if (new RegExp(`\\b(?:approve|approval\\s+of|sign\\s+off\\s+on|green-?light)\\s+(?:(?:the|this|its|your|our)\\s+)?${aim}`, 'i').test(text)) return true;
+  // a bare Approve answer, on a question that names the goal or its design (a sub-decision of the
+  // design with an Approve choice is the owner's to settle before the approval, so it stays askable)
+  if (!new RegExp(`\\b(?:${title ? `${title}|` : ''}goal|design(?:ed)?|approach|plan)(?!\\w)`, 'i').test(text)) return false;
+  const bare = new RegExp(`^\\s*approv(?:e|ed|al)(?:\\s+(?:it|this|the\\s+${aim}))?\\s*[.!]?\\s*$`, 'i');
+  const labels = Array.isArray(choices) ? choices.map((c) => c?.label) : [];
+  return [...labels, ...[].concat(options ?? []), recommendation, def].some((a) => typeof a === 'string' && bare.test(a));
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
@@ -6560,6 +6620,7 @@ function askLine({ thread } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
@@ -7421,7 +7482,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
@@ -7564,6 +7625,71 @@ const ARTIFACT_LENS = String.raw`(() => {
   };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
+  // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
+  const POINTER_GAP = 67;
+  const across = (v, from, n) => (n > 0 ? Math.round(Math.max(0, Math.min(1, (v - from) / n)) * 1e4) / 1e4 : 0);
+  // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
+  // it is sent; the page itself (html or body) is no thing to point at, as hit says
+  const pointerOf = (p) => {
+    let el = p.el;
+    // the page replaced it while the gate held it: what is at that point now
+    if (el && el.isConnected === false) el = document.elementFromPoint(p.cx, p.cy);
+    if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
+    // the rect read now, when it is sent, against the point of the move
+    const r = el.getBoundingClientRect();
+    return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
+  };
+  // one gate for every pointer, nulls too: at most one per gap, the newest input replacing what waits
+  // (one timer, nothing queued, so the last word arrives), and never the same message twice running
+  let pointerPending = null;
+  let pointerTimer = 0;
+  let pointerAt = 0;
+  let pointerSent = '';
+  const flushPointer = () => {
+    const p = pointerPending;
+    pointerPending = null;
+    if (!p) return;
+    const m = pointerOf(p);
+    const s = JSON.stringify(m);
+    if (s === pointerSent) return;
+    pointerSent = s;
+    pointerAt = Date.now();
+    tell(Object.assign({ type: 'pointer' }, m));
+  };
+  const sayPointer = (p) => {
+    pointerPending = p;
+    if (pointerTimer) return;
+    // never longer than one gap, whatever the wall clock did since the last send
+    const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
+    if (wait <= 0) flushPointer();
+    else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
+  };
+
+  // --- where others' pointers are: by selector alone, apart from the pins' watch list ----------------
+  const PLACE_MAX = 8;
+  // querySelector only, never find's text search; null for nothing there, a bad selector, or not shown
+  const shownRect = (k) => {
+    let el = null;
+    try { el = document.querySelector(k); } catch (e) { el = null; }
+    if (!el) return null;
+    const hidden = el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility));
+    return hidden ? null : rectOf(el);
+  };
+  let placing = [];
+  let placedSent = '';
+  let placeLoop = false;
+  const placedNow = () => placing.map((x) => ({ id: x.id, rect: shownRect(x.k) }));
+  // once a frame while there is a list, sent only when a rect changed; an empty list ends it
+  const placeFrame = () => {
+    if (!placing.length) { placeLoop = false; return; }
+    // the next frame is asked for whatever this one's measuring did
+    try {
+      const rects = placedNow();
+      const now = JSON.stringify(rects);
+      if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    } finally { requestAnimationFrame(placeFrame); }
+  };
+
   // --- the viewer's questions ------------------------------------------------------------------------
   // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
   // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
@@ -7605,6 +7731,15 @@ const ARTIFACT_LENS = String.raw`(() => {
       const f = find(a);
       if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
     },
+    // the newest list stands until the next; one that is no list is ignored
+    place: (m) => {
+      if (!Array.isArray(m.anchors)) return;
+      placing = m.anchors.slice(0, PLACE_MAX).filter((x) => x && idOk(x.id) && typeof x.k === 'string' && x.k.length > 0 && size(x.k) <= CAPS.selector).map((x) => ({ id: x.id, k: x.k }));
+      const rects = placedNow();
+      placedSent = JSON.stringify(rects);
+      tell({ type: 'placed', rects });
+      if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
+    },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -7617,6 +7752,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
+  addEventListener('mousemove', (e) => { if (heard) sayPointer({ el: e.target, cx: e.clientX, cy: e.clientY }); }, true);
+  // no relatedTarget: the pointer left the frame
+  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ el: null }); }, true);
   addEventListener('scroll', soon, true);
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
@@ -10075,15 +10213,17 @@ function cmdAct() {
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
-// Returns what is wrong, or null.
+// Header fields written as bullets (Goal, Architecture, Tech stack, Spec, then a colon; bold,
+// underscored or plain, any case) don't count: only the body bullets do. Returns what is wrong, or null.
 function tldrGap(text) {
+  const HEADER_FIELD = /^\s{0,3}[-*+]\s+(?:\*\*|__)?(?:goal|architecture|tech[\s-]?stack|spec)(?:\*\*|__)?\s*:/i;
   const lines = text.split('\n');
   const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
   if (at < 0) return 'has no "## TL;DR" section';
   if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
   const body = [];
   for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
-  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l) && !HEADER_FIELD.test(l)).length;
   if (!bullets) return 'has a TL;DR with no bullets';
   if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
   return null;
@@ -14243,15 +14383,50 @@ function relaunchChild(launch, flag, budget) {
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
+// A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
+// stopped · your login changed or ended · send a prompt to continue". Its process already has the new
+// login and wants only a prompt, so one is typed (nothing is relaunched). False when the pane isn't
+// stopped so, and the caller goes on as before; otherwise what was done: null (not ours, or not due),
+// 'gave-up' (past the restart caps, which it shares), 'continued' or 'failed'. The stop must be the
+// last thing the agent said, matched by its head (the whole line wraps at 80 columns), with an empty
+// input: a draft is someone's and is never typed over, except the kit's own prompt whose Enter was
+// lost, which gets the Enter (the lost-Enter rescues skip a pane that still shows a limit banner).
+function loginChangedStop(target, name, budget, ours) {
+  const prompt = 'The kit: your login changed and the account has room now. Carry on.';
+  const stopHead = /^\s*(?:[⎿⏺●■✖!]\s*)?Automatic continue stopped · your login changed\b/;
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const raw = paneBottom(target);
+  const at = raw.findLastIndex((l) => !PANE_CODE.test(l.trim()) && stopHead.test(l));
+  if (at === -1) return false;
+  const below = raw.slice(at + 1).map((l) => l.trim());
+  if (below.some((l) => /^[⏺●⎿]/.test(l))) return false;
+  const draft = below.map((l) => INPUT_LINE.exec(l)).filter(Boolean).pop()?.[1] ?? '';
+  if (draft && draft !== prompt) return false;
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
+  if (clientActiveOn(target) || !ours()) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget, now);
+  if (verdict !== 'go') return verdict;
+  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
+  if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
+  return ok ? 'continued' : 'failed';
+}
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
 // 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
 // replaces the old process itself, after everything that can refuse, and no key is sent to it.
+// (A session stopped by a login change is another matter: loginChangedStop, above.)
 function restartPane(name, launch, budget) {
   const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  if (problem || !target) return null;
+  // the stop can sit under an old limit banner: it is the newer state, so a prompt, not a relaunch
+  const login = loginChangedStop(target, name, budget, () => launchedByKit(target, name, launch[0]));
+  if (login !== false) return login;
+  if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
   const verdict = claimRestart(name, budget);
   if (verdict !== 'go') return verdict;
@@ -14493,6 +14668,12 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
+  const { target: pane, problem } = resolvePane(supervisorTarget());
+  if (!problem && pane) {
+    const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
+    if (login !== false) return login;
+  }
   const found = supervisorToRestart();
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
@@ -16006,6 +16187,146 @@ function memoryFull(s = loadSettings()) {
   if (!m || m.inUse < ceiling * m.max) return null;
   return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
+/* box-memory start */
+// The memory reading's names, here so its check reads nothing outside this region (a test runs it
+// alone). The ceiling's bounds are memoryCeilingProblem's; the test holds the two equal.
+const MEMORY_KINDS = ['agent', 'browser', 'install', 'devteam', 'node', 'other'];
+const MEMORY_SOURCES = ['cgroup', 'meminfo', 'os'];
+const MEMORY_READING_KEYS = ['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects'];
+const MEMORY_PROJECT_KEYS = ['rss', 'sessions', 'devteam'];
+const MEMORY_CEILING_MIN = 0.5, MEMORY_CEILING_MAX = 0.95;
+const MEMORY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const MEMORY_SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+const isBytes = (v) => Number.isSafeInteger(v) && v >= 0;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
+// so a name with a dot can't read as two fields.
+const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
+// A value as the words show it, never a throw (a writer's own object can hold a BigInt or a cycle).
+const memoryShown = (v) => {
+  let s;
+  try { s = JSON.stringify(v) ?? String(v); } catch { try { s = String(v); } catch { s = 'an unprintable value'; } }
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+// A real UTC time in the one form: 2026-02-30 or 24:00 doesn't come back as itself, so it is refused.
+const memoryAtOk = (at) => {
+  if (typeof at !== 'string' || !MEMORY_AT.test(at)) return false;
+  const t = new Date(at);
+  return Number.isFinite(t.getTime()) && t.toISOString().slice(0, 19) === at.slice(0, 19);
+};
+const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
+// A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
+const memoryCountsProblem = (p, e) => {
+  if (!memoryIsMap(e)) return memoryIs(p, e, '{ n, rss }, a count of processes and their integer bytes');
+  if (!isCount(e.n)) return memoryIs(`${p}.n`, e.n, 'a count of processes, an integer, 0 or more');
+  if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+  const other = Object.keys(e).find((k) => k !== 'n' && k !== 'rss');
+  return other === undefined ? null : `${memoryPath(p, other)} is not a field of ${p}: it holds only n and rss`;
+};
+// machine-memory@1, the memory reading: one JSON object a line in
+// ~/.devteam/machine-<hub port>/memory.jsonl, written once a minute by the machine's hub.
+//   `v`            required, `v: 1` (the line's "v":1): the contract's version; any other value is refused
+//   `at`           required, ISO 8601 UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z: when the reading was taken
+//   `working_set`  required, integer bytes, 0 or more: in use as machineMemory() counts it for the
+//                  gate (cgroup working set, /proc/meminfo, or os.totalmem() - os.freemem())
+//   `max`          integer bytes, more than 0: the cap the gate reads
+//   `ceiling`      a number from 0.5 to 0.95: the lowest machine_memory_ceiling among the known
+//                  instances (default 0.8)
+//   `source`       "cgroup", "meminfo" or "os": where `working_set` and `max` came from
+//   `partial`      true: the tick ran past its 2-second budget and wrote what it had
+//   `sessions`     an integer, 0 or more: agent processes (claude, codex, opencode) whose cwd is
+//                  inside <root>/.worktrees/<name> of a known root; a supervisor in its root is not one
+//   `kinds`        { <kind>: { `n`, `rss` } }: every process by its executable's kind; `n` an integer,
+//                  0 or more, `rss` integer bytes, 0 or more
+//   `devteam`      { <subcommand>: { `n`, `rss` } }: the `devteam` kind split by subcommand, machine-wide
+//   `projects`     { <instance name>: { `rss`, `sessions`?, `devteam`? } }: by the known root holding
+//                  the process's cwd; its `devteam` is { <subcommand>: integer bytes }
+// Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
+// `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
+// running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
+// devteam.mjs), `node` (any other node), `other` (everything else). Exactly: an installer is an
+// argv[0] basename whose first word is `npm`, `pnpm`, `yarn`, `bundle`, `pip` or `uv`, or node whose
+// script's basename is `npm-cli.js`, `pnpm.cjs`, `pnpm.js` or `yarn.js`; it is `install` only with an
+// install subcommand, the next word (`install`, `i`, `ci`, `add` or `sync`). An installer with another
+// subcommand (`npm test`) is `other`, and node running an installer script with another subcommand
+// is `node`. The kind comes from cmdline's
+// argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
+// retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
+// command name. Nothing else of a command line, no environment and no file content is ever kept.
+// Sizes are integer bytes (RSS is statm's resident pages times the page size). A field the machine
+// can't read is left out, never zero: on a machine with no /proc (macOS) a line has `working_set`,
+// `max`, "source":"os" and no `sessions`, `kinds` or `projects`. A new field, or a change to one, is
+// machine-memory@2.
+// A line the check refuses (one torn by a hub killed mid-append, a "v":2 line from a newer
+// recorder, anything else memoryReadingProblem has words for) is skipped by every reader, never
+// fatal: the hub's /memory.json serves only passing lines, `machine memory` and `metrics` read past
+// it and say how many lines they skipped, and the Overview draws the readings it was given. A writer
+// starts each line on a fresh line (a torn tail is ended with a newline before the next append), so
+// one torn line spoils only itself.
+// /memory.json, served by the hub with /instances.json's same-origin check (and on a box through
+// the gateway): `{"v":1,"readings":[<reading>, …]}`, oldest first.
+//   `?since=<n>h|<n>d`  the window, default 24 hours, at most 8 days; thinned to one reading per
+//                       5 minutes for readings older than 6 hours, and one per 30 minutes older than 3 days
+//   `?after=<at>`       only readings newer than at, unthinned, for an at up to 6 hours back; an
+//                       older one is answered 400 (the Overview then asks since=24h again)
+//   `?thin=0`           no thinning, for a loopback request whose window is 24 hours or less
+// memoryReadingProblem(line) takes a line's text or a parsed value: null when it is a valid
+// machine-memory@1 reading, else one sentence starting with the first bad field's path and a space
+// (reading, when the line isn't a JSON object). Shape only: it doesn't add up kinds, compare
+// working_set with max, or look a subcommand up in COMMANDS.
+function memoryReadingProblem(line) {
+  let r = line;
+  if (typeof line === 'string') {
+    try { r = JSON.parse(line); } catch { return 'reading is not JSON (a torn line, or no reading at all): it should be one JSON object, a machine-memory@1 reading'; }
+  }
+  if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
+  if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
+  if (!memoryAtOk(r.at)) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
+  const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
+  if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
+  if (r.max !== undefined && !(isBytes(r.max) && r.max > 0)) return memoryIs('max', r.max, 'integer bytes, more than 0, or left out');
+  if (r.ceiling !== undefined && !(typeof r.ceiling === 'number' && r.ceiling >= MEMORY_CEILING_MIN && r.ceiling <= MEMORY_CEILING_MAX)) return memoryIs('ceiling', r.ceiling, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}, or left out`);
+  if (r.source !== undefined && !MEMORY_SOURCES.includes(r.source)) return memoryIs('source', r.source, `one of ${MEMORY_SOURCES.join(', ')}, or left out`);
+  if (r.partial !== undefined && r.partial !== true) return memoryIs('partial', r.partial, 'true, or left out');
+  if (r.sessions !== undefined && !isCount(r.sessions)) return memoryIs('sessions', r.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+  if (r.kinds !== undefined) {
+    if (!memoryIsMap(r.kinds)) return memoryIs('kinds', r.kinds, '{ <kind>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.kinds)) {
+      if (!MEMORY_KINDS.includes(k)) return `${memoryPath('kinds', k)} is not a kind: it should be one of ${MEMORY_KINDS.join(', ')}`;
+      const p = memoryCountsProblem(memoryPath('kinds', k), e); if (p) return p;
+    }
+  }
+  if (r.devteam !== undefined) {
+    if (!memoryIsMap(r.devteam)) return memoryIs('devteam', r.devteam, '{ <subcommand>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.devteam)) {
+      if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath('devteam', k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+      const p = memoryCountsProblem(memoryPath('devteam', k), e); if (p) return p;
+    }
+  }
+  if (r.projects !== undefined) {
+    if (!memoryIsMap(r.projects)) return memoryIs('projects', r.projects, '{ <instance name>: { rss, sessions?, devteam? } }, or left out');
+    for (const [name, e] of Object.entries(r.projects)) {
+      const p = memoryPath('projects', name);
+      if (name === '') return `${p} is an empty name: a project is keyed by its instance's name`;
+      if (!memoryIsMap(e)) return memoryIs(p, e, '{ rss, sessions?, devteam? }');
+      if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+      if (e.sessions !== undefined && !isCount(e.sessions)) return memoryIs(`${p}.sessions`, e.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+      if (e.devteam !== undefined) {
+        if (!memoryIsMap(e.devteam)) return memoryIs(`${p}.devteam`, e.devteam, '{ <subcommand>: integer bytes }, or left out');
+        for (const [k, b] of Object.entries(e.devteam)) {
+          if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath(`${p}.devteam`, k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+          if (!isBytes(b)) return memoryIs(memoryPath(`${p}.devteam`, k), b, 'integer bytes, 0 or more');
+        }
+      }
+      const extra = Object.keys(e).find((k) => !MEMORY_PROJECT_KEYS.includes(k));
+      if (extra !== undefined) return `${memoryPath(p, extra)} is not a field of ${p}: it holds only ${MEMORY_PROJECT_KEYS.join(', ')}`;
+    }
+  }
+  return null;
+}
+/* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
@@ -16147,6 +16468,8 @@ function cmdAccountsTick() {
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
+  // sessions sent a prompt after a login change (loginChangedStop), not restarted: in resumed too
+  const continued = new Set();
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   // a ticket's held field holds it too: nothing runs for a held ticket
@@ -16194,16 +16517,19 @@ function cmdAccountsTick() {
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
+        // continued, it is starting a turn as a restarted one is: no limit to report, no held line now
+        if (sup === 'continued') { supervisorRestarted = true; state.resumed.push('supervisor'); continued.add('supervisor'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
           else if (did) tries += 1;
-          if (did === 'restarted') state.resumed.push(name);
+          if (did === 'restarted' || did === 'continued') state.resumed.push(name);
+          if (did === 'continued') continued.add(name);
         }
       }
-      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(continued.has(w) ? `continued ${w}: its login changed while it was stopped` : `restarted ${w}: it had stopped at a usage limit`);
     }
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
@@ -16242,7 +16568,7 @@ function cmdAccountsTick() {
   // tick just restarted, whose agent is still coming up
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
-  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -21581,7 +21907,18 @@ function cmdWait() {
   const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
   if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
   const self = fileURLToPath(import.meta.url);
-  const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  // Tests only: a JSON line per snapshot (its children, folds, key and RSS), shorter cycles, and
+  // the first n messages children taken as failed.
+  const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
+  const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
+  let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
+  const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
+  const sub = (args) => {
+    if (trace) started.push(args);
+    const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    if (args[0] === 'messages' && failMessages > 0) { failMessages--; return null; }
+    try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; }
+  };
   // What arrived since the last wait woke the supervisor counts as new, though it is already in the
   // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
   // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
@@ -21599,6 +21936,7 @@ function cmdWait() {
     try { ensureStreams(self); } catch (e) { if (!pollWarned) process.stderr.write(`devteam: a stream collector didn't start: ${e.message}\n`); }
     if (!ms.some((m) => sensorDue(m, sensorState(m.name)))) return [];
     const budget = (Math.max(0, ...ms.filter((m) => m.kind === 'probe').map((m) => m.probe_timeout_s)) + 60) * 1000;
+    if (trace) started.push(['sensor', 'poll', '--due', '--json']);
     const r = spawnSync(process.execPath, [self, 'sensor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: budget, maxBuffer: 8 * 1024 * 1024 });
     // a poll killed after it printed still said its alerts
     try { const j = (r.stdout ?? '').trim() ? JSON.parse(r.stdout) : null; if (r.status === 0 && j) return j.alerts ?? []; if (j?.alerts?.length) { if (!pollWarned) process.stderr.write('devteam: sensor poll ran out of time after it polled; its alerts are below\n'); pollWarned = true; return j.alerts; } } catch {}
@@ -21606,20 +21944,42 @@ function cmdWait() {
     pollWarned = true;
     return [];
   };
+  // The owner's lines and the open messages come only from the log: while its key holds (main's sha,
+  // each log file's name, size and mtime), a cycle keeps the last ones and starts no messages child.
+  // The key is taken before the read, so a line written during the read is read on the next cycle.
+  // A messages child that failed is not kept: the next cycle runs it again. Findings come from
+  // panes, time, accounts and git too, so metrics runs every cycle.
+  let last = null;
+  let cycle = 0;
+  let reads = 0; // the trace's folds since its last line; cycle 0's from just before its snapshot
   const snap = () => {
-    // main's copy of the log as it is now: a wait can outlast many moves of main
-    logCache = null;
-    mainRefCache = undefined;
-    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
-    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
-    const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
-    return { owner, msgs, high };
+    const at = Date.now();
+    const key = logKey();
+    let now;
+    if (last && last.key === key) now = { owner: last.owner, msgs: last.msgs };
+    else {
+      // main's copy of the log as it is now: a wait can outlast many moves of main
+      logCache = null;
+      const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+      const got = sub(['messages', '--open', '--to', 'supervisor', '--json']);
+      const msgs = (got ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
+      last = got ? { key, owner, msgs } : null;
+      now = { owner, msgs };
+    }
+    now.high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    if (trace) {
+      const r = readLog.reads ?? 0;
+      try { fs.appendFileSync(trace, `${JSON.stringify({ cycle: cycle++, at, children: started.splice(0), log_reads: r - reads, key, rss: process.memoryUsage().rss })}\n`); } catch {}
+      reads = r;
+    }
+    return now;
   };
   // the heartbeat while the supervisor waits: at most every HOST_REFRESH_MS, so a long quiet wait
   // keeps its claim fresh, and another machine live on this repo ends the wait
   const hostBeat = () => { if (hostState().refused || !(Date.now() - (Number(hostState().checked) || 0) < HOST_REFRESH_MS)) { const hc = hostCheck(); if (hc.refused) hostRefusedWhileRunning(hc); } };
   hostBeat();
   const firstAlerts = poll();
+  reads = readLog.reads ?? 0;
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
@@ -21634,7 +21994,7 @@ function cmdWait() {
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
-    sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    sleep(Math.min(cycleMs ?? Math.min(Math.max(2000, (minutes * 60000) / 10), 45000), Math.max(0, until - Date.now())));
     hostBeat();
     const alerts = poll();
     if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
@@ -22512,7 +22872,7 @@ function cmdLink() {
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
 // A link of an owner's kind: draft the change and ask a question in the class its
 // field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
-// exactly that change and log the act the chore-registry merge then lands under the same answer.
+// exactly that change and log the act; the chore merge that lands it does so under the same answer.
 // Asking twice for the same draft reuses the open question; applying a draft already written is a
 // no-op. Nothing here names a kind: the table gives fields and classes.
 function linkByOwner(sub, id, field, vals, kind) {
@@ -22555,7 +22915,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
   // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
   // (prior_hash), so merge binds each changed entry to this answer
-  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
@@ -22741,6 +23101,277 @@ function cmdInit() {
   out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
 }
 
+/* browser-guard start */
+// The browser's egress guard (browser@1, refusal; design supervisors-can-use-a-browser-with-the-o,
+// Components 1). Chrome reaches the network only through it: a loopback forward proxy for
+// absolute-form HTTP and CONNECT that refuses every destination on this machine's own network.
+// Each dashboard takes owner presses from any same-origin page on its loopback port, so a browser
+// that could load one could press them; this is what stops it. The rules, in the contract's order:
+// own-name and gateway on the name, before resolving; then own-interface and special-purpose on
+// every address the name resolved to (once), and the first that refuses is reported. It dials the
+// address it checked, never the name, so DNS rebinding can't get past it. An answer it can't read
+// is refused: it fails closed.
+//
+// The refused ranges, exactly the contract's range enum: every IANA special-purpose block, and for
+// IPv6 everything outside 2000::/3 (::/3, 4000::/2, 8000::/1 when nothing narrower names it). An
+// address embedding a refused IPv4 one (mapped, NAT64, 6to4, Teredo) falls in a refused IPv6
+// range and is refused whole. The longest matching prefix is the range reported.
+const GUARD_RANGES = [
+  '127.0.0.0/8', '0.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '192.0.0.0/24',
+  '198.18.0.0/15', '224.0.0.0/4', '::/128', '::1/128', 'fc00::/7', 'fe80::/10', '64:ff9b::/96', '::ffff:0:0/96', '192.0.2.0/24',
+  '192.31.196.0/24', '192.52.193.0/24', '192.88.99.0/24', '192.175.48.0/24', '198.51.100.0/24', '203.0.113.0/24', '240.0.0.0/4',
+  '255.255.255.255/32', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001::/32', '2001:db8::/32', '2002::/16', '2620:4f:8000::/48',
+  '3fff::/20', '5f00::/16', 'ff00::/8', '::/3', '4000::/2', '8000::/1',
+];
+// An address as a number: { v, n, text }, text its normal form (what a refusal reports), or null
+// for anything that isn't exactly an IPv4 dotted quad or an IPv6 address. IPv6 goes through WHATWG
+// URL first, which writes a dotted tail (::ffff:127.0.0.1, as libuv may answer) as hex.
+function guardAddr(s) {
+  const raw = String(s ?? '').split('%')[0];
+  if (net.isIPv4(raw)) return { v: 4, n: raw.split('.').reduce((a, x) => (a << 8n) + BigInt(x), 0n), text: raw };
+  if (!net.isIPv6(raw)) return null;
+  let text;
+  try { text = new URL(`http://[${raw}]/`).hostname.replace(/^\[|\]$/g, ''); } catch { return null; }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(':') : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const groups = halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left;
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return { v: 6, n: groups.reduce((a, g) => (a << 16n) + BigInt(parseInt(g, 16)), 0n), text };
+}
+let guardTable = null;
+// The most specific refused range holding a parsed address, or null.
+function guardRange(a) {
+  guardTable ??= GUARD_RANGES.map((cidr) => { const [base, p] = cidr.split('/'); return { cidr, ...guardAddr(base), prefix: Number(p) }; });
+  const bits = a.v === 4 ? 32 : 128;
+  let best = null;
+  for (const r of guardTable) {
+    if (r.v !== a.v) continue;
+    const shift = BigInt(bits - r.prefix);
+    if ((a.n >> shift) === (r.n >> shift) && (!best || r.prefix > best.prefix)) best = r;
+  }
+  return best?.cidr ?? null;
+}
+// Whether a parsed address is one of this machine's own, read on every call (a VPN, Tailscale).
+function guardOwn(a) {
+  return Object.values(os.networkInterfaces() ?? {}).flat().some((e) => { const b = guardAddr(e?.address); return b && b.v === a.v && b.n === a.n; });
+}
+const guardBare = (h) => String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+const GUARD_HOST = /^[A-Za-z0-9._:\[\]-]{1,255}$/;
+// A host as the refusal may name it (browser@1 host's pattern): every other character a -, at most
+// 255. URL lets a name keep characters the contract doesn't (a_b.localhost).
+const guardFit = (h) => (GUARD_HOST.test(h) ? h : String(h).replace(/[^A-Za-z0-9._:\[\]-]/g, '-').slice(0, 255) || '-');
+// What a request asks for: { name, asked, port, connect, hostHeader?, path? }, or null (400). An
+// absolute-form http: URL, or a CONNECT authority of exactly <host>:<port>, with the port read from
+// the authority itself (URL drops a default one, and a ws: page's CONNECT names :80).
+function guardTarget(method, target) {
+  let u;
+  let asked;
+  let port;
+  if (method === 'CONNECT') {
+    const m = /^(\[[0-9A-Fa-f:.]+\]|[^\[\]:/\\@?#\s]+):(\d{1,5})$/.exec(target ?? '');
+    if (!m) return null;
+    port = Number(m[2]);
+    try { u = new URL(`http://${m[1]}`); } catch { return null; }
+    if (u.pathname !== '/' || u.search || u.hash || u.username || u.password) return null;
+    asked = target;
+  } else {
+    if (!/^http:\/\//i.test(target ?? '')) return null;
+    try { u = new URL(target); } catch { return null; }
+    if (u.protocol !== 'http:') return null;
+    asked = target.slice(7).split(/[/?#]/)[0];
+    port = Number(u.port || 80);
+  }
+  const name = guardBare(u.hostname);
+  if (!name || port < 1 || port > 65535) return null;
+  asked = guardFit(GUARD_HOST.test(asked) ? asked : u.host);
+  if (method === 'CONNECT') return { name, asked, port, connect: true };
+  const rest = target.slice(7 + target.slice(7).split(/[/?#]/)[0].length).split('#')[0];
+  return { name, asked, port, connect: false, hostHeader: u.host, path: rest.startsWith('/') ? rest : `/${rest}` };
+}
+// own-name or gateway, decided on the name before anything resolves it.
+function guardNameRule(name) {
+  const own = guardBare(os.hostname());
+  if (name === 'localhost' || name.endsWith('.localhost') || (own && name === own)) return 'own-name';
+  let gw = '';
+  try { gw = process.env.DEVTEAM_PUBLIC_URL ? guardBare(new URL(process.env.DEVTEAM_PUBLIC_URL).hostname) : ''; } catch {}
+  if (gw && (name === gw || name.endsWith(`.${gw}`))) return 'gateway';
+  return null;
+}
+// The ports no test exception ever opens: the hub, the dashboards' block, ttyd and the gateway, at
+// their defaults and wherever the environment moved them.
+function guardNeverPorts() {
+  const own = process.env.DEVTEAM_PUBLIC_URL && Number(process.env.PORT) > 0 ? [Number(process.env.PORT)] : [];
+  return new Set([4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, HUB_PORT, ...PORT_RANGE, TTYD_PORT, ...own]);
+}
+// The tests' one way out (DEVTEAM_TEST set and non-empty): a loopback port DEVTEAM_TEST_BROWSER_ALLOW
+// lists, for the fixture site, when every address is loopback (127.0.0.0/8, or ::1 exactly).
+function guardAllowed(port, addrs) {
+  if (!process.env.DEVTEAM_TEST) return false;
+  const listed = String(process.env.DEVTEAM_TEST_BROWSER_ALLOW ?? '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,5}$/.test(s)).map(Number);
+  if (!listed.includes(port) || guardNeverPorts().has(port)) return false;
+  return addrs.length > 0 && addrs.every((a) => (a.v === 4 && a.n >> 24n === 127n) || (a.v === 6 && a.n === 1n));
+}
+// A socket to the address it checked (never a name: no second lookup), connected, or an error.
+function guardDial(address, port) {
+  return new Promise((resolve, reject) => {
+    let s;
+    try { s = net.connect({ host: address, port }); } catch (e) { return reject(e); }
+    const timer = setTimeout(() => { s.destroy(); reject(Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' })); }, 30000);
+    const failed = (e) => { clearTimeout(timer); reject(e); };
+    s.once('error', failed);
+    s.once('connect', () => { clearTimeout(timer); s.off('error', failed); s.on('error', () => {}); resolve(s); });
+  });
+}
+// Headers that end at the guard, either way: the hop-by-hop ones and those Connection names.
+const GUARD_HOP = ['connection', 'proxy-connection', 'keep-alive', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'upgrade', 'transfer-encoding'];
+function guardEndToEnd(headers) {
+  const drop = new Set([...GUARD_HOP, ...String(headers.connection ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)]);
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => !drop.has(k.toLowerCase())));
+}
+// A plain request, sent on the socket it dialled (createConnection, no agent: with agent: false Node
+// would ignore it and dial the host itself), its answer streamed back.
+function guardForward(req, res, t, sock, fail) {
+  // the client may have left while the name resolved or the socket dialled: nothing to send it
+  if (req.socket?.destroyed || res.destroyed) return void sock.destroy();
+  const headers = { ...guardEndToEnd(req.headers), host: t.hostHeader };
+  // the body's framing goes out as it came, whatever Connection names (Node frames no body itself
+  // for GET, HEAD, DELETE, OPTIONS; its parser has already refused a request with both or neither)
+  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding'];
+  else if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
+  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers, createConnection: () => sock });
+  up.on('response', (ur) => {
+    // a status line Node reads but won't write (a control character, a code under 100) is the
+    // site's fault: a 502, never a throw out of this listener
+    try { res.writeHead(ur.statusCode, guardEndToEnd(ur.headers)); } catch {
+      ur.destroy();
+      up.destroy();
+      return void fail('the site sent an answer the guard could not pass on');
+    }
+    ur.on('error', () => res.destroy());
+    ur.pipe(res);
+  });
+  up.on('error', (e) => { if (res.headersSent) res.destroy(); else fail(e?.code ?? 'the site closed the connection'); });
+  res.on('close', () => { if (!res.writableFinished) { up.destroy(); sock.destroy(); } });
+  req.pipe(up);
+}
+// A CONNECT tunnel on the socket it dialled.
+function guardTunnel(client, head, sock) {
+  if (client.destroyed) return void sock.destroy();
+  client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  if (head?.length) sock.write(head);
+  for (const [a, b] of [[client, sock], [sock, client]]) { a.on('error', () => b.destroy()); a.on('close', () => b.destroy()); a.pipe(b); }
+}
+// { refuse: { rule, address?, range? } }, { fail: why } (a 502) or { address } to dial. lookup is
+// dns.lookup, called once for a name.
+async function guardDecide(t, lookup) {
+  const named = guardNameRule(t.name);
+  if (named) return { refuse: { rule: named } };
+  const literal = guardAddr(t.name);
+  let addrs = literal ? [literal] : null;
+  if (!addrs) {
+    let list;
+    try { list = await new Promise((resolve, reject) => lookup(t.name, { all: true, verbatim: true }, (e, l) => (e ? reject(e) : resolve(l)))); } catch (e) { return { fail: `no address for it (${e?.code ?? 'lookup failed'})` }; }
+    // before any rule or the test exception: none, or one it can't read, never reaches a dial
+    if (!Array.isArray(list) || !list.length) return { fail: 'no address for it' };
+    addrs = [];
+    for (const x of list) {
+      const a = guardAddr(x?.address);
+      if (!a) return { refuse: { rule: 'special-purpose', address: String(x?.address) } };
+      addrs.push(a);
+    }
+  }
+  if (guardAllowed(t.port, addrs)) return { address: addrs[0].text };
+  for (const a of addrs) if (guardOwn(a)) return { refuse: { rule: 'own-interface', address: a.text } };
+  for (const a of addrs) { const range = guardRange(a); if (range) return { refuse: { rule: 'special-purpose', address: a.text, range } }; }
+  return { address: addrs[0].text };
+}
+const guardEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// The refusal page: plain words, and the browser@1 refusal object as JSON with every < escaped.
+function guardRefusal(rule, { asked, address, range } = {}) {
+  // an address as given (a resolver answer that couldn't be read) is 2 to 64 characters there
+  if (address !== undefined) address = String(address).slice(0, 64).padEnd(2, '?');
+  const at = address ? `${asked} (${address})` : asked;
+  const why = {
+    'own-name': `The supervisor's browser can't open ${asked}: it is this machine's own name.`,
+    gateway: `The supervisor's browser can't open ${asked}: it is this box's gateway, where the owner's controls are.`,
+    'own-interface': `The supervisor's browser can't open ${at}: it is an address of this machine.`,
+    'special-purpose': range ? `The supervisor's browser can't open ${at}: ${range} is not on the public internet.` : `The supervisor's browser can't open ${asked}: its address (${address}) could not be read, so it is refused.`,
+    'not-a-proxy-request': "This is the browser's proxy; it answers only proxy requests.",
+  }[rule].slice(0, 500);
+  const o = { browser: 1, rule, why };
+  if (rule !== 'not-a-proxy-request') o.host = asked;
+  if (address) o.address = address;
+  if (range) o.range = range;
+  const title = rule === 'not-a-proxy-request' ? 'Not a proxy request' : 'This page is blocked';
+  const body = `<!doctype html>\n<html lang="en">\n<head><meta charset="utf-8"><title>${title}</title></head>\n<body>\n<h1>${title}</h1>\n<p>${guardEsc(why)}</p>\n<script type="application/json" id="devteam-refusal">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>\n</body>\n</html>\n`;
+  return { status: rule === 'not-a-proxy-request' ? 400 : 403, body };
+}
+const guardHead = (status, type, length) => `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\ncontent-type: ${type}\r\ncontent-length: ${length}\r\nconnection: close\r\n\r\n`;
+// An answer on a raw socket (a CONNECT's), then the socket closes.
+function guardSocketAnswer(sock, status, body, type = 'text/html; charset=utf-8') {
+  if (sock.destroyed) return;
+  sock.end(guardHead(status, type, Buffer.byteLength(body)) + body);
+}
+function guardAnswer(res, status, body, type = 'text/html; charset=utf-8') {
+  if (res.headersSent) return void res.destroy();
+  res.writeHead(status, { 'content-type': type, 'content-length': Buffer.byteLength(body), connection: 'close' });
+  res.end(body);
+}
+// The guard on 127.0.0.1: { port, close() }. browser serve starts it in-process; `browser-guard`
+// runs it alone.
+async function startBrowserGuard({ port = 0 } = {}) {
+  const dns = (await import('node:dns')).default;
+  const lookup = (...a) => dns.lookup(...a);
+  const server = http.createServer();
+  server.on('connection', (s) => s.on('error', () => {}));
+  // a head Node's own parser refuses (a backslash in a CONNECT authority, say) is no proxy request either
+  server.on('clientError', (e, s) => { if (!s.writable) return void s.destroy(); const r = guardRefusal('not-a-proxy-request'); guardSocketAnswer(s, r.status, r.body); });
+  // One request or CONNECT: decided, then refused, failed (502) or passed on. answer(status, body,
+  // type) writes the guard's own answer; pass(t, address) dials. Nothing it throws ends the guard:
+  // whatever goes wrong is a 502, never a pass.
+  const serve = async (method, target, answer, pass) => {
+    const t = guardTarget(method, target);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return answer(r.status, r.body); }
+    const fail = (why) => answer(502, `The supervisor's browser couldn't reach ${t.asked}: ${why}\n`, 'text/plain; charset=utf-8');
+    try {
+      const d = await guardDecide(t, lookup);
+      if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return answer(r.status, r.body); }
+      if (d.fail) return fail(d.fail);
+      return await pass(t, d.address, fail);
+    } catch (e) { return fail(e?.code ?? 'the guard failed'); }
+  };
+  server.on('request', (req, res) => {
+    req.on('error', () => {});
+    res.on('error', () => {});
+    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), async (t, address, fail) => guardForward(req, res, t, await guardDial(address, t.port), fail)).catch(() => res.destroy());
+  });
+  server.on('connect', (req, sock, head) => {
+    sock.on('error', () => {});
+    // once the tunnel is open, a fault closes it: no answer is ever written into it
+    let open = false;
+    const answer = (status, body, type) => (open ? sock.destroy() : guardSocketAnswer(sock, status, body, type));
+    serve('CONNECT', req.url, answer, async (t, address) => { const up = await guardDial(address, t.port); open = true; guardTunnel(sock, head, up); }).catch(() => sock.destroy());
+  });
+  // Chrome tunnels ws: and wss: through CONNECT, so an Upgrade in absolute form is none of its own
+  server.on('upgrade', (req, sock) => {
+    sock.on('error', () => {});
+    if (!guardTarget(req.method, req.url)) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
+    guardSocketAnswer(sock, 501, "The supervisor's browser proxy tunnels WebSockets through CONNECT; it doesn't upgrade a request.\n", 'text/plain; charset=utf-8');
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
+  return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
+}
+async function cmdBrowserGuard() {
+  const p = flagStr('port');
+  const port = p === undefined ? 0 : Number(p);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) die('--port is a port number, 0 to 65535 (0: any free one)');
+  const g = await startBrowserGuard({ port });
+  out(JSON.stringify({ browser: 1, port: g.port }));
+}
+/* browser-guard end */
+
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
@@ -22801,6 +23432,7 @@ Decide and act (supervisor.md, constitution.md)
   preview list [--json]           this instance's previews, with whether each answers
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
+  browser-guard [--port n]        the browser's egress guard on its own (browser serve starts it; for tests): a loopback forward proxy that refuses this machine's network; prints {"browser":1,"port":n}
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
@@ -22886,7 +23518,7 @@ const COMMANDS = {
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, 'operator-thread': cmdOperatorThread, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
-  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes, hub: cmdHub, 'box-pins': cmdBoxPins, 'browser-guard': cmdBrowserGuard,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);

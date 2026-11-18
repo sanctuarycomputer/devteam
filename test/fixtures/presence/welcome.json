@@ -1,0 +1,8 @@
+{
+  "t": "welcome",
+  "presence": 1,
+  "you": {
+    "id": "p-ann",
+    "conn": "c1"
+  }
+}
