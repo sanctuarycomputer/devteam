@@ -1,7 +1,0 @@
-# REPRO drawer drawn; record loaded: false
-# REPRO Wrong? measured at y=247
-# REPRO at press time Wrong? is at y=247; the point is on BUTTON "Wrong?"
-# REPRO after the press the form is open
-# REPRO the owner's value landed
-# pass 1
-# fail 0
