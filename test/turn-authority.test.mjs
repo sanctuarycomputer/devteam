@@ -133,6 +133,7 @@ test('turn authority', async (t) => {
       // the turn before the no lifts nothing; a part clause, words not in the turn, or another class are refused
       refused(ask(before, 'Restart it.', ['--seen-turn', U]), /older than the owner's no/);
       refused(ask(U, 'Restart it now'), /part of a clause/);
+      refused(ask(U, 'the fix is in. Then tell me.'), /part of a clause/);
       refused(ask(U, 'Restart it later.'), /isn't in the turn/);
       refused(['thread', 'ask', T, '--turn', U, ...q('Tell them?'), '--owner-said', 'Then tell me.'], /--owner-said .* production-remediation/);
       refused(['thread', 'ask', T, '--turn', U, '--kind', 'trust', '--question', 'Trust restarts?', ...rem, '--owner-said', 'Then tell me.'], /not a trust or proposal/);
@@ -194,6 +195,11 @@ test('turn authority', async (t) => {
       const Q3 = askAbout(T3, U3, 'Hold the merge, or ship?');
       refused(answer(Q3, U3, 'merge it'), /part of a clause/);
       refused(answer(Q3, U3, 'Ship it'), /part of a clause; give the whole clause: "Ship it\?"/);
+      // a span whose end is a clause end fails on its start alone: words just before it (the finals' F-start)
+      const { T: TN, U: UN } = thread('Negated', "Don't merge it. Then rest.");
+      const QN = askAbout(TN, UN, 'Merge the hotfix?');
+      refused(answer(QN, UN, 'merge it.'), /part of a clause; give the whole clause: "Don't merge it\."/);
+      refused(answer(QN, UN, "t merge it."), /part of a clause/);
       const { T: T4, U: U4 } = thread('No stop', 'Merge the dashboard PR.');
       F.sup(answer(askAbout(T4, U4, 'Merge the PR, no full stop?'), U4, 'Merge the dashboard PR'));
       assert.deepEqual(raw(show(T4).questions[0].id).find((l) => l.answer !== undefined).said_at, [0, 22]);
@@ -267,6 +273,7 @@ test('turn authority', async (t) => {
       const S9 = F.sup(['thread', 'reply', T9, 'Noted.']);
       refused(['correct', D9, '--from-turn', S9, '--said', 'Noted.'], /that turn is the supervisor's/);
       refused(['correct', D9, '--from-turn', U9, '--said', 'Ship'], /part of a clause/);
+      refused(['correct', D9, '--from-turn', U9, '--said', 'it. Wait.'], /part of a clause/);
       for (const extra of [['--severity', '2'], ['--impact', '2'], ['--reason', 'x'], ['--retro'], ['--from-chat']]) refused(['correct', D9, '--from-turn', U9, '--said', 'Wrong.', ...extra], new RegExp(`--${extra[0].slice(2) === 'from-chat' ? 'from-turn or --from-chat' : extra[0].slice(2)}`));
       refused(['correct', D9, '--from-chat', '--said', 'Wrong.', '--reason', 'x'], /--reason/);
       refused(['correct', D9, '--from-turn', U9, '--said', 'Wrong.'], /supervisor records/, {});
