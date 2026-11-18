@@ -163,6 +163,11 @@ test('turn authority', async (t) => {
       refused(answer(Qplain, U, 'Merge the dashboard PR.'), /wasn't asked about that turn.*thread ask/);
       refused(['answer', Q1, 'Yes', '--from-turn', U, '--at', '0'], /--at goes with --said/);
       refused(['answer', Q1, 'Yes', '--from-turn', U, '--seen-turn', U2], /--seen-turn goes with --said/);
+      // nor with chat, or the owner's own answer (final-1 F2)
+      for (const k of ['--at', '--seen-turn']) {
+        refused(['answer', Q1, 'Yes', '--from-chat', '--said', 'yes', k, k === '--at' ? '0' : U], new RegExp(`answer ${k} goes with --from-turn`));
+        refused(['answer', Q1, 'Yes', k, k === '--at' ? '0' : U], new RegExp(`answer ${k} goes with --from-turn`), {});
+      }
       // A4: the supervisor's own turn never binds
       const S = F.sup(['thread', 'reply', T, 'Looking.']);
       refused(answer(Q1, S, 'Looking.'), /that turn is the supervisor's/);

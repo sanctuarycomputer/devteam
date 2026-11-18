@@ -7250,6 +7250,8 @@ function cmdAnswer() {
   const fromChat = !!flags['from-chat'];
   if (fromChat) chatAnswer('answer');
   const fromTurn = flags['from-turn'] !== undefined;
+  // --at and --seen-turn pick and read a turn's clause: only with --from-turn --said (final-1 F2)
+  if (!fromTurn) for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`answer --${k} goes with --from-turn <u-id> --said`);
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
