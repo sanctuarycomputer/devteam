@@ -60,6 +60,16 @@ async function open(t, F, hash) {
   await p.send('Runtime.enable');
   const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
   await size(1440, 900);
+  // knobs for widening races, each doing nothing unless set:
+  // DEVTEAM_TEST_CPU_THROTTLE=n runs the page n times slower, as on a loaded runner
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+  // DEVTEAM_TEST_SLIDE_MS=ms makes every slide (--dur) that long
+  if (process.env.DEVTEAM_TEST_SLIDE_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--dur', '${Number(process.env.DEVTEAM_TEST_SLIDE_MS)}ms'))` });
+  // DEVTEAM_TEST_CLICK_GAP_MS=ms waits that long between a click's aim and its press, so anything that moves meanwhile is missed
+  if (process.env.DEVTEAM_TEST_CLICK_GAP_MS) {
+    const gap = Number(process.env.DEVTEAM_TEST_CLICK_GAP_MS);
+    p.click = async (sel) => { const at = await p.at(sel); await new Promise((r) => setTimeout(r, gap)); await p.clickAt(at.x, at.y); };
+  }
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/${hash}` });
   const soon = soonIn(p, 30000, () => dash.out());
@@ -534,6 +544,9 @@ test('the counts as threads move', { skip: SKIP, timeout: 300000 }, async (t) =>
 // kit-89 T3: the panel's state in history, under a peek, over a reload and remembered (spec §2.5, §2.9).
 const IS_OPEN = "document.body.classList.contains('threads-open')";
 const AT_REST = `(${IS_OPEN} && getComputedStyle(document.getElementById('threads')).transform === 'none')`;
+// shut and still: the panel slides out and .main's margin slides back over --dur, and each one's transitionend
+// re-places a floating card (tlReplace, tlDraw), so a click aimed before then lands where the card was (spec-1 S4)
+const PANEL_SHUT = `(!${IS_OPEN} && document.getElementById('threads').getAnimations().length === 0 && document.querySelector('.main').getAnimations().length === 0)`;
 const ROW = (id) => `document.querySelector('#tl-list [data-tl-open="${id}"]')`;
 const CARD = "document.getElementById('tl-card')";
 const IN_PANEL = (id) => `(!!document.querySelector('#th-card-slot > #tl-card.in-panel') && !${CARD}.hidden && ${CARD}.dataset.key === '${id}')`;
@@ -631,6 +644,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // a fresh tab on #goals, /api/threads held by its own init script (at least 3 s, then until the test lets it go,
   // so a loaded box can't end the hold before the checks): the stored keys written into its hash at once, kept
   // while the read is held, the store unchanged; A opens in the panel when the read lands
+  await soon(AT_REST, 'the panel at rest before the second tab');
   const q = await chrome.newPage();
   t.after(() => q.close());
   await q.send('Page.enable');
@@ -645,7 +659,10 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   assert.deepEqual(await q.ev(`[TL.have, location.hash, ${STORE}]`), [0, `#goals?th=open&t=${A}`, JSON.stringify({ th: 'open', t: A })], 'still held, still kept');
   await q.ev('window.__let(); void 0');
   await soonQ(`TL.have > 0 && ${IN_PANEL(A)} && location.hash === '#goals?th=open&t=${A}'`, 'A in the panel once the read lands');
-  await q.close();
+  // the tab closed, not only its socket: close() only drops the socket, and a tab left open can keep the first
+  // behind it (CI: the first tab still hidden, 'the first tab in front'); closed, the first tab is the only one
+  await q.send('Page.close');
+  q.close();
   // the first tab in front again: a tab behind another runs no transitions after a reload
   await p.send('Page.bringToFront');
   await soon(`document.visibilityState === 'visible' && ${AT_REST}`, 'the first tab in front, the panel at rest');
@@ -669,7 +686,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // × then a nav click: closed; the focus back on .tt; opening by .tt focuses the selected tab
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`location.hash === '#overview' && !${IS_OPEN} && ${STORE} === null`, 'closed, nothing remembered');
+  await soon(`location.hash === '#overview' && !${IS_OPEN} && ${STORE} === null && ${PANEL_SHUT}`, 'closed, nothing remembered, at rest');
   await soon("document.activeElement === document.querySelector('.pagebar .tt')", 'the focus on .tt');
   await nav('goals');
   await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'Goals, still closed');
@@ -704,7 +721,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // bad values dropped; t without th for an in-panel thread gets th=open
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`!${IS_OPEN} && ${STORE} === null`, 'closed');
+  await soon(`!${IS_OPEN} && ${STORE} === null && ${PANEL_SHUT}`, 'closed, at rest');
   await p.ev("location.hash = '#overview?th=bogus&t=BAD!'; void 0");
   await soon(`location.hash === '#overview' && !${IS_OPEN} && history.state?.page === '#overview'`, 'dropped: #overview, closed');
   await p.ev(`location.hash = '#overview?t=${A}'; void 0`);
@@ -713,7 +730,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // Review Focus 3: a remembered t the threads don't have: the list, t dropped
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`!${IS_OPEN}`, 'closed');
+  await soon(`!${IS_OPEN} && ${PANEL_SHUT}`, 'closed, at rest');
   await p.ev(`localStorage.setItem('devteam.threads.open', JSON.stringify({ th: 'open', t: 't-nope' })); void 0`);
   await nav('goals');
   await soon(`location.hash === '#goals?th=open' && ${AT_REST} && !!${ROW(A)} && ${STORE} === ${stored({ th: 'open' })}`, 'the list, t dropped');
@@ -721,7 +738,7 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // a floating card's ×: a new entry without t; Back reopens it
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`!${IS_OPEN}`, 'closed');
+  await soon(`!${IS_OPEN} && ${PANEL_SHUT}`, 'closed, at rest');
   await go(`#goals?t=${G}`, "G's card");
   await soon(FLOATING(G), "G's card open");
   let n = await p.ev('history.length');
@@ -766,13 +783,13 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   // a pin opens its card in place (spec §2.4: today's [data-tl-pin]), no entry; its × closes it in place
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`location.hash === '#goals' && !${IS_OPEN}`, 'closed');
+  await soon(`location.hash === '#goals' && !${IS_OPEN} && ${PANEL_SHUT}`, 'closed, at rest');
   // a fresh #talk/ link from a page head without keys: the remembered th applied before its route (review T3-2)
   await p.ev(`localStorage.setItem('devteam.threads.open', JSON.stringify({ th: 'open' })); location.hash = '#talk/${G}'; void 0`);
   await soon(`location.hash === '#talk/${G}' && ${FLOATING(G)} && ${IS_OPEN} && history.state?.page === '#goals?th=open&t=${G}'`, 'the remembered th under the talk/ card');
   await soon(AT_REST, 'the panel at rest');
   await p.click('#th-close');
-  await soon(`!${IS_OPEN} && history.state?.page === '#goals?t=${G}'`, 'the panel closed, the card kept');
+  await soon(`!${IS_OPEN} && history.state?.page === '#goals?t=${G}' && ${PANEL_SHUT}`, 'the panel closed, the card kept, at rest');
   await p.ev("document.querySelector('#tl-card [data-tl-close]').click(); void 0");
   await soon(`location.hash === '#goals' && ${CARD}.hidden && !${IS_OPEN}`, 'the card closed: back to Goals');
   await soon(`!!document.querySelector('#tl-pins [data-tl-pin="${G}"]')`, "G's pin");
