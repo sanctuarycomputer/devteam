@@ -706,7 +706,7 @@ try {
   .sink-cmd pre { background: var(--well); padding: 6px 8px; border-radius: 6px; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
   .md figure.diagram { margin: 12px 0; padding: 12px; background: var(--well); border-radius: 8px; overflow-x: auto; }
   .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-  .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+  div.viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer dl:not(.props) { grid-template-columns: 1fr; } }
 
@@ -792,8 +792,10 @@ try {
   .lib-link .links { margin: 0; }
   .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
 
-  /* the artifact viewer: a page the fleet drew, centered over the scrim at 80% of the window */
-  #artifact-view:not([hidden]) { position: fixed; inset: 10%; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  /* the artifact viewer: a page the fleet drew, a modal over the scrim from under the page bar (--bar-h, so the Inbox button above it stays
+     clear) to 16px from the window's sides and bottom; its right edge is --av-right, which the open Inbox panel moves left of itself (8px all
+     round under 600px, below) */
+  #artifact-view:not([hidden]) { position: fixed; inset: var(--bar-h, 49px) var(--av-right, 16px) 16px 16px; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
   /* a viewer opened over a review stays above it: the review sits above the panel (z 25, kit-100) */
   .app:has(main.reviewing) ~ #artifact-view:not([hidden]) { z-index: 26; }
   .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
@@ -808,7 +810,7 @@ try {
   #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: 1px; }
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   #av-frame[hidden], #pv-frame[hidden] { display: none; }
-  @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  @media (max-width: 600px) { #artifact-view:not([hidden]) { inset: 8px; } }
   #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
   /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
   .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
