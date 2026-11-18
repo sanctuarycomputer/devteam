@@ -254,6 +254,10 @@ test('a recurring-run line of each status passes log-check, an unknown one does 
   logLine(bad, 'supervisor', runLine('pass', { sha: 'main' }));
   logLine(bad, 'supervisor', runLine('pass', { excerpt: 'x'.repeat(201) }));
   logLine(bad, 'supervisor', runLine('pass', { output: 'everything it printed' }));
+  logLine(bad, 'supervisor', runLine('pass', { slot: '2026-11-16 09:00' }));
+  logLine(bad, 'supervisor', runLine('pass', { seconds: -1 }));
+  logLine(bad, 'supervisor', runLine('started', { ref: '' }));
+  logLine(bad, 'supervisor', runLine('started', { ref: 'r'.repeat(201) }));
   const r = logCheck(bad);
   assert.notEqual(r.status, 0, r.out);
   assert.match(r.out, /run\.status must be one of pass, fail, error, started, nothing, abandoned/);
@@ -261,6 +265,10 @@ test('a recurring-run line of each status passes log-check, an unknown one does 
   assert.match(r.out, /run\.sha "main" does not match/);
   assert.match(r.out, /run\.excerpt must be at most 200 characters/);
   assert.match(r.out, /run\.output is not a field here/);
+  assert.match(r.out, /run\.slot "2026-11-16 09:00" does not match/);
+  assert.match(r.out, /run\.seconds must be at least 0/);
+  assert.match(r.out, /run\.ref must be at least 1 characters/);
+  assert.match(r.out, /run\.ref must be at most 200 characters/);
 });
 
 test('the owner\'s reopen line passes, and only the owner\'s counts', () => {
