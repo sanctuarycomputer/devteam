@@ -33,7 +33,8 @@ const RELAY_ENV = { DEVTEAM_RELAY_PORTS: `${PORTS + 62}-${PORTS + 79}` };
 // then: held from the start, the stage's pins are first drawn late, already in their final places. (The pins
 // are also redrawn by the panel's slide ending, from the rects the dashboard has, so delaying the dashboard's
 // animation frames instead doesn't hold them back every time.) A message held is dispatched again, as it
-// came, to the dashboard's own listeners; nothing else is.
+// came, to the dashboard's own listeners; nothing else is. Only for a case that doesn't move the frame: a
+// message held across an in-frame link would reach the next page's pins with the last page's rects.
 const CPU_THROTTLE = Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) || 0;
 const RECTS_DELAY_MS = Number(process.env.DEVTEAM_TEST_RECTS_DELAY_MS) || 0;
 const RECTS_DELAY = `(() => {

@@ -79,9 +79,10 @@ test("the viewer's box, its narrowing for the panel, and the frames that fill a 
       const pinSel = `#av-pins [data-tl-pin="${th}"]`;
       await V.soon(`(() => { const e = document.querySelector(${J(pinSel)}); return !!e && e.getBoundingClientRect().width > 0; })()`, `setup: ${name}'s pin drawn on the stage`);
       await where(id);
-      await V.soon(`(() => { const a = ${CENTRE(id)}, q = ${PIN(pinSel)}; return !!a && !!q && Math.hypot(a.x - q.x, a.y - q.y) <= 40; })()`, `${name}'s pin within 40px of #${id}'s centre`).catch(async () => {});
-      const at = await p.ev(CENTRE(id)), pin = await p.ev(PIN(pinSel));
-      assert.ok(near(pin, at, 40), `${name}'s pin ${J(pin)} is within 40px of #${id}'s centre ${J(at)}`);
+      await V.soon(`(() => { const a = ${CENTRE(id)}, q = ${PIN(pinSel)}; return !!a && !!q && Math.hypot(a.x - q.x, a.y - q.y) <= 40; })()`, `${name}'s pin within 40px of #${id}'s centre`).catch(async (e) => {
+        const at = await p.ev(CENTRE(id)), pin = await p.ev(PIN(pinSel));
+        assert.ok(pin && at && near(pin, at, 40), `${name}'s pin ${J(pin)} is within 40px of #${id}'s centre ${J(at)}: ${e.message}`);
+      });
     }
 
     // a real Shift+click on #other-right (placed from the frame's right edge; the frame has the keyboard first,
