@@ -5925,6 +5925,10 @@ function cmdMerge() {
   // gates this PR adds as the supervisor's own call (gateAdditions): run at its head below, and
   // logged as their own gate-add act once it lands
   let gateAdds = null;
+  // owner-classed settings changes (home only) and a chore's files outside project/, for the
+  // link-landing rule under --approved below
+  let ownerChanged = null;
+  let choreOutside = [];
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -5935,6 +5939,7 @@ function cmdMerge() {
     const gateAdd = classed?.some((c) => c.key === 'gates') ? (chore ? gateAdditions(base, sha) : { problem: 'only the supervisor\'s own chore PR adds a gate without the owner' }) : null;
     if (gateAdd?.added?.length) { gateAdds = gateAdd.added.map((n) => [n, settingsAt(sha).gates[n]]); out(`adds gate${gateAdds.length > 1 ? 's' : ''} ${gateAdd.added.join(', ')} and leaves main's as they are: a new check is the supervisor's call (constitution.md §4), to be logged as a gate-add act when it lands`); }
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls) && !(c.key === 'gates' && gateAdds)) ?? null;
+    ownerChanged = changed;
     fails.push(...registryActFails(base, sha));
     fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
@@ -5996,6 +6001,7 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    choreOutside = outside;
     const kitFiles = outside.filter(isKitFile);
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
@@ -6033,10 +6039,23 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    // a bundle's link acts (one per entry its question showed) are one landing too
+    // A bundle's link acts (one per entry its question showed) are one landing too. A link act binds
+    // the change, not a slug: its entry hashes and its question's diff (ownerLinkActFails), so it
+    // lands on a chore of any name that changes those links and nothing else outside project/. Old
+    // acts that also carry chore-registry follow the same rule.
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
-    if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    const linkIds = new Set(prior.filter(linkAct).flatMap((a) => a.refs.filter((r) => r.startsWith('link:')).map((r) => r.slice(5))));
+    const allLinks = prior.length >= 1 && prior.every(linkAct) && prior.every((a) => a.class === av.class);
+    let landing;
+    if (allLinks) {
+      const extras = [...choreOutside, ...(ownerChanged ?? []).filter((c) => !c.key.startsWith('links.') || !linkIds.has(c.key.split('.')[1])).map((c) => c.key)];
+      const linksLanded = (ownerChanged ?? []).some((c) => c.key.startsWith('links.'));
+      landing = !!chore && !extras.length && linksLanded;
+      if (!landing) fails.push(`${approved} approved repo link entries only (${[...linkIds].map((l) => `links.${l}`).join(', ')}), landing on a chore; this ${chore ? 'chore' : 'merge'} ${extras.length ? `also changes ${extras.slice(0, 6).join(', ')}` : 'lands none of them'}: ask again for this one, or take the rest out`);
+    } else {
+      landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+      if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
+    }
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
@@ -22142,7 +22161,7 @@ function cmdLink() {
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
 // A link of an owner's kind: draft the change and ask a question in the class its
 // field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
-// exactly that change and log the act the chore-registry merge then lands under the same answer.
+// exactly that change and log the act; the chore merge that lands it does so under the same answer.
 // Asking twice for the same draft reuses the open question; applying a draft already written is a
 // no-op. Nothing here names a kind: the table gives fields and classes.
 function linkByOwner(sub, id, field, vals, kind) {
@@ -22185,7 +22204,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
   // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
   // (prior_hash), so merge binds each changed entry to this answer
-  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
