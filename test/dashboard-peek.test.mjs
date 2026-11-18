@@ -299,7 +299,8 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.deepEqual(await style(`#drawer-body ${pillSel}`), boardPill, 'a ticket pill in the peek is styled as on Board');
     assert.deepEqual(await style('#drawer-body ol.steps li.now'), cardStep, 'the current step as on the goal card');
     assert.deepEqual(await style('#drawer-body ol.steps li'), cardStep0, 'the first step as on the goal card');
-    assert.ok(await p.ev("!!document.querySelector('#drawer-body ol.steps').closest('.no-shell')"), 'the stepper is fenced');
+    // the step bar is the shell's goalSteps on the card and in the peek alike (kit-90): not fenced
+    assert.ok(await p.ev("!document.querySelector('#drawer-body ol.steps').closest('.no-shell')"), 'the stepper is the shell\'s, not fenced');
     assert.ok(await p.ev(`!!document.querySelector('#drawer-body ${pillSel}').closest('.no-shell')`), 'the progress block is fenced');
     await closePeek();
   });
@@ -569,7 +570,8 @@ const inventory = (ids) => {
     row('goal', 'goal', 'every stored field', 'stored:goal'),
     row('goal', 'goal', 'outcome', 'dt:Outcome >> text:admins pay alone'),
     row('goal', 'goal', 'horizon', 'dt:Horizon'),
-    row('goal', 'goal', 'measure', 'dt:Measure >> text:cards taken a day'),
+    // the stored measure reads Measured by in the goal peek (kit-90 spec §5)
+    row('goal', 'goal', 'measure', 'dt:Measured by >> text:cards taken a day'),
     row('goal', 'goal', 'numbered milestones', `dt:Milestones >> ol li a[href^="#milestone/"]`),
     row('goal', 'goal', 'preconditions with "no plan yet"', 'dt:Preconditions >> ol >> text:no plan yet'),
     row('goal', 'goal', 'not in scope', 'dt:Not in scope >> text:refunds'),
@@ -1320,17 +1322,22 @@ test('rows and cards', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.equal(await p.ev(`location.hash === ${J(page)} && !document.body.classList.contains('peek-open') && document.getElementById('drawer').hidden`), true, `${what}: no peek, still on ${page}`);
     };
     // the ⋯: on a ticket card and on a goal card, it only opens its menu
-    for (const [page, el] of [['#board', tcard], ['#goals', "document.querySelector('#goals-list .card.goal[data-open]')"]]) {
+    for (const [page, el] of [['#board', tcard], ['#goals', "document.querySelector('#goals-list .card.goal[data-open]:not(.upkeep)')"]]) {
       await on(page);
       await p.ev(`(() => { const d = ${el}.querySelector('details.menu'); d.open = false; window.__menu = d; d.querySelector('summary').click(); })(); void 0`);
       await still(page, `${page}: the ⋯`);
       assert.equal(await p.ev('window.__menu.open'), true, `${page}: the ⋯ opened its menu`);
       await p.ev('window.__menu.open = false; void 0');
     }
-    // a hold button on a goal card: its first Let go asks to confirm, and opens nothing
+    // a goal's hold control is in its peek (kit-90): its first Let go asks to confirm, and opens nothing else
     await on('#goals');
-    await p.ev(`(() => { const b = document.querySelector('#goals-list .card.goal[data-open] [data-hold-id][data-mode="let-go"]'); window.__hb = b; b.click(); })(); void 0`);
-    await still('#goals', 'Let go');
+    const gopen = await p.ev(`document.querySelector('#goals-list .card.goal[data-open]:not(.upkeep)').dataset.open`);
+    await p.ev(`location.hash = ${J(gopen)}; void 0`);
+    await opened(gopen, 'the goal\'s peek');
+    await soon(`!!document.querySelector('#drawer-body [data-hold-id][data-mode="let-go"]')`, 'the peek\'s Hold');
+    await p.ev(`(() => { const b = document.querySelector('#drawer-body [data-hold-id][data-mode="let-go"]'); window.__hb = b; b.click(); })(); void 0`);
+    await settle();
+    assert.equal(await p.ev(`decodeURIComponent(location.hash.slice(1)) === decodeURIComponent(${J(gopen)}) && DRAWER.kind === 'goal' && !document.getElementById('drawer').hidden`), true, 'Let go: still the goal\'s peek, nothing else opened');
     assert.equal(await p.ev('window.__hb.textContent'), 'Confirm let go', 'the hold button did its own thing');
     // a link to another record inside a card: it goes there, not to the card's own peek
     let found = null;

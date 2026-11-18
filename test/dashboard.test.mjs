@@ -3238,7 +3238,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.click('#th-close');
     await soon(`!document.body.classList.contains('threads-open')`, 'the panel closed');
     await p.ev(`location.hash = '#goals'`);
-    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none'`, 'the Goals page again');
+    // and at rest: the page's margin slides back as the panel closes, and Goals' cards sit two across (kit-90),
+    // so a point read mid-slide is on the card beside the goal's by the time it is clicked
+    await soon(`getComputedStyle(document.querySelector('#goals')).display !== 'none' && !document.getAnimations().some((a) => a.transitionProperty === 'margin-right')`, 'the Goals page again, at rest');
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
@@ -3274,7 +3276,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`localStorage.setItem('devteam.thread.draft.new:item:goal:gone', ${old(8)}); localStorage.setItem('devteam.thread.draft.new:item:goal:kept', ${old(1)}); void 0`);
     await p.key('Escape');
     await soon(`document.getElementById('tl-card').hidden`, 'Escape closed the card');
-    await shiftClick('#goals h2');
+    await shiftClick('#goals .tabbar [role="tab"][data-tab="active"]');
     await soon(`${shown('tl-card')} && TL.draft?.subject?.kind === 'page'`, 'a card on a spot in Goals');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '', "the goal's draft isn't here");
     assert.deepEqual(await p.ev(`['gone', 'kept'].map((k) => localStorage.getItem('devteam.thread.draft.new:item:goal:' + k) !== null)`), [false, true], 'the week-old draft pruned');
@@ -3314,7 +3316,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('half a thought');
     const polls = await p.ev('window.__polls');
-    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    // Goals draws only what changed (kit-90): its last drawing forgotten, as a change would, so the next poll redraws the card
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); GOALS_HTML = ''; void 0`);
     await soon(`window.__polls >= ${polls + 2} && !window.__g.isConnected`, 'polls landing and the goal card redrawn');
     assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), 'half a thought', 'the draft untouched');
@@ -3423,7 +3426,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const before = await pin();
     assert.equal(before.n, '1');
     assert.ok(Math.abs(before.dx) <= 2 && Math.abs(before.dy) <= 2, `at the goal's top right corner: ${JSON.stringify(before)}`);
-    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    // Goals draws only what changed (kit-90): its last drawing forgotten, so the next poll rebuilds the card
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); GOALS_HTML = ''; void 0`);
     await soon('!window.__g.isConnected', 'the goal card redrawn');
     assert.deepEqual(await pin(), before, 'placed again after the rebuild');
     await click('[data-tl-close]');
