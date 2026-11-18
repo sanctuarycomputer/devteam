@@ -347,3 +347,73 @@ test('saving the goal order: the menu and the keyboard', { ...CHROME, timeout: 4
     assert.equal(await p.ev(`document.querySelector('#e-goal-order').textContent`), '', 'no error');
   });
 });
+
+// A mouse event at x, y with the left button held (buttons 1) or let go (0)
+const mouse = (p, type, x, y, buttons) => p.send('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' && !buttons ? 'none' : 'left', buttons, ...(type === 'mouseMoved' ? {} : { clickCount: 1 }) });
+// The centres of what the selectors find, read in one go after one scroll of the goals list into view
+// (no scrolling after, so the points stay true)
+const centres = (p, sels) => p.ev(`(() => {
+  document.querySelector('#goals-list').scrollIntoView({ block: 'start' });
+  return ${JSON.stringify(sels)}.map((s) => { const r = document.querySelector(s).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+})()`);
+
+test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goals-reorder-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids, dt } = reorderFixture(base);
+  const { A, B, C, D } = ids;
+  const { p, soon, port, go, reload } = await openOn(later, root, env);
+  const shows = (ids, what) => soon(`JSON.stringify([...document.querySelectorAll('#goals .card.goal[data-subject]')].map((c) => c.dataset.subject.replace(/^goal:/, ''))) === ${JSON.stringify(JSON.stringify(['upkeep', ...ids]))}`, what);
+  const fresh = async () => {
+    dt(['goal', 'order', A, B, C, D], null);
+    await go('#goals');
+    await shows([A, B, C, D], 'the cards in the order A, B, C, D');
+    await settled(p, port, [A, B, C, D], 'the order put back');
+  };
+
+  await t.test('dragging a grip reorders with one post, opens no peek, and persists', async () => {
+    await fresh();
+    const acts = dashOrderActs(root);
+    const [from, to] = await centres(p, [`${card(C)} .goal-grip`, card(A)]);
+    await mouse(p, 'mouseMoved', from.x, from.y, 0);
+    await mouse(p, 'mousePressed', from.x, from.y, 1);
+    assert.equal(await p.ev(`document.querySelector(${JSON.stringify(card(C))}).classList.contains('dragging')`), true, 'the dragged card is marked');
+    for (let i = 1; i <= 5; i++) await mouse(p, 'mouseMoved', from.x + ((to.x - from.x) * i) / 5, from.y + ((to.y - from.y) * i) / 5, 1);
+    assert.deepEqual(await order(p), ['upkeep', C, A, B, D], 'the live preview, before the drop');
+    assert.equal((await p.ev('window.__orders')).length, 0, 'nothing posted before the drop');
+    await mouse(p, 'mouseReleased', to.x, to.y, 0);
+    await settled(p, port, [C, A, B, D], 'the order after the drag');
+    await shows([C, A, B, D], 'the cards after the drag');
+    assert.deepEqual(await p.ev('window.__orders'), [{ ids: [C, A, B, D] }], 'one post, the whole order');
+    assert.equal(dashOrderActs(root), acts + 1, 'one goal-order act by the owner on the dashboard');
+    const pri = (id) => JSON.parse(dt(['goal', 'show', id, '--json'])).priority;
+    assert.deepEqual([pri(C), pri(A), pri(B)], [1, 2, 3], 'the priorities saved');
+    assert.equal(await p.ev('location.hash'), '#goals', 'the release opened no peek');
+    assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal.dragging').length`), 0, 'no card left marked');
+    assert.deepEqual(await focusOf(p), { grip: C }, "focus on the dragged card's handle");
+    await reload();
+    await shows([C, A, B, D], 'the cards after reload');
+    assert.deepEqual(await order(p), ['upkeep', C, A, B, D]);
+  });
+
+  await t.test('Escape cancels a drag', async () => {
+    await fresh();
+    const [from, over] = await centres(p, [`${card(B)} .goal-grip`, card(C)]);
+    await mouse(p, 'mouseMoved', from.x, from.y, 0);
+    await mouse(p, 'mousePressed', from.x, from.y, 1);
+    for (let i = 1; i <= 3; i++) await mouse(p, 'mouseMoved', from.x + ((over.x - from.x) * i) / 3, from.y + ((over.y - from.y) * i) / 3, 1);
+    assert.deepEqual(await order(p), ['upkeep', A, C, B, D], 'the live preview');
+    await p.key('Escape');
+    assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'Escape puts the cards back at once');
+    await mouse(p, 'mouseReleased', over.x, over.y, 0);
+    await p.ev('load({ force: true })');
+    const n = await p.ev('window.__polls');
+    await soon(`window.__polls > ${n}`, 'one more poll');
+    assert.deepEqual(await p.ev('window.__orders'), [], 'no post');
+    assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'the order unchanged');
+    assert.deepEqual(activeOf(await (await fetch(`http://127.0.0.1:${port}/api/data`)).json()), [A, B, C, D], "the server's order unchanged");
+    assert.equal(await p.ev('location.hash'), '#goals', 'Escape closed and opened nothing');
+    assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal.dragging').length`), 0, 'no card left marked');
+  });
+});

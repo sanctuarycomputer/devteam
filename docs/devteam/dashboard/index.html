@@ -3494,11 +3494,17 @@ function closedGoalCardHtml(g, R, openQs) {
 const GOALS_TABS = ['active', 'met', 'letgo'];
 let GOALS_TAB = 'active';
 let GOALS_HTML = '';
-function renderGoals() {
-  if (!DATA) return;
-  const o = DATA.ooda, R = o.roadmap, openQs = DATA.questions || [];
+// The Active tab's goals from a goals array, first to last: not met or let go, by priority (none last, ties
+// as given). The one rule for the order: renderGoals draws it and activeGoalOrder saves from it.
+function activeGoalsOf(goals) {
   const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
-  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+  return goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+}
+function renderGoals() {
+  // a drag moves the cards itself; its drop or cancel draws again once it is over
+  if (!DATA || GOAL_DRAG) return;
+  const o = DATA.ooda, R = o.roadmap, openQs = DATA.questions || [];
+  const live = activeGoalsOf(o.goals);
   const met = o.goals.filter((g) => g.status === 'met'), gone = o.goals.filter((g) => g.status === 'abandoned');
   const tabs = tabBar({ tabs: [{ id: 'active', label: 'Active', count: live.length + (DATA.upkeep ? 1 : 0) }, { id: 'met', label: 'Met', count: met.length }, { id: 'letgo', label: 'Let go', count: gone.length }], selected: GOALS_TAB });
   const grid = (cards) => `<div class="g12 goal-grid">${cards.join('')}</div>`;
@@ -3516,14 +3522,13 @@ function renderGoals() {
   const list = $('goals-list');
   const ae = document.activeElement;
   const inList = !!ae && ae !== document.body && list.contains(ae);
-  // the goal control that has focus (put back on its new copy), and whether focus is on the moved goal
+  // the goal control that has focus (put back on its new copy)
   const had = inList ? goalControlOf(ae) : null;
-  const onMoved = inList && !!GOAL_FOCUS && ae.closest('[data-goal-card]')?.dataset.goalCard === GOAL_FOCUS.id;
   if (html !== GOALS_HTML) { list.innerHTML = html; GOALS_HTML = html; }
-  // focus, across the redraw: the control that had it; else, fallen to the page or on the moved goal, the moved goal's
+  // focus, across the redraw: the control that had it; else, fallen to the page, the moved goal's
   const now = document.activeElement;
   const lost = !now || now === document.body;
-  const to = had && lost ? had : (lost || onMoved) && GOAL_FOCUS ? GOAL_FOCUS : null;
+  const to = had && lost ? had : lost && GOAL_FOCUS ? GOAL_FOCUS : null;
   const el = to && goalControlEl(to);
   if (el && el !== now) el.focus(to === had ? { preventScroll: true } : undefined);
 }
@@ -3534,6 +3539,9 @@ let GOAL_ORDER_ERR = '';
 // Cleared once the owner moves on: focus anywhere else (not the page, which is a redraw dropping it), or a
 // press off it.
 let GOAL_FOCUS = null;
+// The drag in progress: { id, pointerId, start (the ids as drawn when it began), card, moved (the drawn
+// order differs from start) }, else null. While it is set renderGoals draws nothing: the drag moves the cards.
+let GOAL_DRAG = null;
 // The goal control el is in: { id, what } for an active goal card's handle or ⋯ summary, else null.
 function goalControlOf(el) {
   const grip = el?.closest?.('.goal-grip[data-goal-grip]');
@@ -3556,11 +3564,11 @@ document.addEventListener('focusin', (e) => {
 window.addEventListener('pointerdown', (e) => {
   if (GOAL_FOCUS && !sameGoalControl(goalControlOf(e.target), GOAL_FOCUS)) GOAL_FOCUS = null;
 }, true);
-// The Active tab's goal ids as drawn (DATA, overlays and all; Upkeep left out), first to last.
+// The Active tab's goal ids as drawn (DATA, overlays and all, by activeGoalsOf, the rule renderGoals draws
+// by; Upkeep left out), first to last. It reads DATA, not the page, so a drag's live preview doesn't move
+// it: Move up / Move down and the arrow keys use it; a drag's drop reads the cards (drawnGoalOrder).
 function activeGoalOrder() {
-  if (!DATA) return [];
-  const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
-  return DATA.ooda.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b)).map((g) => g.id);
+  return DATA ? activeGoalsOf(DATA.ooda.goals).map((g) => g.id) : [];
 }
 // Save ids (every active goal, first to last) as the goal order: one POST /api/goal-order through press (all
 // keyed goal-order, so moves post in turn, each with the order it was made with). The overlay draws the
@@ -3592,7 +3600,7 @@ function moveGoal(id, to, focus = null) {
 }
 // ArrowUp / ArrowDown on a goal's handle (by e.key; no modifier) moves it one place
 document.addEventListener('keydown', (e) => {
-  if (!['ArrowUp', 'ArrowDown'].includes(e.key) || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (GOAL_DRAG || !['ArrowUp', 'ArrowDown'].includes(e.key) || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
   const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
   if (!grip) return;
   e.preventDefault();
@@ -3600,6 +3608,77 @@ document.addEventListener('keydown', (e) => {
   const at = activeGoalOrder().indexOf(id);
   if (at >= 0) moveGoal(id, e.key === 'ArrowUp' ? at - 1 : at + 1, 'grip');
 });
+// ---- dragging a goal by its handle (kit-234; GOAL_DRAG above) ----
+// The Active tab's goal ids as the cards stand on the page, first to last. During a drag this is its live
+// preview, which DATA (activeGoalOrder) doesn't have; the drop saves this.
+function drawnGoalOrder() {
+  return [...$('goals-list').querySelectorAll('.card.goal[data-goal-card]')].map((c) => c.dataset.goalCard);
+}
+const goalCardEl = (id) => $('goals-list').querySelector(`.card.goal[data-goal-card="${CSS.escape(id)}"]`);
+const sameIds = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+// A press with the primary button on a goal's handle starts a drag; the handle holds the pointer (capture)
+document.addEventListener('pointerdown', (e) => {
+  if (GOAL_DRAG || e.button !== 0 || !e.isPrimary) return;
+  const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
+  const card = grip?.closest('.card.goal[data-goal-card]');
+  if (!card || !$('goals-list').contains(card)) return;
+  try { grip.setPointerCapture(e.pointerId); } catch { return; }
+  GOAL_DRAG = { id: grip.dataset.goalGrip, pointerId: e.pointerId, start: drawnGoalOrder(), card, moved: false };
+  card.classList.add('dragging');
+});
+// The live preview: the goal card under the pointer gives the dragged card its place. The cards between
+// them move past the dragged one (insertBefore), which itself never leaves the page, so capture holds.
+document.addEventListener('pointermove', (e) => {
+  const d = GOAL_DRAG;
+  if (!d || e.pointerId !== d.pointerId) return;
+  const over = document.elementsFromPoint(e.clientX, e.clientY).map((el) => el.closest?.('.card.goal[data-goal-card]')).find((c) => c && c !== d.card && c.parentNode === d.card.parentNode);
+  if (!over) return;
+  const grid = d.card.parentNode;
+  const cards = [...grid.querySelectorAll(':scope > .card.goal[data-goal-card]')];
+  const from = cards.indexOf(d.card), to = cards.indexOf(over);
+  if (from < 0 || to < 0) return;
+  // over earlier: it and the cards up to the dragged one go after it, in order; over later: the cards
+  // after the dragged one up to it go before it
+  if (to < from) { const after = d.card.nextSibling; for (const c of cards.slice(to, from)) grid.insertBefore(c, after); }
+  else for (const c of cards.slice(from + 1, to + 1)) grid.insertBefore(c, d.card);
+  d.moved = !sameIds(drawnGoalOrder(), d.start);
+});
+// The drop: a changed order is saved once (focus back on the handle), and the click the release makes is
+// swallowed so it opens nothing; an unchanged one is drawn again.
+document.addEventListener('pointerup', (e) => {
+  if (!GOAL_DRAG || e.pointerId !== GOAL_DRAG.pointerId) return;
+  const ids = drawnGoalOrder();
+  const d = GOAL_DRAG;
+  GOAL_DRAG = null;
+  d.card.classList.remove('dragging');
+  if (sameIds(ids, d.start)) { renderGoals(); return; }
+  const swallow = (c) => { c.stopPropagation(); c.preventDefault(); };
+  document.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 0);
+  saveGoalOrder(ids, { id: d.id, focus: 'grip' });
+});
+// A drag called off (Escape, pointercancel, capture lost): the cards back in the order they began in, no post
+function cancelGoalDrag() {
+  const d = GOAL_DRAG;
+  if (!d) return;
+  GOAL_DRAG = null;
+  const grip = d.card.querySelector('.goal-grip');
+  try { if (grip?.hasPointerCapture(d.pointerId)) grip.releasePointerCapture(d.pointerId); } catch {}
+  const grid = d.card.parentNode;
+  for (const id of d.start) { const c = goalCardEl(id); if (c && grid && c.parentNode === grid) grid.appendChild(c); }
+  d.card.classList.remove('dragging');
+  renderGoals();
+}
+document.addEventListener('pointercancel', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(); });
+document.addEventListener('lostpointercapture', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(); });
+// Escape during a drag cancels it, and only that: taken first (window, capture) so the page's own Escape
+// (closing a peek or the Threads panel) never sees it
+window.addEventListener('keydown', (e) => {
+  if (!GOAL_DRAG || e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  cancelGoalDrag();
+}, true);
 // Selecting a tab is a new entry (#goals, #goals?gt=met), so Back restores the tab before and a reload keeps it.
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
