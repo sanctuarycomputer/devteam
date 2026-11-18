@@ -324,7 +324,10 @@ test('the image\'s downloads retry', () => {
 });
 
 test('the boot\'s hub lines sit where the boot needs them', () => {
-  assert.ok(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').includes('ENV DEVTEAM_IMAGE_HUB=4320'));
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n');
+  assert.ok(df.includes('ENV DEVTEAM_IMAGE_HUB=4320'));
+  // the box's platform counts the page cache toward its cap, so the kit's memory ceiling does too
+  assert.ok(df.includes('ENV DEVTEAM_MEMORY_COUNTS_CACHE=1'));
   const d = devteamDev();
   const at = (pred, what) => { const i = d.findIndex(pred); assert.ok(i >= 0, what); return i; };
   at((l) => l.trim().startsWith('timeout 20 tmux new-session -d -s home -n operator'), 'the home session, in start_operator');

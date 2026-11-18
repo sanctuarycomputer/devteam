@@ -953,6 +953,10 @@ try {
      tabs' text --page-top below the bar) doesn't reach it there */
   #goals-list > .tabbar:first-child { margin-top: -8px; }
   #goals .goal-grid { margin-top: 14px; }
+  /* kit-234: an active goal card's drag handle, before its icon (a ghost the size of the ⋯), and the card being dragged */
+  .goal-grip { flex: none; width: 22px; height: 22px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--muted); display: inline-flex; align-items: center; justify-content: center; cursor: grab; touch-action: none; }
+  .goal-grip:hover { background: var(--hover); color: var(--fg); opacity: 1; }
+  .card.goal.dragging { opacity: .6; cursor: grabbing; }
   /* a long state badge (a held goal's "Draining… (1 still running) · Milestone 2 of 2: being built") ends in
      an ellipsis inside its head or row, not past it, at 720px and below (its title the whole label); Overview's
      goal title keeps 40% */
@@ -2418,17 +2422,19 @@ function questionCard(q, o, reasonText, copy = false) {
     </div>`;
 }
 // A card's ⋯ menu: its ID and rows (k, v HTML), Copy ID, and Open in side peek when it has a peek
-// (open: '<kind>/<id>', the id as it is; the one [data-menu-open] handler makes it a hash with peekFor).
-const menuOf = (id, rows = [], open = null) => `<details class="menu"><summary aria-label="Details"><i class="icon-ellipsis" aria-hidden="true"></i></summary><div class="pop"><div class="kv">${id ? `<span>ID</span><code>${esc(id)}</code>` : ''}${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${v}</span>`).join('')}</div>${id ? `<button class="ghost" data-copy="${esc(id)}">Copy ID</button>` : ''}${open ? `<button type="button" class="ghost" data-menu-open="${esc(open)}">Open in side peek</button>` : ''}</div></details>`;
+// (open: '<kind>/<id>', the id as it is; the one [data-menu-open] handler makes it a hash with peekFor),
+// then extra (HTML: more of the card's own actions, a goal's Move up and Move down).
+const menuOf = (id, rows = [], open = null, extra = '') => `<details class="menu"><summary aria-label="Details"><i class="icon-ellipsis" aria-hidden="true"></i></summary><div class="pop"><div class="kv">${id ? `<span>ID</span><code>${esc(id)}</code>` : ''}${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${v}</span>`).join('')}</div>${id ? `<button class="ghost" data-copy="${esc(id)}">Copy ID</button>` : ''}${open ? `<button type="button" class="ghost" data-menu-open="${esc(open)}">Open in side peek</button>` : ''}${extra}</div></details>`;
 // The same menu for a record card with no cardHead (a Board or Loop card): one ⋯ per card.
 const cardMenu = (kind, id, rows = []) => menuOf(id, rows, `${kind}/${id}`);
 // A card's title (its main line, already escaped HTML) as the link to the card's own record: each run
 // of it outside the links it holds (a ticket, a question) links to the record, and those keep theirs.
 const titled = (href, html) => String(html).split(/(<a\b[^>]*>[\s\S]*?<\/a>)/).map((x, i) => (i % 2 || !x.trim() ? x : `<a class="title-link" href="${esc(href)}">${x}</a>`)).join('');
-// A card's title bar: an icon and a label on the left, ids and timestamps tucked in a ⋯ menu.
-function cardHead(icon, label, { extra = '', id = null, rows = [], open = null } = {}) {
-  const menu = id || rows.length || open ? menuOf(id, rows, open) : '';
-  return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
+// A card's title bar: an icon and a label on the left, ids and timestamps tucked in a ⋯ menu; lead (HTML)
+// before the icon (a goal's drag handle), menuExtra (HTML) at the menu's end.
+function cardHead(icon, label, { extra = '', id = null, rows = [], open = null, lead = '', menuExtra = '' } = {}) {
+  const menu = id || rows.length || open || menuExtra ? menuOf(id, rows, open, menuExtra) : '';
+  return `<div class="card-head">${lead}<i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
 const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
@@ -3447,15 +3453,20 @@ $('settings').addEventListener('click', (e) => {
   drawSettings();
 });
 // A goal's card on Goals' Active tab: its head, title, step bar, next line, attestation, Mark met and
-// links; outlined when its work waits (goalBlock). Its hold control is in its peek.
-function goalCardHtml(g, R, openQs) {
+// links; outlined when its work waits (goalBlock). Its hold control is in its peek. pos ({ i, n }: its index
+// among the Active tab's goal cards, and their count) draws its reorder controls: a drag handle before the
+// icon and Move up / Move down in its ⋯ (not in the viewer; none without pos: Overview, Met, Let go).
+function goalCardHtml(g, R, openQs, pos = null) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const blk = goalBlock(g, DATA);
   // the card opens its peek (a click on it, Enter on it, its title, Open in side peek in its ⋯); no Open link
   const meta = [design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : '', planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')].filter(Boolean).join(' · ');
-  return `<div class="c6 card goal goal-${s.key}${blk ? ` blk-${blk}` : ''}"${subj('goal', g.id, g.title)} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
-    ${cardHead('target', `<span class="badge ${s.tone}" title="${esc(s.label)}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}` })}
+  const ro = pos && !VIEWER;
+  const lead = ro ? `<button type="button" class="goal-grip" data-goal-grip="${esc(g.id)}" aria-label="Reorder ${esc(g.title)}" title="Drag to reorder; or ↑ and ↓"><i class="icon-grip-vertical" aria-hidden="true"></i></button>` : '';
+  const menuExtra = ro ? `<button type="button" class="ghost" data-goal-move="up" data-goal-id="${esc(g.id)}"${pos.i === 0 ? ' disabled' : ''}>Move up</button><button type="button" class="ghost" data-goal-move="down" data-goal-id="${esc(g.id)}"${pos.i === pos.n - 1 ? ' disabled' : ''}>Move down</button>` : '';
+  return `<div class="c6 card goal goal-${s.key}${blk ? ` blk-${blk}` : ''}"${subj('goal', g.id, g.title)}${ro ? ` data-goal-card="${esc(g.id)}"` : ''} role="button" tabindex="0" data-open="goal/${esc(encodeURIComponent(g.id))}">
+    ${cardHead('target', `<span class="badge ${s.tone}" title="${esc(s.label)}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]], open: `goal/${g.id}`, lead, menuExtra })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${goalStepsOf(g, s, R)}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
@@ -3483,26 +3494,206 @@ function closedGoalCardHtml(g, R, openQs) {
 const GOALS_TABS = ['active', 'met', 'letgo'];
 let GOALS_TAB = 'active';
 let GOALS_HTML = '';
-function renderGoals() {
-  if (!DATA) return;
-  const o = DATA.ooda, R = o.roadmap, openQs = DATA.questions || [];
+// The Active tab's goals from a goals array, first to last: not met or let go, by priority (none last, ties
+// as given). The one rule for the order: renderGoals draws it and activeGoalOrder saves from it.
+function activeGoalsOf(goals) {
   const pri = (g) => (typeof g.priority === 'number' ? g.priority : Infinity);
-  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+  return goals.filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => pri(a) - pri(b));
+}
+function renderGoals() {
+  // a drag moves the cards itself; its drop or cancel draws again once it is over
+  if (!DATA || GOAL_DRAG) return;
+  const o = DATA.ooda, R = o.roadmap, openQs = DATA.questions || [];
+  const live = activeGoalsOf(o.goals);
   const met = o.goals.filter((g) => g.status === 'met'), gone = o.goals.filter((g) => g.status === 'abandoned');
   const tabs = tabBar({ tabs: [{ id: 'active', label: 'Active', count: live.length + (DATA.upkeep ? 1 : 0) }, { id: 'met', label: 'Met', count: met.length }, { id: 'letgo', label: 'Let go', count: gone.length }], selected: GOALS_TAB });
   const grid = (cards) => `<div class="g12 goal-grid">${cards.join('')}</div>`;
   let body;
   if (GOALS_TAB === 'active') {
-    const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g) => goalCardHtml(g, R, openQs))].filter(Boolean);
+    const cards = [DATA.upkeep ? upkeepCardHtml(DATA.upkeep, DATA.upkeep_days) : '', ...live.map((g, i) => goalCardHtml(g, R, openQs, { i, n: live.length }))].filter(Boolean);
     const ask = openQs.find((q) => q.kind === 'goal-definition');
     body = (cards.length ? grid(cards) : '') + (o.goals.length ? live.length ? '' : '<p class="empty">None</p>' : empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).'));
   } else {
     const list = GOALS_TAB === 'met' ? met : gone;
     body = list.length ? grid(list.map((g) => closedGoalCardHtml(g, R, openQs))) : '<p class="empty">None</p>';
   }
-  const html = tabs + body;
-  if (html !== GOALS_HTML) { $('goals-list').innerHTML = html; GOALS_HTML = html; }
+  // the Active tab's reorder error (GOAL_ORDER_ERR, kept in page memory so every redraw keeps it), right under the tab bar
+  const html = tabs + (GOALS_TAB === 'active' ? `<span class="err" id="e-goal-order">${esc(GOAL_ORDER_ERR)}</span>` : '') + body;
+  const list = $('goals-list');
+  const ae = document.activeElement;
+  const inList = !!ae && ae !== document.body && list.contains(ae);
+  // the goal control that has focus (put back on its new copy)
+  const had = inList ? goalControlOf(ae) : null;
+  if (html !== GOALS_HTML) { list.innerHTML = html; GOALS_HTML = html; }
+  // focus, across the redraw: the control that had it; else, fallen to the page, the moved goal's
+  const now = document.activeElement;
+  const lost = !now || now === document.body;
+  const to = had && lost ? had : lost && GOAL_FOCUS ? GOAL_FOCUS : null;
+  const el = to && goalControlEl(to);
+  if (el && el !== now) el.focus(to === had ? { preventScroll: true } : undefined);
 }
+// ---- the goal order (kit-234): Move up / Move down in a goal's ⋯, ArrowUp / ArrowDown on its handle ----
+// A refused order's reason, drawn under the Active tab's bar on every redraw until the next move.
+let GOAL_ORDER_ERR = '';
+// Where focus belongs after a move ({ id, what: 'grip' | 'menu' }): the moved goal's handle or ⋯ summary.
+// Cleared once the owner moves on: focus anywhere else (not the page, which is a redraw dropping it), or a
+// press off it.
+let GOAL_FOCUS = null;
+// The drag in progress: { id, pointerId, start (the ids as drawn when it began), card, x, y (where it was
+// pressed), moved (the pointer has gone more than 3px from there) }, else null. While it is set renderGoals
+// draws nothing: the drag moves the cards.
+let GOAL_DRAG = null;
+// A moved drag called off with the button still down (Escape, capture lost): that pointer's id, so its
+// release swallows the click it makes; else null. A new press forgets it.
+let GOAL_SWALLOW_UP = null;
+// The goal control el is in: { id, what } for an active goal card's handle or ⋯ summary, else null.
+function goalControlOf(el) {
+  const grip = el?.closest?.('.goal-grip[data-goal-grip]');
+  if (grip) return { id: grip.dataset.goalGrip, what: 'grip' };
+  const sum = el?.closest?.('details.menu > summary');
+  const c = sum?.closest('[data-goal-card]');
+  return c ? { id: c.dataset.goalCard, what: 'menu' } : null;
+}
+// The element for { id, what } in the goals list, or null.
+function goalControlEl({ id, what }) {
+  const list = $('goals-list');
+  if (what === 'grip') return list.querySelector(`.goal-grip[data-goal-grip="${CSS.escape(id)}"]`);
+  return list.querySelector(`[data-goal-card="${CSS.escape(id)}"] details.menu > summary`);
+}
+const sameGoalControl = (a, b) => !!a && !!b && a.id === b.id && a.what === b.what;
+document.addEventListener('focusin', (e) => {
+  if (!GOAL_FOCUS || !(e.target instanceof Element) || e.target === document.body) return;
+  if (!sameGoalControl(goalControlOf(e.target), GOAL_FOCUS)) GOAL_FOCUS = null;
+}, true);
+window.addEventListener('pointerdown', (e) => {
+  if (GOAL_FOCUS && !sameGoalControl(goalControlOf(e.target), GOAL_FOCUS)) GOAL_FOCUS = null;
+}, true);
+// The Active tab's goal ids as drawn (DATA, overlays and all, by activeGoalsOf, the rule renderGoals draws
+// by; Upkeep left out), first to last. It reads DATA, not the page, so a drag's live preview doesn't move
+// it: Move up / Move down and the arrow keys use it; a drag's drop reads the cards (drawnGoalOrder).
+function activeGoalOrder() {
+  return DATA ? activeGoalsOf(DATA.ooda.goals).map((g) => g.id) : [];
+}
+// Save ids (every active goal, first to last) as the goal order: one POST /api/goal-order through press (all
+// keyed goal-order, so moves post in turn, each with the order it was made with). The overlay draws the
+// order at once (each goal's priority its new place); a refusal drops it and keeps the reason. focus: where
+// focus goes after (the moved goal id's 'grip' or 'menu'), null for none.
+function saveGoalOrder(ids, { id = null, focus = null } = {}) {
+  ids = [...ids];
+  GOAL_FOCUS = id && focus ? { id, what: focus } : null;
+  return press('goal-order', {
+    build: () => ({ action: 'goal-order', body: { ids } }),
+    overlay: {
+      data: (d) => ({ ...d, ooda: { ...d.ooda, goals: d.ooda.goals.map((g) => (ids.includes(g.id) ? { ...g, priority: ids.indexOf(g.id) + 1 } : g)) } }),
+      agrees: (raw) => ids.every((g, i) => raw.ooda.goals.find((x) => x.id === g)?.priority === i + 1),
+    },
+    apply: () => { GOAL_ORDER_ERR = ''; redrawNow(); },
+    onError: (e) => { GOAL_ORDER_ERR = `Not saved: ${e}`; },
+  });
+}
+// Move goal id to index to among the active goals and save; null (nothing done) when to is out of range or
+// its place already.
+function moveGoal(id, to, focus = null) {
+  const cur = activeGoalOrder();
+  const at = cur.indexOf(id);
+  if (at < 0 || to < 0 || to >= cur.length || to === at) return null;
+  const ids = cur.filter((x) => x !== id);
+  ids.splice(to, 0, id);
+  GOAL_FOCUS = focus ? { id, what: focus } : null;
+  return saveGoalOrder(ids, { id, focus });
+}
+// ArrowUp / ArrowDown on a goal's handle (by e.key; no modifier) moves it one place
+document.addEventListener('keydown', (e) => {
+  if (GOAL_DRAG || !['ArrowUp', 'ArrowDown'].includes(e.key) || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+  const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
+  if (!grip) return;
+  e.preventDefault();
+  const id = grip.dataset.goalGrip;
+  const at = activeGoalOrder().indexOf(id);
+  if (at >= 0) moveGoal(id, e.key === 'ArrowUp' ? at - 1 : at + 1, 'grip');
+});
+// ---- dragging a goal by its handle (kit-234; GOAL_DRAG above) ----
+// The Active tab's goal ids as the cards stand on the page, first to last. During a drag this is its live
+// preview, which DATA (activeGoalOrder) doesn't have; the drop saves this.
+function drawnGoalOrder() {
+  return [...$('goals-list').querySelectorAll('.card.goal[data-goal-card]')].map((c) => c.dataset.goalCard);
+}
+const goalCardEl = (id) => $('goals-list').querySelector(`.card.goal[data-goal-card="${CSS.escape(id)}"]`);
+const sameIds = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+// A press with the primary button on a goal's handle starts a drag; the handle holds the pointer (capture)
+document.addEventListener('pointerdown', (e) => {
+  GOAL_SWALLOW_UP = null;
+  if (GOAL_DRAG || e.button !== 0 || !e.isPrimary) return;
+  const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
+  const card = grip?.closest('.card.goal[data-goal-card]');
+  if (!card || !$('goals-list').contains(card)) return;
+  try { grip.setPointerCapture(e.pointerId); } catch { return; }
+  GOAL_DRAG = { id: grip.dataset.goalGrip, pointerId: e.pointerId, start: drawnGoalOrder(), card, x: e.clientX, y: e.clientY, moved: false };
+  card.classList.add('dragging');
+});
+// The live preview: the goal card under the pointer gives the dragged card its place. The cards between
+// them move past the dragged one (insertBefore), which itself never leaves the page, so capture holds.
+document.addEventListener('pointermove', (e) => {
+  const d = GOAL_DRAG;
+  if (!d || e.pointerId !== d.pointerId) return;
+  if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 3) d.moved = true;
+  const over = document.elementsFromPoint(e.clientX, e.clientY).map((el) => el.closest?.('.card.goal[data-goal-card]')).find((c) => c && c !== d.card && c.parentNode === d.card.parentNode);
+  if (!over) return;
+  const grid = d.card.parentNode;
+  const cards = [...grid.querySelectorAll(':scope > .card.goal[data-goal-card]')];
+  const from = cards.indexOf(d.card), to = cards.indexOf(over);
+  if (from < 0 || to < 0) return;
+  // over earlier: it and the cards up to the dragged one go after it, in order; over later: the cards
+  // after the dragged one up to it go before it
+  if (to < from) { const after = d.card.nextSibling; for (const c of cards.slice(to, from)) grid.insertBefore(c, after); }
+  else for (const c of cards.slice(from + 1, to + 1)) grid.insertBefore(c, d.card);
+});
+// The click a moved drag's release makes, swallowed so it opens nothing (no peek): one shot, in the capture
+// phase, gone on the next tick.
+function swallowNextClick() {
+  const swallow = (c) => { c.stopPropagation(); c.preventDefault(); };
+  document.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 0);
+}
+// The drop: a changed order is saved once (focus back on the handle); an unchanged one is drawn again. After
+// a move, the release's click is swallowed either way. A press that never moved stays a plain click.
+document.addEventListener('pointerup', (e) => {
+  if (GOAL_SWALLOW_UP !== null && e.pointerId === GOAL_SWALLOW_UP) { GOAL_SWALLOW_UP = null; swallowNextClick(); return; }
+  if (!GOAL_DRAG || e.pointerId !== GOAL_DRAG.pointerId) return;
+  const ids = drawnGoalOrder();
+  const d = GOAL_DRAG;
+  GOAL_DRAG = null;
+  d.card.classList.remove('dragging');
+  if (d.moved) swallowNextClick();
+  if (sameIds(ids, d.start)) { renderGoals(); return; }
+  saveGoalOrder(ids, { id: d.id, focus: 'grip' });
+});
+// A drag called off (Escape, pointercancel, capture lost): the cards back in the order they began in, no post.
+// After a move, its click is swallowed: at the release still to come when the button is held (held), else now.
+function cancelGoalDrag(held) {
+  const d = GOAL_DRAG;
+  if (!d) return;
+  GOAL_DRAG = null;
+  if (d.moved) { if (held) GOAL_SWALLOW_UP = d.pointerId; else swallowNextClick(); }
+  const grip = d.card.querySelector('.goal-grip');
+  try { if (grip?.hasPointerCapture(d.pointerId)) grip.releasePointerCapture(d.pointerId); } catch {}
+  // put back only when the preview moved them: a card moved for nothing loses the press's click, and the
+  // swallow above is what keeps that click from opening a peek
+  const grid = d.card.parentNode;
+  if (!sameIds(drawnGoalOrder(), d.start)) for (const id of d.start) { const c = goalCardEl(id); if (c && grid && c.parentNode === grid) grid.appendChild(c); }
+  d.card.classList.remove('dragging');
+  renderGoals();
+}
+document.addEventListener('pointercancel', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(false); });
+document.addEventListener('lostpointercapture', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag((e.buttons & 1) === 1); });
+// Escape during a drag cancels it, and only that: taken first (window, capture) so the page's own Escape
+// (closing a peek or the Threads panel) never sees it
+window.addEventListener('keydown', (e) => {
+  if (!GOAL_DRAG || e.key !== 'Escape') return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  cancelGoalDrag(true);
+}, true);
 // Selecting a tab is a new entry (#goals, #goals?gt=met), so Back restores the tab before and a reload keeps it.
 bindTabBar($('goals'), { onSelect: (id) => {
   if (!GOALS_TABS.includes(id)) return;
@@ -8066,6 +8257,16 @@ document.addEventListener('click', async (ev) => {
       onOk: () => { redraw(); },
       errId: `met-${id}`,
     });
+    return;
+  }
+  // Move up / Move down in a goal's ⋯: the menu closes, the goal moves one place and the order is saved
+  const gm = ev.target.closest('[data-goal-move]');
+  if (gm) {
+    if (gm.disabled) return;
+    const id = gm.dataset.goalId;
+    gm.closest('details')?.removeAttribute('open');
+    const at = activeGoalOrder().indexOf(id);
+    if (at >= 0) moveGoal(id, gm.dataset.goalMove === 'up' ? at - 1 : at + 1, 'menu');
     return;
   }
   const mv = ev.target.closest('[data-mdview]');
