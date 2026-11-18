@@ -7007,7 +7007,9 @@ const ownerTurnsIn = (threadId) => logObjects('turn').filter((x) => x.thread ===
 function ownerTurnsRead(threadId, after) {
   const all = ownerTurnsIn(threadId);
   const newest = all[all.length - 1]?.id ?? null;
-  const later = all.filter((x) => x.created_at > after.created_at);
+  // by the log's order, not the clock: a turn stamped in the same millisecond is still after it
+  const at = all.findIndex((x) => x.id === after.id);
+  const later = at >= 0 ? all.slice(at + 1) : all.filter((x) => x.created_at > after.created_at);
   const seen = flagStr('seen-turn');
   if (later.length && seen !== newest) die(`the owner wrote in ${threadId} after ${after.id}; read it first, then run this again with --seen-turn ${newest}:\n${later.map((x) => `  ${x.id} ${x.created_at}: ${String(x.text ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim()}`).join('\n')}`);
   if (!later.length && seen !== undefined && seen !== newest) die(`--seen-turn ${seen}: the newest owner turn in ${threadId} is ${newest}`);
@@ -7477,7 +7479,7 @@ function cmdThread() {
       if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
       about = { about_turn: uid };
       if (flags['owner-said'] !== undefined) {
-        if (flagStr('class') !== 'production-remediation') die("--owner-said with --turn lifts the owner's no on a production-remediation question; this one has no hold to lift");
+        if (flagStr('class') !== 'production-remediation' || ['trust', 'proposal'].includes(flagStr('kind'))) die("--owner-said with --turn lifts the owner's no on a production-remediation question (not a trust or proposal one); this one has no hold to lift");
         const c = turnClause(u.text, flagStr('owner-said'), clauseAt());
         if (c.why) die(`--owner-said: ${c.why}`);
         const blocks = asList(flags.blocks);

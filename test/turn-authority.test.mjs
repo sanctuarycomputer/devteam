@@ -117,6 +117,7 @@ test('turn authority', async (t) => {
       refused(ask(U, 'Restart it now'), /part of a clause/);
       refused(ask(U, 'Restart it later.'), /isn't in the turn/);
       refused(['thread', 'ask', T, '--turn', U, ...q('Tell them?'), '--owner-said', 'Then tell me.'], /--owner-said .* production-remediation/);
+      refused(['thread', 'ask', T, '--turn', U, '--kind', 'trust', '--question', 'Trust restarts?', ...rem, '--owner-said', 'Then tell me.'], /not a trust or proposal/);
       // still held without it
       refused(['thread', 'ask', T, '--turn', U, '--question', 'Restart web again?', ...rem], /stays held/);
       const Q = F.sup(ask(U, 'Restart it  now, the fix\nis in.'));
