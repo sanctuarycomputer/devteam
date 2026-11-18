@@ -816,9 +816,10 @@ test('Progress on the shell: goal and Narrow scope every card, Show filters the 
 
   await t.test("a release's tagged or ready to tag, and a story's done, are about the whole release or story, never the scope", async () => {
     // every RECEIPTS-S2 ticket merged, and one PAY-S2 ticket merged and moved to wave 1: under goal2, v0.3.0's receipts
-    // half is done but its pay half isn't; under wave 1, PAY-S2's one ticket there is done but PAY-S2 isn't
+    // half is done but its pay half isn't; under wave 1, PAY-S2's one ticket there is done but PAY-S2 isn't; and Card
+    // capture (PAY-S1, v0.1.0) moved to wave 2: under wave 2, v0.1.0 holds none of its released tickets but is tagged
     // (each load is a fresh document with the fixture again, so the change goes in after it, read at the next poll)
-    const FX = `(() => { const at = new Date(Date.parse(window.__fx.progress.now) - 86400000).toISOString(); for (const t of window.__fx.progress.tickets) { if (${J([ids.tHighRisk, ids.tPrompt, ids.tBlockedNoQ])}.includes(t.id)) t.merged_at = at; if (t.id === ${J(ids.tHeld)}) { t.merged_at = at; t.wave = 1; } } })()`;
+    const FX = `(() => { const at = new Date(Date.parse(window.__fx.progress.now) - 86400000).toISOString(); for (const t of window.__fx.progress.tickets) { if (${J([ids.tHighRisk, ids.tPrompt, ids.tBlockedNoQ])}.includes(t.id)) t.merged_at = at; if (t.id === ${J(ids.tHeld)}) { t.merged_at = at; t.wave = 1; } if (t.id === ${J(ids.tMerged)}) t.wave = 2; } })()`;
     const BADGES = (k) => `Object.fromEntries([...document.querySelectorAll('#w-${k} .row')].map((r) => [decodeURIComponent(r.dataset.open), r.querySelector('.badge')?.textContent ?? null]))`;
     await progress(`#progress?goal=${ids.goal2}&show=all`);
     await p.ev(FX);
@@ -828,6 +829,13 @@ test('Progress on the shell: goal and Narrow scope every card, Show filters the 
     await p.ev(FX);
     await soon(`'story/PAY-S2' in ${BADGES('stories')}`, 'PAY-S2 has a ticket in wave 1');
     assert.equal((await p.ev(BADGES('stories')))['story/PAY-S2'], null, "PAY-S2's wave-1 ticket is merged, its others aren't: not done");
+    // (wave 2 has nothing merged until the change is in, so no chart to wait on first)
+    await go('#overview');
+    await p.ev('localStorage.clear()');
+    await go(`#progress?narrow=${encodeURIComponent('wave:2')}&show=all`);
+    await p.ev(FX);
+    await soon(`'release/v0.1.0' in ${BADGES('releases')}`, 'v0.1.0 has a ticket in wave 2');
+    assert.equal((await p.ev(BADGES('releases')))['release/v0.1.0'], 'tagged', "v0.1.0's released ticket is out of the scope, the release is tagged all the same");
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
 });

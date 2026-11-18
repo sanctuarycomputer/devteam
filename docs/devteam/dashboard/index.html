@@ -1989,7 +1989,8 @@ function meterRow(label, done, total, note = '', open = null) {
 // Stories, Releases and Waves kept by progressShown (done: every one of its tickets merged); an empty list says
 // None. nameGoals (no goal picked): each wave row names its tickets' goals after it, dim. all: Progress's whole data:
 // a release's tagged or ready to tag, and a story's done, are facts about the whole release or story, so they are
-// read from it, never from the scope (a goal or a Narrow may hold only the part of a release that is done).
+// read from it, never from the scope (a goal or a Narrow may hold only the part of a release that is done); a
+// row's meter and Show read the scope.
 function widgets(p, now, show, { nameGoals = false, all = p } = {}) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
   const none = empty('None');
