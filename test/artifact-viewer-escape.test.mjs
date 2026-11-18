@@ -74,4 +74,23 @@ test('Escape closes a floating card first, then the viewer', { skip: SKIP, timeo
     assert.equal(s.up, true, `the viewer still open (hash ${s.hash})`);
     assert.equal(s.hash, PV, "still on the preview's head");
   });
+
+  // A page that fakes its lens (final-1 F1): five Escape key messages in one task, after a real click has
+  // given the frame the keyboard. It may close its own viewer, once: one history.back() at most, so the tab
+  // never walks back past the head the viewer was opened over, nor off the dashboard.
+  await sub("a page's burst of fake Escapes closes its viewer once, on the head it was opened over", async () => {
+    const V = await visit('#board');
+    for (const head of ['#progress', '#library']) {
+      await V.p.ev(`location.hash = ${J(head)}; void 0`);
+      await V.soon(`location.hash === ${J(head)} && PAGE_NOW === ${J(head.slice(1))}`, `setup: on ${head}`);
+    }
+    await V.open(AV_A);
+    await V.before();
+    await V.frameClick('burst', 'viewer-a/burst', { load: false });
+    await V.closedOn('#library', 'the burst');
+    await new Promise((r) => setTimeout(r, 1000));
+    const s = await V.closedOn('#library', 'a second after the burst');
+    assert.ok(s.backs <= 1, `history.back called at most once (it was called ${s.backs}x)`);
+    assert.deepEqual(s.gos, [], 'history.go never called');
+  });
 });
