@@ -200,6 +200,7 @@ function stateStore(dir) {
   const save = (s) => {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     s.sessions = s.sessions.filter((x) => x.expires > Date.now());
+    if (s.peopleSessions) s.peopleSessions = s.peopleSessions.filter((x) => x.expires > Date.now());
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(s, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, file);
@@ -208,6 +209,17 @@ function stateStore(dir) {
   };
   return { load, save };
 }
+
+// --- people@1 (the header block): the owner's row and the stamp of the owner's passkeys --------
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+// 256 is a multiple of 32, so x & 31 is unbiased
+const newId = (prefix) => prefix + Array.from(crypto.randomBytes(12), (x) => B32[x & 31]).join('');
+const peopleStamp = (passkeys) => b64u(sha256(`devteam-people-stamp-v1\n${passkeys.map((p) => p.id).sort().join('\n')}`));
+const ownerRow = (s) => (s.people ?? []).find((p) => p.role === 'owner') ?? null;
+// Kept when there is one (a claim after a reclaim keeps the owner's row); added after every old key.
+const withOwner = (s, now = Date.now()) => (ownerRow(s) ? s : { ...s, people: [...(s.people ?? []), { id: newId('p-'), name: 'Owner', role: 'owner', level: 'full', methods: [], pushSubs: [], added_at: new Date(now).toISOString(), last_seen: null, notices: [], rev: 1 }] });
+// Every write that changes `passkeys` goes through this, so an older gateway's change shows on start.
+const stamped = (s) => ({ ...s, peopleStamp: peopleStamp(s.passkeys) });
 
 // The box's own address. Each instance is a subdomain of it, so its DNS needs the name and a
 // wildcard under it (box.example.com and *.box.example.com). http only for a *.localhost test.
@@ -1000,6 +1012,9 @@ export function createGateway(opts = {}) {
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
   try {
     const s = store.load();
+    // A box claimed before people: its passkeys, sessions and devices become the owner's where they
+    // are, so the write only adds the row and the stamp after the old keys. Once there, nothing.
+    if (s.passkeys.length && !s.people) store.save(stamped(withOwner(s)));
     // made before sign-in moved under /auth (or for another name): the browser won't offer them here
     if (s.passkeys.some((x) => x.rp !== RP_ID)) log(`passkeys made before sign-in moved to ${PUB}/auth (or for another name) can't sign in here: run devteam-reclaim in a shell on the box for a claim link, and claim it again`);
     if (!s.passkeys.length) {
@@ -1072,10 +1087,11 @@ export function createGateway(opts = {}) {
   // (the kit's helpers, committed images) as cross-site, so a Lax cookie would not go with them.
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
   const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
-  const newSession = () => {
+  // `method`: the passkey it was opened with, so removing that passkey can end it
+  const newSession = (methodId) => {
     const tok = crypto.randomBytes(32);
     const s = store.load();
-    store.save({ ...s, sessions: [...s.sessions, { hash: b64u(sha256(tok)), at: Date.now(), expires: Date.now() + SESSION_MS }] });
+    store.save({ ...s, sessions: [...s.sessions, { hash: b64u(sha256(tok)), method: methodId, at: Date.now(), expires: Date.now() + SESSION_MS }] });
     return cookie(b64u(tok), SESSION_MS / 1000);
   };
 
@@ -1160,6 +1176,7 @@ export function createGateway(opts = {}) {
     if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
     spend(challenge);
     store.save({ ...s, passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: new Date().toISOString() } : p)) });
+    return pk.id;
   };
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
@@ -2104,9 +2121,9 @@ export function createGateway(opts = {}) {
           if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
           const pk = register(body, 'claim');
           if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
-          store.save({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [] });
+          store.save(stamped(withOwner({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [], peopleSessions: [] })));
           log(`claimed with passkey "${pk.name}"`);
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(pk.id) });
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
         if (p === '/auth/login/options' && req.method === 'POST') {
@@ -2114,8 +2131,7 @@ export function createGateway(opts = {}) {
           return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
         }
         if (p === '/auth/login/verify' && req.method === 'POST') {
-          verifyAssertion(await readJson(req));
-          return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
+          return json(res, 200, { ok: true }, { 'set-cookie': newSession(verifyAssertion(await readJson(req))) });
         }
       }
       // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and

@@ -174,3 +174,108 @@ test('people@1: seedPeople writes rows of the documented shape, unique by (type,
   assert.equal(stampOf(['b', 'a']), stampOf(['a', 'b']), 'the stamp is of the sorted ids');
 });
 
+
+// --- A1: the owner's row, on a claim and on the upgrade of a box claimed before people ----------
+const OWNER_ROW = ['id', 'name', 'role', 'level', 'methods', 'pushSubs', 'added_at', 'last_seen', 'notices', 'rev'];
+const ownerOf = (s) => s.people.filter((p) => p.role === 'owner');
+// a session minted as today's gateway mints one, with its cookie
+const mintSession = (extra = {}) => { const tok = crypto.randomBytes(32); return { row: { hash: u(sha(tok)), at: Date.now(), expires: Date.now() + 3600e3, ...extra }, cookie: `devteam_session=${u(tok)}` }; };
+// a browser's push subscription, as the gateway stores it
+const pushSub = (endpoint) => ({ endpoint, p256dh: u(crypto.createECDH('prime256v1').generateKeys()), auth: u(crypto.randomBytes(16)), at: new Date().toISOString() });
+// a passkey in today's top-level shape, registered on box.localhost unless `rp` says otherwise
+const topPasskey = (a, name, extra = {}) => {
+  const m = a.method(name);
+  return { id: m.key, userId: m.data.userId, jwk: m.data.jwk, alg: -7, signCount: 0, name, rp: 'box.localhost', createdAt: new Date().toISOString(), ...extra };
+};
+// a state of today's shape, written in the order today's gateway saves it (load puts these three first)
+function oldState() {
+  const a = authenticator();
+  const b = authenticator();
+  const { rp, ...noRp } = topPasskey(b, 'old laptop');
+  const s1 = mintSession();
+  const s2 = mintSession();
+  const pair = crypto.generateKeyPairSync('ed25519');
+  const state = {
+    passkeys: [topPasskey(a, 'phone', { usedAt: new Date().toISOString() }), noRp],
+    sessions: [s1.row, s2.row],
+    claimHash: null,
+    claimExpires: null,
+    pushSubs: [pushSub('https://web.push.apple.com/phone'), pushSub('https://fcm.googleapis.com/fcm/send/desk')],
+    threadKey: { privateKey: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }), publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }) },
+    public: { alpha: { root: '/srv/alpha', port: P, artifacts: {} } },
+  };
+  return { state, a, b, cookies: [s1.cookie, s2.cookie] };
+}
+const writeState = (dir, s) => { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(s, null, 2), { mode: 0o600 }); };
+
+test('org-access A1: the first passkey claimed is the owner\'s', async () => {
+  const gw = await gateway('a1-claim');
+  try {
+    const a = authenticator();
+    const r = await gw.claim(a);
+    assert.equal(r.status, 200, r.body);
+    const s = gw.state();
+    assert.equal(s.people.length, 1);
+    const [row] = s.people;
+    assert.deepEqual(Object.keys(row), OWNER_ROW);
+    assert.match(row.id, /^p-[a-z2-7]{12}$/);
+    assert.deepEqual({ name: row.name, role: row.role, level: row.level, methods: row.methods, pushSubs: row.pushSubs, notices: row.notices, rev: row.rev, last_seen: row.last_seen }, { name: 'Owner', role: 'owner', level: 'full', methods: [], pushSubs: [], notices: [], rev: 1, last_seen: null });
+    assert.deepEqual(s.passkeys.map((p) => p.id), [u(a.id)], 'the passkey is top-level, as today');
+    assert.equal(s.sessions.length, 1);
+    assert.equal(s.sessions[0].method, u(a.id), 'the claim\'s session names its passkey');
+    assert.deepEqual(s.peopleSessions, []);
+    assert.equal(s.peopleStamp, stampOf([u(a.id)]));
+  } finally { await gw.close(); }
+});
+
+test('org-access A1: an existing box\'s passkeys, sessions and push subscriptions are the owner\'s, and its old fields are unchanged', async () => {
+  const dir = path.join(tmp, 'a1-upgrade');
+  const { state: before, cookies } = oldState();
+  writeState(dir, before);
+  const sent = [];
+  const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: 201 }; };
+  const gw = await gateway('a1-upgrade', { dir, pushFetch });
+  try {
+    const after = gw.state();
+    for (const k of Object.keys(before)) assert.equal(JSON.stringify(after[k]), JSON.stringify(before[k]), `${k} is byte-identical`);
+    assert.deepEqual(Object.keys(after).slice(0, Object.keys(before).length), Object.keys(before), 'the old keys keep their order, first');
+    assert.equal(ownerOf(after).length, 1, 'one owner row');
+    assert.deepEqual(Object.keys(after.people[0]), OWNER_ROW);
+    assert.deepEqual({ name: after.people[0].name, methods: after.people[0].methods, pushSubs: after.people[0].pushSubs }, { name: 'Owner', methods: [], pushSubs: [] });
+    assert.equal(after.peopleStamp, stampOf(before.passkeys.map((p) => p.id)));
+    for (const cookie of cookies) assert.equal((await gw.req('GET', '/box.json', { cookie })).status, 200, 'the owner\'s old sessions still open the box');
+    // T4: /auth/method/list with the old cookie lists the old passkeys
+    const t = await gw.req('POST', '/push/test', { cookie: cookies[0], body: { endpoint: 'https://web.push.apple.com/phone' } });
+    assert.equal(t.status, 200, t.body);
+    assert.deepEqual(sent, ['https://web.push.apple.com/phone'], 'an old subscription is the owner\'s');
+    // T5: a seeded person's /push/test for that endpoint is 404
+  } finally { await gw.close(); }
+});
+
+test('org-access A1: a second start of an upgraded state writes nothing', async () => {
+  const dir = path.join(tmp, 'a1-restart');
+  writeState(dir, oldState().state);
+  const first = await gateway('a1-restart-1', { dir });
+  await first.close();
+  assert.ok(first.state().people, 'the first start upgraded it');
+  const st = fs.statSync(first.file);
+  const bytes = fs.readFileSync(first.file);
+  const second = await gateway('a1-restart-2', { dir });
+  try {
+    const now = fs.statSync(first.file);
+    assert.ok(fs.readFileSync(first.file).equals(bytes), 'the same bytes');
+    assert.deepEqual([now.ino, now.mtimeMs], [st.ino, st.mtimeMs], 'and the file was not rewritten');
+  } finally { await second.close(); }
+  // and a box claimed by this gateway, restarted
+  const claimed = await gateway('a1-restart-3');
+  assert.equal((await claimed.claim(authenticator())).status, 200);
+  await claimed.close();
+  const st2 = fs.statSync(claimed.file);
+  const bytes2 = fs.readFileSync(claimed.file);
+  const again = await gateway('a1-restart-4', { dir: claimed.dir });
+  try {
+    const now = fs.statSync(claimed.file);
+    assert.ok(fs.readFileSync(claimed.file).equals(bytes2), 'the same bytes');
+    assert.deepEqual([now.ino, now.mtimeMs], [st2.ino, st2.mtimeMs]);
+  } finally { await again.close(); }
+});
