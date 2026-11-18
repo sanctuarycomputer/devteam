@@ -22506,8 +22506,10 @@ function guardForward(req, res, t, sock, fail) {
   // the client may have left while the name resolved or the socket dialled: nothing to send it
   if (req.socket?.destroyed || res.destroyed) return void sock.destroy();
   const headers = { ...guardEndToEnd(req.headers), host: t.hostHeader };
-  // a chunked body is framed again on the way out (Node frames none for GET, HEAD, DELETE, OPTIONS)
-  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = 'chunked';
+  // the body's framing goes out as it came, whatever Connection names (Node frames no body itself
+  // for GET, HEAD, DELETE, OPTIONS; its parser has already refused a request with both or neither)
+  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = req.headers['transfer-encoding'];
+  else if (req.headers['content-length']) headers['content-length'] = req.headers['content-length'];
   const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers, createConnection: () => sock });
   up.on('response', (ur) => {
     // a status line Node reads but won't write (a control character, a code under 100) is the

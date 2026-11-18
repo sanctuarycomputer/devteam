@@ -569,6 +569,10 @@ test('a site\'s odd answer, a client that leaves early, a chunked body, an origi
     const c = await ask(g.port, `GET http://echo.test/ HTTP/1.1\r\nHost: echo.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n`);
     assert.equal(c.status, 200, c.head);
     assert.deepEqual(JSON.parse(c.body), { te: 'chunked', body: 'hello' });
+    // a length the client's Connection names still frames the body (R2-1)
+    const l = await ask(g.port, `GET http://echo.test/ HTTP/1.1\r\nHost: echo.test\r\nContent-Length: 5\r\nConnection: close, content-length\r\n\r\nhello`);
+    assert.equal(l.status, 200, l.head);
+    assert.deepEqual(JSON.parse(l.body), { te: null, body: 'hello' });
     // an Upgrade that isn't a proxy request is a 400, like any other
     const u = await ask(g.port, 'GET / HTTP/1.1\r\nHost: x.test\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\r\n');
     assert.equal(u.status, 400, u.head);
