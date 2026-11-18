@@ -1599,7 +1599,30 @@ function checkLine(o, file) {
   // A chat or thread line is an answer, with the owner's words in said, or what that answer
   // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
   // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
-  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  // A correction the supervisor recorded from the owner's words (correct --from-turn|--from-chat --said) is one too.
+  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision) || (['decision', 'act'].includes(o.type) && o.op === 'set' && isObj(o.corrected) && typeof o.corrected.said === 'string'))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, the standing rule or goal verdict that answer carried, or a correction with the owner's words in corrected.said`);
+  // turn-authority-1: what a clause binding carries, and only where it can be
+  const offsetsBad = (x) => Array.isArray(x) && x.length === 2 && Number.isInteger(x[0]) && Number.isInteger(x[1]) && !(x[0] < x[1]);
+  if (['decision', 'act'].includes(o.type) && isObj(o.corrected)) {
+    const c = o.corrected;
+    const bound = c.said !== undefined || c.said_at !== undefined || c.turn !== undefined;
+    if (bound && (o.by !== 'owner' || !['chat', 'thread'].includes(o.channel))) errs.push("corrected.said, said_at and turn are on the owner's correction recorded from a thread or chat only");
+    else if (o.channel === 'chat' && (c.said_at !== undefined || c.turn !== undefined)) errs.push('a correction recorded from chat has no turn or said_at');
+    else if (o.channel === 'thread' && (c.turn === undefined || c.said_at === undefined)) errs.push("a correction recorded from a thread names the owner's turn and where in it the words are (corrected.turn, corrected.said_at)");
+    if (['chat', 'thread'].includes(o.channel) && typeof c.said === 'string') {
+      if (c.reason !== c.said) errs.push("a correction recorded from the owner's words gives them as its reason (corrected.reason is corrected.said)");
+      if (c.severity !== undefined || c.impact !== undefined) errs.push("a correction recorded from the owner's words carries no severity or impact");
+    }
+    if (offsetsBad(c.said_at)) errs.push('corrected.said_at is [start, end] with start before end');
+  }
+  if (o.type === 'question') {
+    if ((o.said_at !== undefined || o.answer_seen !== undefined) && !(o.channel === 'thread' && o.said_at !== undefined && o.answer_seen !== undefined)) errs.push('said_at and answer_seen go together, on an answer recorded from a clause of a thread turn (channel thread)');
+    if ((o.owner_said_turn !== undefined || o.owner_said_at !== undefined) && !(o.owner_said_turn !== undefined && o.owner_said_at !== undefined && typeof o.owner_said === 'string')) errs.push('owner_said_turn and owner_said_at go together, with owner_said');
+    if (o.seen !== undefined && o.about_turn === undefined) errs.push('seen goes with about_turn');
+    if (o.about_turn !== undefined && o.thread === undefined) errs.push('about_turn is on a question asked in a thread (thread ask --turn)');
+    if (offsetsBad(o.said_at)) errs.push('said_at is [start, end] with start before end');
+    if (offsetsBad(o.owner_said_at)) errs.push('owner_said_at is [start, end] with start before end');
+  }
   // dropped files go with the owner's own answer, never words the supervisor recorded for them
   if (o.type === 'question' && ['chat', 'thread'].includes(o.channel) && o.files !== undefined) errs.push(`files are on the owner's own answer, never one recorded from ${o.channel}`);
   if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
@@ -2196,7 +2219,10 @@ function ratingHistory(q) {
   const has = (e) => e.stake || e.urgency || e.settles !== undefined;
   return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
 }
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files'];
+// about_turn, seen, owner_said_turn and owner_said_at are written only when a question is asked and
+// nobody may set them after (x-authority), so they're left out too: an older kit, which drops them
+// as unknown, then hashes the question as this one does, and the owner's answer stands there.
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash', 'files', 'about_turn', 'seen', 'owner_said_turn', 'owner_said_at', 'said_at', 'answer_seen'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // A one-way-door question: asked --kind one-way-door, or asked in the owner-only class one-way-door
@@ -2246,7 +2272,8 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, new_because: q.new_because ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null, said_at: ans?.said_at ?? null, answer_seen: ans?.answer_seen ?? null,
+    about_turn: q.about_turn ?? null, seen: q.seen ?? null, owner_said_turn: q.owner_said_turn ?? null, owner_said_at: q.owner_said_at ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
@@ -2440,7 +2467,9 @@ const isTidyAct = (a) => a.class === 'worker-slots' && String(a.what ?? '').star
 const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner' && !isTidyAct(a))];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
-  return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
+  // a repair answers the correction before it: one newer than the latest repair is unrepaired
+  const r = a.updates.filter((x) => x.repaired !== undefined).pop();
+  return u ? { ...u.corrected, by: u.by, at: u.at, channel: u.channel ?? null, repaired: r && r.at >= u.at ? a.repaired ?? null : null } : null;
 };
 // How much a goal matters to the project, 1 to 4: the supervisor's judgment against
 // project/strategy.md (a goal-impact decision whose first ref is the goal; the latest one), or the
@@ -7119,8 +7148,11 @@ function asksGoalApproval({ goal, kind, question, choices, options, recommendati
   const labels = Array.isArray(choices) ? choices.map((c) => c?.label) : [];
   return [...labels, ...[].concat(options ?? []), recommendation, def].some((a) => typeof a === 'string' && bare.test(a));
 }
-function askLine({ thread } = {}) {
+// about (thread ask --turn): the owner's turn it asks about, the newest owner turn read, and a hold's
+// lift from a clause of that turn (owner_said as the raw slice), all checked by cmdThread first.
+function askLine({ thread, about } = {}) {
   supervisorOnly('ask');
+  if (!about) for (const k of ['turn', 'seen-turn', 'at']) if (flags[k] !== undefined) die(`ask --${k}: a question about the owner's turn is asked in its thread: thread ask <t-id> --turn <u-id>`);
   // a goal-met question's words are the kit's (below)
   let q = ownerText(flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question')));
   const cls = flagStr('class') ?? null;
@@ -7240,7 +7272,7 @@ function askLine({ thread } = {}) {
     // after the owner's no, not again for the same remediation and target, whichever incident is named
     const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
     if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
-    ownerSaid = flagStr('owner-said')?.trim() || null;
+    ownerSaid = about?.owner_said ?? (flagStr('owner-said')?.trim() || null);
   }
   if (!orderAsked && !flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
@@ -7437,10 +7469,108 @@ function askLine({ thread } = {}) {
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
+    about_turn: about?.about_turn, seen: about?.seen, owner_said_turn: about?.owner_said_turn, owner_said_at: about?.owner_said_at,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
 }
 
+/* turnClause start */
+// Turn authority (turn-authority-1): the owner's words in a thread settle a question, lift a hold or
+// correct a call through whole clauses of their turn, bound one span to one thing. These are the
+// rules every writer and metrics share.
+//
+// Whether [start, end) of a turn is whole clauses. A clause starts at the turn's start, a line start,
+// or after . ! ? or ; and whitespace; it ends at the turn's end, a line end, or one of those marks
+// followed by whitespace or the end. A span may leave out a closing . or ;, never ? or !: "Ship it"
+// is no clause of "Ship it? Or wait for CI?". A mark inside a word ("3.5") is no boundary.
+function clauseBounds(text, start, end) {
+  const s = String(text);
+  let k = start - 1;
+  let gap = false;
+  let line = false;
+  while (k >= 0 && /\s/.test(s[k])) { gap = true; if (s[k] === '\n' || s[k] === '\r') line = true; k--; }
+  const startOk = k < 0 || line || (gap && /[.!?;]/.test(s[k]));
+  if (!startOk) return false;
+  if (end >= s.length) return true;
+  if (/[.!?;]/.test(s[end - 1]) && /\s/.test(s[end])) return true;
+  let j = end;
+  while (j < s.length && /[ \t]/.test(s[j])) j++;
+  if (j >= s.length || s[j] === '\n' || s[j] === '\r') return true;
+  return /[.;]/.test(s[end]) && (end + 1 >= s.length || /\s/.test(s[end + 1]));
+}
+// The clause around raw offset i, for a refusal to name: from the boundary before it to the mark
+// (or line end) after it.
+function clauseAround(text, i) {
+  const s = String(text);
+  let a = i;
+  while (a > 0 && !(s[a - 1] === '\n' || (/\s/.test(s[a - 1]) && a > 1 && /[.!?;]/.test(s[a - 2])))) a--;
+  let b = i;
+  while (b < s.length && s[b] !== '\n' && !(/[.!?;]/.test(s[b]) && (b + 1 >= s.length || /\s/.test(s[b + 1])))) b++;
+  return s.slice(a, Math.min(b + 1, s.length)).trim();
+}
+// --said "<words>" as whole clauses of a turn: matched on whitespace-collapsed text, mapped back to
+// raw UTF-16 offsets. { said, said_at } (said is the raw slice), or { why }.
+function turnClause(text, said, at = null) {
+  const s = String(text);
+  const want = String(said ?? '').replace(/\s+/g, ' ').trim();
+  if (!want) return { why: 'say which words: --said "<whole clauses of the turn>"' };
+  let flat = '';
+  const map = [];
+  for (let i = 0; i < s.length;) {
+    if (/\s/.test(s[i])) { map.push(i); flat += ' '; while (i < s.length && /\s/.test(s[i])) i++; } else { map.push(i); flat += s[i]; i++; }
+  }
+  const found = [];
+  for (let i = flat.indexOf(want); i !== -1; i = flat.indexOf(want, i + 1)) {
+    const start = map[i];
+    const end = map[i + want.length - 1] + 1;
+    found.push({ start, end, whole: clauseBounds(s, start, end) });
+  }
+  if (!found.length) return { why: `"${want}" isn't in the turn` };
+  const part = (m) => ({ why: `"${want}" is part of a clause; give the whole clause: "${clauseAround(s, m.start)}"` });
+  let m;
+  if (at !== null) {
+    m = found.find((x) => x.start === at);
+    if (!m) return { why: `no match of "${want}" starts at offset ${at}; matches start at ${found.map((x) => x.start).join(', ')}` };
+    if (!m.whole) return part(m);
+  } else {
+    const whole = found.filter((x) => x.whole);
+    if (!whole.length) return part(found[0]);
+    if (whole.length > 1) return { why: `"${want}" is in the turn ${whole.length} times, at offsets ${whole.map((x) => x.start).join(', ')}; pick one with --at <offset>` };
+    [m] = whole;
+  }
+  return { said: s.slice(m.start, m.end), said_at: [m.start, m.end] };
+}
+// --at <offset>: which match of a repeated clause, as a refusal lists them. null when not given.
+function clauseAt() {
+  if (flags.at === undefined) return null;
+  const n = Number(flagStr('at'));
+  if (!Number.isInteger(n) || n < 0) die('--at <offset>: where the clause starts in the turn, a whole number (a refusal lists them)');
+  return n;
+}
+// What is already bound to an owner's turn: answers (a clause, or the whole turn when said_at is
+// absent) and corrections. A lifted hold (owner_said_turn) binds nothing. Spans overlap when they
+// share an offset; the whole turn overlaps everything.
+const turnBindings = (lines, uid) => lines.flatMap((l) => (l.op !== 'set' ? []
+  : l.type === 'question' && l.turn === uid ? [{ id: l.id, at: l.at, kind: 'answer', span: Array.isArray(l.said_at) ? l.said_at : null, line: l }]
+    : ['decision', 'act'].includes(l.type) && isObj(l.corrected) && l.corrected.turn === uid ? [{ id: l.id, at: l.at, kind: 'correction', span: Array.isArray(l.corrected.said_at) ? l.corrected.said_at : null, line: l }]
+      : []));
+const spansOverlap = (a, b) => !a || !b || (a[0] < b[1] && b[0] < a[1]);
+// The owner's turns in a thread, oldest first, from the fold's created_by (never a view's display by).
+const ownerTurnsIn = (threadId) => logObjects('turn').filter((x) => x.thread === threadId && x.created_by === 'owner').sort(byTime);
+// The owner's newest turn in a thread, once everything after `after` has been read: refused, with
+// those turns printed, unless --seen-turn names the newest. Returns its id.
+function ownerTurnsRead(threadId, after) {
+  const all = ownerTurnsIn(threadId);
+  const newest = all[all.length - 1]?.id ?? null;
+  // by the log's order, not the clock: a turn stamped in the same millisecond is still after it
+  const at = all.findIndex((x) => x.id === after.id);
+  const later = at >= 0 ? all.slice(at + 1) : all.filter((x) => x.created_at > after.created_at);
+  const seen = flagStr('seen-turn');
+  if (later.length && seen !== newest) die(`the owner wrote in ${threadId} after ${after.id}; read it first, then run this again with --seen-turn ${newest}:\n${later.map((x) => `  ${x.id} ${x.created_at}: ${String(x.text ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim()}`).join('\n')}`);
+  if (!later.length && seen !== undefined && seen !== newest) die(`--seen-turn ${seen}: the newest owner turn in ${threadId} is ${newest}`);
+  return newest;
+}
+/* turnClause end */
 // The checks every record of the owner's word in chat shares: only the supervisor records it, and
 // only with the owner's words verbatim. What they said, ready for the line.
 function chatAnswer(what) {
@@ -7465,7 +7595,21 @@ function turnAnswer(what, v) {
   const u = logGet(uid);
   if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
   if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
-  const used = readLog().lines.find((l) => l.type === 'question' && l.op === 'set' && l.turn === uid);
+  // --said: whole clauses of the turn the question was asked about (thread ask --turn), a span no
+  // other binding on the turn overlaps, with what the owner wrote since the question read first
+  if (flags.said !== undefined) {
+    if (v.about_turn !== uid) die(`--from-turn ${uid}: ${v.id} wasn't asked about that turn${v.about_turn ? ` (it's about ${v.about_turn})` : ''}; a clause binds only to the turn its question is about: thread ask ${u.thread} --turn ${uid} …, then answer that`);
+    if (v.thread !== u.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    const answerSeen = ownerTurnsRead(u.thread, logGet(v.seen ?? '')?.type === 'turn' ? logGet(v.seen) : u);
+    return { said: c.said, said_at: c.said_at, turn: uid, answer_seen: answerSeen };
+  }
+  for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`${what} --${k} goes with --said`);
+  // the whole turn: refused once anything is bound to it (an answer, whole or a clause, or a correction)
+  const used = turnBindings(readLog().lines, uid)[0];
   if (used) die(`--from-turn ${uid}: that turn already settled ${used.id}; one turn settles one question (the owner answers the other in the card, or says it again)`);
   if (v.thread && u.thread !== v.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
   if (u.created_at <= v.asked_at) die(`--from-turn ${uid}: the turn is older than ${v.id}; words said before the question was asked don't answer it`);
@@ -7481,7 +7625,7 @@ function cmdAnswer() {
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -7506,6 +7650,8 @@ function cmdAnswer() {
   const fromChat = !!flags['from-chat'];
   if (fromChat) chatAnswer('answer');
   const fromTurn = flags['from-turn'] !== undefined;
+  // --at and --seen-turn pick and read a turn's clause: only with --from-turn --said (final-1 F2)
+  if (!fromTurn) for (const k of ['at', 'seen-turn']) if (flags[k] !== undefined) die(`answer --${k} goes with --from-turn <u-id> --said`);
   const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const files = filesFlag();
   const v = openQuestion(id, ['open', 'defaulted']);
@@ -7539,7 +7685,7 @@ function cmdAnswer() {
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
   if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
-  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}), files };
+  const setLine = { type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn, said_at: turn.said_at, answer_seen: turn.answer_seen } : {}), files };
   if (files && !lineFits(setLine, by)) die(FILES_TOO_LONG);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
@@ -7889,9 +8035,37 @@ function cmdThread() {
     // The question is written first (the turn names its id), so the turn's words are checked before
     // it: a question the log took and a turn it then refused would leave a question no turn shows.
     // askLine writes the question as given, so its first TURN_MAX bytes are the turn's words.
-    if (encodedBytes(capBytes(flagStr('question') ?? '', TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
-    const q = askLine({ thread: t.id });
-    appendLog({ type: 'turn', thread: t.id, text: capBytes(q.question, TURN_MAX), question: q.id }, 'supervisor');
+    // --turn: a question about the owner's turn (turn authority). The turn is the owner's and in this
+    // thread, what they wrote after it is read first (seen), and the thread's turn opens by quoting it.
+    // --owner-said with it lifts a held remediation with a whole clause of that turn, said after the no.
+    let about = null;
+    let lead = '';
+    if (flags.turn !== undefined) {
+      const uid = flagStr('turn');
+      if (!TURN_ID.test(uid ?? '')) die("thread ask --turn <u-id>: the owner's turn the question is about");
+      const u = logGet(uid);
+      if (u?.type !== 'turn') die(`--turn ${uid}: no such turn`);
+      if (u.created_by !== 'owner') die(`--turn ${uid}: that turn is the supervisor's; a question is about the owner's words`);
+      if (u.thread !== t.id) die(`--turn ${uid}: that turn is in ${u.thread}, not ${t.id}; ask in its own thread`);
+      if (flags.at !== undefined && flags['owner-said'] === undefined) die('--at goes with --owner-said: which match of a repeated clause');
+      about = { about_turn: uid };
+      if (flags['owner-said'] !== undefined) {
+        if (flagStr('class') !== 'production-remediation' || ['trust', 'proposal'].includes(flagStr('kind'))) die("--owner-said with --turn lifts the owner's no on a production-remediation question (not a trust or proposal one); this one has no hold to lift");
+        const c = turnClause(u.text, flagStr('owner-said'), clauseAt());
+        if (c.why) die(`--owner-said: ${c.why}`);
+        const blocks = asList(flags.blocks);
+        const rem = blocks.find((b) => b.startsWith('remediation:'));
+        const no = rem ? remediationAnswers(rem, blocks.find((b) => b.startsWith('release:')) ?? null).filter((a) => !a.run).pop() : null;
+        if (no && !(u.created_at > no.at)) die(`--turn ${uid}: the turn is older than the owner's no (${no.id}, ${no.at}); only words said after it lift it`);
+        Object.assign(about, { owner_said: c.said, owner_said_turn: uid, owner_said_at: c.said_at });
+      }
+      about.seen = ownerTurnsRead(t.id, u);
+      const flat = Array.from(String(u.text).replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim());
+      lead = `About your message: "${flat.slice(0, 80).join('')}${flat.length > 80 ? '…' : ''}"\n`;
+    } else for (const k of ['seen-turn', 'at']) if (flags[k] !== undefined) die(`thread ask --${k} goes with --turn <u-id>`);
+    if (encodedBytes(capBytes(`${lead}${flagStr('question') ?? ''}`, TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
+    const q = askLine({ thread: t.id, about });
+    appendLog({ type: 'turn', thread: t.id, text: capBytes(`${lead}${q.question}`, TURN_MAX), question: q.id }, 'supervisor');
     return out(q.id);
   }
   // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
@@ -7976,7 +8150,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\'] [--files <json>]   |   thread say <t-id> "<words>" [--files <json>]   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> [--turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]]] --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -10785,8 +10959,18 @@ function tldrGap(text) {
 // act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro)');
-  const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro; the supervisor records the owner\'s words with --from-turn <u-id> --said "<whole clauses>" [--at <n>] or --from-chat --said "<words>")');
+  // the owner's correction, said in a thread or in the supervisor's session: the supervisor records it,
+  // the line is the owner's, and the reason is the owner's words, nothing else
+  const heard = flags['from-turn'] !== undefined || flags['from-chat'] !== undefined;
+  if (heard) {
+    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('correct --from-turn or --from-chat: the supervisor records what the owner said; in your own terminal, correct directly');
+    if (flags['from-turn'] !== undefined && flags['from-chat'] !== undefined) die('correct: --from-turn or --from-chat, not both');
+    for (const k of ['severity', 'impact', 'reason', 'retro']) if (flags[k] !== undefined) die(`correct --${flags['from-turn'] !== undefined ? 'from-turn' : 'from-chat'}: --${k} isn't taken; the reason is the owner's words (--said), and the rest is the owner's own correct`);
+    if (!flagStr('said')?.trim()) die('correct --from-turn or --from-chat needs --said "<the owner\'s words>"');
+    if (flags['from-chat'] !== undefined && flags.at !== undefined) die('correct --at goes with --from-turn: which match of a repeated clause');
+  } else for (const k of ['said', 'at']) if (flags[k] !== undefined) die(`correct --${k} goes with --from-turn or --from-chat`);
+  const by = heard ? 'owner' : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
@@ -10799,11 +10983,31 @@ function cmdCorrect() {
     if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
     if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
   }
-  if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
-  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
+  // the supervisor's retro alone doesn't stand in the owner's way: the owner corrects it after (spec §5)
+  const prior = correctionOf(act);
+  if (prior && impact === undefined && !(by === 'owner' && writerClass(prior.by) === 'supervisor' && !act.updates.some((x) => x.corrected !== undefined && writerClass(x.by) === 'owner'))) die(`${actId} is already corrected`);
+  let corrected;
+  if (flags['from-turn'] !== undefined) {
+    const uid = flagStr('from-turn');
+    if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
+    const u = logGet(uid);
+    if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    const ref = logGet(u.thread)?.subject?.ref ?? null;
+    const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+    if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    corrected = { reason: c.said, said: c.said, said_at: c.said_at, turn: uid };
+  } else if (heard) corrected = { reason: flagStr('said').trim(), said: flagStr('said').trim() };
+  else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
+  appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
-  if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
+  // the supervisor wrote it from the owner's words: nobody to tell
+  if (by === 'owner' && !heard) nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
 }
 // The supervisor records how it repaired a corrected act.
@@ -12468,6 +12672,9 @@ function cmdGoal() {
   if (sub === 'approve' || sub === 'decide') {
     const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
     const fromTurn = flags['from-turn'] !== undefined;
+    // a goal is approved on its design, never on words said before it: the whole turn, newer than the question
+    if (fromTurn && flags['from-chat'] !== undefined) die('goal decide: --from-turn or --from-chat, not both');
+    if (fromTurn && ['said', 'at', 'seen-turn'].some((k) => flags[k] !== undefined)) die('goal decide --from-turn takes the whole turn: a goal is approved on its design, so --said, --at and --seen-turn aren\'t accepted there');
     const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
     const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
     const g = logGet(id);
@@ -13255,7 +13462,10 @@ const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new 
 const CHAT_QUOTE_WINDOW_MS = 7 * 24 * 3600000;
 function chatQuotesNotFound() {
   if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return [];
-  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at }))];
+  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && !q.owner_said_turn && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at })),
+    // the owner's correction recorded from chat (correct --from-chat): its words, as an answer's (a hold
+    // lifted from a turn is checked against its turn instead, in threadAnswersUnbound)
+    ...[...logObjects('decision'), ...logObjects('act')].map((o) => ({ o, x: correctionOf(o) })).filter(({ x }) => x?.channel === 'chat' && typeof x.said === 'string' && writerClass(x.by) === 'owner' && Date.now() - Date.parse(x.at) < CHAT_QUOTE_WINDOW_MS).map(({ o, x }) => ({ id: o.id, said: x.said, answered_at: x.at }))];
   const t = recent.length ? supervisorTranscript() : null;
   if (!t) return [];
   const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
@@ -13267,29 +13477,72 @@ function chatQuotesNotFound() {
   const owners = typed.filter((x) => !x.startsWith('from the operator ('));
   return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
-// A thread answer (answer --from-turn) cites the owner's turn it was recorded from. checkLine only
-// checks its shape, so this checks the binding turnAnswer enforced, for lines written some other
-// way: the turn is the owner's, its words are what the line says, it is in the question's thread,
-// it is newer than the question, an Inbox question was named in the turn's thread before it
-// (questionNamed), and no other question line cites it. One reason per answer.
+// Everything the owner's words in a thread bound, checked after the fact for lines written some other
+// way than the writers (checkLine checks only their shape). Each line gives its first failing reason.
+// A whole-turn answer (answer --from-turn): the turn is the owner's, its words are what the line says,
+// it is in the question's thread, newer than the question, an Inbox question was named in the turn's
+// thread before it (questionNamed), the turn has no clause binding before it, and no whole-turn answer
+// cites it before. A clause answer (said_at), a hold lifted from a turn (owner_said_turn) and a
+// correction from a thread (corrected.turn): the turn is the owner's, in the right thread, its raw
+// slice is the words and whole clauses (clauseBounds), and no binding before it on the turn overlaps
+// it; then a clause answer's answer_seen is the newest owner turn at the answer, a lifted hold's turn
+// is newer than the no, and a correction's thread is about its record or the act that carried it out.
 function threadAnswersUnbound() {
   const { objects, lines: all } = readLog();
-  const lines = all.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  const first = new Map();
-  return lines.map((l) => {
-    const u = typeof l.turn === 'string' ? logGet(l.turn) : null;
-    const q = logGet(l.id);
-    const firstId = first.get(l.turn);
-    if (l.turn !== undefined && !firstId) first.set(l.turn, l.id);
-    const why = u?.type !== 'turn' ? `names no turn that exists (${l.turn ?? 'none'})`
-      : u.created_by !== 'owner' ? "cites a turn that is the supervisor's, not the owner's"
-      : l.said !== u.text ? "gives words that aren't what the turn says"
-      : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
-      : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
-      : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
-      : firstId ? `cites a turn that already settled ${firstId}` : null;
-    return why ? { id: l.id, why } : null;
-  }).filter(Boolean);
+  const order = new Map(all.map((l, i) => [l, i]));
+  const sorted = [...all].sort((a, b) => String(a.at).localeCompare(String(b.at)) || order.get(a) - order.get(b));
+  const before = (a, b) => String(a.at) < String(b.at) || (a.at === b.at && order.get(a) < order.get(b));
+  const bindings = new Map();
+  const boundBefore = (l, uid) => (bindings.get(uid) ?? (bindings.set(uid, turnBindings(sorted, uid)), bindings.get(uid))).filter((b) => before(b.line, l));
+  // slice clamps, so the span must also lie inside the turn (final-1b F2)
+  const sliceWhy = (u, said, at, what) => (!Array.isArray(at) || typeof said !== 'string' || at[1] > u.text.length || u.text.slice(at[0], at[1]) !== said ? `gives words that aren't what the turn says${what}`
+    : !clauseBounds(u.text, at[0], at[1]) ? `binds part of a clause${what}, not whole clauses` : null);
+  const overlapWhy = (l, uid, span) => { const b = boundBefore(l, uid).find((x) => spansOverlap(x.span, span)); return b ? `overlaps words of the turn that already bound ${b.id}` : null; };
+  const turnWhy = (uid) => { const u = typeof uid === 'string' ? logGet(uid) : null; return u?.type !== 'turn' ? [null, `names no turn that exists (${uid ?? 'none'})`] : u.created_by !== 'owner' ? [u, "cites a turn that is the supervisor's, not the owner's"] : [u, null]; };
+  // the newest owner turn in the thread before the line, by the log's order (a turn in the same
+  // millisecond, appended after it, wasn't there to read)
+  const newestOwnerTurn = (thread, l) => sorted.filter((x) => x.type === 'turn' && x.op === 'new' && x.thread === thread && writerClass(x.by) === 'owner' && before(x, l)).pop()?.id ?? null;
+  const afterWhy = (u, l) => (u.created_at > l.at ? `cites a turn written after it (${u.id})` : null);
+  const found = [];
+  for (const l of sorted) {
+    let why = null;
+    if (l.type === 'question' && l.op === 'set' && l.channel === 'thread' && Array.isArray(l.said_at)) {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      why = w ?? (q?.thread !== u.thread ? 'cites a turn from another thread than the one the question was asked in'
+        : q.about_turn !== u.id ? `answers a question asked about another turn (${q.about_turn ?? 'none'})`
+          : afterWhy(u, l) ?? sliceWhy(u, l.said, l.said_at, '') ?? overlapWhy(l, u.id, l.said_at)
+            ?? (l.answer_seen !== newestOwnerTurn(u.thread, l) ? `gives answer_seen ${l.answer_seen ?? 'none'}, not the newest owner turn the answer should have read (${newestOwnerTurn(u.thread, l)})` : null));
+    } else if (l.type === 'question' && l.op === 'set' && l.channel === 'thread') {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      const earlier = w ? [] : boundBefore(l, u.id);
+      const clause = earlier.find((b) => b.span);
+      const whole = earlier.find((b) => !b.span && b.kind === 'answer');
+      why = w ?? (l.said !== u.text ? "gives words that aren't what the turn says"
+        : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
+          : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
+            : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
+              : clause ? `settles a whole turn that also has a clause binding (${clause.id})`
+                : whole ? `cites a turn that already settled ${whole.id}` : null);
+    } else if (l.type === 'question' && l.op === 'new' && l.owner_said_turn !== undefined) {
+      const [u, w] = turnWhy(l.owner_said_turn);
+      const rem = asList(l.blocks).find((b) => String(b).startsWith('remediation:'));
+      const no = !w && rem ? remediationAnswers(rem, asList(l.blocks).find((b) => String(b).startsWith('release:')) ?? null).filter((a) => !a.run && a.at < l.at).pop() : null;
+      why = w ?? (u.thread !== l.thread ? 'lifts a hold with a turn from another thread than the question\'s'
+        : afterWhy(u, l) ?? sliceWhy(u, l.owner_said, l.owner_said_at, ' to lift a hold')
+          ?? (no && !(u.created_at > no.at) ? `lifts a hold with a turn older than the no it lifts (the owner's, ${no.id})` : null));
+    } else if (['decision', 'act'].includes(l.type) && l.op === 'set' && l.channel === 'thread' && isObj(l.corrected) && l.corrected.turn !== undefined) {
+      const [u, w] = turnWhy(l.corrected.turn);
+      const ref = w ? null : logGet(u.thread)?.subject?.ref ?? null;
+      const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+      why = w ?? (ref !== `${l.type}:${l.id}` && !(via?.type === 'act' && via.decision === l.id) ? `corrects from a thread about another record (${ref ?? 'nothing in particular'})`
+        : l.type === 'act' && logGet(l.id)?.decision ? `corrects an act that carried out ${logGet(l.id).decision}; the decision is what's corrected`
+          : afterWhy(u, l) ?? sliceWhy(u, l.corrected.said, l.corrected.said_at, '') ?? overlapWhy(l, u.id, l.corrected.said_at));
+    }
+    if (why) found.push({ id: l.id, why });
+  }
+  return found;
 }
 // ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
 
@@ -24091,12 +24344,12 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
@@ -24106,7 +24359,7 @@ Decide and act (supervisor.md, constitution.md)
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
-  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
+  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | correct <id> --from-turn <u-id> --said "<whole clauses>" [--at <n>] | correct <id> --from-chat --said "<owner's words>"   (supervisor, the owner's correction) | repair <id> --how undo|fix-ticket|none
   correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
