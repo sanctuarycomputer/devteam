@@ -43,6 +43,8 @@ function landArtifact(F, slug, files) {
 //                     relatedTarget on that move's target
 //   tags           -> { n }, getElementsByTagName calls so far
 //   at { x, y }    -> { tag }, the localName of what is at that point
+//   rerenderOnMove -> {} at once; then on the next mousemove inside the section, from a setTimeout(0)
+//                     (the lens hears the move first), the section's contents are made anew
 //   move { n }     -> { frames: n }, once #mover has moved 1 px a frame for n frames
 //   text           -> {}, once #a reads "A2"
 const OWN_SCRIPT = [
@@ -52,7 +54,9 @@ const OWN_SCRIPT = [
   '  Document.prototype.getElementsByTagName = function () { window.__tags++; return byTag.apply(this, arguments); };',
   '  var lastTarget = null, leaves = 0;',
   '  var leaveOn = function (el) { el.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })); };',
-  '  addEventListener("mousemove", function (e) { var el = e.target; lastTarget = el; if (leaves > 0) { leaves--; setTimeout(function () { leaveOn(el); }, 0); } }, true);',
+  '  var rerender = false;',
+  '  addEventListener("mousemove", function (e) { var el = e.target; lastTarget = el; if (leaves > 0) { leaves--; setTimeout(function () { leaveOn(el); }, 0); }',
+  '    if (rerender && el.closest && el.closest("section")) { rerender = false; setTimeout(function () { var sec = document.querySelector("section"); sec.innerHTML = sec.innerHTML; }, 0); } }, true);',
   '  var say = function (ask, o) { var m = { own: 1, ask: ask }; for (var k in o) m[k] = o[k]; parent.postMessage(m, "*"); };',
   '  var round = function (r) { return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };',
   '  addEventListener("message", function (e) {',
@@ -63,6 +67,7 @@ const OWN_SCRIPT = [
   '    else if (d.ask === "leave") { leaveOn(lastTarget || document.documentElement); say("leave", {}); }',
   '    else if (d.ask === "leaveAfter") { leaves = d.n; say("leaveAfter", {}); }',
   '    else if (d.ask === "tags") say("tags", { n: window.__tags });',
+  '    else if (d.ask === "rerenderOnMove") { rerender = true; say("rerenderOnMove", {}); }',
   '    else if (d.ask === "at") { var hit = document.elementFromPoint(d.x, d.y); say("at", { tag: hit ? hit.localName : null }); }',
   '    else if (d.ask === "move") {',
   '      var mover = document.getElementById("mover"), left = parseFloat(mover.style.left) || 0, done = 0, n = d.n;',
@@ -223,6 +228,22 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   got = (await ptr()).slice(from);
   assert.ok(got.every((m) => m.k !== null), `A15g: no null between elements: ${JSON.stringify(got.map((m) => m.k))}`);
   assert.deepEqual(got.map((m) => m.k), ['#box', pSel, '#a', '#box'], 'A15g: each element in turn');
+
+  // A15h: the element under a move the gate holds is replaced before the gate lets it go: the lens
+  // looks again at that point, and says the new element, never the detached one
+  await sleep(150);
+  await own({ ask: 'rerenderOnMove' });
+  from = (await ptr()).length;
+  // the middle of #box (another point than A15g's last, so it is sent at once), then the section's p
+  // inside the gap; the p is replaced after the lens has heard the move
+  await mouse(200, 150);
+  await mouse(450, 125);
+  await sleep(300);
+  got = (await ptr()).slice(from);
+  assert.deepEqual(bare(got[0]), { lens: 1, type: 'pointer', k: '#box', x: 0.5, y: 0.5 }, 'A15h: #box, at once');
+  lastP = got[got.length - 1];
+  assert.deepEqual(bare(lastP), { lens: 1, type: 'pointer', k: pSel, x: 0.5, y: 0.5 }, 'A15h: the new p, by its full path, at the move\'s point');
+  assert.equal((await own({ ask: 'is', k: lastP.k, sel: 'section > p' })).is, true, 'A15h: the path finds the new p');
 });
 
 test('presence A16: place answers each selector\'s rect, once a frame and only on change, apart from the pins', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {

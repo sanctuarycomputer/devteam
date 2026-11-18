@@ -7610,8 +7610,11 @@ const ARTIFACT_LENS = String.raw`(() => {
   // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
   // it is sent; the page itself (html or body) is no thing to point at, as hit says
   const pointerOf = (p) => {
-    const el = p.el;
+    let el = p.el;
+    // the page replaced it while the gate held it: what is at that point now
+    if (el && el.isConnected === false) el = document.elementFromPoint(p.cx, p.cy);
     if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
+    // the rect read now, when it is sent, against the point of the move
     const r = el.getBoundingClientRect();
     return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
   };
