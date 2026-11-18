@@ -7073,7 +7073,7 @@ function cmdAnswer() {
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
   // dropped files go with the owner's own words, never with a default, a review's result or reason, or words the supervisor recorded
   if (flags.files !== undefined && (flags.defaulted || flags['review-result'] !== undefined || decline || flags['from-chat'] || flags['from-turn'] !== undefined)) die("--files go with the owner's own answer");
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--files <json>] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]] [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -23319,12 +23319,12 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   unread [--json]   what the owner wrote that the supervisor hasn't dealt with yet (answers, thread turns, decisions), oldest first, each with its ref   |   unread ack <ref> [<ref> …]   (supervisor) dealt with exactly those lines
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> --said "<whole clauses>" [--at <n>] [--seen-turn <u-id>]   (a question asked with thread ask --turn) | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
   settings set <key> <1..20|none> [--for <act-id>]   (the supervisor sets max_active_tickets or max_active_per_component in its settings chore, .worktrees/chore-settings; none is no limit; --for names the owner's owner-setting act it lands, which must be the latest for the key with this value. It applies once merge --chore settings lands it)
   owner-setting <key> <1..20|none>   (the owner asks for one of the supervisor's own settings, max_active_tickets or max_active_per_component; none is no limit. The dashboard's Settings page runs it on Save; the supervisor lands it with settings set in its settings chore)
   pane question [--json]   (what the supervisor's terminal is asking; the owner answers it on the dashboard's card, which sends that option's digit key and nothing else: no command answers it)
-  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ask <t-id> --turn <u-id> [--seen-turn <u-id>] [--owner-said "<whole clauses>" [--at <n>]] --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
@@ -23334,7 +23334,7 @@ Decide and act (supervisor.md, constitution.md)
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
-  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
+  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | correct <id> --from-turn <u-id> --said "<whole clauses>" [--at <n>] | correct <id> --from-chat --said "<owner's words>"   (supervisor, the owner's correction) | repair <id> --how undo|fix-ticket|none
   correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 

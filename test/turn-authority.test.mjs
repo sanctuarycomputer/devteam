@@ -43,6 +43,17 @@ test('turn authority', async (t) => {
     // the held remediation A13 lifts, answered in the answers' subtest (A13, A24)
     let held = null;
 
+    await t.test('the docs: supervisor.md §6 and help say how a thread instruction is acted on (A21)', () => {
+      const doc = fs.readFileSync(path.join(testDir, '..', 'docs', 'devteam', 'process', 'supervisor.md'), 'utf8');
+      const s6 = doc.slice(doc.indexOf('\n## 6.'), doc.indexOf('\n## 7.'));
+      for (const x of ['thread ask <t-id> --turn <u-id>', '--from-turn <u-id> --said', 'correct <id> --from-turn <u-id> --said', 'correct <id> --from-chat --said', 'never ask them to confirm']) assert.ok(s6.includes(x), `§6 says ${x}`);
+      const help = F.owner(['help']).split('\n');
+      const line = (start) => help.filter((l) => l.trimStart().startsWith(start)).join('\n');
+      assert.match(line('thread reply'), /thread ask <t-id> --turn <u-id>.*--seen-turn.*--owner-said/);
+      assert.match(line('answer <qid> "<text>"'), /--from-turn <u-id> --said "<whole clauses>" \[--at <n>\] \[--seen-turn <u-id>\]/);
+      assert.match(line('correct'), /--from-turn <u-id> --said .*--from-chat --said/);
+    });
+
     await t.test('the fake: log-check accepts its log and refuses each of its refused lines', () => {
       const snap = F.snapLog();
       try {
