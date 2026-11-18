@@ -567,6 +567,21 @@ test('box-pins changed names each change to what the image runs, alone, and exit
     assert.equal(r.status, 3, `${name}: ${r.stderr}${r.stdout}`);
     assert.equal(r.stdout, `${want.map((w) => `image: ${w}\n`).join('')}kind: minor (${want.length} changes the image runs)\n`, name);
   }
+  // parts only the --since side has (a declaration gone, from a listed region or a listed name), read backwards
+  for (const [name, want] of [['in-region', `${SCRIPT}#box`], ['cmd-hub', `${SCRIPT}#cmdHub`]]) {
+    cg(['checkout', '-q', `minor-${name}`]);
+    const r = changed(['--since', `minor-${name}`, '--to', 'v9.1.0']);
+    assert.equal(r.status, 3, `${name} backwards: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, `image: ${want}\nkind: minor (1 changes the image runs)\n`);
+  }
+  // a region's own rest is that region's, never the file's: an unlisted region's is a patch, a listed one's its name
+  onBranch('region-rest', { [SCRIPT]: after('/* term-server start */\n', 'void 0;\n') });
+  const rr = changed(['--since', 'v9.1.0']);
+  assert.equal(rr.status, 0, rr.stderr + rr.stdout);
+  onBranch('box-rest', { [SCRIPT]: after('/* box start */\n', 'void 0;\n') });
+  const br = changed(['--since', 'v9.1.0']);
+  assert.equal(br.status, 3, br.stderr);
+  assert.equal(br.stdout, `image: ${SCRIPT}#box\nkind: minor (1 changes the image runs)\n`);
 });
 
 test('box-pins changed reads the range --to names, not HEAD', () => {
@@ -608,7 +623,7 @@ test('box-pins changed --json has the shape of image-changes@1\'s fixtures, and 
   const since = (changedKit(), cg(['rev-parse', 'v9.1.0^{commit}']).trim());
   const cases = [
     ['json-patch', { 'docs/devteam/dashboard/index.html': append('<!-- x -->\n') }, 'patch.json', 0],
-    ['json-minor', { 'cloud/gateway.mjs': append('// x\n'), [SCRIPT]: (t) => after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n")(after('function cmdHub() {\n', '  // x\n')(t)) }, 'minor.json', 3],
+    ['json-minor', { 'cloud/gateway.mjs': append('// x\n'), [SCRIPT]: (t) => after('const HUB_ACTIONS = {\n', '  // x\n')(after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n")(after('function cmdHub() {\n', '  // x\n')(t))) }, 'minor.json', 3],
   ];
   for (const [name, edits, fx, code] of cases) {
     const head = onBranch(name, edits);
@@ -633,8 +648,14 @@ test('box-pins changed --json has the shape of image-changes@1\'s fixtures, and 
     assert.equal(t.stdout, render(got), name);
   }
   assert.deepEqual(JSON.parse(changed(['--since', 'v9.1.0', '--json']).stdout).changes, [
-    { file: 'cloud/gateway.mjs', part: null }, { file: SCRIPT, part: '(rest)' }, { file: SCRIPT, part: 'cmdHub' },
+    { file: 'cloud/gateway.mjs', part: null }, { file: SCRIPT, part: '(rest)' }, { file: SCRIPT, part: 'HUB_ACTIONS' }, { file: SCRIPT, part: 'cmdHub' },
   ]);
+  // outside the kit's own checkout it can't tell
+  cg(['remote', 'set-url', 'origin', 'git@github.com:acme/not-the-kit.git']);
+  try {
+    const o = changed(['--since', 'v9.1.0']);
+    assert.notEqual(o.status, 0); assert.notEqual(o.status, 3); assert.equal(o.stdout, '');
+  } finally { cg(['remote', 'set-url', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']); }
 });
 
 // IMAGE_RUNS and the kit's parts and glob readers, read from this checkout's script

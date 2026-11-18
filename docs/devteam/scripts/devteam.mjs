@@ -17995,7 +17995,8 @@ const IMAGE_RUNS = {
     'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
     'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
     // the guards that let the image's commands run outside a project: the machineWide expression,
-    // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list
+    // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list (the helpers homeAt
+    // also calls, KIT_VIEWS, kitsOwnRepoAt, projectIn and repoLinksIn, are shared, so not listed)
     'homeAt', 'realPathMade',
     // the project-side parts the image relies on (the crossings): the presses the gateway signs and
     // a dashboard verifies, and the operator's role guard
@@ -18015,23 +18016,28 @@ function imageChanges(since, to, { smoke = false } = {}) {
   if (raw === null) cant(`git diff ${since} ${to} failed in ${repoRoot}`);
   const tokens = raw.split('\0');
   const paths = [];
+  const S = IMAGE_RUNS.script;
+  // which side has the script, from the diff's own letters (A added, D deleted, R/C old then new)
+  let baseHas = null, headHas = null;
   for (let i = 0; i < tokens.length;) {
     const status = tokens[i++];
     if (!status) continue;
     const n = /^[RC]/.test(status) ? 2 : 1;
-    paths.push(...tokens.slice(i, i + n));
+    const ps = tokens.slice(i, i + n);
+    paths.push(...ps);
     i += n;
+    if (n === 2) { if (ps[0] === S) { baseHas = true; headHas ??= status[0] === 'C'; } if (ps[1] === S) { headHas = true; baseHas ??= false; } }
+    else if (ps[0] === S) { baseHas = status[0] !== 'A'; headHas = status[0] !== 'D'; }
   }
   for (const p of paths) if (IMAGE_RUNS.files.some((g) => pathMatches(g, p))) add(p, null);
-  const S = IMAGE_RUNS.script;
   if (paths.includes(S)) {
-    const textAt = (sha) => {
-      if (git(['cat-file', '-e', `${sha}:${S}`], repoRoot) === null) return '';
+    const textAt = (sha, has) => {
+      if (!has) return '';
       const t = git(['show', `${sha}:${S}`], repoRoot);
       if (t === null) cant(`git show ${sha}:${S} failed`);
       return t;
     };
-    const base = textAt(since), head = textAt(to);
+    const base = textAt(since, baseHas), head = textAt(to, headHas);
     const B = fileParts(base, S), H = fileParts(head, S);
     const inBase = new Set(B.owner.slice(1));
     const leaves = partsChanged(base, head, S, []);
@@ -18057,6 +18063,7 @@ async function cmdBoxPins() {
     for (const k of ['since', 'to']) if (flags[k] !== undefined && (typeof flags[k] !== 'string' || !flags[k] || flags[k].startsWith('-'))) usage();
     for (const k of ['smoke', 'json']) if (flags[k] !== undefined && flags[k] !== true) usage();
     if (flags.since === undefined) usage();
+    if (!kitsOwnRepoAt(repoRoot)) die(`box-pins changed: ${repoRoot} is not a checkout of the kit's own repo (${KIT_UPSTREAM}); run it there, at --to`, 2);
     const sha = (k, ref) => git(['rev-parse', '--verify', '-q', `${ref}^{commit}`], repoRoot) ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
     const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
     const changes = imageChanges(since, to, { smoke: !!flags.smoke });
