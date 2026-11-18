@@ -250,8 +250,12 @@ test('check 5: a quiet night, a busy afternoon, and everything kit-593 draws', (
 
 test('check 6: the generator, imported, gives the committed bytes and writes nothing', async () => {
   const before = dayBytes();
+  const stat0 = fs.statSync(readingsPath, { bigint: true });
   const mod = await import(new URL('./fixtures/box-memory/make-readings.mjs', import.meta.url).href);
   assert.equal(dayBytes(), before, 'importing the generator writes nothing');
+  const stat1 = fs.statSync(readingsPath, { bigint: true });
+  assert.equal(stat1.mtimeNs, stat0.mtimeNs, 'the import did not touch the file (mtime)');
+  assert.equal(stat1.ctimeNs, stat0.ctimeNs, 'the import did not touch the file (ctime)');
   assert.equal(typeof mod.makeReadings, 'function');
   assert.equal(mod.makeReadings(), before, 'makeReadings() is the file, byte for byte');
 });
@@ -260,8 +264,8 @@ test('check 7: every subcommand in the day is a key of COMMANDS', () => {
   const a = src.indexOf('const COMMANDS = {'), b = src.indexOf('\n};', a);
   assert.ok(a >= 0 && b > a, 'COMMANDS block in devteam.mjs');
   const keys = new Set();
-  for (const m of src.slice(a, b).matchAll(/(?:^\s*|,\s*)(?:'([\w-]+)'|([A-Za-z]\w*)):\s/g)) keys.add(m[1] || m[2]);
-  for (const k of ['dashboard-data', 'hello', 'gate']) assert.ok(keys.has(k), `the key parse finds ${k}`);
+  for (const m of src.slice(a, b).matchAll(/(?:^\s*|,\s*)(?:'([\w-]+)'|([A-Za-z]\w*)):\s/gm)) keys.add(m[1] || m[2]);
+  for (const k of ['init', 'hello', 'dashboard-data', 'gate']) assert.ok(keys.has(k), `the key parse finds ${k}`);
   const used = new Set();
   for (const r of dayReadings()) {
     for (const k of Object.keys(r.devteam || {})) used.add(k);
@@ -277,4 +281,23 @@ test('check 10: every top-level key the fixture day uses is named in the comment
   const top = new Set();
   for (const r of dayReadings()) for (const k of Object.keys(r)) top.add(k);
   for (const k of top) assert.ok(c.includes(`\`${k}\``), `the comment names \`${k}\``);
+});
+
+test('fixture consistency: the sums on every line agree (the check itself stays shape-only)', () => {
+  const sum = (o, f) => Object.values(o || {}).reduce((a, x) => a + f(x), 0);
+  for (const r of dayReadings()) {
+    const w = r.at;
+    assert.ok(sum(r.projects, (p) => p.sessions || 0) <= r.sessions, `${w}: projects' sessions sum within sessions`);
+    assert.ok(sum(r.devteam, (d) => d.n) <= r.kinds.devteam.n, `${w}: devteam n within kinds.devteam.n`);
+    assert.ok(sum(r.devteam, (d) => d.rss) <= r.kinds.devteam.rss, `${w}: devteam rss within kinds.devteam.rss`);
+    const kindsRss = sum(r.kinds, (k) => k.rss);
+    assert.ok(sum(r.projects, (p) => p.rss) <= kindsRss, `${w}: projects' rss sum within the kinds' rss`);
+    for (const [name, p] of Object.entries(r.projects)) assert.ok(p.rss <= kindsRss, `${w}: ${name} rss within the kinds' rss`);
+    const per = {};
+    for (const p of Object.values(r.projects)) for (const [s, v] of Object.entries(p.devteam || {})) per[s] = (per[s] || 0) + v;
+    for (const [s, v] of Object.entries(per)) {
+      assert.ok(r.devteam?.[s], `${w}: a project's ${s} has a machine-wide ${s}`);
+      assert.ok(v <= r.devteam[s].rss, `${w}: projects' ${s} sum within devteam.${s}.rss`);
+    }
+  }
 });

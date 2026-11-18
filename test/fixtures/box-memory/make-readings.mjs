@@ -52,19 +52,33 @@ export function makeReadings() {
     for (const [k, share] of Object.entries(KIND_SHARE)) {
       kinds[k] = { n: Math.max(1, Math.round(sessions * KIND_PER_SESSION[k] + rnd() * 2)), rss: Math.max(1, Math.round(ws * share * (0.95 + rnd() * 0.1))) };
     }
-    const devteam = {};
+    // The devteam split divides the devteam kind: the subcommands' n and rss sum to at most kinds.devteam's.
+    kinds.devteam.n = Math.max(kinds.devteam.n, 8);
     const picks = ['dashboard', 'wait', 'hello'];
     if (rnd() < 0.5) picks.push('gate');
     if (rnd() < 0.3) picks.push('metrics');
     if (rnd() < 0.2) picks.push('accounts-tick');
     if (rnd() < 0.4) picks.push('dashboard-data');
     if (min === 600) picks.push(...SUBS); // a minute with all seven, whatever the dice said
-    for (const s of new Set(picks)) devteam[s] = { n: 1 + Math.floor(rnd() * 5), rss: Math.round(60e6 + rnd() * 400e6) };
-    const mine = Math.max(1, Math.round(sessions * (0.35 + rnd() * 0.1)));
-    const dev = Math.round(ws * 0.2), mship = Math.round(ws * 0.28);
+    const subs = [...new Set(picks)];
+    const weights = subs.map(() => 0.5 + rnd());
+    const wsum = weights.reduce((x, y) => x + y, 0);
+    let spare = Math.floor((kinds.devteam.n - subs.length) / 2);
+    const devteam = {};
+    subs.forEach((sub, i) => {
+      const extra = Math.floor(rnd() * (spare + 1));
+      spare -= extra;
+      devteam[sub] = { n: 1 + extra, rss: Math.max(1, Math.floor(kinds.devteam.rss * 0.9 * weights[i] / wsum)) };
+    });
+    // Sessions split between the projects, never summing above the line's; one session goes to one project.
+    const mine = sessions >= 2 ? Math.min(sessions - 1, Math.max(1, Math.round(sessions * (0.35 + rnd() * 0.1)))) : (rnd() < 0.5 ? 1 : 0);
+    const kindsRss = Object.values(kinds).reduce((x, k) => x + k.rss, 0);
+    const dev = Math.round(kindsRss * 0.2), mship = Math.round(kindsRss * 0.28);
+    // Each project's share of a subcommand is a part of the machine-wide figure: 0-40% each, so both sum to at most 80%.
+    const part = () => { const o = {}; for (const sub of subs) if (rnd() < 0.8) o[sub] = Math.floor(devteam[sub].rss * rnd() * 0.4); return o; };
     const projects = {
-      'devteam-dev': { rss: dev, sessions: mine, devteam: { dashboard: Math.round(dev * 0.03), hello: 140e6, wait: 60e6 } },
-      mothership: { rss: mship, sessions: Math.max(1, sessions - mine), devteam: { dashboard: Math.round(mship * 0.02) } },
+      'devteam-dev': { rss: dev, sessions: mine, devteam: part() },
+      mothership: { rss: mship, sessions: sessions - mine, devteam: part() },
     };
     const line = { v: 1, at: new Date(DAY + min * 60000).toISOString().replace('.000Z', 'Z'), working_set: ws, max: MAX, ceiling: 0.8, source: 'cgroup', sessions, kinds, devteam, projects };
     if (n % 311 === 150) line.partial = true;
