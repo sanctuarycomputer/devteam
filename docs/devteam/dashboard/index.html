@@ -5703,7 +5703,13 @@ function overlaid(raw) {
 const redrawNow = () => { if (RAW) drawOrHold(HELD ?? RAW, true); };
 const savingNote = () => { const el = $('saving'); if (el) el.hidden = SAVING === 0; };
 addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } });
-function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError }) {
+// The servers' (the dashboard's, the hub's, the gateway's) terse refusal of a body they couldn't
+// read says nothing the owner can act on: it is said in plain words, the press's own (plain) if it
+// has some. Any other refusal is the server's own words.
+const TERSE_REFUSAL = /^(missing or invalid fields\b|bad json$)/;
+const PLAIN_REFUSAL = 'the server didn\'t take what this page sent, and nothing was recorded. Reload the page and try again.';
+const GOAL_REFUSAL = 'the server didn\'t take this approval as sent, and nothing was recorded. Reload the page and press Approve, Refine or Let go again.';
+function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError, plain }) {
   SAVING++;
   savingNote();
   const ov = overlay ? { ...overlay, confirmedAt: 0 } : null;
@@ -5717,7 +5723,7 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError
       const { action, body } = build();
       const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
       try { out = await r.json(); } catch { out = null; }
-      if (!r.ok || !out) error = [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
+      if (!r.ok || !out) error = TERSE_REFUSAL.test(out?.error ?? '') ? plain || PLAIN_REFUSAL : [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
     } catch (e) { error = `could not send: ${e.message || e}`; }
     if (error) {
       // what the server did before it refused (a partly posted set of secrets) shows on the next read
@@ -5788,7 +5794,7 @@ function holdOverlay(id, mode) {
 // An answer, at once: the card says so, and the server is told. The answer names the question as
 // this page showed it; one changed since is refused, and the card comes back, saying why until the
 // owner dismisses it (REFUSED). stays: false keeps the caller's own one-off error line (a review's).
-function answerPress(id, card, errId, text, build, { stays = true } = {}) {
+function answerPress(id, card, errId, text, build, { stays = true, plain } = {}) {
   const f = cardFields(id, card);
   return press(`q:${id}`, {
     build,
@@ -5798,6 +5804,7 @@ function answerPress(id, card, errId, text, build, { stays = true } = {}) {
     onOk: () => { REFUSED.delete(id); delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
     ...(stays ? { onError: (e) => REFUSED.set(id, { reason: e, n: ++REFUSALS }) } : {}),
     errId,
+    plain,
   });
 }
 const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
@@ -8488,7 +8495,7 @@ document.addEventListener('click', async (ev) => {
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
       ? { action: 'goal-decide', body: { id: goalId, verdict: GOAL_VERDICTS[picked], notes: note || undefined } }
-      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }));
+      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }), goalId ? { plain: GOAL_REFUSAL } : {});
     return;
   }
   // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)

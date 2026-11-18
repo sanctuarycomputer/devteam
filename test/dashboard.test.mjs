@@ -4422,4 +4422,59 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     assert.deepEqual(await shown(GR.q), { suggest: 'Suggested: Refine the measure', labels: ['Approve', 'Refine', 'Let go'], rec: [] }, 'the suggestion in words; no choice marked, none added');
     assert.deepEqual(await shown(GY.q), { suggest: null, labels: ['Approve', 'Refine', 'Let go'], rec: ['Approve'] }, '"Yes" marks Approve, with no line of its own');
   });
+
+  // the goal's status as the dashboard's server has it
+  const goalStatus = async (g) => (await (await fetch(`http://127.0.0.1:${port}/api/data`)).json()).ooda.goals.find((x) => x.id === g)?.status;
+  // a wait on the server, whose failure says what the card said (a refusal, in the red run)
+  const onServer = async (f, what, q) => {
+    const end = Date.now() + 30000;
+    while (!(await f())) {
+      if (Date.now() > end) assert.fail(`timed out: ${what}; the card says: ${JSON.stringify(await p.ev(`${card(q)}?.querySelector('[data-refused]')?.textContent ?? ${card(q)}?.querySelector('.err')?.textContent ?? 'no card'`))}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  await t.test('a stale pick is refused on the page, and nothing is posted', async () => {
+    let said = null;
+    // the click and the read in one still step: no read redraws the card's error line between them
+    await still(async () => { said = await p.ev(`(() => { picks['${GR.q}'] = 'Yes'; window.__posts = []; ${card(GR.q)}.querySelector('[data-answer]').click(); return document.getElementById('e-${GR.q}').textContent; })()`); });
+    assert.equal(said, 'Choose Approve, Refine or Let go.');
+    assert.deepEqual(JSON.parse(await p.ev('JSON.stringify(window.__posts)')), [], 'nothing posted');
+    await p.ev(`delete picks['${GR.q}']; void 0`);
+  });
+
+  await t.test('refused, said plainly, and pressed again: recorded once', async () => {
+    // the next goal press reaches the real server with a verdict it doesn't take, as a page older
+    // than its server could send one
+    await p.ev(`(() => { const f0 = window.fetch; window.__badVerdict = true; window.fetch = (u, o) => { if (window.__badVerdict && String(u) === '/api/goal-decide') { window.__badVerdict = false; o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), verdict: 'yes' }) }; } return f0(u, o); }; })(); void 0`);
+    await p.click(`#q-${GR.q} input[data-pick][value="Refine"]`);
+    await p.click(`#q-${GR.q} textarea[data-q]`);
+    await soon(`document.activeElement === ${card(GR.q)}.querySelector('textarea[data-q]')`, 'the note focused');
+    await p.type('a smaller measure');
+    await soon(`${card(GR.q)}.querySelector('textarea[data-q]').value === 'a smaller measure'`, 'the note typed');
+    await p.click(`#q-${GR.q} [data-answer]`);
+    await soon(`!!${card(GR.q)}?.querySelector('[data-refused]')`, 'the refusal, on the card');
+    const said = await p.ev(`${card(GR.q)}.querySelector('[data-refused]').textContent`);
+    assert.match(said, /^Not saved: the server didn't take this approval as sent, and nothing was recorded\. Reload the page and press Approve, Refine or Let go again\./, said);
+    assert.doesNotMatch(said, /missing or invalid fields/, 'never the server\'s terse words');
+    assert.equal(await p.ev(`${card(GR.q)}.querySelector('input[data-pick][value="Refine"]').checked`), true, 'the pick back');
+    assert.equal(await p.ev(`${card(GR.q)}.querySelector('textarea[data-q]').value`), 'a smaller measure', 'the note back');
+    assert.equal(asked(GR.q).status, 'open', 'nothing recorded');
+    await p.click(`#q-${GR.q} [data-answer]`);
+    await onServer(() => asked(GR.q).status === 'answered', 'the approval pressed again, on the server', GR.q);
+    assert.equal(asked(GR.q).answer, 'Refine — a smaller measure');
+    assert.equal(decided(GR.g, 'refine'), 1, 'one decision');
+    assert.equal(answers(GR.q), 1, 'one answer');
+  });
+
+  await t.test('the recommended press is recorded once', async () => {
+    await p.click(`#q-${GY.q} .choice.rec input[data-pick]`);
+    await soon(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').checked`, 'the recommended choice picked');
+    assert.equal(await p.ev(`${card(GY.q)}.querySelector('.choice.rec input[data-pick]').value`), 'Approve');
+    await p.click(`#q-${GY.q} [data-answer]`);
+    await onServer(async () => asked(GY.q).status === 'answered' && (await goalStatus(GY.g)) === 'ready', 'the approval recorded and the goal ready', GY.q);
+    assert.equal(asked(GY.q).answer, 'Approve');
+    assert.equal(decided(GY.g, 'approve'), 1, 'one decision');
+    assert.equal(answers(GY.q), 1, 'one answer');
+  });
 });
