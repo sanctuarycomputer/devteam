@@ -21392,7 +21392,6 @@ const RECURRING_ENTRY_SHAPE = Object.freeze({
   name_length: Object.freeze([2, 40]),
   kinds: Object.freeze(['check', 'chore']),
   every: /^([1-9][0-9]{0,3})(h|d|w|mo)$/,
-  units: Object.freeze(['h', 'd', 'w', 'mo']),
   every_min: Object.freeze({ check: 'h', chore: 'd' }),
   every_max: Object.freeze({ h: 2160, d: 90, w: 12, mo: 3 }),
   weekdays: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
@@ -21400,8 +21399,6 @@ const RECURRING_ENTRY_SHAPE = Object.freeze({
   at: /^([01][0-9]|2[0-3]):[0-5][0-9]$/,
   last_line_rules: Object.freeze(['above', 'below', 'is_not']),
   by: Object.freeze(['supervisor', 'worker']),
-  env_reference: /(?:\b(?:bearer|basic|token)\s+)?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?=$|[\s"';&|)])/gi,
-  scrub_allowed: Object.freeze(['[ip]', '[phone]', '[email]']),
   fields: Object.freeze({
     kind: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true }),
     title: Object.freeze({ kinds: Object.freeze(['check', 'chore']), required: true, max: 80 }),
@@ -21423,9 +21420,14 @@ const RECURRING_ENTRY_SHAPE = Object.freeze({
   }),
 });
 // What is wrong with one job, each problem naming the entry and field ("settings recurring.<name>.<field>: …"),
-// empty when it holds. It reads no settings and no log, so any reader can check any entry.
+// empty when it holds. It reads no log and no other setting (but sensor_scrub, through scrubText,
+// whose markers it counts too), so any reader can check any entry.
 function recurringEntryProblems(name, entry) {
   const R = RECURRING_ENTRY_SHAPE;
+  const UNITS = Object.keys(R.every_max); // h, d, w, mo: shortest first
+  // a whole environment reference: $NAME or ${NAME} (never ${X:-default} or ${X}more), after any scheme word
+  const REF = /(?:\b(?:bearer|basic|token)\s+)?\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?=$|[\s"';&|)])/gi;
+  const SCRUB_ALLOWED = ['[ip]', '[phone]', '[email]'];
   const at = `settings recurring.${name}`;
   const [lo, hi] = R.name_length;
   if (typeof name !== 'string' || !R.name.test(name) || name.length < lo || name.length > hi) return [`${at}: a name is ${lo} to ${hi} lowercase letters and digits, in words joined by single hyphens (it becomes a chore slug and a ticket id)`];
@@ -21447,7 +21449,7 @@ function recurringEntryProblems(name, entry) {
   if (has('every')) {
     const m = typeof entry.every === 'string' ? R.every.exec(entry.every) : null;
     if (!m) bad('every', '<n>h, <n>d, <n>w or <n>mo');
-    else if (R.units.indexOf(m[2]) < R.units.indexOf(R.every_min[kind])) bad('every', 'a chore runs at most daily: <n>d, <n>w or <n>mo');
+    else if (UNITS.indexOf(m[2]) < UNITS.indexOf(R.every_min[kind])) bad('every', 'a chore runs at most daily: <n>d, <n>w or <n>mo');
     else if (Number(m[1]) > R.every_max[m[2]]) bad('every', `at most ${R.every_max.d}d, ${R.every_max.w}w or ${R.every_max.mo}mo (${R.every_max.h}h)`);
     else unit = m[2];
   }
@@ -21464,10 +21466,19 @@ function recurringEntryProblems(name, entry) {
     const r = entry.run;
     if (typeof r !== 'string' || !r.length || r.length > R.fields.run.max || UNSAFE_TEXT.test(r)) bad('run', `one line of 1 to ${R.fields.run.max} characters`);
     else {
-      const count = (t) => { const c = new Map(); for (const x of t.match(/\[[a-z-]+\]/g) ?? []) c.set(x, (c.get(x) ?? 0) + 1); return c; };
-      const refs = r.replace(R.env_reference, '[var]');
+      // every marker the scrubber can write: any bracketed word (the built-ins, an owner's "[ACME]"), and
+      // each owner sensor_scrub "as" in whatever form it takes; counted, so a typed one hides nothing
+      const owned = (loadSettings().sensor_scrub ?? []).map((p) => (isObj(p) && p.as !== undefined ? String(p.as) : null)).filter((x) => x && !/^\[[^[\]\s]{1,60}\]$/.test(x));
+      const count = (t) => {
+        const c = new Map();
+        const add = (x, n = 1) => c.set(x, (c.get(x) ?? 0) + n);
+        for (const x of t.match(/\[[^[\]\s]{1,60}\]/g) ?? []) add(x);
+        for (const o of owned) add(o, t.split(o).length - 1);
+        return c;
+      };
+      const refs = r.replace(REF, '[var]');
       const before = count(refs);
-      const hidden = [...count(scrubText(refs))].filter(([x, n]) => n > (before.get(x) ?? 0) && !R.scrub_allowed.includes(x)).map(([x]) => x);
+      const hidden = [...count(scrubText(refs))].filter(([x, n]) => n > (before.get(x) ?? 0) && !SCRUB_ALLOWED.includes(x)).map(([x]) => x);
       if (r.split(/\s+/).some((w) => hasCredentials(w.replace(/^(["'])(.*)\1$/, '$2'))) || hidden.length) bad('run', `it carries a credential${hidden.length ? ` (${hidden.join(', ')})` : ''}; ${CREDENTIALS_REFUSED}. A check runs with the supervisor's environment: name a secret by reference ($NAME), never by value`);
     }
   }

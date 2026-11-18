@@ -31,14 +31,15 @@ const cli = (dir, args) => { const r = runNode(path.join(dir, 'docs/devteam/scri
 const git = (dir, args) => execFileSync('git', args, { cwd: dir, env: envFor(dir), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const BLOCK = /```json devteam\s*\n([\s\S]*?)\n```/;
 const settingsFile = (dir) => path.join(dir, 'docs/devteam/project/settings.md');
-// settings.md's recurring key set to block (undefined removes it), the rest left as it is
-function withRecurring(dir, block) {
+// settings.md's keys set as patch says (undefined removes one), the rest left as it is
+function withSettings(dir, patch) {
   const f = settingsFile(dir);
   const text = fs.readFileSync(f, 'utf8');
   const o = JSON.parse(BLOCK.exec(text)[1]);
-  if (block === undefined) delete o.recurring; else o.recurring = block;
+  for (const [k, v] of Object.entries(patch)) if (v === undefined) delete o[k]; else o[k] = v;
   fs.writeFileSync(f, text.replace(BLOCK, () => `\`\`\`json devteam\n${JSON.stringify(o, null, 2)}\n\`\`\``));
 }
+const withRecurring = (dir, block) => withSettings(dir, { recurring: block });
 const validate = (dir) => cli(dir, ['validate']);
 const recurringLines = (out) => out.split('\n').filter((l) => /settings recurring/.test(l));
 
@@ -66,6 +67,14 @@ test('validate accepts the design C1 examples', () => {
     'api-bearer': check({ run: 'curl -H "Authorization: Bearer $TOKEN" https://example.com/api' }),
     'gh-runs': check({ run: 'GITHUB_TOKEN=${GH_TOKEN} gh run list' }),
     'multi-line-prompt': chore({ prompt: 'Look at the branches.\n\tDelete the merged ones.' }),
+    'quarterly-hours': check({ every: '2160h' }),
+    'by-author': check({ run: 'git log --since=yesterday --author=bot@example.com' }),
+    'quick-check': check({ timeout_s: 1, fail_after: 10, severity: 1 }),
+    'worker-grace': chore({ ...WORKER, grace_days: 30 }),
+    'is-not-200': check({ fail: { last_line: { is_not: 'x'.repeat(200) } } }),
+    'below-fraction': check({ fail: { last_line: { below: 0.5 } } }),
+    'monthly-28': chore({ every: '3mo', on: 28 }),
+    'sunday-late': chore({ every: '12w', on: 'sun', at: '23:59' }),
   });
   const r = validate(dir);
   assert.deepEqual(recurringLines(r.out), [], r.out);
@@ -102,7 +111,24 @@ const REFUSED = [
   ['run-bearer-fallback', check({ run: 'curl -H "Authorization: Bearer ${TOKEN:-abc123secretvalue}" https://example.com' }), 'run'],
   ['run-suffix-secret', check({ run: 'TOKEN=${X}abc123secret cmd' }), 'run'],
   ['run-typed-marker', check({ run: 'echo [credentials]; curl --url=https://user:pw@host/x' }), 'run'],
+  // what only the per-word credential check refuses (the scrubber leaves each as it is)
+  ['run-quoted-sig', check({ run: 'curl "https://h/x?sig=abc"' }), 'run'],
+  ['run-key-param', check({ run: 'curl https://h/x?key=abc' }), 'run'],
+  ['run-user-only', check({ run: 'git clone https://alice@host/x' }), 'run'],
+  ['run-scp-password', check({ run: 'git clone user:pass@host:repo' }), 'run'],
   ['no-run', check({ run: undefined }), 'run'],
+  ['hours-2161', check({ every: '2161h' }), 'every'],
+  ['hourly-on', check({ every: '6h', on: 'mon' }), 'on'],
+  ['timeout-zero', check({ timeout_s: 0 }), 'timeout_s'],
+  ['timeout-text', check({ timeout_s: '120' }), 'timeout_s'],
+  ['grace-zero', chore({ grace_days: 0 }), 'grace_days'],
+  ['is-not-201', check({ fail: { last_line: { is_not: 'x'.repeat(201) } } }), 'fail'],
+  ['is-not-empty', check({ fail: { last_line: { is_not: '' } } }), 'fail'],
+  ['above-text', check({ fail: { last_line: { above: '3' } } }), 'fail'],
+  ['below-null', check({ fail: { last_line: { below: null } } }), 'fail'],
+  ['bell-prompt', chore({ prompt: 'ring \u0007 me' }), 'prompt'],
+  ['bidi-title', check({ title: 'safe ‮ text' }), 'title'],
+  ['two-line-what', check({ what: 'one\ntwo' }), 'what'],
   ['timeout-long', check({ timeout_s: 1801 }), 'timeout_s'],
   ['fail-two-rules', check({ fail: { last_line: { above: 3, below: 9 } } }), 'fail'],
   ['fail-zero', check({ fail: { exit: 'zero' } }), 'fail'],
@@ -151,6 +177,21 @@ test('validate refuses each case, naming the entry and field', () => {
   }
   withRecurring(dir, undefined);
   assert.equal(validate(dir).status, 0, 'no recurring key: nothing to check');
+});
+
+test('a run the owner\'s own scrub patterns would hide is refused, whatever their marker', () => {
+  const dir = project('recur-scrub');
+  withSettings(dir, {
+    sensor_scrub: [{ pattern: 'ACME-[0-9a-z]{8}', as: '[ACME]' }, { pattern: 'ZED-[0-9]{4}', as: '[acme_id]' }, { pattern: 'QQ-[0-9]{4}', as: 'HIDDEN' }, 'PLAIN-[0-9]{4}'],
+    recurring: { 'safe-one': check({ run: 'curl https://example.com/ACME' }) },
+  });
+  assert.equal(validate(dir).status, 0, 'a run with no match passes');
+  for (const [name, run] of [['acme', 'tool --id ACME-1234abcd'], ['zed', 'tool --id ZED-1234'], ['qq', 'tool --id QQ-1234'], ['plain', 'tool --id PLAIN-1234']]) {
+    withSettings(dir, { recurring: { [name]: check({ run }) } });
+    const r = validate(dir);
+    assert.equal(r.status, 1, `${name}: ${r.out}`);
+    assert.match(r.out, new RegExp(`^error: settings recurring\\.${name}\\.run: `, 'm'), name);
+  }
 });
 
 test('validate checks this checkout\'s recurring block, whatever main has', () => {
