@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { steps, snapshot, useFixture, tmp } from './lib/chain.mjs';
-import { testDir, threadsFixture, hasTmux, until, multiFixture, fleetFixture, write, review, json } from './lib/kit.mjs';
+import { testDir, threadsFixture, hasTmux, until, multiFixture, monoFixture, fleetFixture, write, review, json } from './lib/kit.mjs';
 
 // Steps that run in a fork of the fixture, beside the rest. A fork is copied at the step's place,
 // so it starts from what the in-line steps before it left, without what earlier forks did; the
@@ -1354,5 +1354,52 @@ test('a repo link approved by the owner lands under any chore slug, still only a
     const a3d = dry('docs-again');
     assert.notEqual(a3d.status, 0, a3d.text);
     assert.match(a3d.text, /already approved/);
+  } finally { F.done(); }
+});
+
+// kit-204 A4: the plan TL;DR limit counts its body bullets; the writing-plans header fields
+// (Goal, Architecture, Tech stack, Spec) as bullets don't count. A refused approve-plan writes
+// nothing, so each refusal runs on the one ticket first and the approval last.
+test('the plan TL;DR limit counts its own bullets, not header fields', () => {
+  const F = monoFixture('tldr-header');
+  const { old, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    const id = 'api-01-tldr';
+    F.ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['its suite passes in CI'], notes: 'n' })], SUP);
+    const w = path.join(old, '.worktrees', id);
+    g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/main'], old);
+    const tdir = path.join(w, 'docs/devteam/project/tickets', id);
+    write(path.join(tdir, 'spec.md'), '# spec\n');
+    const plan = (text) => {
+      write(path.join(tdir, 'plan.md'), text);
+      g(['add', '-A'], w);
+      g(['commit', '-q', '--allow-empty', '-m', `${id}: plan`], w);
+      g(['push', '-q', 'origin', `ticket/${id}`], w);
+    };
+    const tldr = (bullets) => `# plan\n\n## TL;DR\n\n${bullets.join('\n')}\n\n## T1\n\n- a step\n`;
+    const H = ['- **Goal:** g', '- **Architecture:** a', '- **Tech stack:** node', '- **Spec:** spec.md'];
+    const body = (n) => Array.from({ length: n }, (_, i) => `- body bullet ${i + 1}`);
+    F.ok(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'spec ok'], SUP);
+    const approve = () => { const r = F.run(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], SUP); return { status: r.status, text: `${r.out}\n${r.err}` }; };
+    // A4c: header fields alone are no bullets
+    plan(tldr(H));
+    const c = approve();
+    assert.notEqual(c.status, 0, c.text);
+    assert.match(c.text, /a TL;DR with no bullets/);
+    // A4b: header fields plus eight body bullets: the eight count
+    plan(tldr([...H, ...body(8)]));
+    const b = approve();
+    assert.notEqual(b.status, 0, b.text);
+    assert.match(b.text, /8 bullets; seven at most/);
+    // A4d: a label with no colon is a body bullet
+    plan(tldr(['- Spec review first', ...body(7)]));
+    const d = approve();
+    assert.notEqual(d.status, 0, d.text);
+    assert.match(d.text, /8 bullets/);
+    // A4a: every header label form, nine of them, plus six body bullets is approved
+    plan(tldr([...H, '- **Goal**: g', '- __Spec__: s', '- Goal: g', '- **Tech Stack:** node', '- tech-stack: node', ...body(6)]));
+    const a = approve();
+    assert.equal(a.status, 0, a.text);
   } finally { F.done(); }
 });

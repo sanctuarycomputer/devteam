@@ -10094,15 +10094,17 @@ function cmdAct() {
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
-// Returns what is wrong, or null.
+// Header fields written as bullets (Goal, Architecture, Tech stack, Spec, then a colon; bold,
+// underscored or plain, any case) don't count: only the body bullets do. Returns what is wrong, or null.
 function tldrGap(text) {
+  const HEADER_FIELD = /^\s{0,3}[-*+]\s+(?:\*\*|__)?(?:goal|architecture|tech[\s-]?stack|spec)(?:\*\*|__)?\s*:/i;
   const lines = text.split('\n');
   const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
   if (at < 0) return 'has no "## TL;DR" section';
   if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
   const body = [];
   for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
-  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l) && !HEADER_FIELD.test(l)).length;
   if (!bullets) return 'has a TL;DR with no bullets';
   if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
   return null;
