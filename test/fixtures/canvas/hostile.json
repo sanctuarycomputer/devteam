@@ -1,0 +1,130 @@
+{
+  "canvas": 1,
+  "rev": 1,
+  "tokens": {
+    "color": {
+      "brand": {
+        "$type": "color",
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [
+            1,
+            0,
+            0
+          ]
+        }
+      }
+    }
+  },
+  "pages": [
+    {
+      "id": "h1",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "children": [
+        "hf",
+        "hc",
+        "hi"
+      ]
+    },
+    {
+      "id": "h2",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "children": [
+        "he"
+      ]
+    }
+  ],
+  "nodes": {
+    "hf": {
+      "type": "frame",
+      "parent": "h1",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "layout": {
+        "mode": "column"
+      },
+      "children": [
+        "ht",
+        "hr",
+        "hv",
+        "him"
+      ]
+    },
+    "ht": {
+      "type": "text",
+      "parent": "hf",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>"
+    },
+    "hr": {
+      "type": "rect",
+      "parent": "hf",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "fill": {
+        "$ref": "color.brand"
+      }
+    },
+    "hv": {
+      "type": "vector",
+      "parent": "hf",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "path": "M0 0 L10 10 Z"
+    },
+    "him": {
+      "type": "image",
+      "parent": "hf",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "src": "images/429be16d0a91e377.png"
+    },
+    "he": {
+      "type": "ellipse",
+      "parent": "h2",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+    },
+    "hc": {
+      "type": "component",
+      "parent": "h1",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "children": [
+        "hct"
+      ],
+      "props": {
+        "label": {
+          "type": "text",
+          "default": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>",
+          "target": {
+            "id": "hct",
+            "prop": "text"
+          }
+        }
+      },
+      "variants": {
+        "loud": {
+          "hct": {
+            "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>"
+          }
+        }
+      }
+    },
+    "hct": {
+      "type": "text",
+      "parent": "hc",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>"
+    },
+    "hi": {
+      "type": "instance",
+      "parent": "h1",
+      "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+      "component": "hc",
+      "variant": "loud",
+      "props": {
+        "label": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>"
+      },
+      "overrides": {
+        "hct": {
+          "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n ${x} {{y}} <!-- z --> ]]> ‮ right-to-left 😀 é <iframe src=//evil.example></iframe> <svg onload=alert(3)>"
+        }
+      }
+    }
+  }
+}

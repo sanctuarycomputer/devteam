@@ -1,0 +1,428 @@
+{
+  "canvas": "doc-minimal.json",
+  "slug": "pause-board",
+  "steps": [
+    {
+      "open": "a",
+      "person": "ana;name=Ana%20Lima",
+      "level": null,
+      "expect": {
+        "a": [
+          {
+            "t": "welcome",
+            "canvas": 1,
+            "session": "$session",
+            "rev": 0,
+            "you": {
+              "id": "ana",
+              "conn": "$conn:a"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "tick": 250,
+      "expect": {
+        "a": [
+          {
+            "t": "selections",
+            "people": [
+              {
+                "id": "ana",
+                "name": "Ana Lima",
+                "ids": []
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 1,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "r1",
+              "type": "rect",
+              "parent": "p1"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 1,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 1
+            },
+            "ops": [
+              {
+                "op": "add",
+                "node": {
+                  "id": "r1",
+                  "type": "rect",
+                  "parent": "p1"
+                },
+                "after": null
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "do": "pause",
+      "arg": "branch-moved",
+      "expect": {
+        "a": [
+          {
+            "t": "paused",
+            "why": "branch-moved"
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 2,
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "name",
+            "value": "A"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 2,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 2
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "name",
+                "value": "A"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tick": 1000
+    },
+    {
+      "local": {
+        "by": "supervisor",
+        "via": "apply",
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "fill",
+            "value": "#00ff00"
+          }
+        ]
+      },
+      "status": 200,
+      "body": {
+        "rev": 3,
+        "edits": 1,
+        "saved": false
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 3,
+            "by": {
+              "id": "supervisor",
+              "name": "supervisor",
+              "via": "apply"
+            },
+            "ack": null,
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "fill",
+                "value": "#00ff00"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "do": "resume",
+      "expect": {
+        "a": [
+          {
+            "t": "resumed"
+          },
+          {
+            "t": "saved",
+            "rev": 3
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500
+    },
+    {
+      "do": "pause",
+      "arg": "worktree-gone",
+      "expect": {
+        "a": [
+          {
+            "t": "paused",
+            "why": "worktree-gone"
+          }
+        ]
+      }
+    },
+    {
+      "do": "resume",
+      "expect": {
+        "a": [
+          {
+            "t": "resumed"
+          }
+        ]
+      }
+    },
+    {
+      "do": "pause",
+      "arg": "index-dirty",
+      "expect": {
+        "a": [
+          {
+            "t": "paused",
+            "why": "index-dirty"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 3,
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "name",
+            "value": "B"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 4,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 3
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "name",
+                "value": "B"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "do": "resume",
+      "expect": {
+        "a": [
+          {
+            "t": "resumed"
+          },
+          {
+            "t": "saved",
+            "rev": 4
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 4,
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "name",
+            "value": "C"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 5,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 4
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "name",
+                "value": "C"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500,
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 5
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 5,
+        "ops": [
+          {
+            "op": "set",
+            "id": "r1",
+            "prop": "name",
+            "value": "D"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "ops",
+            "rev": 6,
+            "by": {
+              "id": "ana",
+              "name": "Ana Lima",
+              "via": "page"
+            },
+            "ack": {
+              "client": "anapage000000001",
+              "seq": 5
+            },
+            "ops": [
+              {
+                "op": "set",
+                "id": "r1",
+                "prop": "name",
+                "value": "D"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "do": "save",
+      "expect": {
+        "a": [
+          {
+            "t": "saved",
+            "rev": 6
+          }
+        ]
+      }
+    },
+    {
+      "tick": 500,
+      "doc": {
+        "canvas": 1,
+        "rev": 6,
+        "tokens": {},
+        "pages": [
+          {
+            "id": "p1",
+            "name": "Page 1",
+            "children": [
+              "r1"
+            ]
+          }
+        ],
+        "nodes": {
+          "r1": {
+            "type": "rect",
+            "parent": "p1",
+            "name": "D",
+            "fill": "#00ff00"
+          }
+        }
+      }
+    }
+  ]
+}

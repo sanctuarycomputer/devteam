@@ -821,25 +821,33 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
-      // its control is on Progress (one page at a time)
-      await p.ev(`location.hash = '#progress'`);
-      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
-      await p.click('#left-only');
-      const q = 'After the checkbox?';
+      // its control is the Board's Needs attention toggle, in the page bar (one page at a time)
+      const att = '.pagebar .extra [data-f="att"]';
+      await p.ev(`location.hash = '#board'`);
+      await soon(`getComputedStyle(document.querySelector('#board')).display !== 'none' && !!document.querySelector('${att}')`, 'the Board page and its toggle');
+      await p.click(att);
+      await soon(`location.hash.includes('att=1') && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, and focused');
+      const q = 'After the toggle?';
       ask(q);
-      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a checkbox focused');
-      await p.click('#left-only'); // leave the setting as it was
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a toggle focused');
+      await p.click(att); // leave the setting as it was
+      await soon(`!location.hash.includes('att=')`, 'the toggle off again');
       await p.ev(`document.activeElement.blur()`);
     });
 
     await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
-      await p.ev(`window.__o = $('view').options[0]`);
-      await p.click('#view');
+      // the Board's Goal select, in the page bar (drawn again only when it changes); a Board column, drawn on every
+      // read the page isn't held, says whether the page is drawing
+      const goal = '.pagebar .extra select[data-f="goal"]';
+      await p.ev(`window.__o = document.querySelector('${goal}').options[0]`);
+      await p.click(goal);
+      await p.ev(`window.__c = document.querySelector('#board-cols > .col')`);
       await polls();
       assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
+      assert.equal(await p.ev(`window.__c.isConnected`), true, 'nothing is drawn while it is open');
       await p.key('Escape');
       await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
-      await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
+      await soon(`!window.__c.isConnected`, 'the page drawing again, no change event to say so');
       await p.ev(`document.activeElement.blur()`);
       // back to the Inbox, for the card (#inbox opens the panel on its Inbox tab, kit-100)
       await p.ev(`location.hash = '#inbox'`);

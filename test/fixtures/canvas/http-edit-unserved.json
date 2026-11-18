@@ -1,0 +1,21 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    }
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/edit?slug=board",
+    "headers": {
+      "Origin": "$origin",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "ops": []
+    }
+  },
+  "status": 404,
+  "requestKind": null,
+  "responseKind": null
+}
