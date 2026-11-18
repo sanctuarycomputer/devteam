@@ -30,7 +30,7 @@ stdout is one JSON document and a newline, nothing else (formatting free):
 
 - `since`, `to`: the full 40-hex commit each ref resolved to (lowercase).
 - `file`: a path relative to the kit repo's root, as git names it (`/`-separated, no leading `/`), or `"(smoke)"`.
-- `part`: `null` for a whole file (a file a whole-file entry lists, or one side of a rename of one); a D4 part name of `docs/devteam/scripts/devteam.mjs` (a listed part whose leaf changed); `"(rest)"` for that file's rest; for file `"(smoke)"`, the smoke command that differed, as §6 names it (`machine status`, `machine status --questions`, `machine status --knowledge` or `recover --machine --dry-run --force`).
+- `part`: `null` for a whole file (a file the provider's list of what the image runs names whole, such as `cloud/**`, or one side of a rename of one); the name of a part of `docs/devteam/scripts/devteam.mjs`, as the kit's parts reader (`fileParts`) names its parts (a part that list names, whose text changed); `"(rest)"` for that file's rest; for file `"(smoke)"`, the smoke command that differed, as §6 names it (`machine status`, `machine status --questions`, `machine status --knowledge` or `recover --machine --dry-run --force`).
 - A file has either one change with part null, or changes with parts, never both; no change appears twice.
 
 ## 5. Order and kind
