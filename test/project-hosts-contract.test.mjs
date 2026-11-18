@@ -73,34 +73,27 @@ test('the fixture names its contract, and its reserved labels and segments are d
   for (const l of ['term', 'public', 'www']) assert.ok(F.reservedLabels.includes(l), `${l} is reserved`);
 });
 
-test("the header's project-hosts@1 section says the whole definition", () => {
-  const t = sectionText();
-  const must = [
-    [/https:\/\/<project>\.<box>\//, 'a project at https://<project>.<box>/'],
-    [/sign-in/i, 'behind sign-in'],
-    [/\/<artifact>\//, 'public pages at /<artifact>/'],
-    [/anyone/i, 'for anyone'],
-    [/all digits/i, 'not all digits'],
-    [/two projects share/i, 'a name two projects share'],
-    [/no dashboard/i, '… gets no dashboard'],
-    [/stored pages still answer/i, "… its stored pages still answer"],
-    [/preview/i, 'a preview whose name is a project’s'],
-    [/not served under/i, '… is not served under it'],
-    [/hub's list/i, "known from the hub's list"],
-    [/gateway's store/i, "… or the gateway's store"],
-    [/checked before the store/i, 'reserved segments checked before the store'],
-    [/box: 2/, 'box.json box: 2'],
-    [/\{project\}/, 'the {project} template'],
-    [/in place of `instance`/, 'project in place of instance'],
-    [/box's own name/i, "the box's own name keeps"],
-    [/\bhub\b/i, '… the hub'],
-    [/passkeys/i, '… passkeys'],
-    [/pushes/i, '… pushes'],
-    [/\/dev\//, '… /dev/'],
+test("the header's project-hosts@1 section says the whole definition, each item in a sentence of its own", () => {
+  // a sentence ends at '.' and a space, so two items can't share one phrase between them
+  const sentences = sectionText().split(/(?<=\.)\s+/);
+  const reservedLabels = F.reservedLabels.map((l) => new RegExp(`\`${l}\``));
+  const reservedSegments = F.reservedSegments.map((x) => new RegExp(`\`${x.replace('.', '\\.')}\``));
+  const items = [
+    ['a project at https://<project>.<box>/, behind sign-in', [/https:\/\/<project>\.<box>\//, /behind (?:the owner's )?sign-in/i]],
+    ['its public pages at /<artifact>/, for anyone', [/\/<artifact>\//, /anyone/i]],
+    ['the label rule: not all digits, not term, public or www', [/label rule/i, /all digits/i, ...reservedLabels]],
+    ['a name two projects share gets no dashboard; its stored pages still answer', [/two projects share/i, /no dashboard/i, /stored pages still answer/i]],
+    ["a preview whose name is a project's is not served under it", [/preview/i, /project's/i, /not served under/i]],
+    ["a host is known from the hub's list or the gateway's store", [/known from/i, /hub's list/i, /gateway's store/i]],
+    ['the reserved first segments', [/reserved/i, ...reservedSegments]],
+    ['… checked before the store, so a stored page under one never answers', [/checked before the store/i, /never answers/i]],
+    ['<port>.<box> and public.<box> are gone, not redirected (421)', [/<port>\.<box>/, /public\.<box>/, /redirect/i, /421/]],
+    ["the box's own name keeps the hub, sign-in, passkeys, pushes and /dev/", [/box's own name/i, /\bhub\b/i, /sign-in/i, /passkeys/i, /pushes/i, /\/dev\//]],
+    ['box.json box: 2 with project ({project}) in place of instance', [/box: 2/, /\{project\}/, /in place of `instance`/]],
   ];
-  for (const [re, what] of must) assert.match(t, re, `the section says: ${what}`);
-  for (const l of F.reservedLabels) assert.ok(t.includes(`\`${l}\``), `the section names the reserved label \`${l}\``);
-  for (const s of F.reservedSegments) assert.ok(t.includes(`\`${s}\``), `the section names the reserved segment \`${s}\``);
+  for (const [what, res] of items) {
+    assert.ok(sentences.some((x) => res.every((re) => re.test(x))), `one sentence of the section says: ${what}`);
+  }
 });
 
 test('every label case follows the rule as the header writes it', () => {
@@ -135,6 +128,7 @@ test('box.json box: 2 names the project template in place of instance', () => {
   assert.equal(F.boxJson.box, 2);
   assert.ok(F.boxJson.project.includes('{project}'), 'project holds {project}');
   assert.ok(!('instance' in F.boxJson), 'no instance');
+  for (const k of ['terminal', 'passkeys', 'previews', 'push', 'image']) assert.ok(k in F.boxJson, `box: 2 keeps ${k}`);
   assert.equal(new URL(F.boxJson.project.replace('{project}', 'alpha')).hostname, `alpha.${F.box.name}`);
 });
 
@@ -149,8 +143,9 @@ test("every first segment the dashboard server answers is reserved, so no publis
   const segs = new Set();
   // a path literal, quoted or a template, whatever it is compared with; a segment ends at / ? or #
   for (const m of handler.matchAll(/['"`]\/([a-z][a-z0-9.-]*)/g)) segs.add(m[1]);
-  // a route regex, /^\/view\/…/
+  // a route regex, /^\/view\/…/, or one opening with a group of names, /^\/(?:view|review)\//
   for (const m of handler.matchAll(/\/\^\\\/([a-z][a-z0-9.-]*)/g)) segs.add(m[1]);
+  for (const m of handler.matchAll(/\/\^\\\/\((?:\?:)?([a-z0-9.|-]+)\)/g)) for (const x of m[1].split('|')) segs.add(x);
   assert.ok(segs.size >= 6, `found the server's routes (${[...segs].join(', ')})`);
   for (const s of segs) assert.ok(F.reservedSegments.includes(s), `the dashboard answers /${s}, so the fixture reserves it`);
 });
