@@ -22466,6 +22466,11 @@ function cmdLink() {
   if (sub === 'land') { supervisorOnly('link'); return linkLand(id ?? 'registry'); }
   // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
   const vals = [...given, ...(rest ?? [])];
+  // a flag of this command after the bare -- is part of the value there, never a flag: refused, so
+  // a value never swallows --approved (and asks again) nor is stored with it
+  const linkFlags = new Set(['approved', 'source', 'reason', ...Object.keys(LINK_KINDS).flatMap((k) => linkFields(k))]);
+  const swallowed = (rest ?? []).find((t) => /^--[a-z_]+(=|$)/.test(t) && linkFlags.has(t.slice(2).split('=')[0]));
+  if (swallowed) die(`${swallowed.split('=')[0]} after -- would be part of the value: put flags before -- (link set <id> <field> --approved <qid> -- <value>), or quote the value as one argument`);
   if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>   |   link land [<chore slug>]');
   supervisorOnly('link');
   if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
@@ -22557,7 +22562,8 @@ function linkByOwner(sub, id, field, vals, kind) {
   const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
   const approved = flagStr('approved');
   // the command to run once answered: this one, every value quoted, plus --approved
-  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  // (before a bare --, so it stays a flag)
+  const again = (qid) => { const w = argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved'); const d = w.indexOf('--'); return `node docs/devteam/scripts/devteam.mjs link ${(d < 0 ? [...w.map(shq), '--approved', qid] : [...w.slice(0, d).map(shq), '--approved', qid, ...w.slice(d).map(shq)]).join(' ')}`; };
   if (!approved) {
     const toAsk = changes.filter((c) => !coveredBy.get(L(c)));
     if (!toAsk.length) { const by = coveredBy.get(L(own[0])); return out(`${by} already approves this change (${own.map(L).join('; ')}); write it with: ${again(by)}`); }

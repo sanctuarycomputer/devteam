@@ -188,3 +188,27 @@ test('a bundle change no answer covers is refused by name, and nothing is writte
   } finally { T.done(); }
 });
 
+
+test('a link flag after -- is refused, and the printed command puts --approved before --', () => {
+  const T = setup('one-yes-dashdash');
+  try {
+    const before = T.here();
+    const n = T.questionCount();
+    for (const tail of [['v', '--approved', 'q-20260101-000000000-supervisor'], ['v', '--reason', 'x'], ['v', '--approved=q-20260101-000000000-supervisor']]) {
+      const r = T.run(['link', 'set', 'console', 'worktree_setup', '--', ...tail]);
+      assert.equal(r.status, 1, r.out);
+      assert.match(r.err, /put flags before --/);
+      assert.match(r.err, /quote the value/);
+    }
+    assert.equal(T.here(), before);
+    assert.equal(T.questionCount(), n, 'nothing asked');
+    // a value that starts with -- still goes after a bare --, and the command to run once answered keeps it there
+    const { out, qid } = T.ask(['link', 'set', 'console', 'worktree_setup', '--', '--x']);
+    const cmd = /node docs\/devteam\/scripts\/devteam\.mjs (.*)$/.exec(out)[1];
+    assert.match(cmd, new RegExp(`--approved ${qid} '--' '--x'$`), cmd);
+    T.yes(qid);
+    const words = [...cmd.matchAll(/'((?:[^']|'\\'')*)'|(\S+)/g)].map((m) => (m[1] !== undefined ? m[1].replace(/'\\''/g, "'") : m[2]));
+    T.ok(words);
+    assert.equal(T.links().console.worktree_setup, '--x');
+  } finally { T.done(); }
+});
