@@ -450,3 +450,36 @@ test('link land carries an approved add, removal and field removal, each landing
     wouldMerge(dry(T, 'nogates', qf), 'nogates');
   } finally { T.done(); }
 });
+
+test('only a yes approves: --link-change recommends yes and offers no choices, and a no to the same line takes a yes back (final-1 F1, F2)', () => {
+  const T = setup('one-yes-only-yes');
+  try {
+    const change = JSON.stringify({ link: 'console', field: 'records', value: 'home' });
+    const base = ['ask', '--class', 'governance-edit', '--question', 'Keep console records in home?', '--link-change', change];
+    const n = T.questionCount();
+    const rno = T.run([...base, '--recommendation', 'no']);
+    assert.equal(rno.status, 1, rno.out);
+    assert.match(rno.err, /--link-change asks yes or no/);
+    const rch = T.run([...base, '--recommendation', 'Keep in the repo', '--choices', '[{"label":"Keep in the repo"},{"label":"Move to home"}]']);
+    assert.equal(rch.status, 1, rch.out);
+    assert.equal(T.questionCount(), n, 'nothing asked');
+    // a question that recommended something other than yes (written by hand: ask refuses it), answered as recommended, covers nothing
+    T.ask(['link', 'set', 'companion', 'title', 'Companion']);
+    const id = 'q-20261118-120000004-supervisor';
+    fs.appendFileSync(T.logFile(), line({ id, type: 'question', op: 'new', at: new Date(Date.now() - 60000).toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'governance-edit', question: 'Where do console records go?', context: `${HEADER}\nlinks.console.records: main has null; would be "home"`, recommendation: 'Keep in the repo' }));
+    T.okIn(T.old, ['answer', id, 'Keep in the repo']);
+    const m = T.questionCount();
+    const out = T.ok(['link', 'set', 'console', 'records', 'home']);
+    assert.equal(T.questionCount(), m + 1, out);
+    assert.ok(!out.includes(id), out);
+    // a yes, then the owner's later no to the same line: the yes is taken back
+    const q1 = ownWords(T, { link: 'console', field: 'gates', value: { test: 'true' } });
+    T.yes(q1);
+    const q2 = T.ask([...base.slice(0, 4), 'Keep the console gate as it is?', '--link-change', JSON.stringify({ link: 'console', field: 'gates', value: { test: 'true' } }), '--recommendation', 'yes', '--new-because', 'checking again']).qid;
+    T.okIn(T.old, ['answer', q2, 'no, keep it']);
+    const k = T.questionCount();
+    const out2 = T.ok(['link', 'set', 'console', 'gates', '{"test":"true"}']);
+    assert.equal(T.questionCount(), k + 1, out2);
+    assert.ok(!out2.includes(`--approved ${q1}`), out2);
+  } finally { T.done(); }
+});

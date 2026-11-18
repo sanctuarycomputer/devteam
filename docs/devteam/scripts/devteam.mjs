@@ -897,7 +897,8 @@ function linkFieldChanges(a = {}, b = {}) {
 }
 // The line a question shows the owner for one change, and binds by: a field line for a field, an
 // entry line for the whole entry.
-linkFieldChanges.line = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}: main has ${canonical(c.from ?? null)}; would be ${canonical(c.to ?? null)}`;
+linkFieldChanges.key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+linkFieldChanges.line = (c) => `${linkFieldChanges.key(c)}: main has ${canonical(c.from ?? null)}; would be ${canonical(c.to ?? null)}`;
 // Whether question qid approves change c ({ id, field, from, to }): the owner answered it, with its
 // recommendation, unchanged since; a line it binds by shows the change; and it was answered after
 // main last changed what it approves (so an old yes never undoes a revert on main). A question the
@@ -908,7 +909,7 @@ function linkAnswerCovers(qid, c) {
   const q = logGet(qid);
   if (q?.type !== 'question') return false;
   const v = questionView(q);
-  if (v.status !== 'answered' || v.answered_by !== 'owner' || !v.matched || v.kind === 'review' || (v.secrets ?? []).length || !['governance-edit', 'gate-change'].includes(v.class)) return false;
+  if (!linkAnswerCovers.yes(v)) return false;
   if (linkAnswerCovers.why(qid)) return false;
   const lines = linkAnswerCovers.lines(qid);
   const shown = lines.includes(linkFieldChanges.line(c)) || (c.field !== null && lines.some((l) => {
@@ -916,11 +917,16 @@ function linkAnswerCovers(qid, c) {
     return !!e && isObj(e.from) && isObj(e.to) && e.from.kind === e.to.kind && canonical(e.from[c.field] ?? null) === canonical(c.from ?? null) && canonical(e.to[c.field] ?? null) === canonical(c.to ?? null);
   }));
   if (!shown) return false;
+  // the owner's later answer to the same line, if not a yes, takes this one back
+  if (questions().some((o) => o.id !== qid && o.status === 'answered' && o.answered_by === 'owner' && String(o.answered_at) > String(v.answered_at) && !linkAnswerCovers.yes(o) && linkAnswerCovers.lines(o.id).includes(linkFieldChanges.line(c)))) return false;
   const at = c.field === null ? linkChangedOnMain(c.id) : linkAnswerCovers.fieldChangedAt(c.id, c.field);
   return at === null || Date.parse(v.answered_at) >= at;
 }
 Object.assign(linkAnswerCovers, {
   HEADER: 'This answer approves exactly these repo link changes, and no other:',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
+  // (a note after " — " aside), never a review, a secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
   // the lines of a context's approves section, or null when it has none
   section: (context) => {
     const ls = String(context ?? '').split('\n');
@@ -5286,7 +5292,7 @@ function ownerLinkActFails(changed, sha, approved) {
   if (why) return [why];
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+  const key = linkFieldChanges.key;
   const cs = linkFieldChanges(onMain, lands);
   const mine = cs.filter((c) => linkAnswerCovers(approved, c));
   const bare = cs.filter((c) => !mine.includes(c) && !linkAnswerCovers.any(c)).map(key);
@@ -6913,6 +6919,8 @@ function askLine({ thread } = {}) {
   const linkChange = jsonFlag('link-change');
   if (linkChange !== undefined) {
     if (!['governance-edit', 'gate-change'].includes(cls)) die('--link-change goes with --class governance-edit or gate-change: a repo link change is the owner\'s');
+    // its answer approves the change only as a yes: the question recommends yes and offers no other choice
+    if (recommendation.trim().toLowerCase() !== 'yes' || flags.choices !== undefined || flags.options !== undefined) die('--link-change asks yes or no: --recommendation yes, and no --choices or --options (only the owner\'s yes approves the change)');
     const shape = '--link-change: each item is {"link":"<id>","field":"<field>","value":<value>} or {"link":"<id>","entry":{…} | null}';
     const items = Array.isArray(linkChange) ? linkChange : [linkChange];
     if (!items.length) die(shape);
@@ -22564,7 +22572,7 @@ function linkLand(slugName) {
       if (ownersKind(h) || ownersKind(t)) {
         const cs = linkFieldChanges({ [id]: t }, { [id]: h });
         const ok = cs.filter((c) => linkAnswerCovers.any(c));
-        owners.push(...cs.filter((c) => !ok.includes(c)).map((c) => `links.${id}${c.field === null ? '' : `.${c.field}`}`));
+        owners.push(...cs.filter((c) => !ok.includes(c)).map(linkFieldChanges.key));
         if (!ok.length) continue;
         let e = t;
         for (const c of ok) {
@@ -22710,11 +22718,11 @@ function linkByOwner(sub, id, field, vals, kind) {
     const context = [
       'This is the one question for this change: nothing else will ask the owner about it.',
       [linkAnswerCovers.HEADER, ...asking].join('\n'),
-      carried.length ? ['Already approved, not asked again:', ...carried.map((c) => `- links.${c.id}${c.field === null ? '' : `.${c.field}`} (${coveredBy.get(L(c))})`)].join('\n') : null,
+      carried.length ? ['Already approved, not asked again:', ...carried.map((c) => `- ${linkFieldChanges.key(c)} (${coveredBy.get(L(c))})`)].join('\n') : null,
       `The whole settings diff waiting to land${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}`,
       `The registry entries, as they would be in settings.md links:\n${JSON.stringify(bundle, null, 2)}`,
     ].filter(Boolean).join('\n\n');
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map((c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map(linkFieldChanges.key).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
