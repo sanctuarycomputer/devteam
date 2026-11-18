@@ -301,6 +301,38 @@
   .menu-pop .mi b { font-weight: 500; overflow-wrap: anywhere; text-align: right; }
   .menu-pop button { all: unset; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; cursor: pointer; }
   .menu-pop button:hover, .menu-pop button:focus-visible { background: var(--hover); }
+  /* box-memory-css start */
+  /* the machine's memory under the head (kit-593): the bar with its ceiling, the words, the last 24
+     hours, and what holds it; amber at the ceiling */
+  #ov-body > .mem { margin-top: 12px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 12px 14px; }
+  .mem-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-width: 0; }
+  .mem-words { max-width: var(--measure); min-width: 0; color: var(--fg); }
+  .mem-words .dim { color: var(--fg-2); }
+  .mem-words .amber { color: var(--amber-fg); }
+  .mem-bar { position: relative; width: 180px; height: 8px; border-radius: 4px; background: var(--well); flex: none; }
+  .mem-bar > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--series-1); }
+  .mem-bar > .ceil { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--fg-2); }
+  .mem.full .mem-bar > i { background: var(--amber); }
+  .mem-spark { flex: 1 1 220px; min-width: 160px; max-width: 360px; height: 34px; }
+  .mem-spark svg { display: block; width: 100%; height: 34px; overflow: visible; }
+  .mem-spark .gap { fill: var(--well); }
+  .mem-spark .ceil { stroke: var(--muted); stroke-dasharray: 3 3; stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .mem-spark .ws { fill: none; stroke: var(--series-1); stroke-width: 1.5; }
+  .mem-spark .ws.full { stroke: var(--amber); }
+  .mem-open { margin-left: auto; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+  .mem-open:hover { background: var(--hover); }
+  .mem-open:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .mem-holds { margin-top: 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 16px; align-items: start; }
+  .mem-holds[hidden] { display: none; }
+  .mem-holds table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .mem-holds caption { text-align: left; font-weight: 600; padding-bottom: 4px; }
+  .mem-holds td { padding: 3px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .mem-holds td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; padding-left: 12px; }
+  .mem-holds td.share { width: 70px; padding-left: 12px; }
+  .mem-holds td.share span { display: block; height: 6px; border-radius: 3px; background: var(--series-1); min-width: 2px; }
+  .mem-holds tr.sub td:first-child { padding-left: 14px; color: var(--fg-2); }
+  @media (max-width: 560px) { .mem-bar { flex: 1 1 100%; width: auto; } .mem-spark { max-width: none; } .mem-open { margin-left: 0; } }
+  /* box-memory-css end */
   /* threads with the operator: the dashboard's thread layer (index.html, .tl-*), over the Overview */
   #ov-body { min-width: 0; }
   #tl { position: fixed; left: 0; top: 0; width: 0; height: 0; }
@@ -1308,6 +1340,247 @@ function machineMode(modes) {
 const HUB_VIEWS = ['overview', 'terminal', 'settings'];
 const hubKey = (name, twins, hex) => (twins || HUB_VIEWS.includes(String(name)) ? `${name}-${hex}` : String(name));
 /* hub-overview end */
+/* box-memory start */
+// The machine's memory on the Overview (kit-593), from the hub's /memory.json (machine-memory@1: one
+// reading a minute, oldest first). The pure part reads only what it is given, so
+// test/hub-memory-line.test.mjs runs it in vm; the page's part (MEM and the memory* functions after
+// it) runs only when the page calls it.
+const MEMORY_GB = 2 ** 30; // "48 GB" is the box's 51539607552-byte cap
+const MEMORY_DAY_MS = 864e5;
+const MEMORY_ASK_MS = 60000; // the day once, then what's newer at most once a minute
+const MEMORY_GAP_MS = 600000; // past 6 hours readings come 5 minutes apart: a gap is two missed
+const MEMORY_AHEAD_MS = 600000; // a reading further ahead of the clock than this doesn't set now
+const MEMORY_W = 360, MEMORY_H = 34;
+const MEMORY_KIND_WORDS = { agent: 'Agents', browser: 'Browsers', install: 'Installs', devteam: 'devteam\'s own processes', node: 'Other node', other: 'Other' };
+const MEMORY_SUB_WORDS = { dashboard: 'Project dashboards', hello: 'Dashboard status checks', 'dashboard-data': 'Dashboard page data', 'accounts-tick': 'Session restarts', wait: 'Supervisors waiting', gate: 'Test and check runs' };
+const memoryMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const memoryBytes = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+// a reading the page can draw: its time, and a whole working set; anything else is skipped
+const memoryTime = (r) => {
+  if (!memoryMap(r) || typeof r.at !== 'string' || memoryBytes(r.working_set) === null) return null;
+  const t = Date.parse(r.at);
+  return Number.isFinite(t) ? t : null;
+};
+const memoryGb = (b) => (b / MEMORY_GB).toFixed(1);
+const memoryCap = (b) => (Number.isInteger(b / MEMORY_GB) ? String(b / MEMORY_GB) : memoryGb(b));
+const memoryPlural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// the valid readings as [time, reading], oldest first, one per instant (the later one given wins)
+function memoryTimed(list) {
+  const by = new Map();
+  for (const r of Array.isArray(list) ? list : []) { const t = memoryTime(r); if (t !== null) by.set(t, r); }
+  return [...by.entries()].sort((a, b) => a[0] - b[0]);
+}
+// the view's now: the browser's clock, or the newest reading when the box's clock is ahead of it
+// (by at most MEMORY_AHEAD_MS: one reading stamped far ahead doesn't push the day out of the window)
+function memoryNow(readings, clock) {
+  let now = clock;
+  for (const [t] of memoryTimed(readings)) if (t > now && t <= clock + MEMORY_AHEAD_MS) now = t;
+  return now;
+}
+function memoryAgo(ms) {
+  const min = Math.max(1, Math.floor(ms / 60000));
+  return min < 60 ? memoryPlural(min, 'minute') : memoryPlural(Math.floor(min / 60), 'hour');
+}
+function memoryKinds(r) {
+  if (!memoryMap(r.kinds)) return null;
+  const rss = (k) => (memoryMap(r.kinds[k]) ? memoryBytes(r.kinds[k].rss) : null);
+  const top = Object.keys(MEMORY_KIND_WORDS).filter((k) => rss(k) !== null).map((k) => ({ k, b: rss(k) })).sort((a, b) => b.b - a.b);
+  const total = top.reduce((a, x) => a + x.b, 0);
+  const row = (name, b, title = '', sub = false) => ({ name, gb: memoryGb(b), share: total ? Math.round((b / total) * 100) : 0, title, sub });
+  const rows = [];
+  for (const { k, b } of top) {
+    rows.push(row(MEMORY_KIND_WORDS[k], b));
+    if (k !== 'devteam') continue;
+    // devteam's own, split by subcommand: the plain names, then every other subcommand and what the
+    // split doesn't cover; a subcommand shows only in a title
+    const split = memoryMap(r.devteam) ? Object.entries(r.devteam).map(([s, e]) => [s, memoryMap(e) ? memoryBytes(e.rss) : null]).filter(([, v]) => v !== null) : [];
+    const named = split.filter(([s]) => Object.hasOwn(MEMORY_SUB_WORDS, s)).sort((a, c) => c[1] - a[1]);
+    const others = split.filter(([s]) => !Object.hasOwn(MEMORY_SUB_WORDS, s)).sort((a, c) => c[1] - a[1]);
+    for (const [s, v] of named) rows.push(row(MEMORY_SUB_WORDS[s], v, `devteam.mjs ${s}`, true));
+    const rest = others.reduce((a, [, v]) => a + v, 0) + Math.max(0, b - split.reduce((a, [, v]) => a + v, 0));
+    if (rest > 0) rows.push(row('Other devteam commands', rest, others.map(([s]) => s).filter((s) => /^[a-z][a-z0-9-]*$/.test(s)).map((s) => `devteam.mjs ${s}`).join(', '), true));
+  }
+  return rows;
+}
+function memoryProjects(r) {
+  const list = (memoryMap(r.projects) ? Object.entries(r.projects) : []).map(([name, p]) => ({ name: String(name).slice(0, 64), b: memoryMap(p) ? memoryBytes(p.rss) ?? 0 : 0, s: memoryMap(p) && Number.isSafeInteger(p.sessions) && p.sessions > 0 ? p.sessions : 0 }));
+  list.sort((a, b) => b.b - a.b || a.name.localeCompare(b.name));
+  const total = list.reduce((a, x) => a + x.b, 0);
+  return list.map((x) => ({ name: x.s ? `${x.name} · ${memoryPlural(x.s, 'session')}` : x.name, gb: memoryGb(x.b), share: total ? Math.round((x.b / total) * 100) : 0, title: '', sub: false }));
+}
+// what the Overview draws from the readings it has, or null when there is nothing to draw
+function memoryView(readings, clock) {
+  const now = memoryNow(readings, clock);
+  const day = memoryTimed(readings).filter(([t]) => t >= now - MEMORY_DAY_MS && t <= now);
+  if (!day.length) return null;
+  const [, r] = day[day.length - 1];
+  const ws = r.working_set;
+  const max = Number.isSafeInteger(r.max) && r.max > 0 ? r.max : null;
+  const c = max && typeof r.ceiling === 'number' && r.ceiling > 0 && r.ceiling <= 1 ? r.ceiling : null;
+  const full = c !== null && ws >= c * max;
+  const s = Number.isSafeInteger(r.sessions) && r.sessions >= 0 ? r.sessions : null;
+  const per = s ? ` · ${(ws / MEMORY_GB / s).toFixed(2)} GB a session · ${memoryPlural(s, 'session')}` : s === 0 ? ' · 0 sessions' : '';
+  const line = max ? `Memory ${memoryGb(ws)} of ${memoryCap(max)} GB${per}` : `Memory ${memoryGb(ws)} GB in use${per}`;
+  const label = max ? `${memoryGb(ws)} of ${memoryCap(max)} GB in use${c !== null ? `; new work waits at ${memoryGb(c * max)} GB` : ''}` : `${memoryGb(ws)} GB in use`;
+  // the sparkline: 24 hours to now across, 0 to the cap up (the day's largest without one)
+  const scale = max ?? Math.max(1, ...day.map(([, x]) => x.working_set));
+  const x = (t) => ((t - (now - MEMORY_DAY_MS)) / MEMORY_DAY_MS) * MEMORY_W;
+  const y = (v) => MEMORY_H - 2 - (Math.min(v, scale) / scale) * (MEMORY_H - 4);
+  let d = '';
+  const gaps = [];
+  day.forEach(([t, q], i) => {
+    const prev = i ? day[i - 1] : null;
+    const gap = prev && t - prev[0] > MEMORY_GAP_MS;
+    if (gap) gaps.push({ x: Number(x(prev[0]).toFixed(2)), w: Number((x(t) - x(prev[0])).toFixed(2)), from: prev[1].at, to: q.at });
+    d += `${!prev || gap ? 'M' : 'L'}${x(t).toFixed(2)},${y(q.working_set).toFixed(2)} `;
+  });
+  const lastGap = gaps[gaps.length - 1];
+  const tail = full ? { tone: 'amber', text: `at the ceiling (${memoryGb(c * max)} GB): new work waits for room` }
+    : lastGap ? { tone: 'dim', text: `restarted ${memoryAgo(now - Date.parse(lastGap.to))} ago` } : null;
+  const kinds = memoryKinds(r);
+  return {
+    line, label, tail,
+    bar: max ? { share: Math.min(1, Math.max(0, ws / max)), ceiling: c, full } : null,
+    spark: { d: d.trim(), ceilY: c !== null ? Number(y(c * max).toFixed(2)) : null, gaps, full },
+    kinds,
+    projects: kinds ? memoryProjects(r) : null,
+  };
+}
+// the day with the fresh readings in it: one per instant, oldest first, nothing older than 24 hours
+function memoryMerge(day, fresh, now) {
+  return memoryTimed([...(Array.isArray(day) ? day : []), ...(Array.isArray(fresh) ? fresh : [])]).filter(([t]) => t >= now - MEMORY_DAY_MS).map(([, r]) => r);
+}
+// what to ask the hub now, or null: the day, then only what's newer, at most once a minute, never
+// while a request is out (the 10 s redraw asks nothing; a second's slack keeps a 60 s timer that
+// fires a few ms early from skipping a minute)
+function memoryPlan(state, now) {
+  if (state.inFlight) return null;
+  const due = !state.askedAt || now - state.askedAt >= MEMORY_ASK_MS - 1000;
+  if (!due) return null;
+  const day = memoryTimed(state.day);
+  return day.length ? `memory.json?after=${encodeURIComponent(day[day.length - 1][1].at)}` : 'memory.json?since=24h';
+}
+// the state after an answer: a 200 with readings merges them; a 400 to an after (the hub refuses one
+// over 6 hours old) drops the day so the next tick asks for it again at once; anything else (a hub
+// restarting, a gateway's 401, an older hub's 404, a body that isn't readings) keeps the day it had
+function memoryAnswer(state, url, status, body, now) {
+  const next = { ...state, inFlight: false };
+  if (status === 200 && memoryMap(body) && Array.isArray(body.readings)) next.day = memoryMerge(state.day, body.readings, now);
+  else if (status === 400 && /[?&]after=/.test(url)) { next.day = []; next.askedAt = 0; }
+  return next;
+}
+// ----- the page's part: the day it holds, asking for it, and the section it draws ----------------
+// The table's open state lives here, not in the DOM, so the 10 s redraw (paintOverview rebuilds the
+// page whole) keeps it open.
+const MEM = { day: [], askedAt: 0, inFlight: false, open: false, started: false };
+async function memoryTick() {
+  if (document.hidden) return;
+  const url = memoryPlan(MEM, Date.now());
+  if (!url) return;
+  MEM.inFlight = true;
+  MEM.askedAt = Date.now();
+  let status = 0, body = null;
+  // a hub that never answers costs this ask, not every one after it
+  const stop = new AbortController();
+  const limit = setTimeout(() => stop.abort(), 20000);
+  try {
+    const r = await fetch(url, { cache: 'no-store', signal: stop.signal });
+    status = r.status;
+    try { body = await r.json(); } catch { body = null; }
+  } catch { status = 0; } finally { clearTimeout(limit); }
+  Object.assign(MEM, memoryAnswer(MEM, url, status, body, Date.now()));
+  paintOverview();
+  // an after refused (the page slept past 6 hours): the day again now, not in a minute
+  if (status === 400 && !MEM.day.length && !MEM.askedAt) return memoryTick();
+}
+// once, from draw: the day at once, then a tick a minute; and Escape closes the table
+function memoryStart() {
+  if (MEM.started) return;
+  MEM.started = true;
+  memoryTick();
+  setInterval(memoryTick, MEMORY_ASK_MS);
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !MEM.open || e.defaultPrevented || selected !== OVERVIEW) return;
+    // only from the line itself or from nowhere: the ⋯ menu's own Escape runs first and puts the
+    // keyboard on its ⋯, and the fleet switch's confirm Escape is preventDefault'ed, so one Escape
+    // closes one thing. (A ⋯ whose card went away leaves the keyboard on body: then both close.)
+    const sec = ovBody.querySelector('.mem');
+    const at = document.activeElement;
+    if (!sec || !(at === document.body || at === null || sec.contains(at))) return;
+    MEM.open = false;
+    paintOverview();
+    ovBody.querySelector('.mem-open')?.focus({ preventScroll: true });
+  });
+}
+const MEMORY_SVG_NS = 'http://www.w3.org/2000/svg';
+function memorySvg(tag, attrs) {
+  const n = document.createElementNS(MEMORY_SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, String(v));
+  return n;
+}
+function memoryTable(caption, rows) {
+  const t = document.createElement('table');
+  t.append(el('caption', '', caption));
+  const body = document.createElement('tbody');
+  for (const r of rows) {
+    const tr = el('tr', r.sub ? 'sub' : '');
+    if (r.title) tr.title = r.title;
+    const share = el('td', 'share');
+    if (!r.sub) { const bar = el('span'); bar.style.width = `${Math.max(2, r.share)}%`; share.append(bar); }
+    tr.append(el('td', '', r.name), el('td', 'n', `${r.gb} GB`), share);
+    body.append(tr);
+  }
+  t.append(body);
+  return t;
+}
+// the section under the head, or null with no reading to show
+function memoryEl() {
+  const v = memoryView(MEM.day, Date.now());
+  if (!v) return null;
+  if (!v.kinds) MEM.open = false;
+  const sec = el('section', `mem${v.bar?.full ? ' full' : ''}`);
+  sec.setAttribute('aria-label', 'Memory on this machine');
+  const row = el('div', 'mem-row');
+  if (v.bar) {
+    const bar = el('div', 'mem-bar');
+    bar.setAttribute('role', 'img');
+    bar.setAttribute('aria-label', v.label);
+    const fill = el('i');
+    fill.style.width = `${(v.bar.share * 100).toFixed(2)}%`;
+    bar.append(fill);
+    if (v.bar.ceiling !== null) { const c = el('span', 'ceil'); c.style.left = `${v.bar.ceiling * 100}%`; bar.append(c); }
+    row.append(bar);
+  }
+  const words = el('div', 'mem-words', v.line);
+  if (v.tail) { words.append(' · '); words.append(el('span', v.tail.tone, v.tail.text)); }
+  row.append(words);
+  const spark = el('div', 'mem-spark');
+  spark.setAttribute('aria-hidden', 'true');
+  const svg = memorySvg('svg', { viewBox: `0 0 ${MEMORY_W} ${MEMORY_H}`, preserveAspectRatio: 'none' });
+  const hm = (at) => String(at).slice(11, 16);
+  for (const g of v.spark.gaps) { const r = memorySvg('rect', { x: g.x, y: 0, width: Math.max(1, g.w), height: MEMORY_H, class: 'gap' }); r.append(memorySvg('title', {})); r.firstChild.textContent = `No readings from ${hm(g.from)} to ${hm(g.to)}`; svg.append(r); }
+  if (v.spark.ceilY !== null) svg.append(memorySvg('line', { x1: 0, x2: MEMORY_W, y1: v.spark.ceilY, y2: v.spark.ceilY, class: 'ceil' }));
+  svg.append(memorySvg('path', { d: v.spark.d, class: v.spark.full ? 'ws full' : 'ws', 'vector-effect': 'non-scaling-stroke' }));
+  spark.append(svg);
+  row.append(spark);
+  sec.append(row);
+  if (v.kinds) {
+    const b = el('button', 'mem-open', MEM.open ? 'Hide' : 'What holds it');
+    b.type = 'button';
+    b.dataset.k = 'overview:memory';
+    b.setAttribute('aria-expanded', String(MEM.open));
+    b.setAttribute('aria-controls', 'mem-holds');
+    b.onclick = () => { MEM.open = !MEM.open; paintOverview(); };
+    row.append(b);
+    const holds = el('div', 'mem-holds');
+    holds.id = 'mem-holds';
+    holds.hidden = !MEM.open;
+    holds.append(memoryTable('By kind', v.kinds), memoryTable('By project', v.projects));
+    sec.append(holds);
+  }
+  return sec;
+}
+/* box-memory end */
 function paintOverview() {
   if (!ovTab || selected !== OVERVIEW) return;
   // the redraw closes an open ⋯ menu; the keyboard, if it was in the menu, goes back to its ⋯ below
@@ -1339,7 +1612,9 @@ function paintOverview() {
   // the page is redrawn whole every 10 s and on each press: whatever had the keyboard keeps it, so
   // Park and then Confirm park are two presses of one key
   const at = ovBody.contains(document.activeElement) ? document.activeElement.dataset.k : null;
-  ovBody.replaceChildren(head, ...(all.length ? [grid] : []));
+  // the machine's memory under the head, when the hub has a reading (kit-593)
+  const mem = memoryEl();
+  ovBody.replaceChildren(head, ...(mem ? [mem] : []), ...(all.length ? [grid] : []));
   if (at) [...ovEl.querySelectorAll('[data-k]')].find((e) => e.dataset.k === at && !e.disabled)?.focus({ preventScroll: true });
   else if (fromMenu !== null) [...ovBody.querySelectorAll('.menu-btn')].find((b) => b.dataset.k === `${fromMenu}:menu`)?.focus({ preventScroll: true });
   // every card is new: the pins, the dock's "not on the Overview now" and an open card find their places again
@@ -2109,6 +2384,8 @@ function notifyControl() {
 }
 
 async function draw() {
+  // the memory line asks on its own one-minute timer, never on this 10 s one
+  memoryStart();
   let data;
   try {
     const r = await fetch('instances.json', { cache: 'no-store' });
