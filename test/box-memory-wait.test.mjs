@@ -24,7 +24,7 @@ function fixture(name) {
   const highs = () => JSON.parse(F.sup(['metrics', '--json'])).findings.filter((f) => f.severity === 'high');
   for (const f of highs()) F.sup(['ack', f.kind, f.subject, '--reason', 'test']);
   assert.deepEqual(highs().map((f) => `${f.kind} ${f.subject}`), [], 'no high finding open at the start');
-  return { F, name, DT: path.join(F.old, 'docs/devteam/scripts/devteam.mjs') };
+  return { F, name, ticket: TICKET, DT: path.join(F.old, 'docs/devteam/scripts/devteam.mjs') };
 }
 // a worker's phase line as the kit writes it, now
 function phaseLine(F, from, to, extra = {}) {
@@ -59,6 +59,13 @@ async function untilLine(w, pred, what) {
 async function afterChange(w, t) {
   await until(() => w.lines().some((l) => l.at > t) || w.child.exitCode !== null, 'a snapshot after the change');
   return w.lines().find((l) => l.at > t)?.cycle ?? Infinity;
+}
+// what wait printed once it returned; a wait still running three cycles past N fails here, not at
+// the file's watchdog
+async function returned(w, N) {
+  await until(() => w.child.exitCode !== null || w.lines().some((l) => l.cycle > N + 3), 'wait to return');
+  assert.ok(w.child.exitCode !== null, `wait still running 3 cycles after cycle ${N}: ${JSON.stringify(w.lines().at(-1))}`);
+  return w.done;
 }
 const isQuiet = (l) => JSON.stringify(l.children) === JSON.stringify(QUIET) && l.log_reads === 0;
 const count = (l, args) => l.children.filter((c) => JSON.stringify(c) === JSON.stringify(args)).length;
@@ -108,7 +115,8 @@ test('an append to run/log changes the key, reads the log once and starts messag
     assert.equal(count(hit, MESSAGES), 1, 'one messages child');
     assert.equal(count(hit, ['metrics', '--json']), 1, 'one metrics child');
     assert.equal(hit.children.length, 2);
-    assert.match(hit.key, new RegExp(`^run/${TICKET}\\.jsonl \\d+ `, 'm'));
+    const entry = (k) => k.split('\n').find((l) => l.startsWith(`run/${TICKET}.jsonl `));
+    assert.ok(entry(hit.key) && entry(hit.key) !== entry(w.lines()[0].key), 'the appended file\'s entry is what changed');
     const next = await untilLine(w, (l) => l.cycle === hit.cycle + 1, 'the cycle after');
     assert.ok(isQuiet(next), `the cycle after is quiet: ${JSON.stringify(next)}`);
   } finally { w.kill(); }
@@ -164,5 +172,98 @@ test('a failed messages child is retried on the next cycle, not kept under the k
       assert.equal(l.log_reads, 1, `cycle ${l.cycle} reads the log`);
     }
     assert.ok(isQuiet(L[2]), `cycle 2 is quiet once messages answered: ${JSON.stringify(L[2])}`);
+  } finally { w.kill(); }
+});
+
+test('a due sensor adds exactly one sensor poll child, and none while it is not due', async (t) => {
+  const X = fixture('mw-sensor');
+  t.after(() => X.F.done());
+  const port = await freePort();
+  // in a child process: the test's own event loop is blocked during its synchronous kit calls
+  const srv = spawn(process.execPath, ['-e', `require('http').createServer((q, s) => s.end('ok')).listen(${port}, '127.0.0.1')`], { stdio: 'ignore' });
+  let w = null;
+  try {
+    await serverUp(`http://127.0.0.1:${port}/`);
+    const sf = path.join(X.F.old, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {', `"sensors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/" } }, "gates": {`));
+    git(X, ['commit', '-qm', 'a sensor', '--', 'docs/devteam/project/settings.md']);
+    git(X, ['push', '-q', 'origin', 'HEAD:main']);
+    w = startWait(X);
+    await untilLine(w, (l) => l.cycle >= 3, 'four snapshots');
+    const L = w.lines();
+    const POLL = ['sensor', 'poll', '--due', '--json'];
+    assert.equal(count(L[0], POLL), 1, `the due sensor is polled once: ${JSON.stringify(L[0].children)}`);
+    assert.equal(count(L[0], MESSAGES), 1);
+    assert.equal(count(L[0], ['metrics', '--json']), 1);
+    assert.equal(L[0].children.length, 3);
+    for (const l of L.slice(1, 4)) assert.ok(isQuiet(l), `cycle ${l.cycle}: not due, quiet: ${JSON.stringify(l)}`);
+  } finally { w?.kill(); srv.kill(); }
+});
+
+test('a pane at a prompt wakes the wait on the next cycle, with the log unchanged', { skip: !hasTmux && 'tmux not installed' }, async (t) => {
+  const X = fixture('mw-pane');
+  const env = X.F.env();
+  const S = sessionOf(X.F.old, X.name);
+  t.after(() => { spawnSync('tmux', ['kill-session', '-t', `=${S}`], { env }); X.F.done(); });
+  const w = startWait(X);
+  try {
+    await untilLine(w, (l) => l.cycle >= 1, 'a quiet line');
+    spawnSync('tmux', ['new-session', '-d', '-s', S, '-n', TICKET, 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\''], { env });
+    await until(() => /proceed/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${S}:${TICKET}`], { env, encoding: 'utf8' }).stdout ?? ''), 'the pane shows its prompt');
+    const at = Date.now();
+    const N = await afterChange(w, at);
+    const { out } = await returned(w, N);
+    assert.match(out, new RegExp(`^something needs you:\\n[\\s\\S]*finding blocked-prompt ${TICKET}: `));
+    const L = w.lines();
+    assert.ok(L.at(-1).cycle <= N, `woke on cycle ${L.at(-1).cycle}, after the first snapshot started after the prompt (${N})`);
+    assert.equal(new Set(L.map((l) => l.key)).size, 1, 'the log key held throughout');
+  } finally { w.kill(); }
+});
+
+test('a worker gone stale as time passes wakes the wait on the next cycle, with the log unchanged', async (t) => {
+  const X = fixture('mw-stale');
+  t.after(() => X.F.done());
+  // a fake clock: each new process reads the offset once at its start; wait itself started at 0
+  const dir = fs.mkdtempSync(path.join(X.F.base, 'clock-'));
+  const clock = path.join(dir, 'clock.mjs');
+  const offset = path.join(dir, 'offset');
+  write(offset, '0');
+  write(clock, `import fs from 'node:fs';
+let off = 0;
+try { off = Number(fs.readFileSync(process.env.DT_TEST_CLOCK, 'utf8')) || 0; } catch {}
+if (off) {
+  const Real = Date;
+  globalThis.Date = class extends Real {
+    constructor(...a) { if (a.length) super(...a); else super(Real.now() + off); }
+    static now() { return Real.now() + off; }
+  };
+}
+`);
+  const w = startWait(X, { NODE_OPTIONS: `--import ${clock}`, DT_TEST_CLOCK: offset });
+  try {
+    await untilLine(w, (l) => l.cycle >= 1, 'a quiet line');
+    write(offset, String((30 + 5) * 60000)); // stale_after_minutes (30) and five
+    const at = Date.now();
+    const N = await afterChange(w, at);
+    const { out } = await returned(w, N);
+    assert.match(out, new RegExp(`finding stale-worker ${TICKET}: silent for`));
+    const L = w.lines();
+    assert.ok(L.at(-1).cycle <= N, `woke on cycle ${L.at(-1).cycle}, after the first snapshot started after the clock moved (${N})`);
+    assert.equal(new Set(L.map((l) => l.key)).size, 1, 'the log key held throughout');
+  } finally { w.kill(); }
+});
+
+test("wait's memory holds over 20 cycles", async (t) => {
+  const X = fixture('mw-rss');
+  t.after(() => X.F.done());
+  const w = startWait(X);
+  try {
+    await untilLine(w, (l) => l.cycle >= 10, 'ten cycles');
+    phaseLine(X.F, 'build', 'build', { note: 'mid-run' }); // a read mid-run
+    const L20 = await untilLine(w, (l) => l.cycle >= 20, 'twenty cycles');
+    const L1 = w.lines()[1];
+    assert.ok(w.lines().slice(11).some((l) => l.log_reads === 1), 'the append was read');
+    const grew = L20.rss - L1.rss;
+    assert.ok(grew <= 30 * 1024 * 1024, `RSS grew ${Math.round(grew / 1048576)} MB from cycle 1 to cycle 20`);
   } finally { w.kill(); }
 });

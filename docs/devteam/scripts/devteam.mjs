@@ -21231,7 +21231,7 @@ function cmdWait() {
   const trace = process.env.DEVTEAM_TEST_WAIT_TRACE || null;
   const cycleMs = Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) > 0 ? Number(process.env.DEVTEAM_TEST_WAIT_CYCLE_MS) : null;
   let failMessages = Number(process.env.DEVTEAM_TEST_WAIT_FAIL_MESSAGES) || 0;
-  const started = [];
+  const started = []; // the kit children started since the last trace line (cycle 0's include the startup poll)
   const sub = (args) => {
     if (trace) started.push(args);
     const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
