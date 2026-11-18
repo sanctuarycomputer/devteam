@@ -3093,11 +3093,11 @@ function prefixOwners(entry, components, devteamLine) {
 /* parts start */
 // Parts of a file, read by line (spec: what a part is). A touches entry may name one: path#name, or
 // path#+name for a part the ticket adds; only files settings.split_files lists split this way.
-const PART_NAME = /^\+?[A-Za-z0-9_$.-]+$/;
+const PART_NAME = /^[A-Za-z0-9_$.-]+$/;
 const touchPath = (entry) => { const i = entry.indexOf('#'); return i === -1 ? entry : entry.slice(0, i); };
 const touchPart = (entry) => { const i = entry.indexOf('#'); if (i === -1) return null; const p = entry.slice(i + 1); return { name: p.replace(/^\+/, ''), added: p.startsWith('+') }; };
 const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\/|-->)\s*$/;
-const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
+const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
 const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
 const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
 // { places: Map name -> [{from, to}] (1-based, inclusive), leaves: [{key, name, from, to}] } where
@@ -3176,18 +3176,20 @@ function leafTexts(P) {
   for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
   return m;
 }
-// The leaves of a file that changed between two texts and that none of the named parts covers: a
-// part main has covers its leaves at the base and at the head (so a function added inside a named
-// region is its), and a part the ticket adds (+name) its leaves at the head, unless the base has it.
+// The leaves of a file that changed between two texts and that none of the named parts covers. A
+// leaf the base has is judged by the base: only a part named there covers it, so widening a part at
+// the head (a region moved round a function, a heading demoted under a named one) covers nothing
+// more. A leaf only the head has is judged by the head: a function added inside a named region is
+// the region's, and a part the ticket adds (+name) covers its own leaves, unless the base has it.
 function partsChanged(baseText, headText, file, named) {
   const B = fileParts(baseText ?? '', file), H = fileParts(headText ?? '', file);
   const tb = leafTexts(B), th = leafTexts(H);
-  const cov = new Set();
+  const covB = new Set(), covH = new Set();
   for (const x of named) {
-    if (!x.added) for (const k of partLeaves(B, x.name)) cov.add(k);
-    if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) cov.add(k);
+    if (!x.added) for (const k of partLeaves(B, x.name)) covB.add(k);
+    if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) covH.add(k);
   }
-  return [...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !cov.has(k));
+  return [...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k));
 }
 // A leaf key in words: a declaration's or heading's name, or whose rest it is.
 const leafWords = (k) => (k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));

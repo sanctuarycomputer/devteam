@@ -18,7 +18,7 @@ function partsFns() {
   const a = SRC.indexOf('/* parts start */'), b = SRC.indexOf('/* parts end */');
   assert.ok(a >= 0 && b > a, 'devteam.mjs has a /* parts */ region');
   const ctx = vm.createContext({});
-  return vm.runInContext(`${SRC.slice(a, b)}\n;({ fileParts, partLeaves, leafTexts, touchPath, touchPart })`, ctx);
+  return vm.runInContext(`${SRC.slice(a, b)}\n;({ fileParts, partLeaves, leafTexts, touchPath, touchPart, partsChanged })`, ctx);
 }
 const range = (P, name) => JSON.parse(JSON.stringify(P.places.get(name) ?? null));
 
@@ -108,6 +108,39 @@ test('parts: indented markers, markers whose name has a space, _ in a slug, a re
   assert.deepEqual([...partLeaves(M, 'r')], ['d:the-snake_case-rule#1'], "a region in a heading's section covers that heading's leaf");
 });
 
+test('parts: no space after function is no declaration; a repeated start, a start with no end, CRLF', () => {
+  const { fileParts } = partsFns();
+  const P = fileParts(['functionality = 1;', 'function a() {}', '/* r start */', '/* r start */', 'function b() {}', '/* r end */', '/* lone start */', 'function c() {}'].join('\n'), 'x.mjs');
+  assert.equal(P.places.has('ality'), false, 'functionality is not function ality');
+  assert.deepEqual(range(P, 'r'), [{ from: 3, to: 6 }], 'a second start of the same name before its end is ignored');
+  assert.equal(P.places.has('lone'), false, 'a start with no end is no region');
+  const C = fileParts(['/* r start */', 'function a() {}', '/* r end */', '## Head', 'x'].join('\r\n'), 'x.mjs');
+  assert.deepEqual(range(C, 'r'), [{ from: 1, to: 3 }], 'CRLF markers');
+  assert.deepEqual(range(C, 'a'), [{ from: 2, to: 2 }]);
+  const M = fileParts(['## Head One', 'x'].join('\r\n'), 'x.md');
+  assert.ok(M.places.has('head-one'), 'a CRLF heading has the same slug');
+});
+
+test('the gate judges a leaf the base has by the base: a part widened at the head covers nothing more', () => {
+  const { partsChanged: inVm } = partsFns();
+  const partsChanged = (...args) => [...inVm(...args)]; // an array of this realm, for deepEqual
+  const named = (...n) => n.map((x) => ({ name: x.replace(/^\+/, ''), added: x.startsWith('+') }));
+  const md = ['## 3. The tick', 'a', '### Monitoring', 'b', '## 4. Fixing drift', 'c'].join('\n');
+  // demoting ## 4 under ## 3, then editing it: 4-fixing-drift was not the ticket's at the base
+  assert.deepEqual(partsChanged(md, md.replace('## 4. Fixing drift\nc', '### 4. Fixing drift\nc edited'), 'x.md', named('3-the-tick')), ['d:4-fixing-drift#1']);
+  // a new heading above Monitoring, then Monitoring edited
+  assert.deepEqual(partsChanged(md, md.replace('### Monitoring\nb', '## New\n### Monitoring\nb edited'), 'x.md', named('+new')), ['d:monitoring#1']);
+  // a sub-heading added under a named heading is the heading's
+  assert.deepEqual(partsChanged(md, md.replace('### Monitoring', '### Added\nn\n### Monitoring'), 'x.md', named('3-the-tick')), []);
+  const js = ['/* r start */', 'function a() {}', '/* r end */', 'function b() {}'].join('\n');
+  // widening a named region around b, then editing b
+  assert.deepEqual(partsChanged(js, ['/* r start */', 'function a() {}', 'function b() { edited }', '/* r end */'].join('\n'), 'x.mjs', named('r')), ['d:b#1']);
+  // a region added around b by +name
+  assert.deepEqual(partsChanged(js, js.replace('function b() {}', '/* s start */\nfunction b() { edited }\n/* s end */'), 'x.mjs', named('+s')), ['d:b#1']);
+  // a function added inside a named region is the region's
+  assert.deepEqual(partsChanged(js, js.replace('function a() {}', 'function a() {}\nfunction c() {}'), 'x.mjs', named('r')), []);
+});
+
 test('touches entries: path and part', () => {
   const { touchPath, touchPart } = partsFns();
   assert.equal(touchPath('a/b.mjs#x'), 'a/b.mjs');
@@ -115,6 +148,7 @@ test('touches entries: path and part', () => {
   assert.equal(touchPart('a/b.mjs'), null);
   assert.deepEqual({ ...touchPart('a/b.mjs#+x') }, { name: 'x', added: true });
   assert.deepEqual({ ...touchPart('a/b.mjs#x') }, { name: 'x', added: false });
+  assert.deepEqual({ ...touchPart('a/b.mjs#++x') }, { name: '+x', added: true }, 'one + only: the name keeps the second');
 });
 
 test('split_files: a setting of its own, [] by default, on the Settings page', () => {
@@ -181,9 +215,22 @@ test('D4 and ready: different parts of one split file run together; the same par
     F.ticket('app-04-whole', [DT]);
     F.ok(F.old, ['phase', 'build'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'app-01-ready' });
     const rows = Object.fromEntries(json(F.ok(F.old, ['ready', '--json'], SUP)).ready.map((r) => [r.id, r]));
-    assert.equal(rows['app-02-other']?.overlaps_active, undefined, 'a different part: ready to start');
+    assert.ok(rows['app-02-other'], 'app-02-other is ready');
+    assert.equal(rows['app-02-other'].overlaps_active, undefined, 'a different part: ready to start');
     assert.deepEqual(rows['app-03-same']?.overlaps_active, ['app-01-ready'], 'the same part waits');
     assert.deepEqual(rows['app-04-whole']?.overlaps_active, ['app-01-ready'], 'the whole file waits');
+    // a file main lacks: its parts can't be read, so they overlap (validate also refuses them)
+    F.split([DT, 'docs/devteam/scripts/nope.mjs', 'docs/devteam/scripts']);
+    F.touches('app-01-ready', ['docs/devteam/scripts/nope.mjs#a']);
+    F.touches('app-02-other', ['docs/devteam/scripts/nope.mjs#b']);
+    assert.equal(F.d4('app-01-ready', 'app-02-other').length, 1, 'a file missing at main: D4');
+    // a part of a folder (listed itself) and a part of a file in it are different paths: D4
+    F.touches('app-01-ready', ['docs/devteam/scripts#a']);
+    F.touches('app-02-other', [`${DT}#cmdReady`]);
+    assert.equal(F.d4('app-01-ready', 'app-02-other').length, 1, 'different paths that overlap: D4');
+    F.touches('app-01-ready', [`${DT}#cmdReady`]);
+    F.touches('app-02-other', [`${DT}#cmdValidate`]);
+    F.split([DT]);
     // split_files lists nothing: every file is whole again, and different parts are D4
     F.split([]);
     assert.equal(F.d4('app-01-ready', 'app-02-other').length, 1, 'an unlisted file is touched whole');
@@ -202,6 +249,7 @@ test('validate: each named part exists at main, in a file split_files lists; ano
       'app-14-glob': ['docs/devteam/scripts/*.mjs#x', /a part names one file, not a glob/],
       'app-15-nofile': ['docs/devteam/scripts/nope.mjs#x', /is not on main; a ticket that creates a file names it whole/],
       'app-16-name': [`${DT}#a b`, /a part's name is letters, digits/],
+      'app-17-plus2': [`${DT}#++x`, /a part's name is letters, digits/],
     };
     for (const [id, [entry]] of Object.entries(bad)) F.ticket(id, [entry]);
     for (const [id, [, re]] of Object.entries(bad)) { const e = errs(id); assert.equal(e.length, 1, `${id}: ${e.join(' | ')}`); assert.match(e[0], re); }
@@ -269,6 +317,14 @@ test('the merge gate: a change to a part the ticket did not name is refused', ()
     const listed = (t) => { const m = t.match(/```json devteam\s*\n([\s\S]*?)\n```/); const j = JSON.parse(m[1]); j.split_files = [...j.split_files, 'docs/devteam/process/worker.md']; return t.replace(m[1], () => JSON.stringify(j, null, 2)); };
     const own = run('app-53-own', ['docs/devteam/process/worker.md#3-the-rules', SET], [[SET, listed], ['docs/devteam/process/worker.md', swap('## 3. The rules\n', '## 3. The rules\n\nEdited.\n')]]);
     assert.match(own, /changes files outside touches: docs\/devteam\/process\/worker\.md/);
+    // nor does a checkout whose settings say otherwise: the gate reads main's
+    const sf = path.join(F.old, SET);
+    const onMain = fs.readFileSync(sf, 'utf8');
+    fs.writeFileSync(sf, listed(onMain));
+    try {
+      const wt = run('app-54-local', ['docs/devteam/process/worker.md#3-the-rules'], [['docs/devteam/process/worker.md', swap('## 3. The rules\n', '## 3. The rules\n\nEdited.\n')]]);
+      assert.match(wt, /changes files outside touches: docs\/devteam\/process\/worker\.md/, "the checkout's own split_files changes nothing");
+    } finally { fs.writeFileSync(sf, onMain); }
   } finally { F.done(); }
 });
 
