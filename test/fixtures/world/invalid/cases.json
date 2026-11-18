@@ -100,6 +100,10 @@
     "expect": "relation_word \"fan club\" does not match"
   },
   {
+    "file": "exterior-word-not-other.md",
+    "expect": "only for relation other"
+  },
+  {
     "file": "exterior-bad-id.md",
     "expect": "exterior.entities[0].id"
   },

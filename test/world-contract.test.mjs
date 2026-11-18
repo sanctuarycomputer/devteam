@@ -202,7 +202,7 @@ test('the refusals include every case the ticket\'s done-when lists', () => {
   const files = json('invalid/cases.json').map((c) => c.file);
   for (const f of ['self-no-block.md', 'self-two-blocks.md', 'self-not-json.md', 'self-no-parts.md', 'exterior-no-block.md', 'exterior-two-blocks.md',
     'exterior-not-json.md', 'exterior-self-block.md', 'exterior-unnamed.md', 'exterior-person.md', 'exterior-bad-relation.md', 'exterior-other-no-word.md',
-    'exterior-other-two-words.md', 'self-bad-id.md', 'exterior-bad-id.md', 'exterior-bad-signal-id.md', 'self-shared-id.md', 'exterior-shared-id.md',
+    'exterior-other-two-words.md', 'exterior-word-not-other.md', 'self-bad-id.md', 'exterior-bad-id.md', 'exterior-bad-signal-id.md', 'self-shared-id.md', 'exterior-shared-id.md',
     'exterior-shared-signal-id.md', 'exterior-weight-high.md', 'exterior-weight-low.md', 'exterior-value-high.md', 'exterior-value-low.md',
     'exterior-no-quote.md', 'exterior-signal-sensor.md', 'exterior-signal-pages.md']) assert.ok(files.includes(f), f);
 });
