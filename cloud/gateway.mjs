@@ -1151,6 +1151,13 @@ export function createGateway(opts = {}) {
   };
   // Every passkey on the box, everyone's: one credential belongs to one person.
   const allCredentialIds = (s) => [...s.passkeys.map((p) => p.id), ...(s.people ?? []).flatMap((p) => (p.methods ?? []).filter((m) => m.type === 'passkey').map((m) => m.key))];
+  // A person's push devices: the owner's in top-level `pushSubs`, where an older gateway reads them;
+  // anyone else's in their row. Devices aren't what `rev` counts, so neither bumps it.
+  const subsOf = (s, person) => (isOwner(person) ? s.pushSubs ?? [] : (s.people ?? []).find((p) => p.id === person.id)?.pushSubs ?? []);
+  const withSubs = (s, person, subs) => (isOwner(person) ? { ...s, pushSubs: subs } : { ...s, people: (s.people ?? []).map((p) => (p.id === person.id ? { ...p, pushSubs: subs } : p)) });
+  const everySub = (s) => [...(s.pushSubs ?? []), ...(s.people ?? []).flatMap((p) => p.pushSubs ?? [])];
+  // Every list, everyone's, keeping only what `keep` passes.
+  const keepSubs = (s, keep) => ({ ...s, pushSubs: (s.pushSubs ?? []).filter(keep), ...(s.people ? { people: s.people.map((p) => ({ ...p, pushSubs: (p.pushSubs ?? []).filter(keep) })) } : {}) });
   // "Yours" before "last", so nobody learns anything of anyone else's. On success: whoever held it
   // may hold a session too, so every other session of yours ends, and the requester's as well when it
   // was opened with this method; your devices' notifications go (each subscribes again when its hub
@@ -1163,11 +1170,12 @@ export function createGateway(opts = {}) {
     // the owner's last top-level passkey is what keeps the box claimed, whatever else they hold
     if (owner ? top && s.passkeys.length < 2 : own.length < 2) return { status: 400, error: owner ? 'the last passkey can\'t be removed; add another first' : 'your last sign-in method can\'t be removed; add another first' };
     const keep = (x) => x.hash === session.hash && x.method !== id;
-    const people = s.people?.map((p) => (p.id === person.id && p.methods.some((m) => m.id === id) ? { ...p, methods: p.methods.filter((m) => m.id !== id), rev: p.rev + 1, ...(owner ? {} : { pushSubs: [] }) } : p));
+    const people = s.people?.map((p) => (p.id === person.id && p.methods.some((m) => m.id === id) ? { ...p, methods: p.methods.filter((m) => m.id !== id), rev: p.rev + 1 } : p));
     const next = owner
-      ? { ...s, ...(top ? { passkeys: s.passkeys.filter((p) => p.id !== id) } : {}), sessions: s.sessions.filter(keep), pushSubs: [], ...(people ? { people } : {}) }
+      ? { ...s, ...(top ? { passkeys: s.passkeys.filter((p) => p.id !== id) } : {}), sessions: s.sessions.filter(keep), ...(people ? { people } : {}) }
       : { ...s, people, peopleSessions: (s.peopleSessions ?? []).filter((x) => x.person !== person.id || keep(x)) };
-    return { status: 200, next: top ? stamped(next) : next };
+    const cleared = withSubs(next, person, []);
+    return { status: 200, next: top ? stamped(cleared) : cleared };
   };
   // The passkey's user names its person, so a password manager doesn't file anyone's as the owner's.
   const creationOptions = (purpose, person = STAND_IN) => {
@@ -1508,9 +1516,10 @@ export function createGateway(opts = {}) {
       const { seen, messages: inboxMessages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
       const alerts = alertNews(before.pushAlerts ?? {}, list, BLOCK, new Set(lastSent.keys()));
       const messages = [...inboxMessages, ...alerts.messages];
-      if (before.pushSubs?.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
+      const subs = everySub(before);
+      // a root rests after news to anyone's devices, not only the owner's
+      if (subs.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
       if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {}) || JSON.stringify(alerts.seen) !== JSON.stringify(before.pushAlerts ?? {})) store.save({ ...before, pushSeen: seen, pushAlerts: alerts.seen });
-      const subs = before.pushSubs ?? [];
       const dead = new Set();
       const jobs = subs.flatMap((sub) => messages.map((message) => ({ sub, message })));
       const worker = async () => {
@@ -1524,7 +1533,8 @@ export function createGateway(opts = {}) {
         }
       };
       await Promise.all(Array.from({ length: PUSH_SENDS }, worker));
-      if (dead.size) { const now = store.load(); store.save({ ...now, pushSubs: (now.pushSubs ?? []).filter((x) => !dead.has(x.endpoint)) }); }
+      // whoever's list each is in, all in one write
+      if (dead.size) store.save(keepSubs(store.load(), (x) => !dead.has(x.endpoint)));
     } finally { polling = false; }
   };
 
@@ -2300,14 +2310,16 @@ export function createGateway(opts = {}) {
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
-        const now = store.load();
-        store.save({ ...now, pushSubs: [...(now.pushSubs ?? []).filter((x) => x.endpoint !== sub.endpoint), sub].slice(-PUSH_DEVICES) });
+        // One device, one person: out of every list, then into the subscriber's, capped per person so
+        // nobody can push the owner's devices off.
+        const freed = keepSubs(store.load(), (x) => x.endpoint !== sub.endpoint);
+        store.save(withSubs(freed, person, [...subsOf(freed, person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
       }
-      // The hub's "is this working?": one push, to the device that asked.
+      // The hub's "is this working?": one push, to the device that asked, if it is the asker's own.
       if (req.method === 'POST' && p === '/push/test') {
         const body = await readJson(req);
-        const sub = (store.load().pushSubs ?? []).find((x) => x.endpoint === body?.endpoint);
+        const sub = subsOf(store.load(), person).find((x) => x.endpoint === body?.endpoint);
         if (!sub) return json(res, 404, { error: 'this device is not subscribed: reload the hub' });
         let status;
         try { status = await sendPush(sub, PUSH_TEST); } catch (e) { return json(res, 502, { error: e.message }); }

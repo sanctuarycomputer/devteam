@@ -184,6 +184,17 @@ const ownerOf = (s) => s.people.filter((p) => p.role === 'owner');
 const mintSession = (extra = {}) => { const tok = crypto.randomBytes(32); return { row: { hash: u(sha(tok)), at: Date.now(), expires: Date.now() + 3600e3, ...extra }, cookie: `devteam_session=${u(tok)}` }; };
 // a browser's push subscription, as the gateway stores it
 const pushSub = (endpoint) => ({ endpoint, p256dh: u(crypto.createECDH('prime256v1').generateKeys()), auth: u(crypto.randomBytes(16)), at: new Date().toISOString() });
+// what a browser sends /push/subscribe, as test/gateway.test.mjs's browserKeys
+const subscribing = (endpoint) => { const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys(); return { endpoint, keys: { p256dh: u(ecdh.getPublicKey()), auth: u(crypto.randomBytes(16)) } }; };
+// a hub on HUB whose list is whatever `list()` says now, for the gateway's poller
+const fakeHub = async (list) => {
+  const hub = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hub: 1, instances: list() })); });
+  for (let i = 0; ; i++) {
+    if (await new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); })) return hub;
+    if (i > 50) throw new Error('the hub port stays taken');
+    await new Promise((r) => setTimeout(r, 100));
+  }
+};
 // a passkey in today's top-level shape, registered on box.localhost unless `rp` says otherwise
 const topPasskey = (a, name, extra = {}) => {
   const m = a.method(name);
@@ -252,7 +263,13 @@ test('org-access A1: an existing box\'s passkeys, sessions and push subscription
     const t = await gw.req('POST', '/push/test', { cookie: cookies[0], body: { endpoint: 'https://web.push.apple.com/phone' } });
     assert.equal(t.status, 200, t.body);
     assert.deepEqual(sent, ['https://web.push.apple.com/phone'], 'an old subscription is the owner\'s');
-    // T5: a seeded person's /push/test for that endpoint is 404
+    const ana = authenticator();
+    gw.seed([{ name: 'Ana', methods: [ana.method()] }]);
+    const ac = await signIn(gw, ana);
+    sent.length = 0;
+    const theirs = await gw.req('POST', '/push/test', { cookie: ac, body: { endpoint: 'https://web.push.apple.com/phone' } });
+    assert.equal(theirs.status, 404, 'the owner\'s device is not a seeded person\'s');
+    assert.deepEqual(sent, []);
   } finally { await gw.close(); }
 });
 
@@ -724,4 +741,60 @@ test('org-access A9: the owner\'s last passkey stays, and their other methods go
     assert.equal((await gw.req('GET', '/box.json', { cookie: stubC })).status, 401);
     assert.equal((await gw.req('GET', '/box.json', { cookie: oc })).status, 200);
   } finally { await gw.close(); }
+});
+
+// --- A9.10: push per person -----------------------------------------------------------------------
+test('org-access A9: push subscriptions are each person\'s own', async () => {
+  const sent = [];
+  let gone = null;
+  const pushFetch = async (endpoint) => { sent.push(endpoint); return { status: endpoint === gone ? 410 : 201 }; };
+  const { gw, ana, ownerCookie, anaRow, vicRow } = await people('a9-push', { pushFetch });
+  let list = [{ devteam: 1, root: '/r/one', name: 'one', port: P, inbox: 1 }, { devteam: 1, root: '/r/two', name: 'two', port: P + 1, inbox: 1 }];
+  const hub = await fakeHub(() => list);
+  const bump = (root) => { list = list.map((x) => (x.root === root ? { ...x, inbox: x.inbox + 1 } : x)); };
+  const ends = (subs) => subs.map((x) => x.endpoint);
+  const A = (i) => `https://web.push.apple.com/ana-${i}`;
+  try {
+    const ac = await signIn(gw, ana);
+    await gw.g.pollPush();
+    assert.deepEqual(sent, [], 'the backlog is recorded');
+    // Ana's 21 devices: her row keeps the newest 20, and the owner's list is untouched
+    for (let i = 0; i < 21; i++) assert.equal((await gw.req('POST', '/push/subscribe', { cookie: ac, body: subscribing(A(i)) })).status, 200);
+    let s = gw.state();
+    assert.deepEqual(ends(rowOf(s, anaRow.id).pushSubs), Array.from({ length: 20 }, (_, i) => A(i + 1)));
+    assert.deepEqual(s.pushSubs ?? [], [], 'the owner\'s devices are not pushed off');
+    assert.deepEqual(rowOf(s, vicRow.id).pushSubs, []);
+    assert.deepEqual(ownerOf(s)[0].pushSubs, [], 'the owner\'s stay top-level');
+    // the poller reaches her devices; with the owner holding none, the root still rests
+    bump('/r/one');
+    await gw.g.pollPush();
+    assert.deepEqual([...sent].sort(), Array.from({ length: 20 }, (_, i) => A(i + 1)).sort(), 'one push to each of Ana\'s devices');
+    sent.length = 0;
+    bump('/r/one');
+    await gw.g.pollPush();
+    assert.deepEqual(sent, [], 'a root that just notified Ana rests');
+    // her test finds her own device, and not one of nobody's
+    assert.equal((await gw.req('POST', '/push/test', { cookie: ac, body: { endpoint: A(20) } })).status, 200);
+    assert.equal((await gw.req('POST', '/push/test', { cookie: ac, body: { endpoint: A(0) } })).status, 404);
+    // the owner subscribing one of Ana's endpoints takes it: one device, one person
+    assert.equal((await gw.req('POST', '/push/subscribe', { cookie: ownerCookie, body: subscribing(A(20)) })).status, 200);
+    s = gw.state();
+    assert.deepEqual(ends(s.pushSubs), [A(20)]);
+    assert.deepEqual(ends(rowOf(s, anaRow.id).pushSubs), Array.from({ length: 19 }, (_, i) => A(i + 1)));
+    assert.equal((await gw.req('POST', '/push/test', { cookie: ac, body: { endpoint: A(20) } })).status, 404, 'no longer hers');
+    sent.length = 0;
+    assert.equal((await gw.req('POST', '/push/test', { cookie: ownerCookie, body: { endpoint: A(20) } })).status, 200);
+    assert.equal((await gw.req('POST', '/push/test', { cookie: ownerCookie, body: { endpoint: A(1) } })).status, 404, 'nor is Ana\'s the owner\'s');
+    assert.deepEqual(sent, [A(20)]);
+    // one push per device, everyone's; a dead one of Ana's goes from her list alone
+    sent.length = 0;
+    gone = A(5);
+    bump('/r/two');
+    await gw.g.pollPush();
+    assert.deepEqual([...sent].sort(), [...Array.from({ length: 19 }, (_, i) => A(i + 1)), A(20)].sort(), 'each device once, the moved one included');
+    s = gw.state();
+    assert.deepEqual(ends(rowOf(s, anaRow.id).pushSubs), Array.from({ length: 19 }, (_, i) => A(i + 1)).filter((e) => e !== A(5)));
+    assert.deepEqual(ends(s.pushSubs), [A(20)]);
+    assert.equal(rowOf(s, anaRow.id).rev, anaRow.rev, 'push does not bump rev');
+  } finally { await new Promise((r) => hub.close(r)); await gw.close(); }
 });
