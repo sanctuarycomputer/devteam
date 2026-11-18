@@ -1,5 +1,5 @@
-// A dead machine's workers and planners come back, work in progress first, up to 3 a tick (1 with
-// the machine's memory at its ceiling): the guards, the order, the race, the caps.
+// A dead machine's workers and planners come back, work in progress first, up to 3 a tick (none
+// while the machine's memory is at its ceiling): the guards, the order, the race, the caps.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -9,7 +9,7 @@ import path from 'node:path';
 import { hasTmux, json, until, write } from './lib/kit.mjs';
 import { findings, fixture, OFF, sleepMs, STUB_SHELL } from './lib/recovery-fixture.mjs';
 
-// The machine's memory as a test sets it: at or over the 80% ceiling (one relaunch a tick), or under it.
+// The machine's memory as a test sets it: at or over the 80% ceiling (no relaunch), or under it.
 const memory = (F, availGb) => { const f = path.join(F.base, `meminfo-${availGb}`); write(f, `MemTotal:       8388608 kB\nMemFree:         262144 kB\nMemAvailable:   ${Math.round(availGb * 1048576)} kB\n`); return { ...OFF, DEVTEAM_MEMINFO: f, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup') }; };
 const FULL = (F) => memory(F, 0.5);
 const UNDER = (F) => memory(F, 6);
@@ -18,25 +18,30 @@ const dtRun = (F, args, env) => { const r = spawnSync(process.execPath, [path.jo
 const asWorker = (F, id, args) => { const e = F.env({ DEVTEAM_ROLE: 'worker' }); e.DEVTEAM_TICKET = id; return dtRun(F, args, e); };
 const asOwner = (F, args) => { const e = F.env(); delete e.DEVTEAM_ROLE; return dtRun(F, args, e); };
 const phase = (F, id, to) => F.logLine(id, { type: 'phase', from: 'starting', to });
-// One tick at a time, memory full: the one it brings back is the next in the order.
-const order = (F, n) => Array.from({ length: n }, () => /relaunched (\S+): its window was gone/.exec(F.tick(FULL(F)))?.[1] ?? null);
+// Tick after tick, up to 3 each: what they bring back, in the order they bring it.
+const order = (F, n) => { const got = []; for (let i = 0; got.length < n && i < n; i++) got.push(...(F.tick(UNDER(F)).match(/relaunched \S+(?=: its window was gone)/g) ?? []).map((l) => l.slice(11))); return got; };
 
-test('a machine that died: the tmux session gone, a worker and a planner come back, one a tick at the memory ceiling, with or without cswap', { skip: !hasTmux }, async () => {
+test('a machine that died: the tmux session gone, a worker and a planner come back once there is room, with or without cswap', { skip: !hasTmux }, async () => {
   const F = fixture('gone');
   try {
     F.worker('demo-01-a');
     F.planner('plan1');
-    const out1 = F.tick(FULL(F));
-    assert.match(out1, /relaunched (demo-01-a|plan-plan1): its window was gone/);
-    assert.equal(F.state().relaunched.length, 1, 'one relaunch per tick');
-    await until(() => F.relaunched().length === 1, 'the first agent resumed');
-    assert.match(F.tick(FULL(F)), /relaunched/, 'the next tick brings back the other');
+    // at the memory ceiling, as a new start would: both wait, and the tick says why
+    assert.match(F.tick(FULL(F)), /^2 gone sessions wait for room to relaunch: the machine's memory is at 7\.5 of 8\.0 GB \(94%\), at or over its 80% ceiling$/m);
+    assert.equal(F.state().memory_held, 2);
+    assert.equal(F.tick(FULL(F)), '', 'said when the number changes, not every minute');
+    assert.deepEqual(F.state().relaunched, []);
+    assert.deepEqual(F.relaunched(), []);
+    assert.equal(F.state().restart_gave_up.length, 0, 'waiting spends no attempt');
+    const out1 = F.tick(UNDER(F));
+    assert.match(out1, /relaunched demo-01-a: its window was gone/);
+    assert.match(out1, /relaunched plan-plan1: its window was gone/);
     await until(() => F.relaunched().length === 2, 'both resumed');
     assert.deepEqual(F.relaunched().sort(), ['demo-01-a', 'plan-plan1']);
     assert.ok(F.windows().includes('demo-01-a') && F.windows().includes('plan-plan1'));
     const acts = json(F.run(['log', '--type', 'act', '--json']).stdout).map((a) => a.what);
     assert.ok(acts.some((w) => /^resumed worker demo-01-a in /.test(w)), 'relaunched as worker --resume');
-    assert.equal(F.tick(FULL(F)), '', 'its windows are there: nothing more to do');
+    assert.equal(F.tick(FULL(F)), '', 'its windows are there: nothing more to do, and nothing said of memory');
     assert.equal(F.relaunched().length, 2);
   } finally { F.done(); }
 });
@@ -75,9 +80,8 @@ test('the key guard: a window closed in a session older than its launch stays cl
     await until(() => Math.floor(Date.now() / 1000) > Math.floor(Date.parse(now) / 1000), 'the second after the launch');
     F.ensureSession();
     // a session created after the launch: what a reboot, a kept tmux restarted by hand, leaves
-    // memory full: one a tick, so exactly one of the two comes back here
-    assert.match(F.tick(FULL(F)), /relaunched/);
-    await until(() => F.relaunched().length === 1, 'brought back');
+    assert.match(F.tick(UNDER(F)), /relaunched/);
+    await until(() => F.relaunched().length === 2, 'both brought back');
   } finally { F.done(); }
 });
 
@@ -214,9 +218,8 @@ test('what a crash leaves behind: a stale lock and a mangled record neither stop
     F.worker('demo-51-m');
     write(F.restartsFile, JSON.stringify({ 'demo-51-m': [Date.now() + 3600000, Date.now() + 7200000, Date.now() + 9000000] }));
     F.killSession();
-    // memory full, one a tick: demo-50-k (its record overwritten) first, then demo-51-m
-    F.tick(FULL(F));
-    assert.match(F.tick(FULL(F)), /relaunched demo-51-m/);
+    // demo-50-k (its record overwritten) and demo-51-m in one tick
+    assert.match(F.tick(UNDER(F)), /relaunched demo-51-m/);
     await until(() => F.relaunched().includes('demo-51-m'), 'relaunched past a future-dated record');
     const noTmux = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-recovery-notmux-'));
     write(path.join(noTmux, 'tmux'), '#!/bin/sh\necho "server busy" >&2\nexit 1\n');
@@ -291,6 +294,39 @@ test('up to 3 a tick under the memory ceiling, each under the restart record and
     assert.deepEqual(json(fs.readFileSync(F.restartsFile, 'utf8'))['demo-81-notdue'], [once], 'not claimed: its one attempt only');
     await until(() => F.relaunched().length === 4, 'four resumed');
     assert.ok(!F.relaunched().includes('demo-81-notdue'));
+  } finally { F.done(); }
+});
+
+test('a box that counts the page cache: the cache counts toward the ceiling, read again before each relaunch', { skip: !hasTmux }, async () => {
+  const F = fixture('cache');
+  try {
+    // the 2026-11-17 box: a 32 GB cap the platform enforces on memory.current, 11 GB of it page cache
+    const G = 1024 ** 3;
+    const cg = fs.mkdtempSync(path.join(F.base, 'cgroup-'));
+    const use = (current) => { write(path.join(cg, 'memory.max'), `${32 * G}\n`); write(path.join(cg, 'memory.current'), `${current}\n`); write(path.join(cg, 'memory.stat'), `anon ${15 * G}\nfile ${11 * G}\nshmem 0\n`); };
+    const box = { ...OFF, DEVTEAM_CGROUP: cg, DEVTEAM_MEMINFO: path.join(F.base, 'no-meminfo'), DEVTEAM_MEMORY_COUNTS_CACHE: '1' };
+    // each resume (its worktree_setup) takes the box to 27 GB, 84% with the cache
+    const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"worktree_setup": ${JSON.stringify(`echo ${27 * G} > ${path.join(cg, 'memory.current')}`)},\n  "project":`));
+    execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
+    for (const id of ['demo-95-a', 'demo-96-b', 'demo-97-c']) F.worker(id);
+    // 27 of 32 GB: 16 GB without the cache, under the ceiling; with it, over, so nothing comes back
+    use(27 * G);
+    assert.match(F.tick(box), /^3 gone sessions wait for room to relaunch: the machine's memory is at 27\.0 of 32\.0 GB \(84%, 11\.0 GB of it page cache\), at or over its 80% ceiling$/m);
+    assert.deepEqual(F.relaunched(), []);
+    // 20 GB: the first comes back, its resume takes the box to 27, and the next waits
+    use(20 * G);
+    const out = F.tick(box);
+    assert.deepEqual(F.state().relaunched, ['demo-95-a'], out);
+    assert.match(out, /^2 gone sessions wait for room to relaunch: the machine's memory is at 27\.0 of 32\.0 GB/m);
+    // where the platform's cap leaves the cache out (no DEVTEAM_MEMORY_COUNTS_CACHE): 16 GB, so both
+    // come back (in two ticks if the first one's worktree_setup leaves under 100 s for the second)
+    const { DEVTEAM_MEMORY_COUNTS_CACHE: _, ...laptop } = box;
+    const back = [];
+    for (let i = 0; i < 2 && back.length < 2; i++) { F.tick(laptop); back.push(...F.state().relaunched); }
+    assert.deepEqual(back, ['demo-96-b', 'demo-97-c']);
+    assert.equal(F.state().memory_held, 0);
+    await until(() => F.relaunched().length === 3, 'all three resumed');
   } finally { F.done(); }
 });
 

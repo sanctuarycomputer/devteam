@@ -35,6 +35,8 @@ process.env.DEVTEAM_SUPERVISOR_UP = 'off';
 // machine of its own (DEVTEAM_CGROUP, DEVTEAM_MEMINFO), or none, never the one it runs on.
 process.env.DEVTEAM_CGROUP ??= path.join(os.tmpdir(), 'dt-no-such-machine');
 process.env.DEVTEAM_MEMINFO ??= path.join(os.tmpdir(), 'dt-no-such-machine');
+// and counts that machine's page cache only where a test says so, not because the box image does
+delete process.env.DEVTEAM_MEMORY_COUNTS_CACHE;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 // tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
 // and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs
