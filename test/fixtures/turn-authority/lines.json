@@ -301,6 +301,17 @@
   },
   {
    "v": 1,
+   "id": "u-20260110-101230000-owner",
+   "at": "2026-01-10T10:12:30.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-101020000-owner",
+   "text": "Do not restart it now.",
+   "op": "new"
+  },
+  {
+   "v": 1,
    "id": "q-20260110-101300000-supervisor",
    "at": "2026-01-10T10:13:00.000Z",
    "by": "supervisor",
@@ -374,6 +385,32 @@
    "owner_said_at": [
     0,
     11
+   ],
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101600000-supervisor",
+   "at": "2026-01-10T10:16:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Restart web, said in part?",
+   "thread": "t-20260110-101020000-owner",
+   "about_turn": "u-20260110-101230000-owner",
+   "seen": "u-20260110-101230000-owner",
+   "recommendation": "restart it",
+   "stake": 1,
+   "urgency": 1,
+   "class": "production-remediation",
+   "blocks": [
+    "remediation:restart-web"
+   ],
+   "owner_said": "restart it now.",
+   "owner_said_turn": "u-20260110-101230000-owner",
+   "owner_said_at": [
+    7,
+    22
    ],
    "op": "new"
   },
@@ -816,6 +853,114 @@
    "said": "Ship it. Wait for CI? Tell the team.",
    "turn": "u-20260110-103000000-owner",
    "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-112000000-owner",
+   "at": "2026-01-10T11:20:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Hold",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-112000001-owner",
+   "at": "2026-01-10T11:20:00.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-112000000-owner",
+   "text": "Don't merge it. Then rest.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-112100000-supervisor",
+   "at": "2026-01-10T11:21:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Merge it?",
+   "thread": "t-20260110-112000000-owner",
+   "about_turn": "u-20260110-112000001-owner",
+   "seen": "u-20260110-112000001-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-112100000-supervisor",
+   "at": "2026-01-10T11:22:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "merge it.",
+   "turn": "u-20260110-112000001-owner",
+   "said_at": [
+    6,
+    15
+   ],
+   "answer_seen": "u-20260110-112000001-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-113000000-supervisor",
+   "at": "2026-01-10T11:30:00.000Z",
+   "by": "supervisor",
+   "type": "decision",
+   "class": "release-scope",
+   "what": "Shipped the banner",
+   "authority": "rung",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-113100000-owner",
+   "at": "2026-01-10T11:31:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Correct",
+   "subject": {
+    "kind": "item",
+    "ref": "decision:d-20260110-113000000-supervisor"
+   },
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-113100001-owner",
+   "at": "2026-01-10T11:31:00.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-113100000-owner",
+   "text": "I would not ship it.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-113000000-supervisor",
+   "at": "2026-01-10T11:32:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "decision",
+   "corrected": {
+    "reason": "ship it.",
+    "said": "ship it.",
+    "said_at": [
+     12,
+     20
+    ],
+    "turn": "u-20260110-113100001-owner"
+   },
+   "op": "set"
   }
  ],
  "unbound": [
@@ -866,6 +1011,18 @@
   {
    "subject": "d-20260110-105300000-supervisor",
    "why": "aren't what the turn says"
+  },
+  {
+   "subject": "q-20260110-112100000-supervisor",
+   "why": "part of a clause"
+  },
+  {
+   "subject": "q-20260110-101600000-supervisor",
+   "why": "part of a clause"
+  },
+  {
+   "subject": "d-20260110-113000000-supervisor",
+   "why": "part of a clause"
   }
  ],
  "refused": [
