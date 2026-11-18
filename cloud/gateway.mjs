@@ -21,6 +21,35 @@
 // of the gateway's framing that project's viewer at the published version; everyone else, and any
 // doubt, gets the published bytes. The public name reads the cookie for that choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
+// project-hosts@1: where a project is on a box
+// This section is the definition the gateway moves to: the address of a project on a box. Until the
+// gateway follows it, the lines above describe today's names. A new reserved segment, or any change
+// to these rules, bumps the version.
+// A project is https://<project>.<box>/, its dashboard, behind the owner's sign-in. <project> is the
+// project's name (the name /api/hello gives: settings.md's `project`, else the folder's name) when
+// it passes the label rule.
+// A public page is https://<project>.<box>/<artifact>/..., for anyone, from the gateway's store (no
+// sign-in).
+// The label rule: a DNS label of a-z, 0-9 and -, no leading or trailing -, 1 to 63 characters, not
+// all digits, and not `term`, `public` or `www`:
+//   label: /^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+// A name two projects share gets no dashboard on its host; its stored pages still answer (the store
+// ties each page to the one project folder that published it). A preview whose generated name is a
+// project's is not served under it: the name is the project's. A host is known from the hub's list
+// (projects first, then previews) or the gateway's store (published pages).
+// Reserved first segments, the dashboard's: `api`, `artifact`, `c`, `healthz`, `index.html`,
+// `public-manifest`, `review`, `upload`, `view`. They are checked before the store, so a page stored
+// under one never answers on a project's host, and Publish refuses those names. The order on a
+// project's host: a reserved segment goes to the dashboard; a published page of that name is served
+// to anyone; anything else needs the session and goes to the project's dashboard.
+// Gone, and not redirected: <port>.<box> (all-digit labels) and public.<box>, both 421.
+// The box's own name keeps the hub, sign-in (/auth), passkeys, pushes and /dev/. Publish's pages name
+// the project: /public/publish?project=<project>&...; ?port= is still accepted from older dashboards.
+// /box.json becomes box: 2: `project`, https://{project}.<box>/, in place of `instance`
+// (https://{port}.<box>/); its other keys stay.
+// The cases are in test/fixtures/project-hosts.json, which the gateway's, the hub's and the
+// dashboard's tests read.
+// end project-hosts@1
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
