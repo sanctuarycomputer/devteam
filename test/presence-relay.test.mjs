@@ -517,3 +517,172 @@ test('presence A35: the hub reads every length form and fragments, and closes 10
   await sizes(hubUrl);
   await alive(hubUrl, HUB_PORT, by, '/instances.json');
 }));
+
+// ---- A7 and A8: the limits, the ping, and the hello's present ----
+
+// `n` people at the field limits, every field starting zq7: a 64-character id, a name of 80 JSON bytes
+// (zq7, 38 escaped quotes, a), five 120-character at parts.
+const padTo = (head, len, i) => `${head}${'x'.repeat(len - head.length - 3)}${String(i).padStart(3, '0')}`;
+const limitZq7 = (n) => Array.from({ length: n }, (_, i) => ({
+  id: padTo('zq7-p', 64, i),
+  header: `zq7${'%22'.repeat(38)}a`,
+  name: `zq7${'"'.repeat(38)}a`,
+  at: { page: padTo('zq7-pg', 120, i), tab: padTo('zq7-tb', 120, i), peek: padTo('zq7-pk', 120, i), art: padTo('zq7-ar', 120, i), thread: padTo('zq7-th', 120, i) },
+}));
+// 200 at the field limits, all open first (only the first keeps its messages), then every here at once.
+// Resolves to the clients and the first client's people listing all 200.
+async function fill200(url) {
+  const people = limitZq7(LIMITS.perServer);
+  const cs = [];
+  for (const [i, p] of people.entries()) {
+    const c = await open(url, { headers: { 'x-devteam-person': `${p.id};name=${p.header}` }, keep: i === 0 });
+    assert.ok(c.you, `client ${i} welcomed`);
+    cs.push(c);
+  }
+  for (const [i, c] of cs.entries()) c.send({ t: 'here', at: people[i].at, visible: true });
+  const p = await cs[0].next(peopleWith(LIMITS.perServer), 30000);
+  assert.deepEqual(shapeErrors('people', p), []);
+  return { cs, people, p };
+}
+// Nobody but a probe is on the server: its first people lists only itself.
+async function onlyProbe(url) {
+  const probe = await open(url, { headers: P('zq7-probe') });
+  probe.send(hereMsg({ page: 'zq7-probe' }));
+  const p = await probe.next((m) => m.t === 'people', 5000);
+  assert.deepEqual(peopleIds(p), ['zq7-probe'], 'nobody else is connected');
+  probe.close(1000);
+  await closedWithin(probe);
+  clients.delete(probe);
+}
+
+test('presence A7: the rate, the per-person and per-server caps, and the ping, each closing as the contract says', check(async (t) => {
+  const { url } = await dashboard();
+  await t.test('(a) over 30 a second for 10 s is closed 1008; one second over is not', async () => {
+    const O = await open(url, { headers: P('zq7-once') });
+    O.send(hereMsg({ page: 'zq7-once' }));
+    await O.next((m) => m.t === 'people', 5000);
+    const G = await open(url, { headers: P('zq7-flood') });
+    const burst = (c) => c.raw(Buffer.concat(Array.from({ length: 40 }, () => c.build(json({ t: 'zz' })))));
+    await new Promise((r) => setTimeout(r, 1100));
+    burst(O); // one second over, then nothing
+    const start = Date.now();
+    let code = null;
+    G.closed.then((x) => { code = x; });
+    while (code === null && Date.now() - start < 15000) { burst(G); await new Promise((r) => setTimeout(r, 500)); }
+    const took = Date.now() - start;
+    assert.equal(code, 1008, 'the flood is closed 1008');
+    assert.ok(took >= 9000 && took <= 14500, `closed after ten seconds over, not before (${took} ms)`);
+    await sentinel(O, { page: 'zq7-once' }, [O]);
+    assert.equal(O.status, 101, 'the one-second burst is still open');
+  });
+  await t.test('(b) moves over 30 in a second are dropped', async () => {
+    const A = await open(url, { headers: P('zq7-ra') });
+    const B = await open(url, { headers: P('zq7-rb') });
+    A.send(hereMsg({ page: 'zq7-rate' })); B.send(hereMsg({ page: 'zq7-rate' }));
+    await B.next((m) => m.t === 'people' && ['zq7-ra', 'zq7-rb'].every((id) => peopleIds(m).includes(id)), 5000);
+    await new Promise((r) => setTimeout(r, 1100));
+    const mark = B.messages.length;
+    A.raw(Buffer.concat(Array.from({ length: 200 }, (_, i) => A.build(json({ t: 'move', a: { k: 'zq7-kit-1', x: i / 1000, y: 0 } })))));
+    await new Promise((r) => setTimeout(r, 2100));
+    A.send({ t: 'move', a: { k: 'zq7-end', x: 0, y: 0 } });
+    const end = await B.next((m) => m.t === 'move' && m.a?.k === 'zq7-end', 5000);
+    const xs = kinds(between(B, mark, end), 'move').map((m) => m.a.x);
+    assert.ok(xs.length >= 30 && xs.length <= 60, `30 to 60 of 200 moves in one write arrive (${xs.length})`);
+    assert.deepEqual(xs, [...xs].sort((a, b) => a - b), 'in their order');
+  });
+  await closeEvery();
+  await t.test('(c) the 9th connection of one person is closed 1008 before welcome', async () => {
+    for (let i = 0; i < LIMITS.perPerson; i++) assert.ok((await open(url, { headers: P('zq7-p8') })).you, `connection ${i + 1} welcomed`);
+    const ninth = await open(url, { headers: P('zq7-p8') });
+    assert.equal(ninth.status, 101, 'accepted');
+    assert.equal(ninth.you, undefined, 'no welcome');
+    assert.equal(await closedWithin(ninth), 1008);
+    assert.ok((await open(url, { headers: P('zq7-p9') })).you, 'another person is still welcome');
+  });
+  await closeEvery();
+  await t.test('(d) 200 at the field limits fit; a new person\'s 201st is closed 1008 before welcome', async () => {
+    await onlyProbe(url);
+    const { cs } = await fill200(url);
+    await until(() => cs.every((c) => c.sizes.length >= 2), 'each of the 200 has a people', 30000);
+    for (const [i, c] of cs.entries()) assert.ok(c.sizes.every((n) => n < LIMITS.serverMsg), `client ${i}: every frame under 262144`);
+    const over = await open(url, { headers: P('zq7-p201') });
+    assert.equal(over.status, 101);
+    assert.equal(over.you, undefined, 'the 201st gets no welcome');
+    assert.equal(await closedWithin(over), 1008);
+  });
+  await closeEvery();
+  await t.test('(e) two unanswered pings close 1001; a connection that pongs stays', async () => {
+    const F = fleetFixture('presence-ping');
+    const env = F.env({ DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PRESENCE_PING_MS: '1000' });
+    const { dash, port } = await dashboardOnFreePort(F.old, env);
+    try {
+      const u = `http://127.0.0.1:${port}`;
+      const Pn = await openPresence(u, { headers: P('zq7-never') });
+      clients.add(Pn);
+      const Q = await open(u, { headers: P('zq7-pongs') });
+      let qClosed = false;
+      Q.closed.then(() => { qClosed = true; });
+      const t0 = Date.now();
+      assert.equal(await closedWithin(Pn, 8000), 1001, 'two unanswered pings close 1001');
+      assert.ok(Date.now() - t0 <= 6000, `within 6 s (${Date.now() - t0} ms)`);
+      const seen = Q.messages.filter((m) => m.t === 'ping').length;
+      await until(() => Q.messages.filter((m) => m.t === 'ping').length > seen, 'a ping after Pn closed', 5000);
+      assert.equal(qClosed, false, 'the connection that pongs is still open');
+    } finally {
+      await closeEvery();
+      await dash.stop();
+      F.done();
+    }
+  });
+}));
+
+test('presence A8: the hello carries present, one entry per visible person, capped at 50; nothing about presence is kept', check(async () => {
+  const { url, port, runDir, dash } = await dashboard();
+  const hello = async () => JSON.parse((await get(port, '/api/hello')).text);
+  // (a) nobody connected
+  const h0 = await hello();
+  assert.deepEqual({ present: h0.present, present_more: h0.present_more }, { present: [], present_more: 0 }, 'empty with nobody connected');
+  await onlyProbe(url);
+  // (b) one entry per person with a visible connection, in here order
+  const c = (id) => open(url, { headers: P(id) });
+  const A1 = await c('zq7-a'); const A2 = await c('zq7-a');
+  const F1 = await c('zq7-f'); const F2 = await c('zq7-f');
+  const B = await c('zq7-b'); const V = await c('zq7-v'); const H = await c('zq7-h');
+  await c('zq7-s'); // never says here
+  const say = async (x, m, id) => { x.send(m); await A1.next((p) => p.t === 'people' && peopleIds(p).includes(id), 5000).catch(() => {}); };
+  A1.send(hereMsg()); await A1.next((p) => p.t === 'people', 5000);
+  await say(A2, hereMsg({ tab: 'zq7-2' }), 'zq7-a');
+  await say(F1, hereMsg({}, false), 'zq7-f');
+  await say(B, hereMsg(), 'zq7-b');
+  await say(V, hereMsg(), 'zq7-v');
+  await say(H, hereMsg({}, false), 'zq7-h');
+  F2.send(hereMsg({ tab: 'zq7-2' }));
+  V.send(hereMsg({}, false));
+  const who = (id) => ({ id, name: 'zq7 Ann', level: 'full' });
+  const want = [who('zq7-a'), who('zq7-f'), who('zq7-b')];
+  const hb = await until(async () => { const h = await hello(); return JSON.stringify(h.present) === JSON.stringify(want) && h; }, 'present is A, F, B', 5000);
+  assert.equal(hb.present_more, 0);
+  assert.deepEqual(shapeErrors('hello', hb), []);
+  await closeEvery();
+  // (c) 200 at the field limits: the first 50 in here order, present_more 150, under 64 KB
+  await onlyProbe(url);
+  const { p } = await fill200(url);
+  const body = (await get(port, '/api/hello')).text;
+  const h = JSON.parse(body);
+  assert.deepEqual(h.present, p.people.slice(0, LIMITS.present).map(({ id, name, level }) => ({ id, name, level })), "the first 50 in people's order");
+  assert.equal(h.present_more, LIMITS.perServer - LIMITS.present);
+  assert.deepEqual(shapeErrors('hello', h), []);
+  assert.ok(Buffer.byteLength(body) < 65536, `the hello is under 64 KB (${Buffer.byteLength(body)} bytes)`);
+  await closeEvery();
+  // (d) nothing about presence is kept: no file under run/ holds a zq7 word, no path names presence,
+  // and the dashboard's own output holds none
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : e.isFile() ? [path.join(d, e.name)] : []));
+  const files = walk(runDir);
+  assert.ok(files.length > 0, 'run/ has files to look in');
+  for (const f of files) {
+    const rel = path.relative(runDir, f);
+    assert.ok(!/presence/i.test(rel), `no path under run/ names presence (${rel})`);
+    assert.ok(!fs.readFileSync(f).includes('zq7'), `run/${rel} holds nothing of the test's presence`);
+  }
+  assert.ok(!dash.out().includes('zq7'), "the dashboard's output holds nothing of the test's presence");
+}));

@@ -14131,7 +14131,9 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
   const AT_PART = /^[A-Za-z0-9._:@/-]{1,120}$/;
   const ID_RE = /^[A-Za-z0-9._:@/-]{1,64}$/;
   const NAME_RE = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
-  const L = { pageMsg: 2048, frames: 16, anchorBytes: 200, nameBytes: 80, peopleMs: 250, changedMs: 500, unsent: 1024 * 1024, closeWaitMs: 5000 };
+  const L = { pageMsg: 2048, frames: 16, anchorBytes: 200, nameBytes: 80, peopleMs: 250, changedMs: 500, unsent: 1024 * 1024, closeWaitMs: 5000, perSecond: 30, overSeconds: 10, perPerson: 8, perServer: 200, present: 50 };
+  // every 20 s; DEVTEAM_PRESENCE_PING_MS (tests) when it is a whole number of at least 100
+  const pingMs = ((v) => (/^\d+$/.test(v ?? '') && Number(v) >= 100 ? Number(v) : 20000))(process.env.DEVTEAM_PRESENCE_PING_MS);
   const STATUS = { 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 503: 'Service Unavailable' };
   const OPCODES = [0, 1, 2, 8, 9, 10];
   const jsonBytes = (s) => Buffer.byteLength(JSON.stringify(s)) - 2;
@@ -14237,6 +14239,14 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     leave(c);
   }
   const safe = (c, fn) => { try { fn(); } catch { kill(c, 1011); } };
+  // a repeating timer of `c`'s, cleared when it leaves
+  const every = (c, name, ms, fn) => { const t = setInterval(() => { if (c.open) safe(c, fn); }, ms); t.unref(); c.timers[name] = () => clearInterval(t); };
+  // §7: the count, per whole second from the connection's open; closed after 10 seconds in a row over 30
+  const roll = (c) => { c.over = c.sec > L.perSecond ? c.over + 1 : 0; c.sec = 0; if (c.over >= L.overSeconds) kill(c, 1008); };
+  // counts one message or control frame; true when it is over the 30 of this second
+  const count = (c) => { c.sec += 1; return c.sec > L.perSecond; };
+  // §6: a ping each interval; two in a row unanswered by the next close it (1001)
+  const ping = (c) => { if (c.unanswered >= 2) return kill(c, 1001); write(c, textFrame({ t: 'ping' })); c.unanswered += 1; return undefined; };
   // one message to every connection that has said here; each write wrapped on its own
   const broadcast = (build) => {
     const to = hereConns();
@@ -14257,9 +14267,18 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     socket.setNoDelay(true);
     socket.setTimeout(0);
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}\r\n\r\n`);
-    const c = { conn: `c${++connSeq}`, who, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, here: false, seq: 0, at: null, visible: false };
+    // §7: counted from the handshake; one over is accepted and closed at once, before welcome
+    const mine = [...conns].filter((o) => o.who.id === who.id).length;
+    if (mine >= L.perPerson || conns.size >= L.perServer) {
+      socket.end(closeFrame(1008));
+      setTimeout(() => socket.destroy(), L.closeWaitMs).unref();
+      return;
+    }
+    const c = { conn: `c${++connSeq}`, who, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, here: false, seq: 0, at: null, visible: false, sec: 0, over: 0, unanswered: 0 };
     conns.add(c);
     write(c, textFrame({ t: 'welcome', presence: 1, you: { id: who.id, conn: c.conn } }));
+    every(c, 'second', 1000, () => roll(c));
+    every(c, 'ping', pingMs, () => ping(c));
     const take = (d) => { if (!c.open) return; c.buf = c.buf.length ? Buffer.concat([c.buf, d]) : Buffer.from(d); parse(c); };
     socket.on('data', (d) => safe(c, () => take(d)));
     // the http server's sockets are half-open: a peer that ends without a close frame is gone too
@@ -14320,7 +14339,9 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
       leave(c);
       return;
     }
-    if (op === 10) return; // a pong frame
+    const over = count(c);
+    if (op === 10) { c.unanswered = 0; return; } // a pong frame: never dropped
+    if (over) return; // a ping frame over the rate
     write(c, frame(payload, 10));
   }
 
@@ -14328,7 +14349,10 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     let m;
     try { m = JSON.parse(utf8(buf)); } catch { return kill(c, 1008); }
     if (!isObj(m)) return kill(c, 1008);
-    if (m.t === 'here') return here(c, m);
+    const over = count(c);
+    if (m.t === 'here') return here(c, m); // never dropped, whatever the rate
+    if (m.t === 'pong') { c.unanswered = 0; return undefined; }
+    if (over) return undefined; // a move or an unknown t over the rate
     if (m.t === 'move') return move(c, m);
     return undefined; // any other t is ignored (additive)
   }
@@ -14370,8 +14394,11 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
       res.end();
       req.resume();
     },
-    // §11: filled in with the limits (kit-631 T3)
-    present: () => ({ present: [], present_more: 0 }),
+    // §11: the people with a connection whose last here said visible, in people's order; 50 and the rest counted
+    present() {
+      const ps = peopleList().filter((p) => p.conns.some((x) => x.visible));
+      return { present: ps.slice(0, L.present).map(({ id, name, level }) => ({ id, name, level })), present_more: Math.max(0, ps.length - L.present) };
+    },
     // the log grew: a changed at once, then at most one each 500 ms, never dropped; the hub sends none
     changed() {
       if (hub) return;
