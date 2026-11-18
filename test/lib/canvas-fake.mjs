@@ -3,8 +3,16 @@
 // `opErrors` and `applyEdit` (an edit judged as a whole), `resolve` (an instance's five-level order),
 // `shapeErrors` (every message the socket and the routes carry), `freeTexts` (the fields hostile content
 // may fill), and the canvas test-file rule (`skipProblems`, `measureProblems`) with the cases it is
-// tested on. Tree walks use explicit stacks and queues, never recursion. Node built-ins only; consumes
+// tested on. Tree walks use explicit stacks and queues, never recursion. Then the fake server
+// (`startCanvasFake`: the `/canvas` socket and the `/api/canvas/…` routes), its client (`openCanvas`),
+// `request` over `net`, and `playHttp` for the http-*.json fixtures. Node built-ins only; consumes
 // presence@1 through its fake's `ID_RE`, `CONN_RE`, `cutName` and `shapeErrors`.
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import path from 'node:path';
 import { ID_RE as PERSON_ID_RE, CONN_RE, cutName, shapeErrors as presenceShapeErrors } from './presence-fake.mjs';
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -260,7 +268,15 @@ function pathOk(s) {
 const FR_RE = /^([0-9]+)fr$/;
 const SRC_RE = /^images\/([0-9a-f]{16}\.(?:png|jpg|webp|gif))$/;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
-const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const B64_CHAR = /[A-Za-z0-9+/]/;
+// Padded base64: groups of four of the alphabet, the last ending `=` or `==`. A scan, never a regex
+// over the whole string (a repeated group overflows the stack on a few MB of image).
+function base64Ok(s) {
+  if (s.length % 4 !== 0) return false;
+  const pad = s.endsWith('==') ? 2 : s.endsWith('=') ? 1 : 0;
+  for (let i = 0; i < s.length - pad; i++) if (!B64_CHAR.test(s[i])) return false;
+  return true;
+}
 const FAMILIES = ['sans', 'serif', 'mono'];
 
 export const HOSTILE_MARKERS = Object.freeze([
@@ -1026,11 +1042,13 @@ const APPLY = {
 // The spec's whole-edit judgement: each op's own checks in order against the running copy, then
 // docErrors on the end state. Applied: a new document at rev + 1, why null. Refused: the same document
 // and the refusal code.
-export function applyEdit(doc, ops, { images = null, folderBytes = 0, level = 'full' } = {}) {
+// `maxOpsBytes` bounds the ops as JSON: a page's edit by `editOpsBytes` (the default); null for a local
+// apply, which its body bounds instead (§7).
+export function applyEdit(doc, ops, { images = null, folderBytes = 0, level = 'full', maxOpsBytes = LIMITS.editOpsBytes } = {}) {
   const no = (why) => ({ doc, why });
   if (level !== 'full') return no('view');
   if (!Array.isArray(ops) || ops.length === 0) return no('shape');
-  if (Buffer.byteLength(JSON.stringify(ops)) > LIMITS.editOpsBytes) return no('limit');
+  if (maxOpsBytes !== null && Buffer.byteLength(JSON.stringify(ops)) > maxOpsBytes) return no('limit');
   const d = structuredClone(doc);
   for (const op of ops) {
     if (opErrors(op).length) return no('shape');
@@ -1259,7 +1277,7 @@ const CHECK = {
   'image-request': msg('image-request', ['name', 'data'], null, (e, m) => {
     const n = SIMPLE.name(m.name);
     if (n || m.name.length === 0) e.push('image-request.name: not 1 to 200 characters');
-    if (typeof m.data !== 'string' || m.data.length === 0 || !BASE64_RE.test(m.data)) e.push('image-request.data: not base64');
+    if (typeof m.data !== 'string' || m.data.length === 0 || !base64Ok(m.data)) e.push('image-request.data: not base64');
     else if (Math.floor((m.data.length * 3) / 4) - (m.data.endsWith('==') ? 2 : m.data.endsWith('=') ? 1 : 0) > LIMITS.imageBytes) e.push(`image-request.data: over ${LIMITS.imageBytes} bytes`);
   }),
   'image-response': msg('image-response', ['src'], null, (e, m) => { if (SIMPLE.imageSrc(m.src, [])) e.push('image-response.src: not images/<16 hex>.<png|jpg|webp|gif>'); }),
@@ -1560,3 +1578,945 @@ export const MEASURE_CASES = deepFreeze({
     [file('canvas-x.test.mjs', `${IMPORT_TEST}import { canDrive } from './lib/chrome.mjs';\n${CALL}3: a name', { skip: canDrive ? false : 'no Chrome' }, () => {});\n`)],
   ],
 });
+
+// ---- the fake server (§14): the clock, RFC 6455 both ends, the guards, the socket and the routes ----
+// The approach is presence-fake.mjs's (guards in presence@1 §2's order, each frame header weighed before
+// its payload is read, a manual clock, a client over `net`), with this contract's limits and messages.
+
+const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r)); };
+
+// `now()` and `after(ms, fn)` (returning a cancel). The manual clock starts at 0, keeps due times and
+// moves only by `tick(ms)`, which runs each due timer in order (by due time, then by when it was set),
+// yielding after each so socket writes go out and pending reads come in.
+function makeClock(kind) {
+  if (kind === 'manual') {
+    let t = 0;
+    let seq = 0;
+    let due = [];
+    return {
+      now: () => t,
+      after(ms, fn) {
+        const e = { at: t + ms, seq: seq++, fn, off: false };
+        due.push(e);
+        return () => { e.off = true; };
+      },
+      async tick(ms) {
+        const end = t + ms;
+        await settle();
+        for (;;) {
+          let next = null;
+          for (const e of due) if (!e.off && e.at <= end && (!next || e.at < next.at || (e.at === next.at && e.seq < next.seq))) next = e;
+          if (!next) break;
+          next.off = true;
+          t = next.at;
+          next.fn();
+          due = due.filter((e) => !e.off);
+          await settle();
+        }
+        t = end;
+        await settle();
+      },
+      stop() { due = []; },
+    };
+  }
+  if (kind !== 'real') throw new Error(`clock: 'real' or 'manual', not ${JSON.stringify(kind)}`);
+  const live = new Set();
+  return {
+    after(ms, fn) {
+      const h = setTimeout(() => { live.delete(h); fn(); }, ms);
+      live.add(h);
+      return () => { clearTimeout(h); live.delete(h); };
+    },
+    tick() { throw new Error('tick(ms) is for the manual clock only'); },
+    stop() { for (const h of live) clearTimeout(h); live.clear(); },
+  };
+}
+
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const acceptOf = (key) => crypto.createHash('sha1').update(`${key}${WS_GUID}`).digest('base64');
+const OPCODES = [0, 1, 2, 8, 9, 10];
+
+// A frame: `len` forces the 7-, 16- or 64-bit length form (a longer form for a short payload is legal).
+function encodeFrame(bytes, { opcode = 1, fin = true, mask = false, len, rsv = 0 } = {}) {
+  const p = Buffer.from(bytes);
+  const n = p.length;
+  const form = len ?? (n < 126 ? 7 : n < 65536 ? 16 : 64);
+  const head = [(fin ? 0x80 : 0) | ((rsv & 7) << 4) | (opcode & 0x0f)];
+  const m = mask ? 0x80 : 0;
+  let ext = Buffer.alloc(0);
+  if (form === 7) {
+    if (n > 125) throw new Error('a 7-bit length holds at most 125');
+    head.push(m | n);
+  } else if (form === 16) {
+    head.push(m | 126); ext = Buffer.alloc(2); ext.writeUInt16BE(n);
+  } else {
+    head.push(m | 127); ext = Buffer.alloc(8); ext.writeUInt32BE(Math.floor(n / 2 ** 32)); ext.writeUInt32BE(n >>> 0, 4);
+  }
+  if (!mask) return Buffer.concat([Buffer.from(head), ext, p]);
+  const key = crypto.randomBytes(4);
+  const body = Buffer.alloc(n);
+  for (let i = 0; i < n; i++) body[i] = p[i] ^ key[i & 3];
+  return Buffer.concat([Buffer.from(head), ext, key, body]);
+}
+const closeFrame = (code) => {
+  const b = Buffer.alloc(code == null ? 0 : 2);
+  if (code != null) b.writeUInt16BE(code);
+  return encodeFrame(b, { opcode: 8 });
+};
+// A server message (§3): one text frame, or, over 256 KB, a text frame then continuations, each at most 256 KB.
+function messageFrames(m) {
+  const b = Buffer.from(JSON.stringify(m));
+  const max = LIMITS.serverFrameBytes;
+  if (b.length <= max) return encodeFrame(b, { opcode: 1 });
+  const out = [];
+  for (let i = 0; i < b.length; i += max) out.push(encodeFrame(b.subarray(i, i + max), { opcode: i === 0 ? 1 : 0, fin: i + max >= b.length }));
+  return Buffer.concat(out);
+}
+const utf8 = (buf) => new TextDecoder('utf-8', { fatal: true }).decode(buf);
+
+// ---- the person headers (presence@1 §4), as presence's fake reads them ----
+
+const NAME_RE = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
+// rawHeaders' values for one header name, however it was cased.
+function rawValues(req, name) {
+  const out = [];
+  for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) out.push(req.rawHeaders[i + 1]);
+  return out;
+}
+function decodeName(s) {
+  const bytes = [];
+  for (let i = 0; i < s.length;) {
+    if (s[i] === '%') { bytes.push(parseInt(s.slice(i + 1, i + 3), 16)); i += 3; } else { bytes.push(s.charCodeAt(i)); i += 1; }
+  }
+  try { return utf8(Uint8Array.from(bytes)); } catch { return null; }
+}
+// The person of a request, or null when presence@1 §4 refuses it.
+function personOf(req, ownerName) {
+  const ps = rawValues(req, 'x-devteam-person');
+  const ls = rawValues(req, 'x-devteam-level');
+  if (ps.length > 1 || ls.length > 1) return null;
+  if (ls.length && ls[0] !== 'full' && ls[0] !== 'view') return null;
+  if (!ps.length) return ls.length ? null : { id: 'owner', name: cutName(ownerName), level: 'full' };
+  const m = /^([^;]*);name=(.*)$/.exec(ps[0]);
+  if (!m || !PERSON_ID_RE.test(m[1]) || !NAME_RE.test(m[2])) return null;
+  const name = decodeName(m[2]);
+  if (!name) return null;
+  return { id: m[1], name: cutName(name), level: ls.length ? ls[0] : 'full' };
+}
+const validKey = (k) => typeof k === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(k) && Buffer.from(k, 'base64').length === 16;
+const urlOf = (url) => { try { return new URL(url, 'http://x'); } catch { return null; } };
+const STATUS = {
+  200: 'OK', 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 409: 'Conflict', 413: 'Payload Too Large',
+  415: 'Unsupported Media Type', 423: 'Locked', 500: 'Internal Server Error', 501: 'Not Implemented', 503: 'Service Unavailable',
+};
+const IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+// An image by its first bytes: PNG, JPEG, WebP or GIF; anything else (SVG included) null.
+function sniff(b) {
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png';
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b.length >= 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp';
+  if (b.length >= 6 && /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1'))) return 'gif';
+  return null;
+}
+const SESSION_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz';
+const newSession = () => { let s = ''; for (const x of crypto.randomBytes(16)) s += SESSION_CHARS[x % 36]; return s; };
+const exactKeys = (o, want) => isObj(o) && Object.keys(o).length === want.length && want.every((k) => own(o, k));
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+export async function startCanvasFake({
+  canvases = {}, main = {}, images = {}, folderBytes = {}, repo = { name: null, public: null }, ownerName = 'Owner',
+  token = crypto.randomBytes(16).toString('hex'), clock = 'real', serve,
+} = {}) {
+  const clk = makeClock(clock);
+  const sockets = new Set();
+  const conns = new Set(); // every connection past welcome
+  let port = 0;
+  let connSeq = 0;
+  const files = new Map(); // slug -> Map(file -> Buffer), the canvas's images/ (its branch's, then main's)
+  for (const [slug, m] of Object.entries(images)) files.set(slug, new Map(Object.entries(m).map(([f, b]) => [f, Buffer.from(b)])));
+  const filesOf = (slug) => { if (!files.has(slug)) files.set(slug, new Map()); return files.get(slug); };
+  // docErrors' and applyEdit's folder: the image names, and every byte of the folder but canvas.json.
+  const folderOf = (slug) => ({
+    images: new Set(filesOf(slug).keys()),
+    folderBytes: [...filesOf(slug).values()].reduce((s, b) => s + b.length, 0) + (own(folderBytes, slug) ? folderBytes[slug] : 0),
+  });
+  const valid = (slug, d, what) => {
+    if (!SLUG_RE.test(slug)) throw new Error(`startCanvasFake: ${what} slug ${JSON.stringify(slug)} is not a slug`);
+    const e = docErrors(d, folderOf(slug));
+    if (e.length) throw new Error(`startCanvasFake: ${what} ${slug}: ${e[0].rule}: ${e[0].where}: ${e[0].message}`);
+  };
+  // A canvas open for editing. `session` is the open one, or the one its next session will use (§3).
+  const live = new Map();
+  const mains = new Map();
+  const landed = new Set();
+  const newCanvas = (slug, d) => ({
+    slug, doc: structuredClone(d), saved: structuredClone(d), session: newSession(), open: false, book: makeSeqBook(),
+    conns: [], people: new Map(), paused: null, savedCancel: null, selCancel: null,
+  });
+  for (const [slug, d] of Object.entries(canvases)) { valid(slug, d, 'canvas'); live.set(slug, newCanvas(slug, d)); }
+  for (const [slug, d] of Object.entries(main)) { valid(slug, d, 'main'); mains.set(slug, structuredClone(d)); }
+
+  const hostOk = (req) => req.headers.host === `127.0.0.1:${port}` || req.headers.host === `localhost:${port}`;
+  const relayed = (req) => rawValues(req, 'x-devteam-relay').length > 0;
+
+  // presence@1 §2's guards, in order, then the slug (§3); { who, cv }, or the status refusing it.
+  function guardSocket(req, upgrade) {
+    if (!hostOk(req)) return 403;
+    if (relayed(req)) return 403;
+    const u = urlOf(req.url);
+    if (!u || u.pathname !== '/canvas') return 404;
+    if (!upgrade || String(req.headers.upgrade || '').toLowerCase() !== 'websocket'
+      || req.headers['sec-websocket-version'] !== '13' || !validKey(req.headers['sec-websocket-key'])) return 400;
+    const origin = req.headers.origin;
+    if (origin === undefined || origin !== `http://${req.headers.host}`) return 403;
+    const who = personOf(req, ownerName);
+    if (!who) return 403;
+    const slug = u.searchParams.get('slug');
+    if (slug === null || !SLUG_RE.test(slug) || !live.has(slug)) return 404;
+    return { who, cv: live.get(slug) };
+  }
+  // The data GETs' guards (§8): the host check, the relay mark.
+  const dataGuard = (req) => (!hostOk(req) || relayed(req) ? 403 : null);
+  // The owner-action POSTs' guards (§8), in the contract's order.
+  function ownerGuard(req) {
+    if (!hostOk(req)) return 403;
+    if (req.headers.origin !== `http://${req.headers.host}`) return 403;
+    if (relayed(req)) return 403;
+    const who = personOf(req, ownerName);
+    if (!who || who.level !== 'full') return 403;
+    const ct = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (ct !== 'application/json') return 415;
+    return null;
+  }
+
+  // ---- the socket: writing, windows, connections ----
+
+  const write = (c, buf) => { if (c.open && !c.socket.destroyed) c.socket.write(buf); };
+  const send = (c, m) => write(c, messageFrames(m));
+  // One message to every connection on a canvas, built once; a build that throws closes them 1011.
+  function toAll(cv, m) {
+    const to = [...cv.conns];
+    let f;
+    try { f = messageFrames(m); } catch { for (const c of to) kill(c, 1011); return; }
+    for (const c of to) safe(c, () => write(c, f));
+  }
+  const unsaved = (cv) => cv.doc.rev !== cv.saved.rev;
+  function writeSaved(cv) {
+    if (cv.savedCancel) { cv.savedCancel(); cv.savedCancel = null; }
+    cv.saved = structuredClone(cv.doc);
+    toAll(cv, { t: 'saved', rev: cv.doc.rev });
+  }
+  // §5: the first unsaved edit opens a 500 ms window; none while paused.
+  function savedWindow(cv) {
+    if (cv.paused || cv.savedCancel) return;
+    cv.savedCancel = clk.after(LIMITS.savedMs, () => {
+      cv.savedCancel = null;
+      if (!cv.paused && live.get(cv.slug) === cv && unsaved(cv)) writeSaved(cv);
+    });
+  }
+  const selectionsOf = (cv) => [...cv.people.values()].map((p) => ({ id: p.id, name: p.name, ids: [...p.ids] }));
+  // §5: the first change opens a 250 ms window; one selections at its end carries all of them.
+  function selectionsChanged(cv) {
+    if (cv.selCancel) return;
+    cv.selCancel = clk.after(LIMITS.selectionsMs, () => {
+      cv.selCancel = null;
+      if (live.get(cv.slug) === cv) toAll(cv, { t: 'selections', people: selectionsOf(cv) });
+    });
+  }
+  // A deleted node leaves every selection.
+  function dropDeleted(cv) {
+    let changed = false;
+    for (const p of cv.people.values()) {
+      const keep = p.ids.filter((id) => own(cv.doc.nodes, id));
+      if (keep.length !== p.ids.length) { p.ids = keep; changed = true; }
+    }
+    if (changed) selectionsChanged(cv);
+  }
+  const cancelWindows = (cv) => {
+    if (cv.savedCancel) { cv.savedCancel(); cv.savedCancel = null; }
+    if (cv.selCancel) { cv.selCancel(); cv.selCancel = null; }
+  };
+
+  function leave(c) {
+    if (!conns.delete(c)) return;
+    for (const cancel of Object.values(c.timers)) cancel();
+    const cv = c.cv;
+    const i = cv.conns.indexOf(c);
+    if (i >= 0) cv.conns.splice(i, 1);
+    const p = cv.people.get(c.who.id);
+    if (p && --p.n === 0) { cv.people.delete(c.who.id); selectionsChanged(cv); }
+    if (cv.conns.length === 0 && cv.open) {
+      // the session ends with its last connection; the next one will use a new id (§3)
+      cv.open = false;
+      cv.session = newSession();
+      if (cv.selCancel) { cv.selCancel(); cv.selCancel = null; }
+    }
+  }
+  // Close a connection with `code` (a close frame, then the socket ended).
+  function kill(c, code) {
+    if (!c.open) return;
+    try { c.socket.end(closeFrame(code)); } catch { /* gone */ }
+    c.open = false;
+    leave(c);
+  }
+  function safe(c, fn) {
+    try { fn(); } catch { kill(c, 1011); }
+  }
+  // A repeating timer for `c`, through the clock.
+  function every(c, name, ms, fn) {
+    const arm = () => { c.timers[name] = clk.after(ms, () => { if (!c.open) return; safe(c, fn); if (c.open) arm(); }); };
+    arm();
+  }
+
+  function accept(req, socket, head, who, cv) {
+    socket.setNoDelay(true);
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptOf(req.headers['sec-websocket-key'])}\r\n\r\n`);
+    // §7: counted from the handshake; one over is accepted and closed 1008 at once, before welcome.
+    const openCanvases = [...live.values()].filter((x) => x.conns.length > 0).length;
+    if (conns.size >= LIMITS.perServer || (cv.conns.length === 0 && openCanvases >= LIMITS.openCanvases)
+      || cv.conns.length >= LIMITS.perCanvas || cv.conns.filter((x) => x.who.id === who.id).length >= LIMITS.perPerson) {
+      socket.end(closeFrame(1008));
+      return;
+    }
+    if (!cv.open) { cv.open = true; cv.book = makeSeqBook(); }
+    const c = { conn: `c${++connSeq}`, who, cv, slug: cv.slug, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, messages: 0, sec: 0, unanswered: 0 };
+    conns.add(c);
+    cv.conns.push(c);
+    if (!cv.people.has(who.id)) { cv.people.set(who.id, { id: who.id, name: who.name, ids: [], n: 0 }); selectionsChanged(cv); }
+    cv.people.get(who.id).n += 1;
+    send(c, { t: 'welcome', canvas: 1, session: cv.session, rev: cv.doc.rev, you: { id: who.id, conn: c.conn } });
+    every(c, 'second', 1000, () => { c.sec = 0; });
+    every(c, 'ping', LIMITS.pingMs, () => ping(c));
+    const take = (d) => { if (!c.open) return; c.buf = c.buf.length ? Buffer.concat([c.buf, d]) : Buffer.from(d); parse(c); };
+    socket.on('data', (d) => safe(c, () => take(d)));
+    // The http server's sockets are half-open: a peer that ends without a close frame is gone too.
+    socket.on('end', () => { c.open = false; leave(c); socket.end(); });
+    socket.on('close', () => { c.open = false; leave(c); });
+    if (head && head.length) safe(c, () => take(head));
+  }
+
+  // §7: a data message or a ping frame; the 31st in a second closes the connection at once.
+  const counted = (c) => { c.messages += 1; c.sec += 1; if (c.sec > LIMITS.perSecond) { kill(c, 1008); return false; } return true; };
+  function ping(c) {
+    if (c.unanswered >= LIMITS.unansweredPings) { kill(c, 1001); return; }
+    send(c, { t: 'ping' });
+    c.unanswered += 1;
+  }
+
+  // presence@1 §2: a whole header first, checked for validity, then its length weighed, then the payload awaited.
+  function parse(c) {
+    while (c.open) {
+      const b = c.buf;
+      if (b.length < 2) return;
+      const fin = (b[0] & 0x80) !== 0;
+      const rsv = b[0] & 0x70;
+      const op = b[0] & 0x0f;
+      const masked = (b[1] & 0x80) !== 0;
+      const len7 = b[1] & 0x7f;
+      const control = op >= 8;
+      if (rsv || !OPCODES.includes(op) || !masked || (control && !fin)) return kill(c, 1002);
+      if (op === 0 && !c.msg) return kill(c, 1002);
+      if ((op === 1 || op === 2) && c.msg) return kill(c, 1002);
+      const ext = len7 === 126 ? 2 : len7 === 127 ? 8 : 0;
+      const start = 2 + ext + 4;
+      if (b.length < start) return;
+      let len = len7;
+      if (ext === 2) len = b.readUInt16BE(2);
+      else if (ext === 8) {
+        const hi = b.readUInt32BE(2);
+        if (hi >= 0x80000000) return kill(c, 1002);
+        len = hi * 2 ** 32 + b.readUInt32BE(6);
+      }
+      if (control && len > 125) return kill(c, 1002);
+      if (!control) {
+        if (op === 2) return kill(c, 1008);
+        const held = c.msg ? c.msg.size : 0;
+        const frames = c.msg ? c.msg.parts.length : 0;
+        if (held + len > LIMITS.pageMsgBytes || frames + 1 > LIMITS.pageFrames) return kill(c, 1008);
+      }
+      if (b.length < start + len) return;
+      const key = b.subarray(start - 4, start);
+      const payload = Buffer.alloc(len);
+      for (let i = 0; i < len; i++) payload[i] = b[start + i] ^ key[i & 3];
+      c.buf = b.subarray(start + len);
+      if (control) controlFrame(c, op, payload);
+      else {
+        if (!c.msg) c.msg = { parts: [], size: 0 };
+        c.msg.parts.push(payload);
+        c.msg.size += len;
+        if (fin) { const whole = Buffer.concat(c.msg.parts); c.msg = null; message(c, whole); }
+      }
+    }
+  }
+
+  function controlFrame(c, op, payload) {
+    if (op === 8) { // a close: never counted; answered with a close and the socket ended
+      try { c.socket.end(closeFrame(payload.length >= 2 ? payload.readUInt16BE(0) : null)); } catch { /* gone */ }
+      c.open = false;
+      leave(c);
+      return;
+    }
+    if (op === 10) { c.messages += 1; c.unanswered = 0; return; } // a pong frame
+    if (!counted(c)) return;
+    write(c, encodeFrame(payload, { opcode: 10 }));
+  }
+
+  function message(c, buf) {
+    let m;
+    try { m = JSON.parse(utf8(buf)); } catch { return kill(c, 1008); }
+    if (!isObj(m)) return kill(c, 1008);
+    if (!counted(c)) return undefined;
+    if (m.t === 'edit') return edit(c, m);
+    if (m.t === 'select') return select(c, m);
+    if (m.t === 'pong') { c.unanswered = 0; return undefined; }
+    return undefined; // any other t is ignored
+  }
+
+  // §5: the seq book, then the whole-edit judgement; an applied edit to every connection, a refusal to its sender.
+  function edit(c, m) {
+    if (typeof m.client !== 'string' || !CLIENT_RE.test(m.client) || !safeInt(m.seq, 1)) return kill(c, 1008);
+    const cv = c.cv;
+    const by = { id: c.who.id, name: c.who.name, via: 'page' };
+    const ack = { client: m.client, seq: m.seq };
+    const j = cv.book.judge(m.client, m.seq);
+    if (j === 'reack') return send(c, { t: 'ops', rev: cv.doc.rev, by, ack, ops: [] });
+    if (isObj(j)) return send(c, { t: 'refused', client: m.client, seq: m.seq, why: j.refused });
+    const r = applyEdit(cv.doc, m.ops, { ...folderOf(cv.slug), level: c.who.level });
+    cv.book.record(m.client, m.seq, r.why);
+    if (r.why) return send(c, { t: 'refused', client: m.client, seq: m.seq, why: r.why });
+    cv.doc = r.doc;
+    toAll(cv, { t: 'ops', rev: cv.doc.rev, by, ack, ops: m.ops });
+    savedWindow(cv);
+    dropDeleted(cv);
+    return undefined;
+  }
+
+  // §5: at most 100 ids of the id class, else ignored; ids naming no node dropped; the person's latest.
+  function select(c, m) {
+    if (!Array.isArray(m.ids) || m.ids.length > LIMITS.selectIds || !m.ids.every((x) => typeof x === 'string' && NODE_ID_RE.test(x))) return;
+    const cv = c.cv;
+    const ids = [...new Set(m.ids)].filter((id) => own(cv.doc.nodes, id));
+    const p = cv.people.get(c.who.id);
+    if (!p || sameList(p.ids, ids)) return;
+    p.ids = ids;
+    selectionsChanged(cv);
+  }
+
+  // ---- the routes (§8) ----
+
+  function reply(res, status, body = null, headers = {}) {
+    const json = body !== null && !Buffer.isBuffer(body);
+    const b = body === null ? Buffer.alloc(0) : json ? Buffer.from(JSON.stringify(body)) : body;
+    const h = { ...(json ? { 'Content-Type': 'application/json' } : {}), ...headers, 'Content-Length': b.length };
+    res.writeHead(status, STATUS[status], h);
+    res.end(b);
+  }
+  // A refusal before the body is read: the connection closes after it.
+  const early = (res, status, body = null) => reply(res, status, body, { Connection: 'close' });
+  const declared = (req) => (req.headers['content-length'] === undefined ? 0 : Number(req.headers['content-length']));
+  // The body, or null once it passes `limit` (it stops being kept).
+  function readBody(req, limit) {
+    return new Promise((resolve, reject) => {
+      const parts = [];
+      let n = 0;
+      let over = false;
+      req.on('data', (d) => {
+        if (over) return;
+        n += d.length;
+        if (n > limit) { over = true; parts.length = 0; resolve(null); return; }
+        parts.push(d);
+      });
+      req.on('end', () => { if (!over) resolve(Buffer.concat(parts)); });
+      req.on('error', reject);
+    });
+  }
+  const jsonOf = (buf) => { try { return { v: JSON.parse(utf8(buf)) }; } catch { return null; } };
+
+  function docRoute(req, res, q) {
+    const g = dataGuard(req);
+    if (g) return reply(res, g);
+    const slug = q.get('slug');
+    const at = q.get('at');
+    const repoOut = { name: repo.name ?? null, public: repo.public ?? null };
+    if (at === 'main') {
+      const d = slug === null ? null : mains.get(slug);
+      if (!d) return reply(res, 404);
+      return reply(res, 200, { session: null, rev: d.rev, doc: d, repo: repoOut });
+    }
+    const cv = at === null && slug !== null ? live.get(slug) : null;
+    if (!cv) return reply(res, 404);
+    return reply(res, 200, { session: cv.session, rev: cv.doc.rev, doc: cv.doc, repo: repoOut });
+  }
+
+  async function imagePost(req, res, q) {
+    const g = ownerGuard(req);
+    if (g) return early(res, g);
+    if (declared(req) > LIMITS.imageBodyBytes) return early(res, 413);
+    const body = await readBody(req, LIMITS.imageBodyBytes);
+    if (!body) return early(res, 413);
+    const slug = q.get('slug');
+    const cv = slug === null ? null : live.get(slug);
+    if (!cv && landed.has(slug)) return reply(res, 423);
+    if (!cv) return reply(res, 404);
+    const j = jsonOf(body);
+    const v = j && j.v;
+    if (!exactKeys(v, ['name', 'data']) || typeof v.name !== 'string' || v.name.length === 0 || SIMPLE.name(v.name)
+      || typeof v.data !== 'string' || v.data.length === 0 || !base64Ok(v.data)) return reply(res, 400);
+    const bytes = Buffer.from(v.data, 'base64');
+    if (bytes.length > LIMITS.imageBytes) return reply(res, 413);
+    const ext = sniff(bytes);
+    if (!ext) return reply(res, 415);
+    const file = `${crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16)}.${ext}`;
+    const have = filesOf(slug);
+    const add = have.has(file) ? 0 : bytes.length;
+    if (writtenBytes(cv.doc) + folderOf(slug).folderBytes + add > LIMITS.folderBytes) return reply(res, 413);
+    have.set(file, bytes);
+    return reply(res, 200, { src: `images/${file}` });
+  }
+
+  function imageGet(req, res, rawPath) {
+    const g = dataGuard(req);
+    if (g) return reply(res, g);
+    // nothing from the URL is joined to a path unless it matches: the raw path, undecoded
+    const rest = rawPath.slice('/api/canvas/image/'.length).split('/');
+    if (rest.length !== 2 || !SLUG_RE.test(rest[0]) || !IMAGE_FILE_RE.test(rest[1])) return reply(res, 404);
+    const [slug, file] = rest;
+    const b = live.has(slug) || mains.has(slug) ? filesOf(slug).get(file) : undefined;
+    if (!b) return reply(res, 404);
+    return reply(res, 200, b, { 'Content-Type': IMAGE_TYPES[file.split('.')[1]], 'X-Content-Type-Options': 'nosniff' });
+  }
+
+  // A local apply's runs: consecutive ops whose `ops` message fits 1 MB, or null when one op alone passes it.
+  function runsOf(base, by, ops) {
+    const head = (rev) => Buffer.byteLength(JSON.stringify({ t: 'ops', rev, by, ack: null, ops: [] }));
+    const runs = [];
+    let cur = [];
+    let bytes = 0;
+    for (const op of ops) {
+      const n = Buffer.byteLength(JSON.stringify(op));
+      const rev = base + runs.length + 1;
+      if (cur.length && head(rev) + bytes + 1 + n <= LIMITS.serverMsgBytes) { cur.push(op); bytes += 1 + n; continue; }
+      if (cur.length) runs.push(cur);
+      if (head(base + runs.length + 1) + n > LIMITS.serverMsgBytes) return null;
+      cur = [op];
+      bytes = n;
+    }
+    if (cur.length) runs.push(cur);
+    return runs;
+  }
+
+  async function localRoute(req, res, q) {
+    if (!hostOk(req)) return early(res, 403);
+    for (const h of ['origin', 'sec-fetch-site', 'x-devteam-relay', 'x-devteam-person', 'x-devteam-level']) if (rawValues(req, h).length) return early(res, 403);
+    const tk = rawValues(req, 'x-devteam-canvas-token');
+    if (tk.length !== 1 || tk[0] !== token) return early(res, 403);
+    if (declared(req) > LIMITS.localBodyBytes) return early(res, 413);
+    const body = await readBody(req, LIMITS.localBodyBytes);
+    if (!body) return early(res, 413);
+    const slug = q.get('slug');
+    const cv = slug === null ? null : live.get(slug);
+    if (!cv && landed.has(slug)) return reply(res, 423, { why: 'closed' });
+    if (!cv) return reply(res, 404);
+    if (!cv.open) return reply(res, 503, { why: 'no-session' });
+    const j = jsonOf(body);
+    const v = j && j.v;
+    if (!exactKeys(v, ['by', 'via', 'ops']) || typeof v.by !== 'string' || !BY_RE.test(v.by) || (v.via !== 'apply' && v.via !== 'take') || !Array.isArray(v.ops)) return reply(res, 400);
+    // one judgement, then one change, sent as consecutive ops messages before any other edit is taken
+    const r = applyEdit(cv.doc, v.ops, { ...folderOf(slug), maxOpsBytes: null });
+    if (r.why) return reply(res, 409, { why: r.why });
+    const by = { id: v.by, name: v.by, via: v.via };
+    const base = cv.doc.rev;
+    const runs = runsOf(base, by, v.ops);
+    if (!runs) return reply(res, 409, { why: 'limit' });
+    cv.doc = r.doc;
+    cv.doc.rev = base + runs.length;
+    runs.forEach((ops, i) => toAll(cv, { t: 'ops', rev: base + i + 1, by, ack: null, ops }));
+    dropDeleted(cv);
+    // the answer waits for the disk: written at once, unless saving is paused
+    if (cv.paused) return reply(res, 200, { rev: cv.doc.rev, edits: runs.length, saved: false });
+    writeSaved(cv);
+    return reply(res, 200, { rev: cv.doc.rev, edits: runs.length, saved: true });
+  }
+
+  async function importRoute(req, res) {
+    const g = ownerGuard(req);
+    if (g) return early(res, g);
+    if (declared(req) > LIMITS.importBodyBytes) return early(res, 413);
+    if (!await readBody(req, LIMITS.importBodyBytes)) return early(res, 413);
+    return reply(res, 501);
+  }
+
+  async function handle(req, res) {
+    const raw = req.url.split('?')[0];
+    const u = urlOf(req.url);
+    const q = u ? u.searchParams : new URLSearchParams();
+    if (raw === '/canvas') return reply(res, guardSocket(req, false));
+    if (req.method === 'GET' && raw === '/api/canvas/doc') return docRoute(req, res, q);
+    if (req.method === 'POST' && raw === '/api/canvas/image') return imagePost(req, res, q);
+    if (req.method === 'GET' && raw.startsWith('/api/canvas/image/')) return imageGet(req, res, raw);
+    if (req.method === 'POST' && raw === '/api/canvas/local') return localRoute(req, res, q);
+    if (req.method === 'POST' && raw === '/api/canvas/import') return importRoute(req, res);
+    if (serve) return serve(req, res);
+    return reply(res, 404); // export, edit and the rest: later tickets'
+  }
+
+  const server = http.createServer((req, res) => {
+    Promise.resolve().then(() => handle(req, res)).catch(() => {
+      try { if (!res.headersSent) early(res, 500); else res.destroy(); } catch { /* gone */ }
+    });
+  });
+  server.on('connection', (s) => { sockets.add(s); s.on('close', () => sockets.delete(s)); });
+  server.on('upgrade', (req, socket, head) => {
+    socket.on('error', () => {});
+    try {
+      const r = guardSocket(req, true);
+      if (typeof r === 'number') {
+        socket.end(`HTTP/1.1 ${r} ${STATUS[r]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+        return;
+      }
+      accept(req, socket, head, r.who, r.cv);
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  port = server.address().port;
+
+  const need = (slug) => {
+    const cv = live.get(slug);
+    if (!cv) throw new Error(`no canvas ${JSON.stringify(slug)} open for editing`);
+    return cv;
+  };
+  // §5's closed: the message, then a close with 1000; the slug is no longer open for editing.
+  function closeCanvas(cv, why) {
+    live.delete(cv.slug);
+    cancelWindows(cv);
+    for (const c of [...cv.conns]) { send(c, { t: 'closed', why }); kill(c, 1000); }
+  }
+
+  return {
+    url: `http://127.0.0.1:${port}`,
+    port,
+    token,
+    async close() {
+      clk.stop();
+      for (const c of conns) c.open = false;
+      conns.clear();
+      for (const s of sockets) s.destroy();
+      await new Promise((r) => server.close(() => r()));
+    },
+    doc(slug) { const d = live.has(slug) ? live.get(slug).doc : mains.get(slug); return d === undefined ? undefined : structuredClone(d); },
+    rev: (slug) => need(slug).doc.rev,
+    session: (slug) => need(slug).session,
+    save(slug) { writeSaved(need(slug)); },
+    pause(slug, why = 'branch-moved') {
+      if (!PAUSE_WHYS.includes(why)) throw new Error(`pause: why one of ${PAUSE_WHYS.join(', ')}`);
+      const cv = need(slug);
+      cv.paused = why;
+      if (cv.savedCancel) { cv.savedCancel(); cv.savedCancel = null; }
+      toAll(cv, { t: 'paused', why });
+    },
+    resume(slug) {
+      const cv = need(slug);
+      cv.paused = null;
+      toAll(cv, { t: 'resumed' });
+      if (unsaved(cv)) writeSaved(cv);
+    },
+    // §5: the document replaced whole (it is the file now): rev the old one plus one, a new session on
+    // the open connections, every client's seq forgotten.
+    replace(slug, doc) {
+      const cv = need(slug);
+      const d = { ...structuredClone(doc), rev: cv.doc.rev + 1 };
+      valid(slug, d, 'replace');
+      if (cv.savedCancel) { cv.savedCancel(); cv.savedCancel = null; }
+      cv.doc = d;
+      cv.saved = structuredClone(d);
+      cv.session = newSession();
+      cv.book = makeSeqBook();
+      toAll(cv, { t: 'reload', session: cv.session });
+      dropDeleted(cv);
+    },
+    land(slug) {
+      const cv = need(slug);
+      mains.set(slug, structuredClone(cv.doc));
+      landed.add(slug);
+      closeCanvas(cv, 'landed');
+    },
+    remove(slug) { closeCanvas(need(slug), 'removed'); },
+    // Every connection closed 1012, the canvas back to its last saved document, a new session id.
+    restart(slug) {
+      const cv = need(slug);
+      for (const c of [...cv.conns]) kill(c, 1012);
+      cancelWindows(cv);
+      cv.doc = structuredClone(cv.saved);
+      cv.people.clear();
+      cv.open = false;
+      cv.session = newSession();
+      cv.book = makeSeqBook();
+    },
+    stats: () => [...conns].map((c) => ({ conn: c.conn, id: c.who.id, slug: c.slug, messages: c.messages })),
+    tick(ms) {
+      if (clock !== 'manual') throw new Error('tick(ms) is for the manual clock only');
+      return clk.tick(ms);
+    },
+  };
+}
+
+// ---- the client (§14) ----
+
+// The request lines: `base` unless `headers` names one (null leaves it out, an array repeats it).
+function headerLines(base, headers) {
+  const given = new Set(Object.keys(headers).map((k) => k.toLowerCase()));
+  const lines = base.filter(([k]) => !given.has(k.toLowerCase())).map(([k, v]) => `${k}: ${v}`);
+  for (const [k, v] of Object.entries(headers)) if (v != null) for (const x of [].concat(v)) lines.push(`${k}: ${x}`);
+  return lines;
+}
+// host, port and the raw path of `url`, which is never normalised (so `..` and `%2e` reach the server).
+function splitUrl(url) {
+  const m = /^http:\/\/([^/?#]+)([^#]*)$/.exec(url);
+  if (!m) throw new Error(`not an http URL: ${url}`);
+  const [hostname, port] = m[1].split(':');
+  return { hostname, port: Number(port || 80), rest: m[2] || '/' };
+}
+
+// A WebSocket client over `net` for the fake (or a real server): openPresence's, with `slug` as the
+// query and continuation frames joined into one message. It resolves on whichever comes first: a
+// non-101 status, `welcome`, or the socket closing. `headers` adds or overrides request headers (null
+// leaves one out, an array repeats it); `origin: null` sends none; `keep: false` keeps only frame sizes
+// after welcome. `frames` lists each frame read ({ opcode, fin, len }).
+export function openCanvas(url, { slug, headers = {}, origin, host, keep = true } = {}) {
+  const u = splitUrl(url);
+  const port = u.port;
+  const hostH = host ?? `127.0.0.1:${port}`;
+  const originH = origin === undefined ? `http://${hostH}` : origin;
+  const q = u.rest.indexOf('?');
+  const pathname = q < 0 ? u.rest : u.rest.slice(0, q);
+  const search = q < 0 ? '' : u.rest.slice(q);
+  const where = `${pathname && pathname !== '/' ? pathname : '/canvas'}${search || (slug === undefined ? '' : `?slug=${slug}`)}`;
+  const key = crypto.randomBytes(16).toString('base64');
+  const base = [['Host', hostH], ['Upgrade', 'websocket'], ['Connection', 'Upgrade'], ['Sec-WebSocket-Key', key], ['Sec-WebSocket-Version', '13']];
+  if (originH !== null) base.push(['Origin', originH]);
+  const lines = headerLines(base, headers);
+
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: u.hostname, port });
+    sock.setNoDelay(true);
+    sock.on('error', () => {});
+    let buf = Buffer.alloc(0);
+    let shook = false;
+    let settled = false;
+    let code = null;
+    let parts = null; // the fragments of a message not yet whole
+    let closedResolve;
+    const returned = new Set();
+    const waiters = [];
+    const c = {
+      status: undefined, headers: {}, key, you: undefined, messages: [], sizes: [], frames: [], controls: [],
+      closed: new Promise((r) => { closedResolve = r; }),
+      build: (bytes, opts = {}) => encodeFrame(bytes, { mask: true, ...opts }),
+      raw: (bytes) => { if (!sock.destroyed) sock.write(Buffer.from(bytes)); },
+      frame: (bytes, opts = {}) => c.raw(c.build(bytes, opts)),
+      send: (obj) => c.frame(Buffer.from(JSON.stringify(obj))),
+      close(closeCode = 1000) { const b = Buffer.alloc(2); b.writeUInt16BE(closeCode); c.raw(c.build(b, { opcode: 8 })); sock.end(); },
+      destroy: () => sock.destroy(),
+      next(pred, ms = 2000) {
+        const test = (m) => { try { return pred(m); } catch { return false; } };
+        for (let i = 0; i < c.messages.length; i++) {
+          if (!returned.has(i) && test(c.messages[i])) { returned.add(i); return Promise.resolve(c.messages[i]); }
+        }
+        return new Promise((res, rej) => {
+          const w = { test, res, timer: null };
+          w.timer = setTimeout(() => { waiters.splice(waiters.indexOf(w), 1); rej(new Error(`next: no matching message in ${ms} ms`)); }, ms);
+          waiters.push(w);
+        });
+      },
+    };
+    const done = () => { if (!settled) { settled = true; resolve(c); } };
+    function got(m) {
+      const i = c.messages.push(m) - 1;
+      for (const w of [...waiters]) {
+        if (!returned.has(i) && w.test(m)) { returned.add(i); clearTimeout(w.timer); waiters.splice(waiters.indexOf(w), 1); w.res(m); }
+      }
+    }
+    function frames() {
+      while (buf.length >= 2) {
+        const fin = (buf[0] & 0x80) !== 0;
+        const op = buf[0] & 0x0f;
+        const l7 = buf[1] & 0x7f;
+        const masked = (buf[1] & 0x80) !== 0;
+        let off = 2;
+        let len = l7;
+        if (l7 === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; }
+        if (l7 === 127) { if (buf.length < 10) return; len = buf.readUInt32BE(2) * 2 ** 32 + buf.readUInt32BE(6); off = 10; }
+        const mk = masked ? buf.subarray(off, off + 4) : null;
+        if (masked) off += 4;
+        if (buf.length < off + len) return;
+        const p = Buffer.from(buf.subarray(off, off + len));
+        if (mk) for (let i = 0; i < p.length; i++) p[i] ^= mk[i & 3];
+        buf = buf.subarray(off + len);
+        c.sizes.push(len);
+        c.frames.push({ opcode: op, fin, len });
+        if (op === 1 || op === 0) {
+          if (op === 1) parts = [p]; else if (parts) parts.push(p);
+          if (fin && parts) {
+            const whole = parts.length === 1 ? parts[0] : Buffer.concat(parts);
+            parts = null;
+            if (keep || c.you === undefined) {
+              const m = JSON.parse(whole.toString('utf8'));
+              got(m);
+              if (c.you === undefined && m.t === 'welcome') { c.you = m.you; done(); }
+            }
+          }
+        } else if (op === 8) {
+          code = p.length >= 2 ? p.readUInt16BE(0) : 1005;
+          sock.end();
+        } else c.controls.push({ opcode: op, payload: p });
+      }
+    }
+    sock.on('connect', () => sock.write(`GET ${where} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`));
+    sock.on('data', (d) => {
+      buf = buf.length ? Buffer.concat([buf, d]) : d;
+      if (!shook) {
+        const i = buf.indexOf('\r\n\r\n');
+        if (i < 0) return;
+        const [first, ...rest] = buf.subarray(0, i).toString('latin1').split('\r\n');
+        c.status = Number(first.split(' ')[1]);
+        for (const line of rest) { const j = line.indexOf(':'); if (j > 0) c.headers[line.slice(0, j).trim().toLowerCase()] = line.slice(j + 1).trim(); }
+        buf = buf.subarray(i + 4);
+        shook = true;
+        if (c.status !== 101) { done(); return; }
+      }
+      frames();
+    });
+    sock.on('close', () => { closedResolve(code ?? 1006); done(); });
+  });
+}
+
+// An HTTP/1.1 request over `net`, so a test can declare a `contentLength` it doesn't send (the body is
+// sent only when given). `body`: a Buffer or string as is, anything else as JSON. `headers` adds or
+// overrides (null leaves one out). Resolves { status, headers, body (Buffer), json (parsed when the
+// response says application/json, else undefined) }.
+export function request(url, { method = 'GET', headers = {}, body, contentLength } = {}) {
+  const u = splitUrl(url);
+  const b = body === undefined || body === null ? null : Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+  const base = [['Host', `127.0.0.1:${u.port}`], ['Connection', 'close']];
+  const len = contentLength ?? (b ? b.length : null);
+  if (len !== null) base.push(['Content-Length', String(len)]);
+  const lines = headerLines(base, headers);
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host: u.hostname, port: u.port });
+    let buf = Buffer.alloc(0);
+    let head = null;
+    let finished = false;
+    const finish = (out) => {
+      if (finished) return;
+      finished = true;
+      sock.destroy();
+      const json = /application\/json/.test(head.headers['content-type'] || '') ? JSON.parse(out.toString('utf8')) : undefined;
+      resolve({ status: head.status, headers: head.headers, body: out, json });
+    };
+    // A chunked body, or null while it is incomplete.
+    const unchunk = (x) => {
+      const out = [];
+      let i = 0;
+      for (;;) {
+        const j = x.indexOf('\r\n', i);
+        if (j < 0) return null;
+        const n = parseInt(x.subarray(i, j).toString('latin1'), 16);
+        if (n === 0) return Buffer.concat(out);
+        if (x.length < j + 2 + n + 2) return null;
+        out.push(x.subarray(j + 2, j + 2 + n));
+        i = j + 2 + n + 2;
+      }
+    };
+    function tryFinish(atClose) {
+      if (!head) {
+        const i = buf.indexOf('\r\n\r\n');
+        if (i < 0) return;
+        const [first, ...rest] = buf.subarray(0, i).toString('latin1').split('\r\n');
+        const hs = {};
+        for (const line of rest) { const j = line.indexOf(':'); if (j > 0) hs[line.slice(0, j).trim().toLowerCase()] = line.slice(j + 1).trim(); }
+        head = { status: Number(first.split(' ')[1]), headers: hs };
+        buf = buf.subarray(i + 4);
+      }
+      const h = head.headers;
+      if (h['content-length'] !== undefined) {
+        const n = Number(h['content-length']);
+        if (buf.length >= n) finish(buf.subarray(0, n));
+      } else if (/chunked/i.test(h['transfer-encoding'] || '')) {
+        const out = unchunk(buf);
+        if (out) finish(out);
+      } else if (atClose) finish(buf);
+    }
+    sock.on('connect', () => {
+      sock.write(`${method} ${u.rest} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`);
+      if (b) sock.write(b);
+    });
+    sock.on('data', (d) => {
+      buf = buf.length ? Buffer.concat([buf, d]) : d;
+      try { tryFinish(false); } catch (e) { finished = true; sock.destroy(); reject(e); }
+    });
+    // an early answer (a 413 from Content-Length) may close the socket while a body is still going out
+    sock.on('error', () => {});
+    sock.on('close', () => {
+      if (finished) return;
+      try { if (head || buf.length) tryFinish(true); } catch (e) { finished = true; reject(e); return; }
+      if (!finished) { finished = true; reject(new Error(`request ${method} ${u.rest}: closed with no whole response`)); }
+    });
+  });
+}
+
+// ---- the HTTP fixtures (§14) ----
+
+const HTTP_FIXTURE_KEYS = ['fake', 'request', 'status', 'requestKind', 'responseKind'];
+const FAKE_FIXTURE_KEYS = ['canvases', 'main', 'images', 'folderBytes', 'repo', 'ownerName', 'token', 'clock'];
+// The fake's options from a fixture's `fake`: documents and images named by fixture file.
+function fixtureOptions(fake, fixturesDir) {
+  const out = { clock: 'manual' };
+  const readDoc = (f) => JSON.parse(fs.readFileSync(path.join(fixturesDir, f), 'utf8'));
+  for (const k of Object.keys(fake)) {
+    if (!FAKE_FIXTURE_KEYS.includes(k)) throw new Error(`fake: an option ${JSON.stringify(k)} a fixture can't give`);
+    if (k === 'canvases' || k === 'main') out[k] = Object.fromEntries(Object.entries(fake[k]).map(([slug, f]) => [slug, readDoc(f)]));
+    else if (k === 'images') out[k] = Object.fromEntries(Object.entries(fake[k]).map(([slug, names]) => [slug, Object.fromEntries(names.map((n) => [n, fs.readFileSync(path.join(fixturesDir, 'images', n))]))]));
+    else out[k] = fake[k];
+  }
+  return out;
+}
+
+// Plays one http-<route key>-<case>.json: starts the fake, sends the request, checks the status, the
+// request's and response's kinds by shapeErrors, and the response body exactly when given. In the
+// request's headers `"$origin"` is the fake's own origin, `http://<Host>`.
+export async function playHttp(file, { fixturesDir }) {
+  const where = path.isAbsolute(file) ? file : path.join(fixturesDir, file);
+  const name = path.basename(where);
+  const fx = JSON.parse(fs.readFileSync(where, 'utf8'));
+  assert.ok(isObj(fx), `${name}: an object`);
+  for (const k of HTTP_FIXTURE_KEYS) assert.ok(own(fx, k), `${name}: has ${k}`);
+  for (const k of Object.keys(fx)) assert.ok([...HTTP_FIXTURE_KEYS, 'response'].includes(k), `${name}: no key ${k}`);
+  const r = fx.request;
+  assert.ok(isObj(r) && typeof r.method === 'string' && typeof r.path === 'string' && r.path.startsWith('/') && isObj(r.headers), `${name}: request { method, path, headers }`);
+  for (const k of Object.keys(r)) assert.ok(['method', 'path', 'headers', 'body', 'contentLength'].includes(k), `${name}: request has no key ${k}`);
+  for (const k of ['requestKind', 'responseKind']) assert.ok(fx[k] === null || HTTP_KINDS.includes(fx[k]), `${name}: ${k} an HTTP_KINDS entry or null`);
+  if (fx.requestKind !== null) {
+    assert.ok(own(r, 'body'), `${name}: a requestKind with a body`);
+    assert.deepEqual(shapeErrors(fx.requestKind, r.body), [], `${name}: the request holds to ${fx.requestKind}`);
+  }
+  if (own(fx, 'response')) assert.notEqual(fx.responseKind, null, `${name}: a response has a responseKind`);
+  const fake = await startCanvasFake(fixtureOptions(fx.fake, fixturesDir));
+  try {
+    const headers = {};
+    for (const [k, v] of Object.entries(r.headers)) headers[k] = v === '$origin' ? `http://127.0.0.1:${fake.port}` : v;
+    const res = await request(`${fake.url}${r.path}`, { method: r.method, headers, body: r.body, contentLength: r.contentLength });
+    assert.equal(res.status, fx.status, `${name}: status`);
+    if (fx.responseKind === null) {
+      assert.equal(res.json, undefined, `${name}: no JSON body`);
+      return;
+    }
+    assert.notEqual(res.json, undefined, `${name}: a JSON body`);
+    assert.deepEqual(shapeErrors(fx.responseKind, res.json), [], `${name}: the response holds to ${fx.responseKind}`);
+    if (own(fx, 'response')) assert.deepEqual(res.json, fx.response, `${name}: the response`);
+  } finally {
+    await fake.close();
+  }
+}

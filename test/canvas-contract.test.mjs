@@ -7,12 +7,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   TYPES, PROPS, CLASSES, TOKEN_TYPES, DOC_RULES, OPS, PAGE_KINDS, SERVER_KINDS, HTTP_KINDS, REFUSALS, ROUTES, LIMITS, LIMIT_ANSWERS, RANGES,
   NODE_ID_RE, SLUG_RE, CLIENT_RE, SESSION_RE, BY_RE, IMAGE_FILE_RE, HOSTILE_MARKERS, PAUSE_WHYS, CLOSE_WHYS,
   docErrors, opErrors, applyEdit, resolve, makeSeqBook, shapeErrors, freeTexts, skipProblems, measureProblems, SKIP_CASES, MEASURE_CASES,
+  startCanvasFake, openCanvas, request, playHttp,
 } from './lib/canvas-fake.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -345,6 +347,491 @@ function tokenTypesOf(tokens) {
   return out;
 }
 const FREE_KINDS = ['page-name', 'node-name', 'text', 'prop-default', 'prop-value', 'variant-text', 'override-text'];
+
+// ---- the fake (startCanvasFake), its client (openCanvas) and request ----
+// Timing runs on the manual clock. Every wait is `next`, `closed`, or polling with a deadline; a
+// "never" ends on a round trip (a ping frame answered after everything the fake wrote before it).
+
+const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const SLUG = 'board';
+const PNG_NAME = '429be16d0a91e377.png';
+const pngBytes = () => fs.readFileSync(path.join(FIX, 'images', PNG_NAME));
+const P = (id, name = 'Ann Lee') => ({ 'x-devteam-person': `${id};name=${encodeURIComponent(name)}` });
+const PV = (id, name = 'Vi') => ({ ...P(id, name), 'x-devteam-level': 'view' });
+const W = (d) => Buffer.byteLength(`${JSON.stringify(d, null, 2)}\n`);
+const hashName = (b, ext) => `${crypto.createHash('sha256').update(b).digest('hex').slice(0, 16)}.${ext}`;
+const IMAGE_BYTES = {
+  png: () => pngBytes(),
+  jpg: () => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from('a jpeg body')]),
+  webp: () => Buffer.concat([Buffer.from('RIFF'), Buffer.from([20, 0, 0, 0]), Buffer.from('WEBPVP8 '), Buffer.alloc(8, 1)]),
+  gif: () => Buffer.concat([Buffer.from('GIF89a'), Buffer.alloc(10, 2)]),
+};
+const MIME = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+
+async function until(fn, what, ms = 5000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = fn();
+    if (v) return v;
+    if (Date.now() > end) assert.fail(`timed out after ${ms} ms: ${what}`);
+    await new Promise((r) => setTimeout(r, 2));
+  }
+}
+// `c`'s close code, failing when no close comes within `ms`.
+async function closedWithin(c, ms = 5000) {
+  let timer;
+  const late = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`not closed within ${ms} ms`)), ms); });
+  try { return await Promise.race([c.closed, late]); } finally { clearTimeout(timer); }
+}
+async function withFake(opts, fn) {
+  const fake = await startCanvasFake({ clock: 'manual', ...opts });
+  try { return await fn(fake); } finally { await fake.close(); }
+}
+const stat = (fake, c) => fake.stats().find((s) => s.conn === c.you.conn);
+const openOn = (fake, opts = {}) => openCanvas(fake.url, { slug: SLUG, ...opts });
+// Everything the fake wrote to `c` before this has arrived once its pong is back.
+let trips = 0;
+async function roundTrip(c) {
+  const tag = `rt-${++trips}`;
+  c.frame(Buffer.from(tag), { opcode: 9 });
+  await until(() => c.controls.some((x) => x.opcode === 10 && x.payload.toString() === tag), `the pong ${tag}`);
+}
+let seqN = 0;
+// Sends an edit; resolves on its ack or its refusal.
+function sendEdit(c, ops, client = CLIENT, seq = ++seqN) {
+  c.send({ t: 'edit', client, seq, ops });
+  const mine = (m) => (m.t === 'ops' && m.ack !== null && m.ack.client === client && m.ack.seq === seq) || (m.t === 'refused' && m.client === client && m.seq === seq);
+  return c.next(mine, 20000);
+}
+const outcome = (m) => (m.t === 'refused' ? m.why : 'applied');
+const originOf = (fake) => `http://127.0.0.1:${fake.port}`;
+// An owner-action POST (image, import), same-origin and JSON unless `headers` says otherwise.
+const post = (fake, route, body, { headers = {}, slug = SLUG, contentLength } = {}) => request(`${fake.url}/api/canvas/${route}?slug=${slug}`, {
+  method: 'POST', headers: { Origin: originOf(fake), 'Content-Type': 'application/json', ...headers }, body, contentLength,
+});
+// The supervisor's local route, with the fake's token unless `headers` says otherwise.
+const local = (fake, body, { headers = {}, slug = SLUG, contentLength } = {}) => request(`${fake.url}/api/canvas/local?slug=${slug}`, {
+  method: 'POST', headers: { 'x-devteam-canvas-token': fake.token, 'Content-Type': 'application/json', ...headers }, body, contentLength,
+});
+const localBody = (ops, by = 'supervisor', via = 'apply') => ({ by, via, ops });
+const setName = (id, value) => ({ op: 'set', id, prop: 'name', value });
+// `buf` cut in `n` pieces.
+const pieces = (buf, n) => { const size = Math.ceil(buf.length / n); return Array.from({ length: n }, (_, i) => buf.subarray(i * size, (i + 1) * size)); };
+// The messages `c` got after `mark`, up to a round trip.
+async function since(c, mark) { await roundTrip(c); return c.messages.slice(mark); }
+const noTicks = (list) => list.filter((m) => m.t !== 'ping');
+// A page holding `nodes` (id -> node, each parented to p1 unless it says otherwise), its children in order.
+function docWith(nodes, extra = {}) {
+  const d = { ...minimal(), ...extra, nodes: {} };
+  for (const [id, n] of Object.entries(nodes)) {
+    d.nodes[id] = { parent: 'p1', ...n };
+    if (d.nodes[id].parent === 'p1') d.pages[0].children.push(id);
+  }
+  for (const [id, n] of Object.entries(d.nodes)) if (n.parent !== 'p1') d.nodes[n.parent].children.push(id);
+  return d;
+}
+const range = (n) => Array.from({ length: n }, (_, i) => i);
+const rectsDoc = (n) => docWith(Object.fromEntries(range(n).map((i) => [`r${i}`, { type: 'rect' }])));
+// A canvas holding `doc` with one owner connection.
+const onCanvas = (doc, fn, opts = {}) => withFake({ canvases: { [SLUG]: doc }, ...opts }, async (fake) => {
+  const c = await openOn(fake);
+  assert.ok(c.you, 'welcomed');
+  return fn(fake, c);
+});
+// Two edits through the fake: the first, at the limit, applies; the second, one over, is refused `why`.
+const atAndOver = (doc, atOps, overOps, why, opts) => onCanvas(doc, async (fake, c) => {
+  assert.equal(outcome(await sendEdit(c, atOps)), 'applied', 'at the limit');
+  assert.equal(outcome(await sendEdit(c, overOps)), why, 'one over');
+}, opts);
+// Opens `n` connections (keep: false) on `slug`, person i its own unless `person` says, each welcomed.
+async function fill(fake, slug, n, person = (i) => `p-${slug}-${i}`) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const c = await openCanvas(fake.url, { slug, headers: P(person(i)), keep: false });
+    assert.ok(c.you, `${slug} connection ${i} welcomed`);
+    out.push(c);
+  }
+  return out;
+}
+// One over: accepted (101), then closed 1008 before welcome.
+async function oneOver(fake, slug, headers, what) {
+  const c = await openCanvas(fake.url, { slug, headers, keep: false });
+  assert.equal(c.status, 101, `${what}: accepted from the handshake`);
+  assert.equal(c.you, undefined, `${what}: no welcome`);
+  assert.equal(await closedWithin(c), 1008, `${what}: closed 1008`);
+}
+const closeAll = (cs) => { for (const c of cs) c.destroy(); };
+// A pong of exactly `n` bytes (an extra key the fake ignores pads it).
+function paddedPong(n) {
+  const m = { t: 'pong', pad: '' };
+  m.pad = 'x'.repeat(n - Buffer.byteLength(JSON.stringify(m)));
+  return Buffer.from(JSON.stringify(m));
+}
+// A vector path of exactly `n` bytes: a move and one long number.
+const pathOfBytes = (n) => `M${'0'.repeat(n - 1)}`;
+const isPing = (m) => m.t === 'ping';
+
+// Each limit of the contract's Limits table, crossed by one against the fake (document limits through an
+// edit on its socket, or the local route where a page's 64 KB can't carry it). A table row with no entry fails.
+const LIMIT_CHECKS = {
+  async docBytes() {
+    // k texts of `full` characters (ids of one width, so each adds the same bytes) fill the document so
+    // that t0000's text of L characters makes it exactly 5 MB as written at rev 1
+    const id = (i) => `t${String(i).padStart(4, '0')}`;
+    const withTexts = (k, full) => {
+      const d = docWith({ [id(0)]: { type: 'text', text: '' } });
+      for (let i = 1; i <= k; i++) { d.nodes[id(i)] = { type: 'text', parent: 'p1', text: 'x'.repeat(full) }; d.pages[0].children.push(id(i)); }
+      return d;
+    };
+    const base = W({ ...withTexts(0, 0), rev: 1 });
+    const per0 = W({ ...withTexts(1, 0), rev: 1 }) - base;
+    let full = LIMITS.textChars;
+    while ((LIMITS.docBytes - base) % (per0 + full) >= LIMITS.textChars) full -= 1;
+    const d = withTexts(Math.floor((LIMITS.docBytes - base) / (per0 + full)), full);
+    const L = LIMITS.docBytes - W({ ...d, rev: 1 });
+    assert.ok(L >= 0 && L < LIMITS.textChars, `t0000 takes the rest (${L})`);
+    const text = (n) => [{ op: 'set', id: id(0), prop: 'text', value: 'x'.repeat(n) }];
+    await atAndOver(d, text(L), text(L + 1), 'limit');
+  },
+  async folderBytes() {
+    const d = minimal();
+    const after = W({ ...d, rev: 1, pages: [{ ...d.pages[0], name: 'a' }] });
+    await atAndOver(d, [setName('p1', 'a')], [setName('p1', 'ab')], 'limit', { folderBytes: { [SLUG]: LIMITS.folderBytes - after } });
+  },
+  async nodes() {
+    const add = (id) => [{ op: 'add', node: { id, type: 'rect', parent: 'p1' }, after: null }];
+    await atAndOver(rectsDoc(LIMITS.nodes - 1), add('last'), add('over'), 'limit');
+  },
+  async pages() {
+    const d = minimal();
+    for (let i = 2; i < LIMITS.pages; i++) d.pages.push({ id: `p${i}`, name: '', children: [] });
+    const add = (id) => [{ op: 'add', node: { id, type: 'page', parent: null, name: id }, after: null }];
+    await atAndOver(d, add('plast'), add('pover'), 'limit');
+  },
+  async tokens() {
+    const g = {};
+    for (let i = 0; i < LIMITS.tokens - 1; i++) g[`t${i}`] = { $type: 'number', $value: i };
+    const tok = (p) => [{ op: 'token', path: p, value: { $type: 'number', $value: 1 } }];
+    await atAndOver({ ...minimal(), tokens: { g } }, tok('g.last'), tok('g.over'), 'limit');
+  },
+  async tokenDepth() {
+    const tok = (p) => [{ op: 'token', path: p, value: { $type: 'number', $value: 1 } }];
+    await atAndOver(minimal(), tok(range(LIMITS.tokenDepth).map((i) => `a${i}`).join('.')), tok(range(LIMITS.tokenDepth + 1).map((i) => `b${i}`).join('.')), 'limit');
+  },
+  async depth() {
+    const chain = {};
+    for (let i = 1; i < LIMITS.depth; i++) chain[`f${i}`] = { type: 'frame', parent: i === 1 ? 'p1' : `f${i - 1}`, children: [] };
+    const add = (id, parent) => [{ op: 'add', node: { id, type: 'frame', parent }, after: null }];
+    await atAndOver(docWith(chain), add(`f${LIMITS.depth}`, `f${LIMITS.depth - 1}`), add('deeper', `f${LIMITS.depth}`), 'limit');
+  },
+  async overrideEntries() {
+    const nodes = { c: { type: 'component', children: [] } };
+    for (let i = 0; i <= LIMITS.overrideEntries; i++) nodes[`r${i}`] = { type: 'rect', parent: 'c' };
+    nodes.i = { type: 'instance', component: 'c', overrides: Object.fromEntries(range(LIMITS.overrideEntries - 1).map((k) => [`r${k}`, { visible: false }])) };
+    const ov = (k) => [{ op: 'set', id: 'i', prop: `overrides.r${k}.visible`, value: false }];
+    await atAndOver(docWith(nodes), ov(LIMITS.overrideEntries - 1), ov(LIMITS.overrideEntries), 'limit');
+  },
+  async props() {
+    const def = { type: 'bool', default: true, target: { id: 'b', prop: 'visible' } };
+    const props = Object.fromEntries(range(LIMITS.props - 1).map((i) => [`p${i}`, def]));
+    const set = (name) => [{ op: 'set', id: 'c', prop: `props.${name}`, value: def }];
+    await atAndOver(docWith({ c: { type: 'component', children: [], props }, b: { type: 'rect', parent: 'c' } }), set('last'), set('over'), 'limit');
+  },
+  async variants() {
+    const v = { b: { visible: false } };
+    const variants = Object.fromEntries(range(LIMITS.variants - 1).map((i) => [`v${i}`, v]));
+    const set = (name) => [{ op: 'set', id: 'c', prop: `variants.${name}`, value: v }];
+    await atAndOver(docWith({ c: { type: 'component', children: [], variants }, b: { type: 'rect', parent: 'c' } }), set('last'), set('over'), 'limit');
+  },
+  async tracks() {
+    const cols = (n) => [{ op: 'set', id: 'f', prop: 'layout.columns', value: Array(n).fill('auto') }];
+    await atAndOver(docWith({ f: { type: 'frame', children: [] } }), cols(LIMITS.tracks), cols(LIMITS.tracks + 1), 'value');
+  },
+  async idChars() {
+    // a componentRef value: an op's own id over 40 would be a malformed op (shape), §7
+    const C = 'c'.repeat(LIMITS.idChars);
+    const ref = (v) => [{ op: 'set', id: 'i', prop: 'component', value: v }];
+    await atAndOver(docWith({ [C]: { type: 'component', children: [] }, i: { type: 'instance', component: C } }), ref(C), ref(`${C}c`), 'value');
+  },
+  async nameChars() {
+    await atAndOver(docWith({ r: { type: 'rect' } }), [setName('r', 'n'.repeat(LIMITS.nameChars))], [setName('r', 'n'.repeat(LIMITS.nameChars + 1))], 'value');
+  },
+  async textChars() {
+    const text = (n) => [{ op: 'set', id: 't', prop: 'text', value: 'x'.repeat(n) }];
+    await atAndOver(docWith({ t: { type: 'text' } }), text(LIMITS.textChars), text(LIMITS.textChars + 1), 'value');
+  },
+  async pathBytes() {
+    // past a page's 64 KB edit, so by the local route (409 with the code)
+    await onCanvas(docWith({ v: { type: 'vector', path: 'M0 0' } }), async (fake) => {
+      const set = (n) => localBody([{ op: 'set', id: 'v', prop: 'path', value: pathOfBytes(n) }]);
+      assert.equal((await local(fake, set(LIMITS.pathBytes))).status, 200, 'at the limit');
+      const over = await local(fake, set(LIMITS.pathBytes + 1));
+      assert.equal(over.status, 409);
+      assert.deepEqual(over.json, { why: 'value' });
+    });
+  },
+  async figmaChars() {
+    const fig = (n) => [{ op: 'set', id: 'r', prop: 'figma', value: '1'.repeat(n) }];
+    await atAndOver(docWith({ r: { type: 'rect' } }), fig(LIMITS.figmaChars), fig(LIMITS.figmaChars + 1), 'value');
+  },
+  async propNameChars() {
+    // a variantName value: a set path naming a 41-character variant names no property (prop), §7
+    const V = `V${'a'.repeat(LIMITS.propNameChars - 1)}`;
+    const choose = (v) => [{ op: 'set', id: 'i', prop: 'variant', value: v }];
+    const d = docWith({ c: { type: 'component', children: [], variants: { [V]: { b: { visible: false } } } }, b: { type: 'rect', parent: 'c' }, i: { type: 'instance', component: 'c' } });
+    await atAndOver(d, choose(V), choose(`${V}a`), 'value');
+  },
+  async tokenSegmentChars() {
+    // a $ref value: a token op's own path over 40 would be a malformed op (shape), §7
+    const K = 'k'.repeat(LIMITS.tokenSegmentChars);
+    const fillRef = (p) => [{ op: 'set', id: 'r', prop: 'fill', value: { $ref: p } }];
+    const d = docWith({ r: { type: 'rect' } }, { tokens: { [K]: { $type: 'color', $value: { colorSpace: 'srgb', components: [0, 0, 0] } } } });
+    await atAndOver(d, fillRef(K), fillRef(`${K}k`), 'value');
+  },
+  async pageMsgBytes() {
+    await onCanvas(minimal(), async (fake, c) => {
+      c.frame(paddedPong(LIMITS.pageMsgBytes));
+      await until(() => stat(fake, c)?.messages === 1, 'the 256 KB message read');
+      const over = c.build(paddedPong(LIMITS.pageMsgBytes + 1));
+      c.raw(over.subarray(0, 14)); // the header alone: the size is weighed before any payload
+      assert.equal(await closedWithin(c), 1008);
+    });
+  },
+  async pageFrames() {
+    await onCanvas(minimal(), async (fake, c) => {
+      const inFrames = (buf, n) => pieces(buf, n).forEach((p, i) => c.frame(p, { opcode: i === 0 ? 1 : 0, fin: i === n - 1 }));
+      const e = { t: 'edit', client: CLIENT, seq: ++seqN, ops: [setName('p1', 'sixteen frames')] };
+      inFrames(Buffer.from(JSON.stringify(e)), LIMITS.pageFrames);
+      assert.equal(outcome(await c.next((m) => m.t === 'ops' && m.ack.seq === e.seq)), 'applied', '16 frames');
+      inFrames(Buffer.from(JSON.stringify({ ...e, seq: ++seqN })), LIMITS.pageFrames + 1);
+      assert.equal(await closedWithin(c), 1008, 'a 17th frame');
+    });
+  },
+  async editOpsBytes() {
+    const opsOf = (n) => {
+      const ops = range(8).map(() => ({ op: 'set', id: 't', prop: 'text', value: 'x'.repeat(8000) }));
+      ops[7].value = 'x'.repeat(8000 + n - Buffer.byteLength(JSON.stringify(ops)));
+      assert.equal(Buffer.byteLength(JSON.stringify(ops)), n);
+      return ops;
+    };
+    await atAndOver(docWith({ t: { type: 'text' } }), opsOf(LIMITS.editOpsBytes), opsOf(LIMITS.editOpsBytes + 1), 'limit');
+  },
+  async serverMsgBytes() {
+    const P64 = pathOfBytes(LIMITS.pathBytes);
+    const vectors = Object.fromEntries(range(40).map((i) => [`v${i}`, { type: 'vector', path: 'M0 0' }]));
+    await onCanvas(docWith(vectors), async (fake, c) => {
+      const ops = range(40).map((i) => ({ op: 'set', id: `v${i}`, prop: 'path', value: P64 }));
+      const mark = c.messages.length;
+      const r = await local(fake, localBody(ops));
+      assert.equal(r.status, 200);
+      const got = (await since(c, mark)).filter((m) => m.t === 'ops');
+      assert.ok(got.length >= 3, `split in ${got.length} messages`);
+      assert.deepEqual(r.json, { rev: got.length, edits: got.length, saved: true }, 'one rev per message');
+      assert.deepEqual(got.map((m) => m.rev), range(got.length).map((i) => i + 1));
+      for (const m of got) assert.ok(Buffer.byteLength(JSON.stringify(m)) <= LIMITS.serverMsgBytes, 'each message at most 1 MB');
+      assert.deepEqual(got.flatMap((m) => m.ops), ops, 'the runs, in order, are the ops');
+      assert.equal(fake.rev(SLUG), got.length);
+    });
+    // a single op whose message alone passes 1 MB refuses the whole apply
+    const nodes = { k: { type: 'component', children: [] } };
+    for (let i = 0; i < 20; i++) nodes[`w${i}`] = { type: 'vector', parent: 'k', path: 'M0 0' };
+    await onCanvas(docWith(nodes), async (fake, c) => {
+      const big = { op: 'set', id: 'k', prop: 'variants', value: { big: Object.fromEntries(range(20).map((i) => [`w${i}`, { path: P64 }])) } };
+      const mark = c.messages.length;
+      const r = await local(fake, localBody([setName('p1', 'first'), big]));
+      assert.equal(r.status, 409);
+      assert.deepEqual(r.json, { why: 'limit' });
+      assert.deepEqual(noTicks(await since(c, mark)), [], 'no ops sent');
+      assert.equal(fake.rev(SLUG), 0, 'nothing changed');
+    });
+  },
+  async serverFrameBytes() {
+    const P64 = pathOfBytes(LIMITS.pathBytes);
+    const vectors = Object.fromEntries(range(8).map((i) => [`v${i}`, { type: 'vector', path: 'M0 0' }]));
+    await onCanvas(docWith(vectors), async (fake, c) => {
+      const ops = range(8).map((i) => ({ op: 'set', id: `v${i}`, prop: 'path', value: P64 }));
+      const mark = c.frames.length;
+      assert.equal((await local(fake, localBody(ops))).status, 200);
+      const m = await c.next((x) => x.t === 'ops' && x.ops.length === 8);
+      assert.deepEqual(m.ops, ops, 'joined by openCanvas');
+      const fr = c.frames.slice(mark);
+      for (const f of fr) assert.ok(f.len <= LIMITS.serverFrameBytes, 'each frame at most 256 KB');
+      assert.ok(fr.some((f) => f.opcode === 1 && !f.fin) && fr.some((f) => f.opcode === 0 && f.fin), 'a text frame, then continuations');
+    });
+  },
+  async perSecond() {
+    await onCanvas(minimal(), async (fake, c) => {
+      for (let i = 0; i < LIMITS.perSecond; i++) c.send({ t: 'pong' });
+      await until(() => stat(fake, c)?.messages === LIMITS.perSecond, '30 read');
+      await fake.tick(1000);
+      for (let i = 0; i < LIMITS.perSecond; i++) c.send({ t: 'pong' });
+      await until(() => stat(fake, c)?.messages === 2 * LIMITS.perSecond, '30 more, in the next second');
+      c.frame(Buffer.from('31'), { opcode: 9 }); // a ping frame counts too
+      assert.equal(await closedWithin(c), 1008, 'a 31st in a second');
+    });
+  },
+  async perPerson() {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      const cs = await fill(fake, SLUG, LIMITS.perPerson, () => 'p-same');
+      await oneOver(fake, SLUG, P('p-same'), 'a 9th connection of a person');
+      cs.push(...await fill(fake, SLUG, 1, () => 'p-other'));
+      closeAll(cs);
+    });
+  },
+  async perCanvas() {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      const cs = await fill(fake, SLUG, LIMITS.perCanvas);
+      await oneOver(fake, SLUG, P('p-51'), 'a 51st on a canvas');
+      closeAll(cs);
+    });
+  },
+  async openCanvases() {
+    const slugs = range(LIMITS.openCanvases + 1).map((i) => `c${i}`);
+    await withFake({ canvases: Object.fromEntries(slugs.map((s) => [s, minimal()])) }, async (fake) => {
+      const cs = [];
+      for (const s of slugs.slice(0, -1)) cs.push(...await fill(fake, s, 1));
+      await oneOver(fake, slugs[LIMITS.openCanvases], P('p-21'), 'a 21st open canvas');
+      cs.push(...await fill(fake, slugs[0], 1, () => 'p-again'));
+      closeAll(cs);
+    });
+  },
+  async perServer() {
+    const n = LIMITS.perServer / LIMITS.perCanvas;
+    const slugs = range(n + 1).map((i) => `s${i}`);
+    await withFake({ canvases: Object.fromEntries(slugs.map((s) => [s, minimal()])) }, async (fake) => {
+      const cs = [];
+      for (const s of slugs.slice(0, n)) cs.push(...await fill(fake, s, LIMITS.perCanvas));
+      assert.equal(fake.stats().length, LIMITS.perServer);
+      await oneOver(fake, slugs[n], P('p-201'), 'a 201st on the server');
+      closeAll(cs);
+    });
+  },
+  async selectIds() {
+    await onCanvas(rectsDoc(LIMITS.selectIds + 1), async (fake, c) => {
+      const ids = range(LIMITS.selectIds + 1).map((i) => `r${i}`);
+      await fake.tick(LIMITS.selectionsMs);
+      await c.next((m) => m.t === 'selections');
+      c.send({ t: 'select', ids: ids.slice(0, LIMITS.selectIds) });
+      await roundTrip(c);
+      await fake.tick(LIMITS.selectionsMs);
+      const s = await c.next((m) => m.t === 'selections' && m.people[0].ids.length > 0);
+      assert.deepEqual(s.people[0].ids, ids.slice(0, LIMITS.selectIds));
+      const mark = c.messages.length;
+      c.send({ t: 'select', ids });
+      await roundTrip(c);
+      await fake.tick(LIMITS.selectionsMs);
+      assert.deepEqual(await since(c, mark), [], 'a select of 101 ids changes nothing');
+    });
+  },
+  async refusedMemory() {
+    await onCanvas(minimal(), async (fake, c) => {
+      const cl = 'refusedmemory001';
+      const bad = [setName('nope', 'x')];
+      assert.equal(outcome(await sendEdit(c, bad, cl, 1)), 'missing');
+      assert.equal(outcome(await sendEdit(c, [setName('p1', 'a')], cl, 1 + LIMITS.refusedMemory)), 'applied');
+      assert.equal(outcome(await sendEdit(c, bad, cl, 1)), 'missing', 'within 2000 of the highest seen: refused again');
+      assert.equal(outcome(await sendEdit(c, [setName('p1', 'b')], cl, 2 + LIMITS.refusedMemory)), 'applied');
+      const again = await sendEdit(c, bad, cl, 1);
+      assert.deepEqual(again, { t: 'ops', rev: 2, by: { id: 'owner', name: 'Owner', via: 'page' }, ack: { client: cl, seq: 1 }, ops: [] }, '2001 below: forgotten, re-acked');
+    });
+  },
+  async pingMs() {
+    await onCanvas(minimal(), async (fake, c) => {
+      await fake.tick(LIMITS.pingMs - 1);
+      await roundTrip(c);
+      assert.equal(c.messages.filter(isPing).length, 0, 'no ping before 20000 ms');
+      await fake.tick(1);
+      await c.next(isPing);
+    });
+  },
+  async unansweredPings() {
+    await onCanvas(minimal(), async (fake, c) => {
+      for (let i = 1; i <= 3; i++) {
+        await fake.tick(LIMITS.pingMs);
+        await until(() => c.messages.filter(isPing).length === i, `ping ${i}`);
+        c.send({ t: 'pong' });
+        await roundTrip(c);
+      }
+      await fake.tick(LIMITS.pingMs * LIMITS.unansweredPings);
+      await until(() => c.messages.filter(isPing).length === 3 + LIMITS.unansweredPings, 'two pings unanswered');
+      await fake.tick(LIMITS.pingMs);
+      assert.equal(await closedWithin(c), 1001);
+    });
+  },
+  async savedMs() {
+    await onCanvas(minimal(), async (fake, c) => {
+      assert.equal(outcome(await sendEdit(c, [setName('p1', 'a')])), 'applied');
+      await fake.tick(LIMITS.savedMs - 1);
+      await roundTrip(c);
+      assert.equal(c.messages.filter((m) => m.t === 'saved').length, 0, 'not yet');
+      await fake.tick(1);
+      assert.deepEqual(await c.next((m) => m.t === 'saved'), { t: 'saved', rev: 1 });
+    });
+    // the default clock is real: the window closes on its own
+    await onCanvas(minimal(), async (fake, c) => {
+      assert.throws(() => fake.tick(1), /manual clock only/);
+      const t0 = Date.now();
+      assert.equal(outcome(await sendEdit(c, [setName('p1', 'a')])), 'applied');
+      assert.deepEqual(await c.next((m) => m.t === 'saved', 5000), { t: 'saved', rev: 1 });
+      assert.ok(Date.now() - t0 >= LIMITS.savedMs - 50, 'not before the window');
+    }, { clock: 'real' });
+  },
+  async selectionsMs() {
+    await onCanvas(rectsDoc(1), async (fake, c) => {
+      await fake.tick(LIMITS.selectionsMs);
+      assert.deepEqual(await c.next((m) => m.t === 'selections'), { t: 'selections', people: [{ id: 'owner', name: 'Owner', ids: [] }] }, 'a connection is a change');
+      c.send({ t: 'select', ids: ['r0'] });
+      await roundTrip(c);
+      await fake.tick(LIMITS.selectionsMs - 1);
+      const mark = c.messages.length;
+      assert.deepEqual(await since(c, mark), [], 'not yet');
+      await fake.tick(1);
+      assert.deepEqual(await c.next((m) => m.t === 'selections' && m.people[0].ids.length === 1), { t: 'selections', people: [{ id: 'owner', name: 'Owner', ids: ['r0'] }] });
+    });
+  },
+  async imageBytes() {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      const img = (n) => { const b = Buffer.alloc(n, 7); pngBytes().copy(b, 0, 0, 8); return b; };
+      const atBody = { name: 'big.png', data: img(LIMITS.imageBytes).toString('base64') };
+      const overBody = { name: 'big.png', data: img(LIMITS.imageBytes + 1).toString('base64') };
+      assert.deepEqual(shapeErrors('image-request', atBody), [], 'a 4 MB image holds to image-request (a linear base64 check)');
+      assert.ok(shapeErrors('image-request', overBody).some((x) => /over 4194304 bytes/.test(x)), 'one byte over does not');
+      const at = await post(fake, 'image', atBody);
+      assert.equal(at.status, 200, 'a 4 MB image');
+      assert.equal((await post(fake, 'image', overBody)).status, 413, 'one byte over');
+    });
+  },
+  async imageBodyBytes() {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      assert.equal((await post(fake, 'image', null, { contentLength: LIMITS.imageBodyBytes + 1 })).status, 413, 'declared, never sent');
+    });
+  },
+  async localBodyBytes() {
+    await onCanvas(minimal(), async (fake) => {
+      assert.equal((await local(fake, null, { contentLength: LIMITS.localBodyBytes + 1 })).status, 413, 'declared, never sent');
+      assert.equal(fake.rev(SLUG), 0);
+    });
+  },
+  async importBodyBytes() {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      assert.equal((await post(fake, 'import', null, { contentLength: LIMITS.importBodyBytes + 1 })).status, 413, 'declared, never sent');
+      assert.equal((await post(fake, 'import', { key: 'abc' })).status, 501, 'within the limit');
+    });
+  },
+  async byChars() {
+    await onCanvas(minimal(), async (fake) => {
+      assert.equal((await local(fake, localBody([setName('p1', 'a')], 'b'.repeat(LIMITS.byChars)))).status, 200, '64 characters');
+      assert.equal((await local(fake, localBody([setName('p1', 'b')], 'b'.repeat(LIMITS.byChars + 1)))).status, 400, '65');
+    });
+  },
+  async noteAnchorChars() {
+    assert.deepEqual(shapeErrors('note-anchor', { node: 'n'.repeat(LIMITS.noteAnchorChars) }), []);
+    assert.ok(shapeErrors('note-anchor', { node: 'n'.repeat(LIMITS.noteAnchorChars + 1) }).length, 'not an anchor');
+  },
+};
+// The http-<route key>-<case>.json fixtures, and the route each names (the longest key its name starts with).
+const httpFixtures = () => fixtureFiles().filter((f) => (fixtureKind(f) || {}).kind === 'http');
+const routeOf = (f) => ROUTES.filter((r) => f.startsWith(`http-${r.key}-`)).sort((a, b) => b.key.length - a.key.length)[0];
 
 test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one another, and no canvas test skips', async (t) => {
   await t.test('rules: a minimal document is valid', () => {
@@ -1262,6 +1749,432 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     const got = freeTexts(one);
     assert.deepEqual(got.map((f) => f.kind).sort(), [...FREE_KINDS].sort(), 'each kind found, once');
     assert.deepEqual(got.map((f) => f.value).sort(), ['D', 'N', 'O', 'P', 'PV', 'T', 'V']);
+  });
+
+  await t.test('rules: applyEdit takes maxOpsBytes (null for the local route)', () => {
+    const d = docWith({ t: { type: 'text' } });
+    const ops = range(8).map(() => ({ op: 'set', id: 't', prop: 'text', value: 'x'.repeat(9000) }));
+    assert.equal(applyEdit(d, ops).why, 'limit', 'a page edit over 64 KB');
+    assert.equal(applyEdit(d, ops, { maxOpsBytes: null }).why, null, 'unbounded for a local apply');
+    assert.equal(applyEdit(d, [setName('p1', 'abc')], { maxOpsBytes: 10 }).why, 'limit', 'a bound of its own');
+  });
+
+  await t.test('fake: guards in order', async () => {
+    await withFake({ canvases: { [SLUG]: minimal(), gone: minimal() } }, async (fake) => {
+      const { url, port } = fake;
+      const ok = await openOn(fake);
+      assert.equal(ok.status, 101);
+      assert.equal(ok.headers['sec-websocket-accept'], crypto.createHash('sha1').update(ok.key + GUID).digest('base64'));
+      assert.deepEqual(ok.messages[0], { t: 'welcome', canvas: 1, session: fake.session(SLUG), rev: 0, you: { id: 'owner', conn: ok.you.conn } }, 'welcome first');
+      assert.deepEqual(shapeErrors('welcome', ok.messages[0]), []);
+      assert.equal((await openOn(fake, { host: `localhost:${port}` })).status, 101, 'localhost:<port> is a Host');
+      fake.land('gone');
+      const person = (v) => ({ headers: { 'x-devteam-person': v } });
+      const refusals = [
+        [403, 'a foreign Host', { host: `evil.example:${port}` }],
+        [403, 'x-devteam-relay', { headers: { 'x-devteam-relay': '1' } }],
+        [404, 'another path', {}, '/elsewhere'],
+        [400, 'no key', { headers: { 'Sec-WebSocket-Key': null } }],
+        [400, 'version 12', { headers: { 'Sec-WebSocket-Version': '12' } }],
+        [400, 'a key of 15 bytes', { headers: { 'Sec-WebSocket-Key': Buffer.alloc(15, 1).toString('base64') } }],
+        [400, 'no Upgrade: websocket', { headers: { Upgrade: 'h2c' } }],
+        [403, 'no Origin', { origin: null }],
+        [403, 'Origin: null', { origin: 'null' }],
+        [403, 'a foreign Origin', { origin: 'http://evil.example' }],
+        [403, 'an empty name', person('p-a;name=')],
+        [403, 'no ;name=', person('p-a')],
+        [403, 'x-devteam-person twice', { headers: { 'x-devteam-person': ['p-a;name=Ann', 'p-b;name=Bo'] } }],
+        [403, 'x-devteam-level: View', { headers: { ...P('p-a'), 'x-devteam-level': 'View' } }],
+        [403, 'a level with no person', { headers: { 'x-devteam-level': 'view' } }],
+        [404, 'no slug', { slug: undefined }],
+        [404, 'a malformed slug', { slug: 'Bad_Slug' }],
+        [404, 'a slug not open for editing', { slug: 'nope' }],
+        [404, 'a landed slug', { slug: 'gone' }],
+        // the order: the first guard that applies answers
+        [403, 'a foreign Host on another path', { host: `evil.example:${port}` }, '/elsewhere'],
+        [403, 'the relay mark on another path', { headers: { 'x-devteam-relay': '1' } }, '/elsewhere'],
+        [404, 'another path with no key', { headers: { 'Sec-WebSocket-Key': null } }, '/elsewhere'],
+        [400, 'no key and no Origin', { headers: { 'Sec-WebSocket-Key': null }, origin: null }],
+        [400, 'no key and an unknown slug', { headers: { 'Sec-WebSocket-Key': null }, slug: 'nope' }],
+        [403, 'no Origin and an unknown slug', { origin: null, slug: 'nope' }],
+        [403, 'a bad person and an unknown slug', { ...person('p-a'), slug: 'nope' }],
+      ];
+      for (const [status, label, opts, where = ''] of refusals) {
+        const c = await openCanvas(`${url}${where}`, { slug: SLUG, ...opts });
+        assert.equal(c.status, status, label);
+        assert.equal(c.you, undefined, `${label}: no welcome`);
+        assert.deepEqual(c.messages, [], `${label}: no message`);
+      }
+      assert.equal(fake.stats().length, 2, 'only the two accepted connections are open');
+      assert.equal((await request(`${url}/canvas?slug=${SLUG}`)).status, 400, 'a plain GET of /canvas is not an upgrade');
+      const view = await openOn(fake, { headers: PV('p-v') });
+      assert.equal(view.you.id, 'p-v', 'a View person holds a socket');
+    });
+  });
+
+  await t.test('fake: frames and close codes', async () => {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      const editBuf = (name) => Buffer.from(JSON.stringify({ t: 'edit', client: CLIENT, seq: ++seqN, ops: [setName('p1', name)] }));
+      const applied = (c, name) => c.next((m) => m.t === 'ops' && m.ops[0] && m.ops[0].value === name);
+      for (const len of [7, 16, 64]) {
+        const c = await openOn(fake);
+        const b = editBuf(`len${len}`);
+        c.frame(b, { len });
+        await applied(c, `len${len}`);
+      }
+      const cf = await openOn(fake);
+      const [f1, f2, f3] = pieces(editBuf('fragments'), 3);
+      cf.frame(f1, { fin: false });
+      cf.frame(Buffer.from('hi'), { opcode: 9 });
+      cf.frame(f2, { opcode: 0, fin: false });
+      cf.frame(f3, { opcode: 0 });
+      await applied(cf, 'fragments');
+      await until(() => cf.controls.some((x) => x.opcode === 10 && x.payload.toString() === 'hi'), 'a pong of the same payload, between fragments');
+      // a message split across TCP writes, a byte at a time, is joined
+      const cb = await openOn(fake);
+      for (const byte of cb.build(editBuf('bytewise'))) { cb.raw(Buffer.from([byte])); await new Promise((r) => setImmediate(r)); }
+      await applied(cb, 'bytewise');
+
+      const closer = await openOn(fake);
+      closer.frame(Buffer.from([0x03, 0xe8]), { opcode: 8 });
+      assert.equal(await closedWithin(closer), 1000, 'a close is answered with a close');
+
+      const ignored = await openOn(fake);
+      ignored.send({ t: 'nope', x: 1 });
+      ignored.send({ t: 'edit', client: CLIENT, seq: ++seqN, ops: 'not an array' });
+      assert.equal((await ignored.next((m) => m.t === 'refused')).why, 'shape', 'ops not an array is refused shape');
+      await roundTrip(ignored);
+      assert.ok(stat(fake, ignored), 'an unknown t is ignored');
+
+      const body = editBuf('x');
+      const closes = [
+        [1002, 'an unmasked frame', (c) => c.frame(body, { mask: false })],
+        [1002, 'a reserved bit', (c) => c.frame(body, { rsv: 4 })],
+        [1002, 'opcode 3', (c) => c.frame(body, { opcode: 3 })],
+        [1002, 'a fragmented ping', (c) => c.frame(Buffer.from('hi'), { opcode: 9, fin: false })],
+        [1002, 'a 126-byte ping', (c) => c.frame(Buffer.alloc(126, 97), { opcode: 9 })],
+        [1002, 'a stray continuation', (c) => c.frame(body, { opcode: 0 })],
+        [1002, 'a text frame while a message is open', (c) => { c.frame(f1, { fin: false }); c.frame(f2); }],
+        [1002, 'a 64-bit length with its top bit set, from the header alone', (c) => c.raw(Buffer.from([0x81, 0xff, 0x80, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4]))],
+        [1008, 'binary', (c) => c.frame(body, { opcode: 2 })],
+        [1008, 'not JSON', (c) => c.frame(Buffer.from('{nope'))],
+        [1008, 'not UTF-8', (c) => c.frame(Buffer.from([0x7b, 0xff, 0x7d]))],
+        [1008, 'an array', (c) => c.send([])],
+        [1008, 'null', (c) => c.send(null)],
+        [1008, 'a number', (c) => c.send(5)],
+        [1008, 'a client of 15', (c) => c.send({ t: 'edit', client: 'abc', seq: 1, ops: [] })],
+        [1008, 'an upper-case client', (c) => c.send({ t: 'edit', client: CLIENT.toUpperCase(), seq: 1, ops: [] })],
+        [1008, 'no client', (c) => c.send({ t: 'edit', seq: 1, ops: [] })],
+        [1008, 'seq 0', (c) => c.send({ t: 'edit', client: CLIENT, seq: 0, ops: [] })],
+        [1008, 'seq 1.5', (c) => c.send({ t: 'edit', client: CLIENT, seq: 1.5, ops: [] })],
+        [1008, "seq '1'", (c) => c.send({ t: 'edit', client: CLIENT, seq: '1', ops: [] })],
+        [1008, 'seq past a safe integer', (c) => c.send({ t: 'edit', client: CLIENT, seq: 2 ** 53, ops: [] })],
+      ];
+      for (const [code, label, act] of closes) {
+        const c = await openOn(fake);
+        act(c);
+        assert.equal(await closedWithin(c), code, label);
+      }
+      assert.equal(fake.doc(SLUG).pages[0].name, 'bytewise', 'nothing a closed connection sent was applied');
+    });
+  });
+
+  await t.test('fake: doc route', async () => {
+    const every = readFix('doc-every-type.json');
+    const images = { [SLUG]: { [PNG_NAME]: pngBytes() } };
+    for (const repo of [{ name: 'a/b', public: true }, { name: 'a/b', public: false }, undefined]) {
+      const opts = { canvases: { [SLUG]: every, both: minimal() }, main: { [SLUG]: minimal(), old: readFix('hostile.json'), both: rectsDoc(1) }, images: { ...images, old: { [PNG_NAME]: pngBytes() } } };
+      if (repo) opts.repo = repo;
+      await withFake(opts, async (fake) => {
+        const want = repo || { name: null, public: null };
+        const docAt = (q) => request(`${fake.url}/api/canvas/doc?${q}`);
+        const r = await docAt(`slug=${SLUG}`);
+        assert.equal(r.status, 200);
+        assert.equal(r.headers['content-type'], 'application/json');
+        assert.deepEqual(shapeErrors('doc-response', r.json), []);
+        assert.deepEqual(r.json, { session: fake.session(SLUG), rev: every.rev, doc: every, repo: want }, 'repo passed through');
+        const c = await openOn(fake);
+        assert.equal(c.messages[0].session, r.json.session, "session is the next welcome's");
+        assert.equal((await docAt(`slug=${SLUG}`)).json.session, c.messages[0].session, 'and the open one while open');
+        const both = await docAt('slug=both&at=main');
+        assert.deepEqual(both.json, { session: null, rev: 0, doc: rectsDoc(1), repo: want }, "at=main: main's document for one also open");
+        const old = await docAt('slug=old&at=main');
+        assert.deepEqual([old.status, old.json.session, old.json.doc], [200, null, readFix('hostile.json')], 'at=main for a canvas only on main');
+        assert.equal((await docAt('slug=old')).status, 404, 'a canvas only on main is not open for editing');
+        assert.equal(outcome(await sendEdit(c, [setName('p-main', 'landed')])), 'applied');
+        fake.land(SLUG);
+        assert.equal(await closedWithin(c), 1000);
+        const landed = await docAt(`slug=${SLUG}&at=main`);
+        assert.equal(landed.json.doc.pages[0].name, 'landed', 'a landed canvas is on main');
+        assert.equal(landed.json.session, null);
+        assert.deepEqual(shapeErrors('doc-response', landed.json), []);
+        assert.equal((await docAt(`slug=${SLUG}`)).status, 404, 'landed: no longer open');
+        for (const [status, label, q, headers] of [
+          [403, 'a bad host', 'slug=both', { Host: `evil.example:${fake.port}` }],
+          [403, 'the relay mark', 'slug=both', { 'x-devteam-relay': '1' }],
+          [403, 'the relay mark before an unknown slug', 'slug=nope', { 'x-devteam-relay': '1' }],
+          [404, 'an unknown slug', 'slug=nope'],
+          [404, 'an unknown slug on main', 'slug=nope&at=main'],
+          [404, 'no slug', ''],
+          [404, 'another at', 'slug=both&at=elsewhere'],
+        ]) assert.equal((await request(`${fake.url}/api/canvas/doc?${q}`, { headers })).status, status, label);
+        assert.equal((await request(`${fake.url}/api/canvas/doc?slug=both`, { headers: PV('p-v') })).status, 200, 'a View person gets the GETs');
+      });
+    }
+  });
+
+  await t.test('fake: image routes', async () => {
+    const png = pngBytes();
+    await withFake({ canvases: { [SLUG]: minimal(), shut: minimal() }, main: { old: minimal() }, images: { old: { [PNG_NAME]: png } } }, async (fake) => {
+      const srcs = {};
+      for (const ext of Object.keys(IMAGE_BYTES)) {
+        const b = IMAGE_BYTES[ext]();
+        const body = { name: `pic.${ext}`, data: b.toString('base64') };
+        assert.deepEqual(shapeErrors('image-request', body), []);
+        const r = await post(fake, 'image', body);
+        assert.equal(r.status, 200, ext);
+        assert.deepEqual(shapeErrors('image-response', r.json), []);
+        assert.deepEqual(r.json, { src: `images/${hashName(b, ext)}` }, `${ext}: saved under its hash`);
+        assert.deepEqual((await post(fake, 'image', { name: 'again', data: body.data })).json, r.json, `${ext}: the same bytes, the same src`);
+        const g = await request(`${fake.url}/api/canvas/image/${SLUG}/${hashName(b, ext)}`);
+        assert.equal(g.status, 200, `${ext}: served`);
+        assert.equal(g.headers['content-type'], MIME[ext]);
+        assert.equal(g.headers['x-content-type-options'], 'nosniff');
+        assert.ok(g.body.equals(b), `${ext}: the bytes`);
+        srcs[ext] = r.json.src;
+      }
+      const c = await openOn(fake);
+      const add = (id, src) => [{ op: 'add', node: { id, type: 'image', parent: 'p1', src }, after: null }];
+      assert.equal(outcome(await sendEdit(c, add('pic', srcs.webp))), 'applied', 'an add of an image node naming it');
+      assert.equal(outcome(await sendEdit(c, add('nopic', 'images/ffffffffffffffff.png'))), 'ref', 'one naming no file');
+      assert.equal((await request(`${fake.url}/api/canvas/image/old/${PNG_NAME}`)).status, 200, "served from main's folder");
+
+      fake.land('shut');
+      const pngBody = { name: 'p', data: png.toString('base64') };
+      const refusals = [
+        [415, 'a non-image', { body: { name: 'x', data: Buffer.from('hello world').toString('base64') } }],
+        [415, 'an SVG', { body: { name: 'x.svg', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64') } }],
+        [415, 'a text/plain body', { headers: { 'Content-Type': 'text/plain' } }],
+        [415, 'no Content-Type', { headers: { 'Content-Type': null } }],
+        [400, 'bad JSON', { body: '{"name":' }],
+        [400, 'an extra key', { body: { ...pngBody, x: 1 } }],
+        [400, 'no name', { body: { data: pngBody.data } }],
+        [400, 'an empty name', { body: { ...pngBody, name: '' } }],
+        [400, 'a name of 201 characters', { body: { ...pngBody, name: 'n'.repeat(201) } }],
+        [400, 'bad base64', { body: { name: 'p', data: '***' } }],
+        [400, 'no data', { body: { name: 'p', data: '' } }],
+        [403, 'a View person', { headers: PV('p-v') }],
+        [403, 'a cross origin', { headers: { Origin: 'http://evil.example' } }],
+        [403, 'no Origin', { headers: { Origin: null } }],
+        [403, 'the relay mark', { headers: { 'x-devteam-relay': '1' } }],
+        [403, 'a bad person header', { headers: { 'x-devteam-person': 'p-a;name=' } }],
+        [403, 'a bad host', { headers: { Host: `evil.example:${fake.port}` } }],
+        [413, 'a body over 6 MB by Content-Length', { body: null, contentLength: LIMITS.imageBodyBytes + 1 }],
+        [404, 'an unknown slug', { slug: 'nope' }],
+        [404, 'a slug only on main', { slug: 'old' }],
+        [423, 'a landed canvas', { slug: 'shut' }],
+        // the order
+        [403, 'a View person on a landed canvas', { headers: PV('p-v'), slug: 'shut' }],
+        [415, 'text/plain on an unknown slug', { headers: { 'Content-Type': 'text/plain' }, slug: 'nope' }],
+        [413, 'over 6 MB on a landed canvas', { body: null, contentLength: LIMITS.imageBodyBytes + 1, slug: 'shut' }],
+        [423, 'bad JSON on a landed canvas', { body: '{', slug: 'shut' }],
+        [404, 'bad JSON on an unknown slug', { body: '{', slug: 'nope' }],
+      ];
+      for (const [status, label, o] of refusals) {
+        const r = await post(fake, 'image', o.body === undefined ? pngBody : o.body, o);
+        assert.equal(r.status, status, label);
+      }
+      const hex = PNG_NAME.slice(0, 16);
+      const gets = [
+        [404, '../canvas-token', `${SLUG}/../canvas-token`],
+        [404, '%2e%2e%2f', `${SLUG}/%2e%2e%2fcanvas-token`],
+        [404, '%2e%2e%2f in the slug', `%2e%2e%2f${SLUG}/${PNG_NAME}`],
+        [404, 'upper-case hex', `${SLUG}/${hex.toUpperCase()}.png`],
+        [404, 'another extension', `${SLUG}/${hex}.svg`],
+        [404, 'a short name', `${SLUG}/${hex.slice(1)}.png`],
+        [404, 'an extra segment', `${SLUG}/x/${PNG_NAME}`],
+        [404, 'an unknown slug', `nope/${PNG_NAME}`],
+        [404, 'a malformed slug', `Bad_Slug/${PNG_NAME}`],
+        [404, 'a file not there', `${SLUG}/ffffffffffffffff.png`],
+      ];
+      for (const [status, label, rest] of gets) assert.equal((await request(`${fake.url}/api/canvas/image/${rest}`)).status, status, label);
+      assert.equal((await request(`${fake.url}/api/canvas/image/old/${PNG_NAME}`, { headers: { Host: `evil.example:${fake.port}` } })).status, 403, 'a bad host');
+      assert.equal((await request(`${fake.url}/api/canvas/image/old/${PNG_NAME}`, { headers: { 'x-devteam-relay': '1' } })).status, 403, 'the relay mark');
+      assert.equal((await request(`${fake.url}/api/canvas/image/nope/x`, { headers: { 'x-devteam-relay': '1' } })).status, 403, 'the relay mark before the file rule');
+    });
+    // a folder past 25 MB: the image route's 413
+    const jpg = IMAGE_BYTES.jpg();
+    await withFake({ canvases: { [SLUG]: minimal() }, folderBytes: { [SLUG]: LIMITS.folderBytes - W(minimal()) - png.length } }, async (fake) => {
+      assert.equal((await post(fake, 'image', { name: 'p', data: png.toString('base64') })).status, 200, 'the folder at 25 MB');
+      assert.equal((await post(fake, 'image', { name: 'p', data: png.toString('base64') })).status, 200, 'the same bytes again add nothing');
+      assert.equal((await post(fake, 'image', { name: 'j', data: jpg.toString('base64') })).status, 413, 'past it');
+    });
+  });
+
+  await t.test('fake: local route', async () => {
+    await withFake({ canvases: { [SLUG]: minimal(), shut: minimal() }, token: 'the-token' }, async (fake) => {
+      assert.equal(fake.token, 'the-token');
+      const body = localBody([setName('p1', 'Local')]);
+      assert.deepEqual(shapeErrors('local-request', body), []);
+      for (const [label, headers] of [
+        ['an Origin', { Origin: originOf(fake) }],
+        ['Sec-Fetch-Site', { 'Sec-Fetch-Site': 'same-origin' }],
+        ['x-devteam-relay', { 'x-devteam-relay': '1' }],
+        ['x-devteam-person', P('p-a')],
+        ['x-devteam-level', { 'x-devteam-level': 'full' }],
+        ['no token', { 'x-devteam-canvas-token': null }],
+        ['a wrong token', { 'x-devteam-canvas-token': 'not-the-token' }],
+        ['the token twice', { 'x-devteam-canvas-token': ['the-token', 'the-token'] }],
+        ['a bad host', { Host: `evil.example:${fake.port}` }],
+      ]) assert.equal((await local(fake, body, { headers })).status, 403, label);
+      const none = await local(fake, body);
+      assert.equal(none.status, 503, 'no page connected');
+      assert.deepEqual(none.json, { why: 'no-session' });
+      assert.deepEqual(shapeErrors('error-response', none.json), []);
+      assert.deepEqual([fake.rev(SLUG), fake.doc(SLUG)], [0, minimal()], 'nothing changed');
+      assert.equal((await local(fake, body, { slug: 'nope' })).status, 404, 'an unknown slug');
+
+      const c = await openOn(fake);
+      for (const [label, b] of [
+        ['bad JSON', '{"by":'],
+        ['not an object', []],
+        ['an extra key', { ...body, x: 1 }],
+        ['no ops', { by: 'supervisor', via: 'apply' }],
+        ['ops not an array', { ...body, ops: {} }],
+        ['a via of page', { ...body, via: 'page' }],
+        ['a by with a space', { ...body, by: 'a b' }],
+        ['an empty by', { ...body, by: '' }],
+      ]) assert.equal((await local(fake, b)).status, 400, label);
+      assert.equal(fake.rev(SLUG), 0);
+
+      let mark = c.messages.length;
+      const r = await local(fake, body);
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.json, { rev: 1, edits: 1, saved: true });
+      assert.deepEqual(shapeErrors('local-response', r.json), []);
+      const seen = await since(c, mark);
+      assert.deepEqual(seen, [
+        { t: 'ops', rev: 1, by: { id: 'supervisor', name: 'supervisor', via: 'apply' }, ack: null, ops: body.ops },
+        { t: 'saved', rev: 1 },
+      ], 'the ops, then saved, both before the answer');
+      for (const m of seen) assert.deepEqual(shapeErrors(m.t, m), []);
+
+      mark = c.messages.length;
+      const take = localBody([{ op: 'move', id: 'p1', parent: null, after: null }], 'kit-651', 'take');
+      assert.deepEqual((await local(fake, take)).json, { rev: 2, edits: 1, saved: true }, 'via take');
+      assert.deepEqual((await since(c, mark))[0].by, { id: 'kit-651', name: 'kit-651', via: 'take' });
+
+      fake.pause(SLUG, 'index-dirty');
+      mark = c.messages.length;
+      assert.deepEqual((await local(fake, localBody([setName('p1', 'Paused')]))).json, { rev: 3, edits: 1, saved: false }, 'paused: answered at once');
+      assert.deepEqual((await since(c, mark)).map((m) => m.t), ['paused', 'ops'], 'no saved while paused');
+      mark = c.messages.length;
+      fake.resume(SLUG);
+      assert.deepEqual(await since(c, mark), [{ t: 'resumed' }, { t: 'saved', rev: 3 }], 'saved at once when the pause ends');
+
+      // a refused apply changes nothing and sends nothing
+      const before = fake.doc(SLUG);
+      mark = c.messages.length;
+      const refused = await local(fake, localBody([{ op: 'add', node: { id: 'i', type: 'instance', parent: 'p1', component: 'nope' }, after: null }]));
+      assert.equal(refused.status, 409);
+      assert.deepEqual(refused.json, { why: 'ref' }, 'an end state that breaks a rule');
+      assert.deepEqual(await since(c, mark), [], 'no ops sent');
+      assert.deepEqual(fake.doc(SLUG), before, 'the document and rev unchanged');
+      assert.deepEqual((await local(fake, localBody([]))).json, { why: 'shape' }, 'no ops is shape');
+
+      // a restart after saved: true keeps the apply; a page edit not yet saved is lost
+      assert.equal(outcome(await sendEdit(c, [setName('p1', 'unsaved')])), 'applied');
+      const session = fake.session(SLUG);
+      fake.restart(SLUG);
+      assert.equal(await closedWithin(c), 1012);
+      assert.deepEqual(fake.doc(SLUG), before, 'reverted to the last saved document, the local apply kept');
+      assert.notEqual(fake.session(SLUG), session, 'a new session id');
+      const c2 = await openOn(fake);
+      assert.deepEqual([c2.messages[0].session, c2.messages[0].rev], [fake.session(SLUG), 3]);
+
+      // 423 after land, before the 404; statuses in order
+      fake.land('shut');
+      const shut = await local(fake, body, { slug: 'shut' });
+      assert.deepEqual([shut.status, shut.json], [423, { why: 'closed' }], 'a landed canvas');
+      for (const [status, label, b, o] of [
+        [403, 'no token, over 5 MB', null, { headers: { 'x-devteam-canvas-token': null }, contentLength: LIMITS.localBodyBytes + 1 }],
+        [413, 'over 5 MB on a landed canvas', null, { slug: 'shut', contentLength: LIMITS.localBodyBytes + 1 }],
+        [423, 'bad JSON on a landed canvas', '{', { slug: 'shut' }],
+        [404, 'bad JSON on an unknown slug', '{', { slug: 'nope' }],
+        [400, 'bad JSON with a session', '{', {}],
+      ]) assert.equal((await local(fake, b, o)).status, status, label);
+      c2.destroy();
+      await until(() => fake.stats().length === 0, 'the session ends');
+      assert.equal((await local(fake, '{')).status, 503, 'no session before the body');
+    });
+  });
+
+  await t.test('fake: import limit', async () => {
+    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      assert.equal((await post(fake, 'import', { key: 'abc' })).status, 501, 'within the limit: a later ticket');
+      assert.equal((await post(fake, 'import', null, { contentLength: LIMITS.importBodyBytes + 1 })).status, 413, 'over 50 MB by Content-Length');
+      for (const [status, label, headers] of [
+        [403, 'a View person', PV('p-v')],
+        [403, 'no Origin', { Origin: null }],
+        [403, 'the relay mark', { 'x-devteam-relay': '1' }],
+        [415, 'text/plain', { 'Content-Type': 'text/plain' }],
+      ]) assert.equal((await post(fake, 'import', { key: 'abc' }, { headers })).status, status, label);
+    });
+  });
+
+  await t.test('fake: every limit', async () => {
+    sameSet(Object.keys(LIMIT_CHECKS), Object.keys(LIMITS), 'a check for every limit');
+    for (const [name, check] of Object.entries(LIMIT_CHECKS)) {
+      try {
+        await check();
+      } catch (e) {
+        e.message = `${name}: ${e.message}`;
+        throw e;
+      }
+    }
+  });
+
+  await t.test('fixtures: http files', async () => {
+    const files = httpFixtures();
+    assert.ok(files.length > 0);
+    for (const f of files) await playHttp(f, { fixturesDir: FIX });
+    // the runner fails a fixture whose status, body or kinds differ
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'canvas-http-'));
+    try {
+      const base = readFix('http-doc-public.json');
+      const broken = [
+        ['status', { ...base, status: 201 }],
+        ['response', { ...base, response: { ...base.response, rev: 9 } }],
+        ['responseKind', { ...base, responseKind: 'image-response' }],
+        ['requestKind', { ...base, requestKind: 'local-request' }],
+        ['an extra key', { ...base, extra: 1 }],
+      ];
+      for (const [label, fx] of broken) {
+        const file = path.join(tmp, 'http-doc-broken.json');
+        fs.writeFileSync(file, JSON.stringify(fx));
+        await assert.rejects(playHttp(file, { fixturesDir: FIX }), `a broken ${label} fails`);
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  await t.test('coverage: routes', () => {
+    const files = httpFixtures();
+    for (const f of files) assert.ok(routeOf(f), `${f} names a route`);
+    for (const r of ROUTES) {
+      const mine = files.filter((f) => routeOf(f) === r);
+      assert.ok(mine.length > 0, `an http- fixture for ${r.key}`);
+      for (const f of mine) {
+        const fx = readFix(f);
+        assert.equal(fx.request.method, r.method, `${f}: ${r.key}'s method`);
+        assert.ok(fx.request.path.startsWith(r.path.split('<')[0]), `${f}: ${r.key}'s path`);
+        if (!r.fake) assert.deepEqual([fx.status, fx.responseKind], [404, null], `${f}: the fake doesn't serve ${r.key}`);
+      }
+      if (r.fake) assert.ok(mine.some((f) => readFix(f).status !== 404), `a fixture of ${r.key} the fake answers past a 404`);
+    }
+    const repos = files.filter((f) => routeOf(f).key === 'doc').map(readFix).filter((fx) => fx.status === 200).map((fx) => fx.response.repo.public);
+    for (const v of [true, false, null]) assert.ok(repos.includes(v), `a doc fixture with repo.public ${v}`);
   });
 
   await t.test('rules: Object.prototype is untouched', () => {

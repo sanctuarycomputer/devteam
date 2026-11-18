@@ -1,0 +1,25 @@
+{
+  "fake": {
+    "canvases": {
+      "board": "doc-minimal.json"
+    }
+  },
+  "request": {
+    "method": "POST",
+    "path": "/api/canvas/image?slug=board",
+    "headers": {
+      "Origin": "$origin",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "name": "dot.png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR42mMwTjsDAAI1AWa0b5eeAAAAAElFTkSuQmCC"
+    }
+  },
+  "status": 200,
+  "requestKind": "image-request",
+  "responseKind": "image-response",
+  "response": {
+    "src": "images/429be16d0a91e377.png"
+  }
+}
