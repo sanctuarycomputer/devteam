@@ -133,6 +133,8 @@ test('fences: column 0 backticks, the info string trimmed of spaces and tabs onl
   assert.deepEqual(blocks('````self\n```\n{}\n````\n').blocks.map((b) => b.body), ['```\n{}'], 'a shorter fence inside does not close it');
   assert.deepEqual(info('```self\n{}\n``` x\n```\n'), ['self'], 'a fence line with text does not close the block');
   assert.equal(blocks('x\n```self\n{}\n').unclosed, 2);
+  assert.equal(blocks('```self\n{}\n```\u00a0\n').unclosed, 1, 'a closing line closes with spaces or tabs after it, nothing else');
+  assert.equal(blocks('```self\n{}\n``` \t\n').unclosed, null);
 });
 
 test('namesWhole matches whole words only, ignoring case', () => {
