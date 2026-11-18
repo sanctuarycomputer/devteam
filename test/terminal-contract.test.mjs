@@ -86,8 +86,8 @@ async function keys(fake, which, fields = {}, headers) {
 }
 const hex = (s) => Buffer.from(s, 'latin1').toString('hex');
 // fetch can't set Host, so the wrong-host check goes through http.request.
-const withHost = (fake, p, host) => new Promise((resolve, reject) => {
-  const r = http.request({ host: '127.0.0.1', port: fake.port, path: p, headers: { host, 'sec-fetch-site': 'same-origin' } }, (res) => {
+const withHost = (fake, p, host, extra = {}) => new Promise((resolve, reject) => {
+  const r = http.request({ host: '127.0.0.1', port: fake.port, path: p, headers: { host, 'sec-fetch-site': 'same-origin', ...extra } }, (res) => {
     let s = '';
     res.on('data', (c) => { s += c; });
     res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(s) }));
@@ -144,15 +144,14 @@ test('terminal A1: the fake answers every route, echoes, orders, brackets, 304, 
     assert.deepEqual(fake.typed('supervisor'), ['hi', '!']);
     // one post at a time per pane: seq 4 waits behind seq 3's send
     fake.set({ sendMs: 100 });
-    const t0 = Date.now();
-    const p3 = keys(fake, 'supervisor', { seq: 3, data: hex('a'), pane: '%1' });
+    const p3 = keys(fake, 'supervisor', { seq: 3, data: hex('a'), pane: '%1' }).then((x) => ({ ...x, at: Date.now() }));
     await until(() => fake.typed('supervisor').length === 3);
-    const p4 = keys(fake, 'supervisor', { seq: 4, data: hex('b'), pane: '%1' }).then((x) => ({ ...x, at: Date.now() - t0 }));
+    const p4 = keys(fake, 'supervisor', { seq: 4, data: hex('b'), pane: '%1' }).then((x) => ({ ...x, at: Date.now() }));
     const [r3, r4] = await Promise.all([p3, p4]);
     assert.equal(r3.json.taken, true);
     assert.equal(r4.json.taken, true);
     assert.deepEqual(fake.typed('supervisor').slice(-2), ['a', 'b']);
-    assert.ok(r4.at >= 180, `seq 4 waited behind seq 3 (answered after ${r4.at} ms)`);
+    assert.ok(r4.at - r3.at >= 80, `seq 4 waited behind seq 3 and then took its own send (${r4.at - r3.at} ms after it)`);
     fake.set({ sendMs: 0 });
     assert.equal((await keys(fake, 'supervisor', { seq: 3, data: hex('a') })).json.taken, false);
     assert.equal((await keys(fake, 'supervisor', { seq: 7, data: hex('c') })).json.taken, true, 'a gap is taken');
@@ -177,6 +176,9 @@ test('terminal A1: the fake answers every route, echoes, orders, brackets, 304, 
     assert.equal(r.json.pane, '%2');
     assert.equal((await keys(fake, 'shell', { seq: 1, data: hex('ls') })).json.taken, true, 'each tab its own seq');
     assert.deepEqual(fake.typed('shell'), ['ls']);
+    fake.set({ shell: false });
+    assert.equal((await screenOf(fake, 'shell')).json.state, 'gone', 'set({ shell: false }) closes the Shell');
+    assert.equal((await req(fake, 'POST', '/api/term/shell/open', { body: openBody })).json.state, 'live');
     // a paste: whole, bracketed only when told to
     await keys(fake, 'supervisor', { seq: 8, paste: 'a\nb' });
     assert.equal(fake.typed('supervisor').at(-1), 'a\nb');
@@ -233,6 +235,9 @@ test('terminal A2: held and why', async () => {
     assert.deepEqual(await why({ 'x-devteam-relay': '1' }), { why: 'relay' });
     assert.deepEqual(await why({ 'sec-fetch-site': 'cross-site' }), { why: 'cross-site' });
     assert.deepEqual(await why({ 'x-devteam-level': 'view', 'sec-fetch-site': 'cross-site' }), { why: 'view' }, 'view wins over cross-site');
+    assert.deepEqual(await why({ 'x-devteam-level': 'view', 'x-devteam-relay': '1' }), { why: 'view' }, 'view wins over relay');
+    const hv = await withHost(fake, '/api/term/supervisor/screen', 'evil.test', { 'x-devteam-level': 'view' });
+    assert.deepEqual(hv.json, { why: 'host' }, 'host wins over view');
     const h = await withHost(fake, '/api/term/supervisor/screen', 'evil.test');
     assert.equal(h.status, 403);
     assert.deepEqual(h.json, { why: 'host' });
@@ -274,6 +279,13 @@ test('terminal A3: refusals type nothing', async () => {
     assert.equal(r.status, 200);
     assert.equal(typed(), n + 1);
     await none('body over 100 KB', req(fake, 'POST', '/api/term/supervisor/keys', { raw: 'x'.repeat(102401) }), 413);
+    await none('body at 100 KB is read (and is no JSON)', req(fake, 'POST', '/api/term/supervisor/keys', { raw: 'x'.repeat(102400) }), 400);
+    await none('content type before the body cap', req(fake, 'POST', '/api/term/supervisor/keys', { raw: 'x'.repeat(102401), headers: { 'content-type': 'text/plain' } }), 403);
+    await none('token before the data cap', keys(fake, 'supervisor', { seq: 1, data: '00'.repeat(4097), token: undefined }), 403);
+    await none('paste one byte over', keys(fake, 'supervisor', { seq: 1, paste: 'a'.repeat(65537) }), 413);
+    n = typed();
+    assert.equal((await keys(fake, 'supervisor', { seq: 1, paste: 'a'.repeat(65536) })).status, 200, 'a paste of exactly 65536 bytes');
+    assert.equal(typed(), n, 'seq 1 was already taken, so nothing more is typed');
     await none('unknown which', req(fake, 'GET', '/api/term/nope/screen'), 404);
     await none('supervisor/open', req(fake, 'POST', '/api/term/supervisor/open', { body: { which: 'supervisor', page: P, token: fake.token, cols: 80, rows: 24 } }), 404);
     await none('GET keys', req(fake, 'GET', '/api/term/supervisor/keys'), 405);

@@ -195,6 +195,7 @@ export async function startTermFake(opts = {}) {
     token,
     set(patch) {
       Object.assign(o, patch);
+      if ('shell' in patch) shellOpen = patch.shell !== false;
       if ('lines' in patch) { t.supervisor.buf = [...patch.lines]; t.supervisor.cx = 0; t.supervisor.cy = 0; }
       if ('history' in patch) t.supervisor.history = [...patch.history];
     },
