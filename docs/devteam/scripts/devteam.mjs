@@ -14116,6 +14116,274 @@ const HUB_ACTIONS = {
   'thread-reopen': (b) => (OPERATOR_THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || hubTurnOk(b.text)) ? ['operator-thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
   start: () => ['operator-thread', 'start'],
 };
+// ===== live presence: the relay (presence@1, test/contracts/presence.md) =====
+// A /presence WebSocket on a dashboard's server and on the hub's: RFC 6455's server side by hand (Node
+// built-ins only). Each page says where it is (here) and where its pointer is (move); the relay tells
+// everyone on this server who is here (people, coalesced to one each 250 ms) and passes each move only
+// to the others on the sender's spot. Who a connection is comes only from the upgrade's headers
+// (x-devteam-person, x-devteam-level, which the box's gateway sets); with neither it is the owner.
+// Everything is in this process's memory: nothing is logged, written or kept. A connection that
+// breaks a rule is closed with the contract's code; a throw closes only its own connection (1011).
+// `okHost(host)` is the server's own Host check; `ownerCwd` where `git config user.name` names the
+// owner; `draining()` true while the dashboard hands over to a new kit (an upgrade then gets 503).
+function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false } = {}) {
+  const AT_KEYS = ['page', 'tab', 'peek', 'art', 'thread'];
+  const AT_PART = /^[A-Za-z0-9._:@/-]{1,120}$/;
+  const ID_RE = /^[A-Za-z0-9._:@/-]{1,64}$/;
+  const NAME_RE = /^(?:[A-Za-z0-9\-_.!~*'()]|%[0-9A-Fa-f]{2})+$/;
+  const L = { pageMsg: 2048, frames: 16, anchorBytes: 200, nameBytes: 80, peopleMs: 250, changedMs: 500, unsent: 1024 * 1024, closeWaitMs: 5000 };
+  const STATUS = { 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 503: 'Service Unavailable' };
+  const OPCODES = [0, 1, 2, 8, 9, 10];
+  const jsonBytes = (s) => Buffer.byteLength(JSON.stringify(s)) - 2;
+  // §4: the longest start, by whole characters, whose JSON encoding (without quotes) is at most 80 bytes
+  const cutName = (name) => { let out = ''; let n = 0; for (const ch of String(name)) { const b = jsonBytes(ch); if (n + b > L.nameBytes) break; out += ch; n += b; } return out; };
+  const ownerName = (() => {
+    try {
+      const r = spawnSync('git', ['config', 'user.name'], { cwd: ownerCwd ?? process.cwd(), encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return cutName((r.status === 0 && r.stdout.trim()) || 'Owner') || 'Owner';
+    } catch { return 'Owner'; }
+  })();
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  // §5: only the five keys, each a string in the set or null, built afresh
+  const checkAt = (at) => Object.fromEntries(AT_KEYS.map((k) => { const v = own(at, k) ? at[k] : null; return [k, typeof v === 'string' && AT_PART.test(v) ? v : null]; }));
+  const sameSpot = (a, b) => a.page === b.page && a.tab === b.tab && a.peek === b.peek && a.art === b.art;
+  const sameAt = (a, b) => AT_KEYS.every((k) => a[k] === b[k]);
+  const frac01 = (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+  // §6: a move's `a` from checked fields; undefined when it is neither null nor a pointer
+  const pointerOf = (a) => {
+    if (a === null) return null;
+    if (!isObj(a) || typeof a.k !== 'string' || a.k.length === 0 || Buffer.byteLength(a.k) > L.anchorBytes || !frac01(a.x) || !frac01(a.y)) return undefined;
+    return { k: a.k, x: a.x, y: a.y };
+  };
+  // ---- frames (server frames are unmasked and whole) ----
+  const frame = (payload, opcode) => {
+    const n = payload.length;
+    const head = n < 126 ? Buffer.from([0x80 | opcode, n]) : n < 65536 ? Buffer.alloc(4) : Buffer.alloc(10);
+    if (n >= 126 && n < 65536) { head[0] = 0x80 | opcode; head[1] = 126; head.writeUInt16BE(n, 2); }
+    if (n >= 65536) { head[0] = 0x80 | opcode; head[1] = 127; head.writeUInt32BE(Math.floor(n / 2 ** 32), 2); head.writeUInt32BE(n >>> 0, 6); }
+    return Buffer.concat([head, payload]);
+  };
+  const textFrame = (m) => frame(Buffer.from(JSON.stringify(m)), 1);
+  const closeFrame = (code) => { const b = Buffer.alloc(code == null ? 0 : 2); if (code != null) b.writeUInt16BE(code); return frame(b, 8); };
+  const utf8 = (buf) => new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  // ---- the upgrade's headers (§2, §4) ----
+  const rawValues = (req, name) => { const out = []; for (let i = 0; i < req.rawHeaders.length; i += 2) if (req.rawHeaders[i].toLowerCase() === name) out.push(req.rawHeaders[i + 1]); return out; };
+  const decodeName = (s) => {
+    const bytes = [];
+    for (let i = 0; i < s.length;) { if (s[i] === '%') { bytes.push(parseInt(s.slice(i + 1, i + 3), 16)); i += 3; } else { bytes.push(s.charCodeAt(i)); i += 1; } }
+    try { return utf8(Uint8Array.from(bytes)); } catch { return null; }
+  };
+  const personOf = (req) => {
+    const ps = rawValues(req, 'x-devteam-person');
+    const ls = rawValues(req, 'x-devteam-level');
+    if (ps.length > 1 || ls.length > 1) return null;
+    if (ls.length && ls[0] !== 'full' && ls[0] !== 'view') return null;
+    if (!ps.length) return ls.length ? null : { id: 'owner', name: ownerName, level: 'full' };
+    const m = /^([^;]*);name=(.*)$/.exec(ps[0]);
+    if (!m || !ID_RE.test(m[1]) || !NAME_RE.test(m[2])) return null;
+    const name = decodeName(m[2]);
+    if (!name) return null;
+    const cut = cutName(name);
+    return cut ? { id: m[1], name: cut, level: ls.length ? ls[0] : 'full' } : null;
+  };
+  const validKey = (k) => typeof k === 'string' && /^[A-Za-z0-9+/]{22}==$/.test(k) && Buffer.from(k, 'base64').length === 16;
+  const pathOf = (url) => { try { return new URL(url, 'http://x').pathname; } catch { return null; } };
+  // §2's guards in order: the person, or the status refusing it
+  const guard = (req, upgrade) => {
+    const host = req.headers.host;
+    if (!okHost(host)) return 403;
+    if (rawValues(req, 'x-devteam-relay').length) return 403;
+    if (pathOf(req.url) !== '/presence') return 404;
+    if (!upgrade || String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || req.headers['sec-websocket-version'] !== '13' || !validKey(req.headers['sec-websocket-key'])) return 400;
+    const origin = req.headers.origin;
+    if (origin === undefined || origin === 'null' || origin !== `http://${host}`) return 403;
+    return personOf(req) || 403;
+  };
+
+  const conns = new Set(); // open connections past welcome, in open order
+  let connSeq = 0;
+  let hereSeq = 0;
+  let peopleTimer = null;
+  const chg = { open: false, pending: false };
+  const hereConns = () => [...conns].filter((c) => c.here).sort((a, b) => a.seq - b.seq);
+  const peopleList = () => {
+    const by = new Map();
+    for (const c of hereConns()) {
+      let p = by.get(c.who.id);
+      if (!p) { p = { id: c.who.id, name: c.who.name, level: c.who.level, conns: [] }; by.set(c.who.id, p); }
+      p.conns.push({ conn: c.conn, at: { ...c.at }, visible: c.visible });
+    }
+    return [...by.values()];
+  };
+  // a socket that holds over 1 MB unsent isn't reading: dropped without a close frame
+  const write = (c, buf) => {
+    if (!c.open || c.socket.destroyed) return;
+    if (c.socket.writableLength > L.unsent) { c.open = false; c.socket.destroy(); leave(c); return; }
+    c.socket.write(buf);
+  };
+  function leave(c) {
+    if (!conns.delete(c)) return;
+    for (const cancel of Object.values(c.timers)) cancel();
+    if (c.here) peopleChanged();
+  }
+  // a close frame, the socket ended, and destroyed if the peer hasn't hung up within 5 s
+  function kill(c, code) {
+    if (!c.open) return;
+    c.open = false;
+    try { c.socket.end(closeFrame(code)); } catch {}
+    const t = setTimeout(() => c.socket.destroy(), L.closeWaitMs);
+    t.unref();
+    c.socket.once('close', () => clearTimeout(t));
+    leave(c);
+  }
+  const safe = (c, fn) => { try { fn(); } catch { kill(c, 1011); } };
+  // one message to every connection that has said here; each write wrapped on its own
+  const broadcast = (build) => {
+    const to = hereConns();
+    let f;
+    try { f = build(); } catch { for (const c of to) kill(c, 1011); return; }
+    for (const c of to) safe(c, () => write(c, f));
+  };
+  const flushPeople = () => { peopleTimer = null; broadcast(() => textFrame({ t: 'people', people: peopleList() })); };
+  // §6: the first change opens a 250 ms window; one people at its end carries all of them
+  function peopleChanged() { if (!peopleTimer) { peopleTimer = setTimeout(flushPeople, L.peopleMs); peopleTimer.unref(); } }
+  const sendChanged = () => broadcast(() => textFrame({ t: 'changed' }));
+  const changedWindow = () => {
+    chg.open = true;
+    setTimeout(() => { if (chg.pending) { chg.pending = false; sendChanged(); changedWindow(); } else chg.open = false; }, L.changedMs).unref();
+  };
+
+  function accept(req, socket, head, who) {
+    socket.setNoDelay(true);
+    socket.setTimeout(0);
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}\r\n\r\n`);
+    const c = { conn: `c${++connSeq}`, who, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, here: false, seq: 0, at: null, visible: false };
+    conns.add(c);
+    write(c, textFrame({ t: 'welcome', presence: 1, you: { id: who.id, conn: c.conn } }));
+    const take = (d) => { if (!c.open) return; c.buf = c.buf.length ? Buffer.concat([c.buf, d]) : Buffer.from(d); parse(c); };
+    socket.on('data', (d) => safe(c, () => take(d)));
+    // the http server's sockets are half-open: a peer that ends without a close frame is gone too
+    socket.on('end', () => { c.open = false; leave(c); try { socket.end(); } catch {} });
+    socket.on('close', () => { c.open = false; leave(c); });
+    if (head && head.length) safe(c, () => take(head));
+  }
+
+  // §2: a whole header first, checked for validity, then its length weighed, then the payload awaited
+  function parse(c) {
+    while (c.open) {
+      const b = c.buf;
+      if (b.length < 2) return;
+      const fin = (b[0] & 0x80) !== 0;
+      const rsv = b[0] & 0x70;
+      const op = b[0] & 0x0f;
+      const masked = (b[1] & 0x80) !== 0;
+      const len7 = b[1] & 0x7f;
+      const control = op >= 8;
+      if (rsv || !OPCODES.includes(op) || !masked || (control && !fin)) return kill(c, 1002);
+      if (op === 0 && !c.msg) return kill(c, 1002);
+      if ((op === 1 || op === 2) && c.msg) return kill(c, 1002);
+      const ext = len7 === 126 ? 2 : len7 === 127 ? 8 : 0;
+      const start = 2 + ext + 4;
+      if (b.length < start) return;
+      let len = len7;
+      if (ext === 2) len = b.readUInt16BE(2);
+      else if (ext === 8) {
+        const hi = b.readUInt32BE(2);
+        if (hi >= 0x80000000) return kill(c, 1002);
+        len = hi * 2 ** 32 + b.readUInt32BE(6);
+      }
+      if (control && len > 125) return kill(c, 1002);
+      if (!control) {
+        if (op === 2) return kill(c, 1008);
+        if ((c.msg ? c.msg.size : 0) + len > L.pageMsg || (c.msg ? c.msg.parts.length : 0) + 1 > L.frames) return kill(c, 1008);
+      }
+      if (b.length < start + len) return;
+      const key = b.subarray(start - 4, start);
+      const payload = Buffer.alloc(len);
+      for (let i = 0; i < len; i++) payload[i] = b[start + i] ^ key[i & 3];
+      c.buf = b.subarray(start + len);
+      if (control) controlFrame(c, op, payload);
+      else {
+        if (!c.msg) c.msg = { parts: [], size: 0 };
+        c.msg.parts.push(payload);
+        c.msg.size += len;
+        if (fin) { const whole = Buffer.concat(c.msg.parts); c.msg = null; message(c, whole); }
+      }
+    }
+  }
+
+  function controlFrame(c, op, payload) {
+    if (op === 8) { // a close: answered with a close of its code and the socket ended
+      if (!c.open) return;
+      c.open = false;
+      try { c.socket.end(closeFrame(payload.length >= 2 ? payload.readUInt16BE(0) : null)); } catch {}
+      leave(c);
+      return;
+    }
+    if (op === 10) return; // a pong frame
+    write(c, frame(payload, 10));
+  }
+
+  function message(c, buf) {
+    let m;
+    try { m = JSON.parse(utf8(buf)); } catch { return kill(c, 1008); }
+    if (!isObj(m)) return kill(c, 1008);
+    if (m.t === 'here') return here(c, m);
+    if (m.t === 'move') return move(c, m);
+    return undefined; // any other t is ignored (additive)
+  }
+
+  function here(c, m) {
+    if (!isObj(m.at)) return; // a here whose at is not an object is ignored
+    const at = checkAt(m.at);
+    const visible = m.visible === true;
+    if (c.here && sameAt(c.at, at) && c.visible === visible) return; // changes nothing: no people
+    if (!c.here) { c.here = true; c.seq = ++hereSeq; }
+    c.at = at;
+    c.visible = visible;
+    peopleChanged();
+  }
+
+  function move(c, m) {
+    if (!c.here || !c.visible) return;
+    const a = pointerOf(m.a);
+    if (a === undefined) return;
+    const f = textFrame({ t: 'move', id: c.who.id, conn: c.conn, a });
+    for (const o of conns) if (o !== c && o.here && o.visible && o.who.id !== c.who.id && sameSpot(o.at, c.at)) safe(o, () => write(o, f));
+  }
+
+  return {
+    // an upgrade on this server: refused with the first guard's status, or accepted
+    upgrade(req, socket, head) {
+      socket.on('error', () => {});
+      try {
+        const who = draining() ? 503 : guard(req, true);
+        if (typeof who === 'number') { socket.end(`HTTP/1.1 ${who} ${STATUS[who]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
+        accept(req, socket, head, who);
+      } catch { socket.destroy(); }
+    },
+    // a plain request for /presence: the guard's status, an empty body
+    refuse(req, res) {
+      let code = 400;
+      try { const r = guard(req, false); code = typeof r === 'number' ? r : 400; } catch {}
+      res.writeHead(code, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', connection: 'close' });
+      res.end();
+      req.resume();
+    },
+    // §11: filled in with the limits (kit-631 T3)
+    present: () => ({ present: [], present_more: 0 }),
+    // the log grew: a changed at once, then at most one each 500 ms, never dropped; the hub sends none
+    changed() {
+      if (hub) return;
+      if (chg.open) { chg.pending = true; return; }
+      sendChanged();
+      changedWindow();
+    },
+    // every connection closed with `code` (a hand-over to a new kit, the hub closing)
+    closeAll(code = 1001) { for (const c of [...conns]) kill(c, code); },
+  };
+}
+
 function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   // the hub alone runs its owner actions where it was started, as box-thread's run: on a box that is
@@ -17632,7 +17900,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   every(refreshHello, 10000);
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)), ...presence.present() });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -18035,6 +18303,8 @@ async function cmdDashboard() {
   const bodyMs = uploadLimits().bodyMs;
   // set while it hands over to a new kit (kit-288): what it still answers closes its connection
   let draining = false;
+  // live presence (presence@1): its /presence socket, on the same Host check as every route here
+  const presence = presenceRelay({ okHost: (h) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(h ?? ''), ownerCwd: mainRoot, draining: () => draining });
   const server = http.createServer(async (req, res) => {
     if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
@@ -18050,6 +18320,8 @@ async function cmdDashboard() {
     if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
     if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // /presence is a socket: a plain request gets its guard's status (presence@1 §2)
+    if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
     // the terminal: right after the global guards, before any other route
     if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
     // a file dropped on the page: before every other route, and before a byte of its body is read
@@ -18480,6 +18752,7 @@ async function cmdDashboard() {
     }
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
+  server.on('upgrade', (req, socket, head) => presence.upgrade(req, socket, head));
   keepAlive(server);
   server.requestTimeout = UPLOAD_REQUEST_MS;
   trackRequests(server);
@@ -18532,6 +18805,7 @@ async function cmdDashboard() {
     stopTimers();
     hubHandle?.close();
     hubHandle = null;
+    presence.closeAll(1001);
     for (const name of [...relays.keys()]) relayClose(name);
     server.close();
     await drained();
