@@ -174,7 +174,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(metQ(), { role: 'sup' }).err, /recommends yes/);
     assert.match(dt(metQ(['--recommendation', 'yes', '--default', 'yes']), { role: 'sup' }).err, /has no --default/);
     assert.match(dt(['ask', '--class', 'goal-met', '--goal', Gr, '--question', 'Done?', '--recommendation', 'yes'], { role: 'sup' }).err, /is draft/);
-    const Qwrong = must(['ask', '--class', 'release-scope', '--goal', Go, '--question', 'Is it validated?', '--recommendation', 'yes'], { role: 'sup' });
+    const Qwrong = must(['ask', '--no-default', 'the test waits for the owner', '--class', 'release-scope', '--goal', Go, '--question', 'Is it validated?', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qwrong, 'yes']);
     assert.match(dt(['goal', 'reading', Go, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-met/);
     const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
@@ -687,7 +687,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   });
 
   step('questions, autonomy direction, the act gate, corrections', () => {
-    Q = must(['ask', '--question', 'Ship card capture behind a flag?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--options', 'yes', 'no', '--blocks', 'bill-01-card'], { role: 'sup' });
+    Q = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Ship card capture behind a flag?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--options', 'yes', 'no', '--blocks', 'bill-01-card'], { role: 'sup' });
     assert.notEqual(dt(['answer', Q, 'yes'], { role: 'sup' }).status, 0, 'an agent cannot answer as the owner');
     must(['answer', Q, 'yes', '--autonomy', '2', '--rule', 'flags first']);
     assert.match(dt(['ask', '--kind', 'trust', '--class', 'release-scope', '--question', 'step up?'], { role: 'sup' }).err, /needs 90% of the last 10/, 'a trust question needs the evidence');
@@ -735,7 +735,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   step('decisions: a call records the trust it rests on, acts carry it out, corrections land on the call', () => {
     const sup = { role: 'sup' };
     assert.equal(dt(['decide', '--class', 'release-scope', '--', 'slip BILL-S2'], sup).status, 3, 'decide asks first below rung 3, like act');
-    const Qx = must(['ask', '--question', 'Ship the refund flow flagged?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
+    const Qx = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Ship the refund flow flagged?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
     must(['answer', Qx, 'yes']);
     assert.match(dt(['decide', '--class', 'release-scope', '--confidence', '2', '--approved', Qx, '--', 'x'], sup).err, /--confidence is a number from 0 to 1/);
     const D = must(['decide', '--class', 'release-scope', '--approved', Qx, '--options', 'ship flagged', 'hold a week', '--rationale', 'the flag makes it reversible', '--confidence', '0.8', '--refs', 'bill-01-card', '--', 'ship refunds behind a flag'], sup);
@@ -765,7 +765,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       fs.appendFileSync(supFile, line({ id: rid, type: 'decision', op: 'new', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship something else', refs: ['bill-02-x'], authority: 'answer', approved_by: Qx }));
       assert.match(dt(['act', '--decision', rid, '--', 'shipped'], sup).err, new RegExp(`records authority it doesn't have \\(${Qx} already approved a decision \\(${D}\\)`));
       // nor carry an answer asked about one ticket into a call about another
-      const Qt = must(['ask', '--question', 'Ship the card flow flagged?', '--class', 'release-scope', '--ticket', 'bill-01-card', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
+      const Qt = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Ship the card flow flagged?', '--class', 'release-scope', '--ticket', 'bill-01-card', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
       must(['answer', Qt, 'yes']);
       const tid = 'd-20261101-235959003-supervisor';
       fs.appendFileSync(supFile, line({ id: tid, type: 'decision', op: 'new', at: new Date(Date.now() + 2000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship another', refs: ['bill-02-x'], authority: 'answer', approved_by: Qt }));
@@ -799,7 +799,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     // a project-wide preference is not authority over a class; a rule the owner scoped to the class is
     const K = json(must(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'flags first').id;
     assert.match(dt(['decide', '--class', 'release-scope', '--approved', K, '--', 'flag the export too'], sup).err, /applies to project; a standing rule authorises a call only when the owner scoped it/);
-    const Qk = must(['ask', '--question', 'May exports always ship behind a flag?', '--class', 'release-scope', '--recommendation', 'yes'], sup);
+    const Qk = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'May exports always ship behind a flag?', '--class', 'release-scope', '--recommendation', 'yes'], sup);
     must(['answer', Qk, 'yes', '--rule', 'exports ship behind a flag', '--rule-scope', 'class:release-scope']);
     const K2 = json(must(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'exports ship behind a flag').id;
     const Dk = must(['decide', '--class', 'release-scope', '--approved', K2, '--', 'flag the export too'], sup);
@@ -1394,7 +1394,7 @@ process.exit(${code});
     git(['push', '-q', 'origin', 'HEAD:main']);
     const sha = (f) => git(['rev-parse', `HEAD:docs/devteam/project/remediations/${f}`]);
     landSettings((txt) => txt.replace('"gates": {', `"remediations": { "restart-web": { "kind": "restart", "script": "project/remediations/restart.mjs", "sha": "${sha('restart.mjs')}", "credentials": { "TOK": "file:rem-token" }, "params": { "out": ${JSON.stringify(outFile)} }, "undo": null }, "rollback-web": { "kind": "rollback", "script": "project/remediations/rollback.mjs", "sha": "${sha('rollback.mjs')}", "params": { "out": ${JSON.stringify(outFile)} } }, "broken": { "kind": "restart", "script": "project/remediations/broken.mjs", "sha": "${sha('broken.mjs')}", "params": { "out": ${JSON.stringify(outFile)} } } }, "gates": {`));
-    const ask = (blocks, { kind = null, def = null, rec = 'do it' } = {}) => must(['ask', ...(kind ? ['--kind', kind] : []), '--class', 'production-remediation', '--blocks', ...blocks, '--question', `Run ${blocks.join(' ')}?`, '--recommendation', rec, ...(def ? ['--default', def] : []), '--reasons', 'below-rung'], sup);
+    const ask = (blocks, { kind = null, def = null, rec = 'do it' } = {}) => must(['ask', ...(kind ? ['--kind', kind] : []), '--class', 'production-remediation', '--blocks', ...blocks, '--question', `Run ${blocks.join(' ')}?`, '--recommendation', rec, ...(def ? ['--default', def] : ['--no-default', 'the test waits for the owner']), '--reasons', 'below-rung'], sup);
     const decide = (q, refs) => dt(['decide', '--class', 'production-remediation', '--approved', q, '--refs', ...refs, '--', `run ${refs.join(' ')}`], sup);
     try {
       assert.match(dt(['remediate', 'restart-web'], sup).err, /needs --decision/);
@@ -1504,7 +1504,7 @@ process.exit(${code});
       const at = (ms) => new Date(Date.now() - ms).toISOString();
       fs.writeFileSync(supFile3, supKept3.split('\n').map((l) => { if (l.includes(`"id":"${q0}"`) && l.includes('"deadline"')) return JSON.stringify({ ...JSON.parse(l), at: at(3 * 3600000), deadline: at(60000) }); if (l.includes(`"id":"${q1}"`) && l.includes('"question"')) return JSON.stringify({ ...JSON.parse(l), question: 'edited after the fact' }); return l; }).join('\n'));
       fs.writeFileSync(ownFile3, ownKept3.split('\n').map((l) => (l.includes(`"id":"${q1}"`) && l.includes('"answer"') ? JSON.stringify({ ...JSON.parse(l), at: at(2 * 3600000) }) : l)).join('\n'));
-      assert.equal(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup).status, 0, 'only re-asking is time-limited');
+      assert.equal(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--reasons', 'below-rung', '--no-default', 'the test waits for the owner'], sup).status, 0, 'only re-asking is time-limited');
       assert.match(dt(['answer', q0, '--defaulted'], sup).err, /said no to broken/, 'the default is held for good');
       // a defaulted line written by hand decides nothing, and a decision written by hand runs nothing
       fs.appendFileSync(supFile3, line({ id: q0, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'defaulted' }));
@@ -1516,7 +1516,7 @@ process.exit(${code});
       const pOf = (title) => { const pid = must(['problem', 'add', '--title', title, '--severity', '1', '--detail', 'x'], sup).split(/[\s:]/)[0]; fs.appendFileSync(supFile3, line({ id: pid, type: 'problem', op: 'set', at: new Date().toISOString(), by: 'supervisor', fingerprints: ['x:exception:X'] })); return pid; };
       const pb = pOf('b');
       const qb0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung'], sup).trim();
-      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup);
+      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung', '--no-default', 'the test waits for the owner'], sup);
       must(['answer', qb1, 'no, leave it']);
       must(['problem', 'set', pb, '--status', 'resolved'], sup);
       fs.writeFileSync(supFile3, fs.readFileSync(supFile3, 'utf8').split('\n').map((l) => (l.includes(`"id":"${qb0}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: at(60000) }) : l)).join('\n'));
@@ -1694,7 +1694,7 @@ http.createServer((req, res) => {
 
   step('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, the same weight as the Inbox', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
-    const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    const Qc = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat'], { role: 'sup' }).status, 0, "the owner's words are required");
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said], { role: 'worker' }).status, 0, 'only the supervisor records a chat answer');
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said]).status, 0, 'in their own terminal the owner answers directly');
@@ -1712,7 +1712,7 @@ http.createServer((req, res) => {
     assert.equal(tr.rung, 2, 'a chat answer with no autonomy leaves the rung where it was (the class starts at 2)');
     assert.ok(tr.agreement_questions.includes(Qc), 'a chat answer is agreement evidence, like any other');
     // the rung moves from chat in both directions, up to the class's ceiling
-    const Qup = must(['ask', '--question', 'Open them without asking from now on?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    const Qup = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Open them without asking from now on?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qup, 'yes', '--autonomy', '3', '--from-chat', '--said', 'yes, just open them'], { role: 'sup' });
     assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr').rung, 3, 'a chat answer raises the rung like an Inbox answer');
     const listed = json(must(["dashboard-data"])).ooda.answered.find((x) => x.id === Qc);
@@ -1991,7 +1991,7 @@ http.createServer((req, res) => {
     const r = dt(args, { role: 'sup' });
     assert.notEqual(r.status, 0);
     assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
-    const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    const Qw = must(['ask', '--no-default', 'the test waits for the owner', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qw, 'yes']);
     assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /needs an answered gate-change or governance-edit question/, 'an answer of another class does not cover it');
     const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
@@ -2029,7 +2029,7 @@ http.createServer((req, res) => {
     assert.match(rm.out, /would merge/);
     assert.doesNotMatch(rm.out, /owner settings/, 'nothing to approve');
     // a decision is carried out once per target: one naming a batch carries out each once
-    const Qm = must(['ask', '--class', 'priority-change', '--reasons', 'below-rung', '--question', 'Land these two chores first?', '--recommendation', 'yes'], { role: 'sup' });
+    const Qm = must(['ask', '--no-default', 'the test waits for the owner', '--class', 'priority-change', '--reasons', 'below-rung', '--question', 'Land these two chores first?', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qm, 'yes']);
     const Dm = must(['decide', '--class', 'priority-change', '--approved', Qm, '--refs', 'chore-mon', 'chore-elsewhere', '--', 'land them first'], { role: 'sup' });
     assert.match(must([...margs, '--decision', Dm], { role: 'sup' }), /would merge/);
