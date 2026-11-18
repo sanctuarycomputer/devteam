@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { threadsFixture, fleetFixture, line, write, json, dashboardOnFreePort, PORTS, kit } from './lib/kit.mjs';
+import { threadsFixture, fleetFixture, multiFixture, line, write, json, dashboardOnFreePort, PORTS, kit } from './lib/kit.mjs';
 
 // `/api/data` serves exactly this
 const data = (F) => json(F.ok(F.old, ['dashboard-data']));
@@ -601,4 +601,25 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   assert.deepEqual(badWords(cut), ['tick_minutes']);
 
   assert.deepEqual(logNow(), before, 'the reads wrote nothing to the log');
+});
+
+// kit-91: the Board's Repo filter reads each ticket's repo: its component's repo link, 'home' for home's lines
+test('each ticket row says its repo', { timeout: 300000 }, async (t) => {
+  const M = multiFixture('repo-rows');
+  t.after(() => M.done());
+  M.ticket('console-01-a');
+  M.ticket('api-01-a', { touches: ['api/**'] });
+  const d = json(M.ok(M.old, ['dashboard-data']));
+  const row = (xs, id) => xs.find((r) => r.id === id);
+  assert.equal(row(d.tickets, 'console-01-a').repo, 'console', 'a repo link component: the link');
+  assert.equal(row(d.tickets, 'api-01-a').repo, 'home', 'a home line: home');
+  assert.equal(row(d.progress.tickets, 'console-01-a').repo, 'console', 'progress: the link');
+  assert.equal(row(d.progress.tickets, 'api-01-a').repo, 'home', 'progress: home');
+  const F = threadsFixture('repo-rows-one');
+  t.after(() => F.done());
+  F.sup(['feature', 'add', 'rr-work', '--json', JSON.stringify({ title: 'RR', goals: [F.goal], stories: [{ id: 'RR-S1', text: 'x', release: 'v1.0.0' }] })]);
+  F.sup(['ticket', 'add', 'app-01-a', '--json', JSON.stringify({ title: 'a', feature: 'rr-work', component: 'app', kind: 'build', size: 'S', risk: 'normal', serves: ['RR-S1'], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'] })]);
+  const one = data(F);
+  assert.ok(one.tickets.length && one.progress.tickets.length, 'rows to check');
+  for (const r of [...one.tickets, ...one.progress.tickets]) assert.equal(r.repo, 'home', `${r.id}: one repo, home`);
 });
