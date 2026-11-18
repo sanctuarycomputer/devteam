@@ -146,12 +146,15 @@ test('terminal A1: the fake answers every route, echoes, orders, brackets, 304, 
     fake.set({ sendMs: 100 });
     const p3 = keys(fake, 'supervisor', { seq: 3, data: hex('a'), pane: '%1' }).then((x) => ({ ...x, at: Date.now() }));
     await until(() => fake.typed('supervisor').length === 3);
+    const t4 = Date.now();
     const p4 = keys(fake, 'supervisor', { seq: 4, data: hex('b'), pane: '%1' }).then((x) => ({ ...x, at: Date.now() }));
     const [r3, r4] = await Promise.all([p3, p4]);
     assert.equal(r3.json.taken, true);
     assert.equal(r4.json.taken, true);
     assert.deepEqual(fake.typed('supervisor').slice(-2), ['a', 'b']);
-    assert.ok(r4.at - r3.at >= 80, `seq 4 waited behind seq 3 and then took its own send (${r4.at - r3.at} ms after it)`);
+    // from seq 4's own send: with the chain it waits out most of seq 3's 100 ms and then its own (about 180 ms); a stall only adds; without the chain about 100 ms
+    assert.ok(r4.at - t4 >= 150, `seq 4 waited behind seq 3 and then took its own send (${r4.at - t4} ms after it was sent)`);
+    assert.ok(r4.at >= r3.at, 'seq 4 answered after seq 3');
     fake.set({ sendMs: 0 });
     assert.equal((await keys(fake, 'supervisor', { seq: 3, data: hex('a') })).json.taken, false);
     assert.equal((await keys(fake, 'supervisor', { seq: 7, data: hex('c') })).json.taken, true, 'a gap is taken');
@@ -311,6 +314,33 @@ test('terminal A3: refusals type nothing', async () => {
     n = typed();
     assert.equal((await keys(fake, 'supervisor', { seq: 4, data: '00' })).json.taken, true, 'seq 4 after a 503');
     assert.equal(typed(), n + 1);
+    // every POST guard, each typing nothing
+    await none('POST cross-site with a right Origin', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'sec-fetch-site': 'cross-site' }), 403, 'cross-site');
+    await none('POST without Sec-Fetch-Site', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'sec-fetch-site': null }), 403, 'cross-site');
+    await none('a wrong Origin', keys(fake, 'supervisor', { seq: 5, data: '00' }, { origin: 'http://evil.test' }), 403, 'cross-site');
+    await none('View on a POST', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'x-devteam-level': 'view' }), 403, 'view');
+    fake.set({ refuse: 'cross-site' });
+    await none('a real View header wins over a scripted refusal', screenOf(fake, 'supervisor', { 'x-devteam-level': 'view' }), 403, 'view');
+    fake.set({ refuse: null });
+    const shellTyped = () => fake.typed('shell').length;
+    const open = (fields, headers) => req(fake, 'POST', '/api/term/shell/open', { headers, body: { which: 'shell', page: P, token: fake.token, cols: 80, rows: 24, ...fields } });
+    const s0 = shellTyped();
+    assert.equal((await open({ token: undefined })).status, 403, 'shell/open without a token');
+    assert.equal((await open({ token: 'f'.repeat(64) })).status, 403, 'shell/open with a wrong token');
+    for (const f of [{ cols: 19 }, { cols: 501 }, { rows: 4 }, { rows: 201 }, { cols: 80.5 }, { extra: 1 }, { which: 'supervisor' }, { page: 'short' }]) {
+      assert.equal((await open(f)).status, 400, `shell/open ${JSON.stringify(f)}`);
+    }
+    assert.equal((await open({ cols: 20, rows: 5 })).status, 200, 'the smallest panel');
+    assert.equal((await open({ cols: 500, rows: 200 })).status, 200, 'the largest panel');
+    assert.equal((await open({}, { 'x-devteam-level': 'view' })).json.why, 'view', 'View on shell/open');
+    fake.set({ shell: false });
+    assert.equal((await keys(fake, 'shell', { pane: '%2', seq: 2, data: '00' })).status, 409, 'Shell keys while Shell is gone');
+    fake.set({ openFails: true });
+    assert.equal((await open({})).status, 409, 'shell/open that could not make the window');
+    fake.set({ openFails: false, shellPane: '%5' });
+    assert.equal((await open({})).json.pane, '%5');
+    assert.equal((await keys(fake, 'shell', { pane: '%2', seq: 2, data: '00' })).status, 423, 'Shell keys to the old pane');
+    assert.equal(shellTyped(), s0, 'no Shell refusal typed anything');
   } finally {
     await fake.close();
   }

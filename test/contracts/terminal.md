@@ -206,7 +206,9 @@ It enforces every check of §3 in §3's order, handles one post at a time per pa
 | `cols`, `rows`, `lines` | 80, 24, `[]` | the supervisor's screen |
 | `shell` | true | false: Shell is `gone` until `shell/open` |
 | `supervisor` | `'live'` | `'gone'`: the supervisor isn't running |
-| `pane` | `'%1'` | the supervisor's pane id; Shell's is `'%2'` |
+| `pane` | `'%1'` | the supervisor's pane id |
+| `shellPane` | `'%2'` | Shell's pane id |
+| `openFails` | false | true: `shell/open` answers 409 while Shell isn't open |
 | `bracketPaste` | false | true: a paste is recorded as `\x1b[200~…\x1b[201~` |
 | `held` | `{ count: 0, oldest_ms: 0, prompt: 'readable' }` | the supervisor's `held` |
 | `refuse` | null | one of the five `why`s: every route refuses for it |

@@ -17,7 +17,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function startTermFake(opts = {}) {
   const o = {
     cols: 80, rows: 24, lines: [], shell: true, supervisor: 'live', pane: '%1', bracketPaste: false,
-    held: DEFAULT_HELD, refuse: null, gatewayView: false, busy: false, history: [], sendMs: 0, serve: null,
+    held: DEFAULT_HELD, refuse: null, gatewayView: false, busy: false, history: [], sendMs: 0, serve: null, shellPane: '%2', openFails: false,
     ...opts,
   };
   const token = crypto.randomBytes(32).toString('hex');
@@ -31,7 +31,7 @@ export async function startTermFake(opts = {}) {
 
   const live = (which) => (which === 'supervisor' ? o.supervisor === 'live' : shellOpen);
   const size = (which) => (which === 'supervisor' ? { cols: o.cols, rows: o.rows } : shellSize);
-  const paneOf = (which) => (which === 'supervisor' ? o.pane : '%2');
+  const paneOf = (which) => (which === 'supervisor' ? o.pane : o.shellPane);
   const heldOf = (which) => ({ ...(which === 'supervisor' ? o.held : DEFAULT_HELD) });
   function rowsOf(which) {
     const s = t[which];
@@ -105,9 +105,9 @@ export async function startTermFake(opts = {}) {
     return null;
   }
   function whyOf(req, r) {
+    if (req.headers['x-devteam-level'] === 'view') return 'view';
     if (o.refuse) return o.refuse;
     const host = req.headers.host;
-    if (req.headers['x-devteam-level'] === 'view') return 'view';
     const site = req.headers['sec-fetch-site'];
     if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
     if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
@@ -145,6 +145,7 @@ export async function startTermFake(opts = {}) {
     return sendJson(res, 200, { ...screenOf(which), taken: true });
   }
   function open(res, b) {
+    if (o.openFails && !shellOpen) return sendJson(res, 409, { error: 'the shell could not be opened' });
     shellSize = { cols: b.cols, rows: b.rows };
     shellOpen = true;
     return sendJson(res, 200, screenOf('shell'));
