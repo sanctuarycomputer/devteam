@@ -2,13 +2,17 @@
 # devteam in the cloud: one container that is the owner's dev box. Its only public listener is the
 # gateway (gateway.mjs), which lets in a passkey registered when the box is claimed and passes the
 # owner to the machine's devteam hub, a terminal on the box's tmux server (where supervisors and
-# workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
+# workers run), and each project at a host of its own. What lasts lives on /data.
 #
-# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
-# its own too (term.box.example.com). Signing in is at box.example.com/auth.
-# public.box.example.com, under the same wildcard, serves the artifacts the owner published, to
-# anyone, from the gateway's own copy (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default).
+# It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com. Each project is
+# at <project>.box.example.com: its dashboard and every private view after sign-in, and its public
+# pages (what the owner published) at /<artifact>/ for anyone, from the gateway's own copy
+# (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default). Older releases' addresses (a port number
+# or public. in front of the box's name) no longer answer, and nothing redirects them. The wildcard
+# certificate covers every project host: no DNS record or certificate to add. A project's host is its
+# name, `project` in its settings.md (else its folder's name): a DNS label of a-z, 0-9 and -, not all
+# digits, not term, public or www, unique on the box. The terminal has its own host
+# (term.box.example.com). Signing in is at box.example.com/auth.
 # A session's running dev server gets a name of its own under the same wildcard, cool-tiger.box.example.com,
 # behind the owner's session; box.example.com/dev/ lists them. DEVTEAM_PREVIEWS=1 says this image's
 # gateway serves them, so the kit prints a link only then.
