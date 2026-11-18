@@ -185,6 +185,11 @@ test('a bundle change no answer covers is refused by name, and nothing is writte
     assert.match(r.err, new RegExp(`not approved yet: ${esc('links.companion.title')}`));
     assert.match(r.err, /bring this checkout's settings\.md up to date/);
     assert.equal(T.here(), before);
+    // without --approved it asks about that change only, and its question names it, not console's covered gates (task-1 T1-2)
+    const { qid } = T.ask(['link', 'set', 'console', 'gates', '{"test":"true"}']);
+    const q = T.question(qid);
+    assert.deepEqual(T.section(q.context), ['links.companion.title: main has "Companion app"; would be "Hand edit"']);
+    assert.match(q.question, /^Change links\.companion\.title, waiting in settings\.md to land with console\?$/);
   } finally { T.done(); }
 });
 
@@ -396,5 +401,17 @@ test('still bound: a hand edit, an answer that covers none of it, a default', ()
     T.g(['worktree', 'add', '-q', '-b', 'chore-dflt', wt, 'origin/main'], T.old);
     assert.match(T.ok(['link', 'land', 'dflt']), /not carried, as the owner's.*links\.console/);
     assert.equal(choreLinks(wt).console.records, undefined);
+  } finally { T.done(); }
+});
+
+test("the owner's no covers nothing: link set asks again rather than citing it (task-1 T1-1)", () => {
+  const T = setup('one-yes-no');
+  try {
+    const { qid } = T.ask(['link', 'set', 'console', 'records', 'home']);
+    T.okIn(T.old, ['answer', qid, 'no, keep them in the repo']);
+    const n = T.questionCount();
+    const out = T.ok(['link', 'set', 'console', 'records', 'home']);
+    assert.equal(T.questionCount(), n + 1, out);
+    assert.ok(!out.includes(qid), out);
   } finally { T.done(); }
 });

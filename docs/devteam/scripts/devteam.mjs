@@ -965,6 +965,8 @@ Object.assign(linkAnswerCovers, {
     let at = null;
     for (const row of rows) {
       const [sha, ct] = row.split(' ');
+      // a shallow clone's history ends here: what came before is unknown, so nothing is known to have changed
+      if (git(['rev-parse', '--verify', '--quiet', `${sha}^`]) === null) break;
       if (valueAt(sha) !== valueAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
     }
     linkAnswerCovers.history.set(key, at);
@@ -22633,7 +22635,7 @@ function linkByOwner(sub, id, field, vals, kind) {
       `The whole settings diff waiting to land${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}`,
       `The registry entries, as they would be in settings.md links:\n${JSON.stringify(bundle, null, 2)}`,
     ].filter(Boolean).join('\n\n');
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map((c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
