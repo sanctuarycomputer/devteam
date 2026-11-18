@@ -336,6 +336,32 @@ const isGone = (j, which = 'supervisor') => { const { etag, ...rest } = j ?? {};
 const RED_LINE = /^\x1b\[31mred(?:\x1b\[(?:0|39)?m)?$/;
 const L53 = Array.from({ length: 53 }, (_, i) => `L${i}`);
 
+test('terminal B-R-1: a paste loses its bracket markers in one linear pass, as the repeat-until-clean strip would', () => {
+  const c = vm.createContext({});
+  vm.runInContext(`${constSrc('termUnbracket')}globalThis.termUnbracket = termUnbracket;`, c);
+  const strip = c.termUnbracket;
+  // the reference: drop every marker, again until none is left
+  const slow = (s) => { for (let t; (t = s.replace(/\x1b\[20[01]~/g, '')) !== s;) s = t; return s; };
+  assert.equal(strip('one\x1b[201~two\r'), 'onetwo\r');
+  assert.equal(strip('a\x1b[20\x1b[201~1~b\x1b[2\x1b[200~00~c\r'), 'abc\r');
+  assert.equal(strip('\x1b[20\x1b[201~0~'), '');
+  assert.equal(strip('é😀\x1b[200~x'), 'é😀x', 'text beyond ASCII kept whole');
+  const A = ['\x1b', '[', '2', '0', '1', '~', 'a', '\r'];
+  for (let i = 0; i < 500; i++) {
+    const s = Array.from({ length: 1 + Math.floor(Math.random() * 60) }, () => A[Math.floor(Math.random() * A.length)]).join('');
+    assert.equal(strip(s), slow(s), JSON.stringify(s));
+  }
+  // nested markers near the body cap: one marker per pass for the old strip, one pass here
+  const n = 16000;
+  const nested = `a${'\x1b[20'.repeat(n)}${'1~'.repeat(n)}b`;
+  assert.ok(nested.length > 96000, String(nested.length));
+  const t0 = performance.now();
+  const out = strip(nested);
+  const ms = performance.now() - t0;
+  assert.equal(out, 'ab');
+  assert.ok(ms < 50, `the strip took ${ms.toFixed(1)} ms`);
+});
+
 test('terminal A3: termLine keeps SGR and drops every other escape, C0 and DEL, and trailing spaces', () => {
   const termLine = termLineFn();
   assert.equal(termLine('a\x1b[1;31mb\x1b[0mc\x1b[m'), 'a\x1b[1;31mb\x1b[0mc\x1b[m', 'SGR kept');

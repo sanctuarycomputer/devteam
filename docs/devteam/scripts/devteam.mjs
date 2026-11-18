@@ -16994,9 +16994,11 @@ const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data',
 // The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
 const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
 // A paste without bracketed-paste markers: tmux passes them through, so one inside a paste would end its
-// bracket early and the rest, an Enter too, would arrive typed. Dropped again until none is left, since
-// a drop can join two halves into a new one (ESC[20 ESC[201~ 0~).
-const termUnbracket = (s) => { for (let t; (t = s.replace(/\x1b\[20[01]~/g, '')) !== s;) s = t; return s; };
+// bracket early and the rest, an Enter too, would arrive typed. A drop can join two halves into a new
+// one (ESC[20 ESC[201~ 0~), so each is dropped as it completes the output so far: one linear pass (each
+// char pushed once, popped at most once; neither marker overlaps itself or the other), the same text as
+// dropping them again until none is left, which is quadratic on nested markers.
+const termUnbracket = (s) => { const o = []; for (const c of s) { o.push(c); const n = o.length; if (c === '~' && n >= 6 && o[n - 6] === '\x1b' && o[n - 5] === '[' && o[n - 4] === '2' && o[n - 3] === '0' && (o[n - 2] === '0' || o[n - 2] === '1')) o.length = n - 6; } return o.join(''); };
 // tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
 const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
 // A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
