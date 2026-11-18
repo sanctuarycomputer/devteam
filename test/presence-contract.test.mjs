@@ -599,7 +599,10 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       assert.equal(stat(fake, A).dropped - before.dropped, 3, 'the 31st move, the ping frame and the unknown t are dropped; the here and the pong are not');
       await fake.tick(LIMITS.peopleMs);
       await B.next((m) => m.t === 'people' && m.people[0].conns[0].at.tab === 'late');
-      assert.ok(!A.controls.some((x) => x.opcode === 10 && x.payload.toString() === 'p2'), 'the ping over the rate is not answered');
+      await fake.tick(1000); // a fresh second: a protocol ping on A is answered, and ends the check on A's own socket
+      A.frame(Buffer.from('p3'), { opcode: 9 });
+      await until(() => A.controls.some((x) => x.opcode === 10 && x.payload.toString() === 'p3'), "A's pong for p3");
+      assert.deepEqual(A.controls.filter((x) => x.opcode === 10).map((x) => x.payload.toString()), ['p3'], 'the ping over the rate (p2) was never answered');
 
       const G = await openPresence(fake.url, { headers: P('p-g') });
       for (let sec = 1; sec <= LIMITS.overSeconds; sec++) {
@@ -670,7 +673,11 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       ends = await sentinel(fake, E, [A, B]);
       assert.deepEqual(kinds(between(A, mark2[0], ends[0]), 'changed'), [], 'none after another 500 ms');
       assert.deepEqual(kinds(between(B, mark2[1], ends[1]), 'changed'), []);
-      assert.deepEqual(N.messages.map((m) => m.t), ['welcome'], 'a connection that never said here gets nothing');
+      N.send(hereMsg({ page: 'late' })); // ends the check on N's own socket
+      await read(fake, N, 1, 'N');
+      await fake.tick(LIMITS.peopleMs);
+      const np = await N.next((m) => m.t === 'people');
+      assert.deepEqual(between(N, 1, np), [], 'before its here, N got nothing: no changed, no other message');
     });
     await withFake({ clock: 'manual', hub: true }, async (fake) => {
       const A = await openPresence(fake.url, { headers: P('p-a') });
@@ -733,6 +740,22 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       const gone = await X.next((m) => m.t === 'people');
       assert.deepEqual(gone.people.map((x) => x.id), ['p-x', 'p-y'], 'a client gone without a close leaves people');
     });
+    // The order is here-order, not connect-order: people by their first here, and one person's conns too.
+    await withFake({ clock: 'manual' }, async (fake) => {
+      const early = await openPresence(fake.url, { headers: P('p-early') });
+      const late1 = await openPresence(fake.url, { headers: P('p-late') });
+      const late2 = await openPresence(fake.url, { headers: P('p-late') });
+      for (const [c, tab] of [[late2, 'b'], [early, 'e'], [late1, 'a']]) {
+        c.send(hereMsg({ tab }));
+        await until(() => stat(fake, c)?.here, `${tab}'s here taken`);
+      }
+      await fake.tick(LIMITS.peopleMs);
+      const p = await early.next((m) => m.t === 'people');
+      assert.deepEqual(p.people.map((x) => [x.id, x.conns.map((k) => k.conn)]), [
+        ['p-late', [late2.you.conn, late1.you.conn]], ['p-early', [early.you.conn]],
+      ], 'the person who said here first is first, and its conns in their here-order, whatever the connect order');
+      assert.deepEqual(fake.present().present.map((x) => x.id), ['p-late', 'p-early'], "present follows people's order");
+    });
   });
 });
 
@@ -753,15 +776,16 @@ test("presence A34: a hello's present is capped at 50, with present_more", async
 
   await t.test('3 people: 3 and 0', async () => {
     await withFake({ clock: 'manual' }, async (fake) => {
-      for (const id of ['p-1', 'p-2', 'p-3']) {
-        const c = await openPresence(fake.url, { headers: P(id) });
-        c.send(hereMsg());
-        await until(() => stat(fake, c)?.here, `${id} said here`);
+      const cs = {};
+      for (const id of ['p-1', 'p-2', 'p-3']) cs[id] = await openPresence(fake.url, { headers: P(id) });
+      for (const id of ['p-3', 'p-1', 'p-2']) { // here-order differs from connect-order
+        cs[id].send(hereMsg());
+        await until(() => stat(fake, cs[id])?.here, `${id} said here`);
       }
       await openPresence(fake.url, { headers: P('p-silent') }); // no here: in no present
       assert.deepEqual(fake.present(), {
-        present: ['p-1', 'p-2', 'p-3'].map((id) => ({ id, name: 'Ann Lee', level: 'full' })), present_more: 0,
-      });
+        present: ['p-3', 'p-1', 'p-2'].map((id) => ({ id, name: 'Ann Lee', level: 'full' })), present_more: 0,
+      }, "present is people's order (here-order), not connect-order");
     });
   });
   await t.test("200 people: 50 in people's order and present_more 150", async () => {
