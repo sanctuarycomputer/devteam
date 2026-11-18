@@ -130,7 +130,7 @@ It serves independent researchers, who write long notes and want them to last. I
     },
     {
       "id": "libraries",
-      "name": "lugin",
+      "name": "lugins",
       "relation": "affects",
       "kind": "group",
       "matters": "They host the workshops that bring new writers.",

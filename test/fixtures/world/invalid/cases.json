@@ -80,7 +80,11 @@
     "expect": "never names it"
   },
   {
-    "file": "exterior-named-inside-word.md",
+    "file": "exterior-named-word-start.md",
+    "expect": "never names it"
+  },
+  {
+    "file": "exterior-named-word-end.md",
     "expect": "never names it"
   },
   {
