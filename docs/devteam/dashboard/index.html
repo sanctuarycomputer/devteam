@@ -3539,9 +3539,13 @@ let GOAL_ORDER_ERR = '';
 // Cleared once the owner moves on: focus anywhere else (not the page, which is a redraw dropping it), or a
 // press off it.
 let GOAL_FOCUS = null;
-// The drag in progress: { id, pointerId, start (the ids as drawn when it began), card, moved (the drawn
-// order differs from start) }, else null. While it is set renderGoals draws nothing: the drag moves the cards.
+// The drag in progress: { id, pointerId, start (the ids as drawn when it began), card, x, y (where it was
+// pressed), moved (the pointer has gone more than 3px from there) }, else null. While it is set renderGoals
+// draws nothing: the drag moves the cards.
 let GOAL_DRAG = null;
+// A moved drag called off with the button still down (Escape, capture lost): that pointer's id, so its
+// release swallows the click it makes; else null. A new press forgets it.
+let GOAL_SWALLOW_UP = null;
 // The goal control el is in: { id, what } for an active goal card's handle or ⋯ summary, else null.
 function goalControlOf(el) {
   const grip = el?.closest?.('.goal-grip[data-goal-grip]');
@@ -3618,12 +3622,13 @@ const goalCardEl = (id) => $('goals-list').querySelector(`.card.goal[data-goal-c
 const sameIds = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 // A press with the primary button on a goal's handle starts a drag; the handle holds the pointer (capture)
 document.addEventListener('pointerdown', (e) => {
+  GOAL_SWALLOW_UP = null;
   if (GOAL_DRAG || e.button !== 0 || !e.isPrimary) return;
   const grip = e.target?.closest?.('.goal-grip[data-goal-grip]');
   const card = grip?.closest('.card.goal[data-goal-card]');
   if (!card || !$('goals-list').contains(card)) return;
   try { grip.setPointerCapture(e.pointerId); } catch { return; }
-  GOAL_DRAG = { id: grip.dataset.goalGrip, pointerId: e.pointerId, start: drawnGoalOrder(), card, moved: false };
+  GOAL_DRAG = { id: grip.dataset.goalGrip, pointerId: e.pointerId, start: drawnGoalOrder(), card, x: e.clientX, y: e.clientY, moved: false };
   card.classList.add('dragging');
 });
 // The live preview: the goal card under the pointer gives the dragged card its place. The cards between
@@ -3631,6 +3636,7 @@ document.addEventListener('pointerdown', (e) => {
 document.addEventListener('pointermove', (e) => {
   const d = GOAL_DRAG;
   if (!d || e.pointerId !== d.pointerId) return;
+  if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 3) d.moved = true;
   const over = document.elementsFromPoint(e.clientX, e.clientY).map((el) => el.closest?.('.card.goal[data-goal-card]')).find((c) => c && c !== d.card && c.parentNode === d.card.parentNode);
   if (!over) return;
   const grid = d.card.parentNode;
@@ -3641,27 +3647,34 @@ document.addEventListener('pointermove', (e) => {
   // after the dragged one up to it go before it
   if (to < from) { const after = d.card.nextSibling; for (const c of cards.slice(to, from)) grid.insertBefore(c, after); }
   else for (const c of cards.slice(from + 1, to + 1)) grid.insertBefore(c, d.card);
-  d.moved = !sameIds(drawnGoalOrder(), d.start);
 });
-// The drop: a changed order is saved once (focus back on the handle), and the click the release makes is
-// swallowed so it opens nothing; an unchanged one is drawn again.
+// The click a moved drag's release makes, swallowed so it opens nothing (no peek): one shot, in the capture
+// phase, gone on the next tick.
+function swallowNextClick() {
+  const swallow = (c) => { c.stopPropagation(); c.preventDefault(); };
+  document.addEventListener('click', swallow, { capture: true, once: true });
+  setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 0);
+}
+// The drop: a changed order is saved once (focus back on the handle); an unchanged one is drawn again. After
+// a move, the release's click is swallowed either way. A press that never moved stays a plain click.
 document.addEventListener('pointerup', (e) => {
+  if (GOAL_SWALLOW_UP !== null && e.pointerId === GOAL_SWALLOW_UP) { GOAL_SWALLOW_UP = null; swallowNextClick(); return; }
   if (!GOAL_DRAG || e.pointerId !== GOAL_DRAG.pointerId) return;
   const ids = drawnGoalOrder();
   const d = GOAL_DRAG;
   GOAL_DRAG = null;
   d.card.classList.remove('dragging');
+  if (d.moved) swallowNextClick();
   if (sameIds(ids, d.start)) { renderGoals(); return; }
-  const swallow = (c) => { c.stopPropagation(); c.preventDefault(); };
-  document.addEventListener('click', swallow, { capture: true, once: true });
-  setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 0);
   saveGoalOrder(ids, { id: d.id, focus: 'grip' });
 });
-// A drag called off (Escape, pointercancel, capture lost): the cards back in the order they began in, no post
-function cancelGoalDrag() {
+// A drag called off (Escape, pointercancel, capture lost): the cards back in the order they began in, no post.
+// After a move, its click is swallowed: at the release still to come when the button is held (held), else now.
+function cancelGoalDrag(held) {
   const d = GOAL_DRAG;
   if (!d) return;
   GOAL_DRAG = null;
+  if (d.moved) { if (held) GOAL_SWALLOW_UP = d.pointerId; else swallowNextClick(); }
   const grip = d.card.querySelector('.goal-grip');
   try { if (grip?.hasPointerCapture(d.pointerId)) grip.releasePointerCapture(d.pointerId); } catch {}
   const grid = d.card.parentNode;
@@ -3669,15 +3682,15 @@ function cancelGoalDrag() {
   d.card.classList.remove('dragging');
   renderGoals();
 }
-document.addEventListener('pointercancel', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(); });
-document.addEventListener('lostpointercapture', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(); });
+document.addEventListener('pointercancel', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag(false); });
+document.addEventListener('lostpointercapture', (e) => { if (GOAL_DRAG && e.pointerId === GOAL_DRAG.pointerId) cancelGoalDrag((e.buttons & 1) === 1); });
 // Escape during a drag cancels it, and only that: taken first (window, capture) so the page's own Escape
 // (closing a peek or the Threads panel) never sees it
 window.addEventListener('keydown', (e) => {
   if (!GOAL_DRAG || e.key !== 'Escape') return;
   e.preventDefault();
   e.stopImmediatePropagation();
-  cancelGoalDrag();
+  cancelGoalDrag(true);
 }, true);
 // Selecting a tab is a new entry (#goals, #goals?gt=met), so Back restores the tab before and a reload keeps it.
 bindTabBar($('goals'), { onSelect: (id) => {

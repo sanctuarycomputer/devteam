@@ -8,8 +8,9 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, dashboardOnFreePort } from './lib/kit.mjs';
+import { PORTS, bareProject, dashboardOnFreePort, startDashboard, until } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
+import { SIZES, measureAt } from './lib/measure.mjs';
 
 const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' };
 
@@ -97,9 +98,19 @@ const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
 
 // The dashboard on the fixture, Chrome on it with the init script, at a size: { p, soon, dash, port, go,
 // reload }. later is the test's cleanup(t), so all of it is stopped before the fixture is removed.
-async function openOn(later, root, env, { width = 1440, height = 900 } = {}) {
-  const { dash, port } = await dashboardOnFreePort(root, env);
-  later(() => dash.stop());
+// inBlock: the dashboard on a port of the block the hub scans (DEVTEAM_PORT_BASE), so the hub lists it.
+async function openOn(later, root, env, { width = 1440, height = 900, inBlock = false } = {}) {
+  let dash, port;
+  if (inBlock) {
+    dash = startDashboard(root, env);
+    later(() => dash.stop());
+    await until(() => /dashboard on http/.test(dash.out()) || dash.p.exitCode !== null, 'the dashboard');
+    port = Number(/dashboard on http:\/\/127\.0\.0\.1:(\d+)/.exec(dash.out())?.[1]);
+    assert.ok(port, `the dashboard's port: ${dash.out().slice(-400)}`);
+  } else {
+    ({ dash, port } = await dashboardOnFreePort(root, env));
+    later(() => dash.stop());
+  }
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();
@@ -397,8 +408,15 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
     assert.deepEqual(await order(p), ['upkeep', C, A, B, D]);
   });
 
-  await t.test('Escape cancels a drag', async () => {
+  await t.test('Escape cancels a drag, and only the drag', async () => {
     await fresh();
+    // the Threads panel open over the page: the page's own Escape closes it
+    await go('#goals?th=inbox');
+    const PANEL = "document.body.classList.contains('threads-open')";
+    await soon(`${PANEL} && getComputedStyle(document.getElementById('threads')).transform === 'none' && document.querySelectorAll('#goals .goal-grip').length === 4`, 'the Threads panel open over the goals, at rest');
+    // the page beside it laid out anew: B's grip where it was a moment ago
+    const gripAt = `JSON.stringify(document.querySelector(${JSON.stringify(`${card(B)} .goal-grip`)}).getBoundingClientRect())`;
+    for (let last = null, n = 0, i = 0; n < 3 && i < 60; i++) { await pause(150); const now = await p.ev(gripAt); n = now === last ? n + 1 : 0; last = now; }
     const [from, over] = await centres(p, [`${card(B)} .goal-grip`, card(C)]);
     await mouse(p, 'mouseMoved', from.x, from.y, 0);
     await mouse(p, 'mousePressed', from.x, from.y, 1);
@@ -413,7 +431,124 @@ test('dragging a goal by its grip', { ...CHROME, timeout: 300000 }, async (t) =>
     assert.deepEqual(await p.ev('window.__orders'), [], 'no post');
     assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'the order unchanged');
     assert.deepEqual(activeOf(await (await fetch(`http://127.0.0.1:${port}/api/data`)).json()), [A, B, C, D], "the server's order unchanged");
-    assert.equal(await p.ev('location.hash'), '#goals', 'Escape closed and opened nothing');
+    assert.equal(await p.ev(PANEL), true, "the drag's Escape left the Threads panel open");
+    assert.equal(await p.ev('location.hash'), '#goals?th=inbox', 'Escape closed and opened nothing');
     assert.equal(await p.ev(`document.querySelectorAll('#goals .card.goal.dragging').length`), 0, 'no card left marked');
+    // with no drag, Escape is the page's again: it closes the panel
+    await p.key('Escape');
+    await soon(`!${PANEL} && location.hash === '#goals'`, 'a second Escape, no drag: the panel closed');
+  });
+
+  await t.test('a cancelled drag opens no peek where it is released', async () => {
+    await fresh();
+    // B's grip, and a point on B's card body: nothing there but the card (a click there opens its peek)
+    const [from, box] = await p.ev(`(() => {
+      document.querySelector('#goals-list').scrollIntoView({ block: 'start' });
+      const g = document.querySelector(${JSON.stringify(`${card(B)} .goal-grip`)}).getBoundingClientRect();
+      const c = document.querySelector(${JSON.stringify(card(B))}).getBoundingClientRect();
+      return [{ x: g.left + g.width / 2, y: g.top + g.height / 2 }, { left: c.left, top: c.top, width: c.width, height: c.height }];
+    })()`);
+    const body = await p.ev(`(() => {
+      const c = document.querySelector(${JSON.stringify(card(B))});
+      for (let fy = 0.5; fy < 0.95; fy += 0.05) for (let fx = 0.3; fx < 0.95; fx += 0.05) {
+        const x = ${box.left} + ${box.width} * fx, y = ${box.top} + ${box.height} * fy;
+        const el = document.elementFromPoint(x, y);
+        if (el && c.contains(el) && !el.closest('button, a, summary, details, input, textarea, select, label')) return { x, y };
+      }
+      return null;
+    })()`);
+    assert.ok(body, "a plain point on B's card body");
+    // press, move a little within B's card (not over another), Escape, release on the body
+    await mouse(p, 'mouseMoved', from.x, from.y, 0);
+    await mouse(p, 'mousePressed', from.x, from.y, 1);
+    for (let i = 1; i <= 4; i++) await mouse(p, 'mouseMoved', from.x + ((body.x - from.x) * i) / 4, from.y + ((body.y - from.y) * i) / 4, 1);
+    assert.deepEqual(await order(p), ['upkeep', A, B, C, D], 'no preview: the pointer stayed on B');
+    await p.key('Escape');
+    await mouse(p, 'mouseReleased', body.x, body.y, 0);
+    await pause(500);
+    assert.equal(await p.ev('location.hash'), '#goals', 'the release opened no peek');
+    assert.deepEqual(await p.ev('window.__orders'), [], 'no post');
+    // the same point, a plain click: it does open B's peek (so the release above was a click that would have)
+    await mouse(p, 'mousePressed', body.x, body.y, 1);
+    await mouse(p, 'mouseReleased', body.x, body.y, 0);
+    await soon(`location.hash !== '#goals'`, "a plain click on B's card body opens its peek");
+  });
+});
+
+// No reorder control on a read-only view (AC8, AC9): the hub's page, and the artifact viewer. The rendered
+// text (innerText: no script, nothing hidden) has neither Move up nor Move down.
+const noControls = async (p, where) => {
+  assert.equal(await p.ev(`document.querySelectorAll('.goal-grip, [data-goal-move]').length`), 0, `${where}: no handle, no Move up or Move down`);
+  assert.doesNotMatch(await p.ev('document.body.innerText'), /Move up|Move down/, `${where}: no Move up or Move down in its text`);
+};
+
+test('no reorder control on the hub or in the viewer', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goals-reorder-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env } = reorderFixture(base);
+  // an artifact, written and committed by hand before the dashboard starts (`artifact new` refuses on main)
+  const dir = path.join(root, 'docs/devteam/project/artifacts/reorder-probe');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'artifact.json'), JSON.stringify({ v: 1, title: 'Reorder probe', summary: 'A page', by: 'supervisor', for: [] }));
+  fs.writeFileSync(path.join(dir, 'index.html'), '<!doctype html><html><body><p id="art">the probe</p></body></html>');
+  const git = (...a) => { const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root, encoding: 'utf8' }); assert.equal(r.status, 0, `git ${a.join(' ')}: ${r.stderr}`); };
+  git('add', '-A', dir);
+  git('commit', '-qm', 'artifact: reorder-probe');
+  const { p, dash, port } = await openOn(later, root, env, { inBlock: true });
+  const soon = soonIn(p, 60000, () => dash.out());
+
+  await t.test('AC8: the hub', async () => {
+    const hub = `http://127.0.0.1:${PORTS + 0}/`;
+    // the project in the hub's list with its pulse, before the page waits on its card
+    await until(async () => { try { return (await (await fetch(`${hub}instances.json`)).json()).instances?.some((x) => x.pulse); } catch { return false; } }, "the project in the hub's list");
+    await p.send('Page.navigate', { url: hub });
+    await soon(`!!document.querySelector('.hub-goal')`, "the hub's goal line (the project's pulse)");
+    await noControls(p, 'the hub');
+  });
+
+  await t.test('AC9: the artifact viewer', async () => {
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/view/artifact/reorder-probe` });
+    await soon(`document.documentElement.classList.contains('viewer') && document.getElementById('av-title')?.textContent === 'Reorder probe' && !!document.getElementById('av-frame') && !document.getElementById('av-frame').hidden && !!document.getElementById('av-frame').getAttribute('src')`, 'the viewer: its frame and title');
+    await noControls(p, 'the viewer');
+  });
+});
+
+test('the goals page measure with handles at three sizes', { ...CHROME, timeout: 300000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goals-reorder-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const { root, env, ids } = reorderFixture(base);
+  const { A, B, C, D } = ids;
+  const { p, soon, port } = await openOn(later, root, env);
+  const url = (hash) => `http://127.0.0.1:${port}/${hash}`;
+  const GRIPS = `document.querySelectorAll('#goals .goal-grip').length === 4`;
+
+  await t.test('AC10/AC11: the measure at each size, then Move down from the menu on a phone', async () => {
+    // as dashboard-measure.test.mjs measures #goals: page-top at 1440 only (its view a selector no element has
+    // below 900px, where kit-87's nav row sits between the bar and the page)
+    for (const [i, size] of SIZES.entries()) {
+      const res = await measureAt(p, url('#goals'), { ready: GRIPS, sizes: [size], ...(i ? { view: '#no-such-view' } : {}) });
+      const at = `${size[0]}x${size[1]}`;
+      assert.deepEqual(res, { [at]: [] }, `#goals at ${at}`);
+      assert.equal(await p.ev(`document.querySelectorAll('#goals .goal-grip').length`), 4, `four handles at ${at}`);
+    }
+    assert.deepEqual(await p.ev('[innerWidth, innerHeight]'), [390, 844], 'on the phone size');
+    await settled(p, port, [A, B, C, D], 'the seeded order');
+    const posts = (await p.ev('window.__orders')).length;
+    await p.click(`${card(B)} details.menu > summary`);
+    await soon(`!!document.querySelector(${JSON.stringify(`${card(B)} details.menu[open]`)})`, "B's menu open");
+    const boxes = await p.ev(`(() => {
+      document.querySelector(${JSON.stringify(`${card(B)} details.menu .pop`)}).scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      return [...document.querySelectorAll(${JSON.stringify(`${card(B)} [data-goal-move]`)})].map((b) => {
+        const r = b.getBoundingClientRect();
+        return { move: b.dataset.goalMove, seen: b.checkVisibility({ visibilityProperty: true, opacityProperty: true }) && r.width > 0 && r.height > 0, inside: r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight };
+      });
+    })()`);
+    assert.deepEqual(boxes, [{ move: 'up', seen: true, inside: true }, { move: 'down', seen: true, inside: true }], "B's Move up and Move down, shown and inside the window");
+    await p.click(`${card(B)} [data-goal-move="down"]`);
+    await soon(`window.__orders.length === ${posts + 1}`, 'one more post');
+    await settled(p, port, [A, C, B, D], 'the order after Move down on a phone');
+    assert.deepEqual((await p.ev('window.__orders')).slice(posts), [{ ids: [A, C, B, D] }], 'the post: the whole order');
   });
 });
