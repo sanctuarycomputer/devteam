@@ -26,6 +26,27 @@ const idOf = (out) => out.split('\n')[0].trim();
 // The laptop's preview relays, in this file's own block of ports (lib/ports.mjs's layout: +62..79).
 const RELAY_ENV = { DEVTEAM_RELAY_PORTS: `${PORTS + 62}-${PORTS + 79}` };
 
+// Knobs for widening a race on demand (kit-305), each changing nothing unless set:
+// DEVTEAM_TEST_CPU_THROTTLE=<n>, Chrome's CPU throttling on each case's tab (a loaded runner);
+// DEVTEAM_TEST_RECTS_DELAY_MS=<ms>, once V.open has the viewer up, each lens's rects message (where its
+// watched anchors are) reaches the dashboard that much later, so the pins follow a move late (DW6). Only from
+// then: held from the start, the stage's pins are first drawn late, already in their final places. (The pins
+// are also redrawn by the panel's slide ending, from the rects the dashboard has, so delaying the dashboard's
+// animation frames instead doesn't hold them back every time.) A message held is dispatched again, as it
+// came, to the dashboard's own listeners; nothing else is.
+const CPU_THROTTLE = Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) || 0;
+const RECTS_DELAY_MS = Number(process.env.DEVTEAM_TEST_RECTS_DELAY_MS) || 0;
+const RECTS_DELAY = `(() => {
+  if (window !== top) return;
+  const again = new WeakSet();
+  addEventListener('message', (e) => {
+    const m = e.data;
+    if (!window.__rectsDelay || again.has(e) || !m || m.lens !== 1 || m.type !== 'rects') return;
+    e.stopImmediatePropagation();
+    setTimeout(() => { const d = new MessageEvent('message', { data: m, origin: e.origin, source: e.source }); again.add(d); dispatchEvent(d); }, ${RECTS_DELAY_MS});
+  });
+})()`;
+
 // A wait on a condition in the page (this file's own copy of dashboard.test.mjs's soonIn): an
 // evaluation that throws is "not yet"; timed out, it says where the tab is and the last error.
 const soonIn = (p, ms = 20000, server = null) => async (expr, what) => {
@@ -176,6 +197,8 @@ export async function harness(t, fixture) {
     await p.send('Page.enable');
     await p.send('Runtime.enable');
     await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+    if (CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
+    if (RECTS_DELAY_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: RECTS_DELAY });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
     await p.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH });
     await p.send('Page.navigate', { url: `${B}/${path}${hash}` });
@@ -193,6 +216,7 @@ export async function harness(t, fixture) {
       const n = await V.mark();
       await p.ev(`location.hash = ${J(head)}; void 0`);
       await V.up(head, n);
+      if (RECTS_DELAY_MS) await p.ev('window.__rectsDelay = true');
     };
     // up on head's stage: the lens ready (and a preview's app at /), the page's own word heard since from
     V.up = async (head, from) => {
@@ -264,11 +288,23 @@ export async function harness(t, fixture) {
     // A full Escape press (CDP keyDown then keyUp) with the frame's focus, and the lens's keydown message
     // for it heard by the dashboard's window (task-1 T1-5: a press that never reached the lens would be
     // the dashboard's own Escape, not the lens's).
+    // The keyUp waits until nothing it is aimed at is being removed (kit-305): the dashboard closes the
+    // viewer on the keydown's message and swaps the frame out, and a keyUp sent to that out-of-process frame
+    // while it goes is never answered (Input.dispatchKeyEvent's 30 s timeout). WATCH's message listener runs
+    // before the dashboard's, so once the keydown is in __lensKeys the dashboard has acted on it: its
+    // history.back or its replace is counted. A close begun is waited for; a press that closes nothing (a
+    // card, pin mode) still sends its keyUp to the frame, so the lens's up message is there to check. The
+    // counters are only read here, never zeroed: the DW3 cases read them.
     V.frameEscape = async () => {
       await V.focusFrame();
       const k = await V.keysMark();
-      await p.key('Escape');
+      const [b0, r0] = await p.ev('[window.__backs, window.__replaces.length]');
+      const ESC = { key: 'Escape', code: 'Escape', modifiers: 0, windowsVirtualKeyCode: 27 };
+      await p.send('Input.dispatchKeyEvent', { type: 'keyDown', ...ESC });
       await soon(`window.__lensKeys.slice(${k}).some((m) => m.key === 'Escape' && m.up !== true)`, "the lens told the dashboard of the Escape's keydown");
+      if (await p.ev(`window.__backs > ${b0} || window.__replaces.slice(${r0}).some((r) => r.leave) || !${VIEWER_UP}`)) await settle(CLOSED, 3000);
+      await p.ev(FRAMES);
+      await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...ESC });
       return k;
     };
     // Each closer (DW2): X pressed; Escape with the dashboard's focus; Escape with the frame's (a full
