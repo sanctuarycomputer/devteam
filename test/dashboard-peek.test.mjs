@@ -97,21 +97,28 @@ const RECORD = `(() => {
     // and, just after peekHide's own end listener (added in a microtask queued here, inside peekHide before
     // it adds end; the microtask runs once the closing handler or evaluate returns, before any frame), whether
     // the slide out's own transitionend hid the drawer: never the safety net a second later. A stale end from
-    // the slide in (a transform transition still running) is skipped. A listener left by a close that was
-    // reopened goes at the next close or RECORD.
+    // the slide in (a transform transition still running) is skipped. And __cut: a transition event that hid
+    // the drawer while a transform transition still ran on it (read in the capture phase, before the page's
+    // listeners), i.e. a slide out cut short. Listeners left by a close that was reopened go at the next close or RECORD.
     const slides = () => d.getAnimations().some((a) => a.transitionProperty === 'transform');
+    for (const ty of ['transitionend', 'transitioncancel']) addEventListener(ty, (e) => { if (e.target === d && e.propertyName === 'transform') window.__pre = { shown: !d.hidden, sliding: slides() }; }, true);
     cl.remove = (...c) => { const was = c.includes('peek-open') && cl.contains('peek-open'); const r = remove(...c);
       if (was) {
         window.__out = { hidden: d.hidden, scrim: document.getElementById('scrim').hidden, sliding: slides() };
         if (window.__endL) d.removeEventListener('transitionend', window.__endL);
+        if (window.__cutL) for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL);
         queueMicrotask(() => {
           const l = window.__endL = (e) => { if (e.target !== d || e.propertyName !== 'transform' || slides()) return; window.__endHidden = d.hidden; d.removeEventListener('transitionend', l); if (window.__endL === l) window.__endL = null; };
           d.addEventListener('transitionend', l);
+          const cut = window.__cutL = (e) => { if (e.target === d && e.propertyName === 'transform' && d.hidden && window.__pre?.shown && window.__pre.sliding) window.__cut = e.type; };
+          for (const ty of ['transitionend', 'transitioncancel']) d.addEventListener(ty, cut);
         });
       }
       return r; };
   }
   if (window.__endL) { d.removeEventListener('transitionend', window.__endL); window.__endL = null; }
+  if (window.__cutL) { for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL); window.__cutL = null; }
+  window.__cut = null;
   window.__tr.length = 0;
   window.__closed = null;
   window.__out = null;
@@ -346,13 +353,18 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   // A close during the slide in, or in the frame it ends, still slides out (kit-289): the slide in's own
   // transitioncancel (or a late transitionend), sent with the next frame, must not hide the drawer at once.
   // Each close clears __tr in its own task, so the first transitionrun read after it is the slide out's.
-  const slidesOut = async (what) => {
+  // full: a slide out of the whole --dur, which must still be shown when its transitionrun arrives. A close
+  // mid slide in reverses it in a shorter slide, which one slow frame on a loaded runner can outlast (it is
+  // over before Chrome sends its events, and hiding then is right): there, that nothing hid the drawer while
+  // its slide out still ran (__cut) is the check.
+  const slidesOut = async (what, { full = true } = {}) => {
     await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${what}: the slide out runs`);
-    assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${what}: shown when the slide out's transitionrun arrives`);
+    if (full) assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${what}: shown when the slide out's transitionrun arrives`);
+    await soon(isClosed, `${what}: closed`);
+    assert.equal(await p.ev('window.__cut'), null, `${what}: not hidden while its slide out ran`);
     await soon("window.__tr.some((x) => x.type === 'transitionend')", `${what}: the slide out ended`);
     await soon('window.__endHidden !== null', `${what}: the slide out's own end heard`);
     assert.equal(await p.ev('window.__endHidden'), true, `${what}: hidden by the slide's own end`);
-    await soon(isClosed, `${what}: closed`);
   };
   // Open from Board and close from the task in which ready(a) first holds (a: the slide in's animation, or
   // null once it is gone), polled from setTimeout tasks as a CDP evaluate or a key event lands: between frames.
@@ -394,7 +406,7 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     let closed = false;
     for (let i = 0; i < 5 && !closed; i++) closed = await closeWhen("(a) => !!a && window.__tr.some((x) => x.type === 'transitionrun') && a.currentTime >= 40 && a.currentTime <= 200");
     assert.ok(closed, 'closed mid slide in');
-    await slidesOut('mid slide in');
+    await slidesOut('mid slide in', { full: false });
   });
 
   await t.test('slide out survives: a close in the frame the slide in ends', async () => {
@@ -403,6 +415,7 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
       await soon("window.__tr.some((x) => x.type === 'transitionrun')", `round ${i}: the slide out runs`);
       assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `round ${i}: shown when the slide out's transitionrun arrives`);
       await soon(isClosed, `round ${i}: closed`);
+      assert.equal(await p.ev('window.__cut'), null, `round ${i}: not hidden while its slide out ran`);
     }
   });
 
