@@ -2,13 +2,13 @@
 
 What Quillmark relates to, by how each relates to it.
 
-It serves independent researchers, who write long notes and want them to last. It depends on Cloudberry Storage, where sync keeps the notes. Inkwell Plugins builds on it. Ledgerpad is its alternative: it does the same job and locks notes in. It collaborates with the Open Notes Format group on the format both follow. Data protection regulators govern how it keeps its users' notes. Its workshops affect local libraries, which host them. And the Small Press Fair sponsors its yearly meetup.
+It serves independent researchers, who write long notes and want them to last. It depends on Acme Storage, where sync keeps the notes. Inkwell Plugins builds on it. Ledgerpad is its alternative: it does the same job and locks notes in. It collaborates with the Open Notes Format group on the format both follow. Data protection regulators govern how it keeps its users' notes. Its workshops affect local libraries, which host them. And the Small Press Fair sponsors its yearly meetup.
 
 ```exterior
 {
   "exterior": 1,
-  "strategy_blob": "882f8e9b11b88623d45a14abf6223c75bdcfcf85",
-  "self_blob": "5f2c5dd5d8026163e52e568ff141b9857c266361",
+  "strategy_blob": "d4b0bd760cf918d668218611232bd51efe8fbe2d",
+  "self_blob": "c69d5ece56a6aa7dd72e1257f0eac0892e0c73c0",
   "entities": [
     {
       "id": "researchers", "name": "Independent researchers", "relation": "serves", "kind": "group",
@@ -20,9 +20,9 @@ It serves independent researchers, who write long notes and want them to last. I
       ]
     },
     {
-      "id": "cloudberry", "name": "Cloudberry Storage", "relation": "depends_on", "kind": "organisation",
+      "id": "acme-storage", "name": "Acme Storage", "relation": "depends_on", "kind": "organisation",
       "matters": "Sync runs on it, so its prices and its outages are ours.", "weight": 3,
-      "strategy": ["Sync runs on Cloudberry Storage, so it must stay fast and cheap."],
+      "strategy": ["Sync runs on Acme Storage, so it must stay fast and cheap."],
       "signals": [
         { "id": "storage-prices", "what": "Their storage prices, which set what sync costs.", "value": 3 },
         { "id": "storage-incidents", "what": "Incidents on their status page.", "value": 2 }

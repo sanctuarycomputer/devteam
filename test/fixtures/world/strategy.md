@@ -13,7 +13,7 @@ Independent researchers who write long notes and want them to last.
 ## How it wins
 
 - Notes stay plain text, where an alternative like Ledgerpad locks them in.
-- Sync runs on Cloudberry Storage, so it must stay fast and cheap.
+- Sync runs on Acme Storage, so it must stay fast and cheap.
 - Plugins such as Inkwell Plugins grow what it can do.
 - It follows the Open Notes Format, shaped with its working group.
 - It keeps to the data protection rules where its users live.

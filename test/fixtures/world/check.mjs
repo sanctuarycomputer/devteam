@@ -18,9 +18,9 @@ if (!fn || !list) throw new Error('schemaErrors or asList not found in devteam.m
 export const schemaErrors = new Function(`${list}${fn}; return schemaErrors;`)();
 
 // The fenced blocks of a markdown file. A fence is a line at column 0 of three or more backticks;
-// one opens a block when none is open, its info string the rest of the line, trimmed (possibly
+// one opens a block when none is open, its info string the rest of the line, its spaces and tabs trimmed (possibly
 // empty). The block closes at the next line of at least as many backticks and nothing else but
-// whitespace. Indented and ~~~ fences are prose. Returns the blocks, the text outside every block
+// spaces or tabs. Indented and ~~~ fences are prose. Returns the blocks, the text outside every block
 // (prose), and the line of a block that never closes (or null).
 export function blocks(text) {
   const out = [];
@@ -29,9 +29,9 @@ export function blocks(text) {
   text.split('\n').forEach((line, i) => {
     const m = /^(`{3,})(.*)$/.exec(line);
     if (!open) {
-      if (m) open = { ticks: m[1].length, info: m[2].trim(), line: i + 1, body: [] };
+      if (m) open = { ticks: m[1].length, info: m[2].replace(/^[ \t]+|[ \t]+$/g, ''), line: i + 1, body: [] };
       else prose.push(line);
-    } else if (m && m[1].length >= open.ticks && /^\s*$/.test(m[2])) {
+    } else if (m && m[1].length >= open.ticks && /^[ \t]*$/.test(m[2])) {
       out.push({ info: open.info, line: open.line, body: open.body.join('\n') });
       open = null;
     } else open.body.push(line);

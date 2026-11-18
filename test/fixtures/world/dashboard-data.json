@@ -64,11 +64,11 @@
         ]
       },
       {
-        "entity": "cloudberry",
+        "entity": "acme-storage",
         "relation": "depends_on",
         "relation_word": null,
         "kind": "organisation",
-        "name": "Cloudberry Storage",
+        "name": "Acme Storage",
         "matters": "Sync runs on it, so its prices and its outages are ours.",
         "weight": 3,
         "signals": [

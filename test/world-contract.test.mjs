@@ -123,8 +123,24 @@ test('nothing in a fixture names what the strategy does not', () => {
   }
 });
 
+test('fences: column 0 backticks, the info string trimmed of spaces and tabs only, closed by as many backticks or more', () => {
+  const info = (t) => blocks(t).blocks.map((b) => b.info);
+  assert.deepEqual(info('```self \t\n{}\n```\n'), ['self']);
+  assert.deepEqual(info('```self\u00a0\n{}\n```\n'), ['self\u00a0'], 'only spaces and tabs are trimmed');
+  assert.deepEqual(info('```self x\n{}\n```\n'), ['self x']);
+  assert.deepEqual(info(' ```self\n{}\n ```\n'), [], 'an indented fence is prose');
+  assert.deepEqual(info('~~~self\n{}\n~~~\n'), [], 'a ~~~ fence is prose');
+  assert.deepEqual(blocks('````self\n```\n{}\n````\n').blocks.map((b) => b.body), ['```\n{}'], 'a shorter fence inside does not close it');
+  assert.deepEqual(info('```self\n{}\n``` x\n```\n'), ['self'], 'a fence line with text does not close the block');
+  assert.equal(blocks('x\n```self\n{}\n').unclosed, 2);
+});
+
 test('namesWhole matches whole words only, ignoring case', () => {
-  assert.ok(namesWhole('We sync with Cloudberry Storage daily.', 'cloudberry storage'));
+  assert.ok(namesWhole('We sync with Acme Storage daily.', 'acme storage'));
+  assert.ok(!namesWhole('We use Ledgerpad.', 'pad'), 'a letter just before');
+  assert.ok(!namesWhole('model 2pad', 'pad'), 'a digit just before');
+  assert.ok(!namesWhole('pad2 is out', 'pad'), 'a digit just after');
+  assert.ok(namesWhole('Pad, then more.', 'pad'));
   assert.ok(!namesWhole('We use Google.', 'Go'));
   assert.ok(!namesWhole('Ledgerpads are many.', 'Ledgerpad'));
   assert.ok(namesWhole('(Ledgerpad)', 'Ledgerpad'));
@@ -148,7 +164,7 @@ test('dashboard-data.json is both documents\' dashboard blocks, each valid, and 
     entity: 'press-fair', relation: 'other', relation_word: 'sponsors', kind: 'organisation', name: 'Small Press Fair',
     matters: 'It sponsors the yearly meetup, where most new plugin writers first come.', weight: 1, signals: undefined,
   });
-  const prices = d.exterior.entities.find((e) => e.entity === 'cloudberry').signals.find((s) => s.signal === 'storage-prices');
+  const prices = d.exterior.entities.find((e) => e.entity === 'acme-storage').signals.find((s) => s.signal === 'storage-prices');
   assert.deepEqual(prices, { signal: 'storage-prices', what: 'Their storage prices, which set what sync costs.', value: 3, score: 9 });
   assert.equal(d.self.parts[0].name, 'The app');
 });
