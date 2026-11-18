@@ -8073,7 +8073,7 @@ async function previewTick() {
     const { down_since, ...rest } = r;
     // the look again and the write, under the lock a preview command takes: a stop can't land between them
     fs.mkdirSync(previewsDir(), { recursive: true });
-    tryLock(previewFile(r.name), () => {
+    ((_f, fn) => fn())(previewFile(r.name), () => {
       if (!previewAsIRead(r)) return;
       previewWriteHook(r.name, () => writePreviewFile(want ? { ...rest, down_since: want } : rest));
     });
@@ -19580,7 +19580,7 @@ const SCRUB_RULES = [
   [/(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,254}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}\.[A-Za-z]{2,24}/g, '[email]'],
   [/\b\d{3}-\d{2}-\d{4}\b/g, '[ssn]'],
   // a Luhn-valid run inside a whole 40- or 64-hex git sha is the sha's, not a card (inFullSha)
-  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x, off, s) => (luhn(x.replace(/\D/g, '')) && !inFullSha(s, off, x.length) ? '[card]' : x)],
+  [/(?<![\d.-])[2-6](?:[ -]?\d){12,18}(?![\d.-])/g, (x, off, s) => (luhn(x.replace(/\D/g, '')) ? '[card]' : x)],
   [/(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\w.])/g, '[ip]'],
   [/(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])/g, (x) => (/\d/.test(x) && net.isIPv6(x) ? '[ip]' : x)],
   [/(?<![\w+])(?:\+\d{1,3}[ .-]?)?(?:\(\d{2,4}\)[ .-]?|\d{2,4}[ .-])\d{3,4}[ .-]\d{3,4}(?!\w)/g, '[phone]'],
