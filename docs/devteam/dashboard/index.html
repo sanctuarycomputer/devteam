@@ -2194,8 +2194,10 @@ function choicesOf(q) {
   // question's own choices) is a line of text (oaSuggest), never a button that reads as doing the job
   if (isOa(q)) return doneCant.map((c) => ({ ...c, rec: false }));
   if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = doneCant;
-  const rec = q.recommendation;
-  if (rec && !list.some((c) => norm(c.label) === norm(rec))) list.unshift({ label: rec });
+  // a goal's approval takes only Approve, Refine or Let go (goal decide): a recommendation in other
+  // words ("Yes") marks Approve rather than adding a choice the press can't send
+  const rec = q.kind === 'goal-approval' && /^(yes|approve[ds]?|go ahead)\b/i.test(String(q.recommendation ?? '').trim()) ? 'Approve' : q.recommendation;
+  if (rec && !list.some((c) => norm(c.label) === norm(rec)) && q.kind !== 'goal-approval') list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
 // An open owner-action without secrets: the card the owner acts from. An answered one (its drawer)
@@ -8469,7 +8471,7 @@ document.addEventListener('click', async (ev) => {
       if (open.length) { NOT_DONE.set(id, open); oaPaint(); return; }
     }
     if (NOT_DONE.delete(id)) oaPaint();
-    if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
+    if (goalId && !['Approve', 'Refine', 'Let go'].includes(picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = card?.querySelector('input[data-auto]:checked')?.value;
     const asRule = card?.querySelector('input[data-rulebox]')?.checked;
