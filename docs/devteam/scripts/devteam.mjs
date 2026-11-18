@@ -520,6 +520,10 @@ const SETTINGS_DEFAULTS = {
   // (often the owner's own gh login, which opens every fleet PR) can't give; merge's own checks still run first.
   // Home only: a repo link doesn't inherit it.
   merge_admin: false,
+  // Big files whose tickets may name parts of them in touches (path#name, planning.md D4): two tickets
+  // naming different parts of one listed file can run at once. Globs; every other file is touched
+  // whole. The supervisor's own setting; the merge gate reads it as main has it.
+  split_files: [],
   // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
@@ -656,6 +660,7 @@ const SETTINGS_WORDS = Object.freeze({
   model_prices: ['Agents and sessions', 'Model prices', 'prices for models the kit has none for, or overrides', 'names'],
   gates: ['Merging and checks', 'Checks before merge', "the commands that must pass at a ticket's head before it merges", 'names'],
   ignored_checks: ['Merging and checks', 'Ignored forge checks', "forge checks merge doesn't wait for", 'value'],
+  split_files: ['Merging and checks', 'Files split by part', 'big files whose tickets may name parts of them in touches; every other file is touched whole', 'value'],
   slow_gate_minutes: ['Merging and checks', 'Slow check after', "minutes a check may take before it's flagged slow", 'value'],
   main_branch: ['Merging and checks', 'Main branch', 'the branch work merges into', 'value'],
   merge_method: ['Merging and checks', 'Merge method', 'how PRs land: a merge commit, squash or rebase', 'value'],
@@ -695,7 +700,7 @@ const SETTING_SHAPES = Object.freeze({
   release: (v) => v !== undefined && releaseProblem(v) === null,
   upstream_base: (v) => v === null || (typeof v === 'string' && /^v\d+\.\d+\.\d+$/.test(v)),
   main_branch: settingName, tmux_session: settingName, project: settingName,
-  usage_sources: settingLines, ignored_checks: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
+  usage_sources: settingLines, ignored_checks: settingLines, split_files: settingLines, worktree_files: settingLines, worker_denied_commands: settingLines,
   autonomy_ceilings: (v) => isObj(v) && Object.entries(v).every(([k, n]) => /^[a-z0-9-]{1,60}$/.test(k) && [1, 2, 3].includes(n)),
 });
 // The hidden settings whose kit default is the kit's own constant, so the page may show it.
@@ -3085,6 +3090,154 @@ function prefixOwners(entry, components, devteamLine) {
   return [...new Set(probes.flatMap((p) => ownersOf(p, components, devteamLine)))];
 }
 /* coverage end */
+/* parts start */
+// Parts of a file, read by line (spec: what a part is). A touches entry may name one: path#name, or
+// path#+name for a part the ticket adds; only files settings.split_files lists split this way.
+const PART_NAME = /^[A-Za-z0-9_$.-]+$/;
+const touchPath = (entry) => { const i = entry.indexOf('#'); return i === -1 ? entry : entry.slice(0, i); };
+const touchPart = (entry) => { const i = entry.indexOf('#'); if (i === -1) return null; const p = entry.slice(i + 1); return { name: p.replace(/^\+/, ''), added: p.startsWith('+') }; };
+const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\/|-->)\s*$/;
+const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
+const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
+const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
+// { places: Map name -> [{from, to}] (1-based, inclusive), owner: line -> leaf key, lines, n }. The
+// leaves partition the file: each declaration's or heading's own lines, and the rest by region. A
+// leaf is keyed by its path (a heading's ancestor headings; a declaration's enclosing regions), its
+// name and its count among places with that path and name, so a same-named place added elsewhere
+// never renumbers it: d:<path/>name#k, r:<region> for a region's rest, r: for the file's.
+function fileParts(text, file) {
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const n = lines.length;
+  const places = new Map();
+  const add = (name, from, to) => { if (!places.has(name)) places.set(name, []); places.get(name).push({ from, to }); };
+  const owner = new Array(n + 1).fill(null); // line -> own leaf key (declaration or heading), else null
+  const count = new Map();
+  const own = (path, name, from, to) => { const id = `${path.length ? `${path.join('/')}/` : ''}${name}`; const k = (count.get(id) ?? 0) + 1; count.set(id, k); const key = `d:${id}#${k}`; for (let i = from; i <= to; i++) owner[i] = key; return key; };
+  // regions
+  const open = new Map();
+  const regions = [];
+  for (let i = 1; i <= n; i++) {
+    const m = lines[i - 1].match(PART_MARK);
+    if (!m) continue;
+    if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
+    else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
+  }
+  const isMark = (i) => PART_MARK.test(lines[i - 1]);
+  // only a marker at column 0 ends a declaration; an indented one sits inside a body
+  const isMark0 = (i) => isMark(i) && !/^\s/.test(lines[i - 1]);
+  if (/\.md$/i.test(file)) {
+    const heads = [];
+    let fence = null;
+    for (let i = 1; i <= n; i++) {
+      const l = lines[i - 1];
+      const f = l.match(/^\s{0,3}(`{3,}|~{3,})/);
+      if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
+      if (fence) continue;
+      const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+    }
+    const above = [];
+    for (let j = 0; j < heads.length; j++) {
+      const h = heads[j];
+      while (above.length && above[above.length - 1].level >= h.level) above.pop();
+      let to = n;
+      for (let k = j + 1; k < heads.length; k++) if (heads[k].level <= h.level) { to = heads[k].i - 1; break; }
+      add(h.name, h.i, to);
+      const ownTo = j + 1 < heads.length ? heads[j + 1].i - 1 : n;
+      own(above.map((a) => a.name), h.name, h.i, ownTo);
+      above.push(h);
+    }
+  } else {
+    const html = /\.html?$/i.test(file);
+    const decls = [];
+    for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
+    // a declaration starts at the comment lines directly above it
+    for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
+    for (let j = 0; j < decls.length; j++) {
+      const d = decls[j];
+      const stop = j + 1 < decls.length ? Math.max(decls[j + 1].from, d.i + 1) : n + 1;
+      let to = d.i;
+      while (to + 1 < stop && !isMark0(to + 1) && !(html && lines[to].startsWith('<'))) to++;
+      const from = Math.max(d.from, j ? decls[j - 1].i + 1 : 1);
+      add(d.name, from, to);
+      own(regions.filter((r) => r.from < d.i && d.i < r.to).sort((a, b) => a.from - b.from).map((r) => r.name), d.name, from, to);
+    }
+  }
+  // the rest: lines no declaration or heading owns, by innermost region
+  const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
+  for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
+  return { places, regions, owner, lines, n };
+}
+// The leaf keys a named part covers in these parts: every leaf with a line inside one of its places.
+function partLeaves(P, name) {
+  const s = new Set();
+  for (const pl of P.places.get(name) ?? []) for (let i = pl.from; i <= pl.to; i++) s.add(P.owner[i]);
+  return s;
+}
+// Each leaf's text, trailing blank lines dropped.
+function leafTexts(P) {
+  const m = new Map();
+  for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; m.set(k, m.has(k) ? `${m.get(k)}\n${P.lines[i - 1]}` : P.lines[i - 1]); }
+  for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
+  return m;
+}
+// The leaves of a file that changed between two texts and that none of the named parts covers. A
+// leaf the base has is judged by the base: only a part named there covers it, so widening a part at
+// the head (a region moved round a function, a heading demoted under a named one) covers nothing
+// more. A leaf only the head has is judged by the head: a function added inside a named region is
+// the region's, and a part the ticket adds (+name) covers its own leaves, unless the base has it.
+function partsChanged(baseText, headText, file, named) {
+  const B = fileParts(baseText ?? '', file), H = fileParts(headText ?? '', file);
+  const tb = leafTexts(B), th = leafTexts(H);
+  const covB = new Set(), covH = new Set();
+  for (const x of named) {
+    if (!x.added) for (const k of partLeaves(B, x.name)) covB.add(k);
+    if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) covH.add(k);
+  }
+  return [...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k));
+}
+// A leaf key in words: a declaration's or heading's name, or whose rest it is.
+const leafWords = (k) => (k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
+/* parts end */
+// Parts of a file at a repo's main, read once per process: null when this machine can't read the
+// repo or its main has no such file.
+const partsAtMainCache = new Map();
+function partsAtMain(repoName, file) {
+  const k = `${repoName}\0${file}`;
+  if (!partsAtMainCache.has(k)) {
+    let P = null;
+    if (repoReadable(repoName)) {
+      const R = repo(repoName);
+      const ref = R.mainRef();
+      const text = ref ? R.git(['show', `${ref}:${file}`]) : null;
+      if (text !== null) P = fileParts(text, file);
+    }
+    partsAtMainCache.set(k, P);
+  }
+  return partsAtMainCache.get(k);
+}
+// Whether settings.split_files lists a file (its tickets may name parts of it).
+const isSplitFile = (file, s = loadSettings()) => Array.isArray(s.split_files) && s.split_files.some((g) => typeof g === 'string' && pathMatches(g, file));
+// Whether two touches entries of tickets in one repo can collide (D4, ready). Paths that don't
+// overlap never do; a whole file, a glob, or a file split_files doesn't list overlaps as before.
+// Two parts of a listed file: names that exist at main collide when they cover a common leaf there;
+// a name not there yet (path#+name, or one a dependency adds) is compared by name, and never
+// collides with a part main has. A repo this machine can't read, or a file main lacks, collides.
+function touchesOverlap(a, b, repoName, s = loadSettings()) {
+  const pa = touchPath(a), pb = touchPath(b);
+  if (!globsOverlap(pa, pb)) return false;
+  const xa = touchPart(a), xb = touchPart(b);
+  if (!xa || !xb || trimSlash(pa) !== trimSlash(pb) || hasWild(pa) || !isSplitFile(pa, s)) return true;
+  const P = partsAtMain(repoName, trimSlash(pa));
+  if (!P) return true;
+  const ma = !xa.added && P.places.has(xa.name), mb = !xb.added && P.places.has(xb.name);
+  if (!ma && !mb) return xa.name === xb.name;
+  if (ma !== mb) return false;
+  const la = partLeaves(P, xa.name);
+  for (const k of partLeaves(P, xb.name)) if (la.has(k)) return true;
+  return false;
+}
 
 // Live state of a ticket's worker: its last phase line, and its last line of any kind.
 function workerState(id) {
@@ -3741,10 +3894,11 @@ function cmdValidate() {
   // Each ticket against its own repo's lines; another repo's kit line is its project folder, read
   // from settings alone (no checkout needed, so a missing one never stops validate).
   const S0 = loadSettings(); const lined = linesDeclared(S0);
+  let validateClosures = null;
   const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
-    for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
+    for (const g of t.touches ?? []) if (unbalanced(touchPath(g))) err(id, `touches entry "${g}" has unbalanced braces`);
     // Component lines: the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
     if (lined && isActive(t)) {
@@ -3757,7 +3911,7 @@ function cmdValidate() {
       const mine = new Set([t.component, ...tc]);
       const L0 = linesOf(componentLink(t.component, S0));
       for (const entry of t.touches ?? []) {
-        const owners = prefixOwners(entry, L0.comps, L0.dev);
+        const owners = prefixOwners(touchPath(entry), L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
         else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
@@ -3765,6 +3919,25 @@ function cmdValidate() {
       }
     }
     if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!ownEntry(loadSettings().links, l)) err(id, `links "${l}" is not in settings links`);
+    // Parts (path#name): of a file split_files lists, named as main has them, or added (path#+name)
+    // by this ticket or one it depends on. Written "<id>: …", so another ticket's gate only warns.
+    if (isActive(t) && !mergeShaFor(id)) for (const entry of t.touches ?? []) {
+      const x = touchPart(entry);
+      if (!x) continue;
+      const f = trimSlash(touchPath(entry));
+      const rn = repoOfTicketLink(t);
+      if (hasWild(f)) err(id, `touches "${entry}": a part names one file, not a glob`);
+      else if (!x.name || !PART_NAME.test(x.name)) err(id, `touches "${entry}": a part's name is letters, digits and _ $ . - (path#name, or path#+name for a part the ticket adds)`);
+      else if (!isSplitFile(f, S0)) err(id, `touches "${entry}": ${f} is not in settings.split_files, so it is touched whole; name it without #${x.added ? '+' : ''}${x.name}`);
+      else if (!repoReadable(rn)) warnings.push(`${id}: touches "${entry}": its part is not checked, since repo ${rn} can't be read here`);
+      else {
+        const P = partsAtMain(rn, f);
+        const added = () => [...(validateClosures ??= closures(ts)).get(id) ?? []].some((d) => { const o = ts.get(d); return o && isActive(o) && !mergeShaFor(d) && (o.touches ?? []).some((e) => { const y = touchPart(e); return y?.added && y.name === x.name && trimSlash(touchPath(e)) === f; }); });
+        if (!P) err(id, `touches "${entry}": ${f} is not on main; a ticket that creates a file names it whole`);
+        else if (x.added && P.places.has(x.name)) err(id, `touches "${entry}": ${f} already has a part ${x.name} at main; name it without +`);
+        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let, var or class, a Markdown heading's slug, or a /* name start */ … /* name end */ region); one this ticket adds is #+${x.name}`);
+      }
+    }
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -3888,7 +4061,7 @@ function cmdValidate() {
       if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
       // the same path in two repos is two files (by name: validate never needs a checkout)
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
-      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
+      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
   }
 
@@ -4227,7 +4400,7 @@ const capWords = (v) => (Number.isFinite(capOf(v)) ? String(v) : 'no cap');
 function overlapsActive(t, activeIds, ts) {
   const repo = repoOfTicketLink(t);
   const mine = t.touches ?? [];
-  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => globsOverlap(ga, gb))); });
+  return activeIds.filter((id) => { const a = ts.get(id); return a && a.id !== t.id && repoOfTicketLink(a) === repo && (a.touches ?? []).some((ga) => mine.some((gb) => touchesOverlap(ga, gb, repo))); });
 }
 function cmdReady() {
   const ts = tickets();
@@ -4773,7 +4946,19 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true, records: 
     // records in home: nothing of the project's in the link, its own folder included
     const own = R.projectInRepo && !H ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
-    const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
+    // A whole entry (no #part) covers a file as before; a file main's split_files lists is also inside
+    // touches when an entry names a part of it, and then only the parts named may change.
+    const entries = t.touches ?? [];
+    const sSplit = mainSettings() ?? {};
+    const whole = (f) => entries.some((g) => !touchPart(g) && pathMatches(g, f));
+    const partsNamed = (f) => (isSplitFile(f, sSplit) ? entries.filter((g) => touchPart(g) && trimSlash(touchPath(g)) === f && !hasWild(touchPath(g))).map(touchPart) : []);
+    const outside = changed.filter((f) => !mineOwn(f) && !whole(f) && !partsNamed(f).length);
+    for (const f of changed) {
+      if (mineOwn(f) || whole(f) || !partsNamed(f).length) continue;
+      const show = (at) => R.git(['show', `${at}:${f}`]);
+      const gap = partsChanged(show(base), show(sha), f, partsNamed(f));
+      if (gap.length) fails.push(`changes parts of ${f} the ticket doesn't name: ${[...new Set(gap.map(leafWords))].slice(0, 10).join(', ')}${gap.length > 10 ? ` (+${gap.length - 10} more)` : ''} (the file's rest is the lines outside every declaration, heading and region); a part not named is a design-change to the supervisor (worker.md §3)`);
+    }
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}; if the supervisor widened touches with ticket set since the log last landed, land the log first (log-sync, then merge --chore log) and check again`);
     // Component lines: a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.

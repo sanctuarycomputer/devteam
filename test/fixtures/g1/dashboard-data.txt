@@ -2187,6 +2187,17 @@ exit 0
       "owner_only": "gate-change"
     },
     {
+      "key": "split_files",
+      "group": "Merging and checks",
+      "name": "Files split by part",
+      "description": "big files whose tickets may name parts of them in touches; every other file is touched whole",
+      "shown": "value",
+      "value": [],
+      "set": false,
+      "default": [],
+      "owner_only": null
+    },
+    {
       "key": "slow_gate_minutes",
       "group": "Merging and checks",
       "name": "Slow check after",
