@@ -1,4 +1,0 @@
-
-summary: 1 file, concurrency 4
-test/a.test.mjs  5.0  failed (signal SIGKILL) (run 1)
-failed: test/a.test.mjs (failed (signal SIGKILL), run 1)
