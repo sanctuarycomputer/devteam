@@ -190,3 +190,91 @@ test('check 10: the comment states every field, kind and /memory.json rule', () 
     '30 minutes', '3 days', '400', 'loopback', '/instances.json'];
   for (const w of words) assert.ok(c.includes(w), `the contract comment holds ${w}`);
 });
+
+// ---- The fixture day: test/fixtures/box-memory/readings.jsonl, and the script that makes it.
+const fixDir = path.join(root, 'test', 'fixtures', 'box-memory');
+const readingsPath = path.join(fixDir, 'readings.jsonl');
+const dayBytes = () => fs.readFileSync(readingsPath, 'utf8');
+const dayLines = () => dayBytes().split('\n').filter((l) => l !== '');
+const dayReadings = () => dayLines().map((l) => JSON.parse(l));
+const t = (r) => Date.parse(r.at);
+const hourOf = (r) => new Date(t(r)).getUTCHours();
+
+test('check 1: every line of the fixture day passes the check', () => {
+  const { memoryReadingProblem } = fns();
+  const lines = dayLines();
+  assert.ok(lines.length > 0, 'readings.jsonl has lines');
+  for (const [i, l] of lines.entries()) assert.equal(memoryReadingProblem(l), null, `line ${i + 1}`);
+  assert.ok(dayBytes().endsWith('\n'), 'ends with a newline');
+});
+
+test('check 3b: the day plus a torn line and a v: 2 line, filtered, is exactly the day', () => {
+  const { memoryReadingProblem } = fns();
+  const day = dayLines();
+  const torn = day[10].slice(0, Math.floor(day[10].length / 2));
+  const file = `${day.join('\n')}\n${torn}\n${JSON.stringify({ ...JSON.parse(day[0]), v: 2 })}\n`;
+  const kept = file.split('\n').filter((l) => l !== '' && memoryReadingProblem(l) === null);
+  assert.deepEqual(kept, day);
+});
+
+test('check 4: a day a minute apart, with one restart gap', () => {
+  const rs = dayReadings();
+  assert.ok(rs.length >= 1350, `${rs.length} lines`);
+  assert.equal(rs[0].at, '2026-11-17T00:00:00Z');
+  assert.equal(rs[rs.length - 1].at, '2026-11-17T23:59:00Z');
+  const gaps = [];
+  for (let i = 1; i < rs.length; i++) {
+    const d = t(rs[i]) - t(rs[i - 1]);
+    assert.ok(d > 0, `at increases at line ${i + 1}`);
+    if (d !== 60000) gaps.push(d);
+  }
+  assert.equal(gaps.length, 1, 'one step is not a minute');
+  assert.ok(gaps[0] >= 30 * 60000, `the gap is ${gaps[0] / 60000} minutes`);
+});
+
+test('check 5: a quiet night, a busy afternoon, and everything kit-593 draws', () => {
+  const rs = dayReadings();
+  const night = rs.filter((r) => hourOf(r) < 6);
+  assert.ok(night.length > 0);
+  for (const r of night) assert.ok(r.sessions < 5, `${r.at} has ${r.sessions} sessions`);
+  const pm = rs.filter((r) => hourOf(r) >= 12 && hourOf(r) < 18);
+  assert.ok(pm.filter((r) => r.sessions >= 5).length >= 120, 'at least 120 afternoon lines with 5 or more sessions');
+  assert.equal(Math.max(...rs.map((r) => r.sessions)), Math.max(...pm.map((r) => r.sessions)), "the day's max sessions is in the afternoon");
+  assert.ok(pm.some((r) => r.working_set >= 0.8 * r.max), 'an afternoon line at or over the ceiling');
+  for (const k of KINDS) assert.ok(rs.some((r) => r.kinds?.[k]), `kind ${k}`);
+  for (const p of ['devteam-dev', 'mothership']) assert.ok(rs.some((r) => r.projects?.[p]), `project ${p}`);
+  for (const s of ['dashboard', 'dashboard-data', 'hello', 'accounts-tick', 'wait', 'gate', 'metrics']) assert.ok(rs.some((r) => r.devteam?.[s]), `subcommand ${s}`);
+  assert.ok(rs.some((r) => r.partial === true), 'a partial line');
+  for (const r of rs) assert.ok(r.max === 51539607552 && r.ceiling === 0.8 && r.source === 'cgroup');
+});
+
+test('check 6: the generator, imported, gives the committed bytes and writes nothing', async () => {
+  const before = dayBytes();
+  const mod = await import(new URL('./fixtures/box-memory/make-readings.mjs', import.meta.url).href);
+  assert.equal(dayBytes(), before, 'importing the generator writes nothing');
+  assert.equal(typeof mod.makeReadings, 'function');
+  assert.equal(mod.makeReadings(), before, 'makeReadings() is the file, byte for byte');
+});
+
+test('check 7: every subcommand in the day is a key of COMMANDS', () => {
+  const a = src.indexOf('const COMMANDS = {'), b = src.indexOf('\n};', a);
+  assert.ok(a >= 0 && b > a, 'COMMANDS block in devteam.mjs');
+  const keys = new Set();
+  for (const m of src.slice(a, b).matchAll(/(?:^\s*|,\s*)(?:'([\w-]+)'|([A-Za-z]\w*)):\s/g)) keys.add(m[1] || m[2]);
+  for (const k of ['dashboard-data', 'hello', 'gate']) assert.ok(keys.has(k), `the key parse finds ${k}`);
+  const used = new Set();
+  for (const r of dayReadings()) {
+    for (const k of Object.keys(r.devteam || {})) used.add(k);
+    for (const p of Object.values(r.projects || {})) for (const k of Object.keys(p.devteam || {})) used.add(k);
+  }
+  assert.ok(used.size >= 7);
+  for (const k of used) assert.ok(keys.has(k), `${k} is a COMMANDS key`);
+  assert.ok(!dayBytes().includes('FIXTURE-SECRET-DO-NOT-KEEP'));
+});
+
+test('check 10: every top-level key the fixture day uses is named in the comment', () => {
+  const c = contractComment();
+  const top = new Set();
+  for (const r of dayReadings()) for (const k of Object.keys(r)) top.add(k);
+  for (const k of top) assert.ok(c.includes(`\`${k}\``), `the comment names \`${k}\``);
+});
