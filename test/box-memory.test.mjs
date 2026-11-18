@@ -260,12 +260,18 @@ test('check 6: the generator, imported, gives the committed bytes and writes not
   assert.equal(mod.makeReadings(), before, 'makeReadings() is the file, byte for byte');
 });
 
-test('check 7: every subcommand in the day is a key of COMMANDS', () => {
+// The CLI's command names: the keys of COMMANDS, read from devteam.mjs's source.
+const commandKeys = () => {
   const a = src.indexOf('const COMMANDS = {'), b = src.indexOf('\n};', a);
   assert.ok(a >= 0 && b > a, 'COMMANDS block in devteam.mjs');
   const keys = new Set();
   for (const m of src.slice(a, b).matchAll(/(?:^\s*|,\s*)(?:'([\w-]+)'|([A-Za-z]\w*)):\s/gm)) keys.add(m[1] || m[2]);
   for (const k of ['init', 'hello', 'dashboard-data', 'gate']) assert.ok(keys.has(k), `the key parse finds ${k}`);
+  return keys;
+};
+
+test('check 7: every subcommand in the day is a key of COMMANDS', () => {
+  const keys = commandKeys();
   const used = new Set();
   for (const r of dayReadings()) {
     for (const k of Object.keys(r.devteam || {})) used.add(k);
@@ -299,5 +305,193 @@ test('fixture consistency: the sums on every line agree (the check itself stays 
       assert.ok(r.devteam?.[s], `${w}: a project's ${s} has a machine-wide ${s}`);
       assert.ok(v <= r.devteam[s].rss, `${w}: projects' ${s} sum within devteam.${s}.rss`);
     }
+  }
+});
+
+// ---- The fake /proc and cgroup: test/fixtures/box-memory/proc/, and what a recorder must make of it,
+// proc-expected.json. Read as a recorder reads the real /proc: cmdline split on NUL, comm, readlink of
+// cwd (never stat: the targets don't exist), statm's resident pages.
+const procDir = path.join(fixDir, 'proc');
+const cgroupDir = path.join(procDir, 'cgroup');
+const expectedPath = path.join(fixDir, 'proc-expected.json');
+const expectedText = () => fs.readFileSync(expectedPath, 'utf8');
+const expected = () => JSON.parse(expectedText());
+const SECRET = 'FIXTURE-SECRET-DO-NOT-KEEP';
+const ROOTS = { 'devteam-dev': '/fixture/code/devteam-dev', mothership: '/fixture/code/mothership' };
+const PAGE = 4096;
+const pids = () => fs.readdirSync(procDir).filter((n) => /^\d+$/.test(n)).sort((a, b) => a - b);
+const readProc = () => pids().map((pid) => {
+  const d = path.join(procDir, pid);
+  const cmdline = fs.readFileSync(path.join(d, 'cmdline'), 'utf8');
+  const argv = cmdline === '' ? [] : cmdline.split('\0');
+  if (argv.at(-1) === '') argv.pop();
+  let cwd = null;
+  try { cwd = fs.readlinkSync(path.join(d, 'cwd')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  const statm = fs.readFileSync(path.join(d, 'statm'), 'utf8');
+  return { pid, cmdline, argv, comm: fs.readFileSync(path.join(d, 'comm'), 'utf8'), cwd, statm, resident: Number(statm.trim().split(' ')[1]) };
+});
+const cgroupStat = () => Object.fromEntries(fs.readFileSync(path.join(cgroupDir, 'memory.stat'), 'utf8').trim().split('\n').map((l) => { const [k, v] = l.split(' '); return [k, Number(v)]; }));
+const cgroupNumber = (f) => Number(fs.readFileSync(path.join(cgroupDir, f), 'utf8').trim());
+const argv0 = (p) => path.basename(p.argv[0] ?? '').split(' ')[0];
+const isScript = (p, name) => p.argv[1]?.endsWith(`/devteam.mjs`) && p.argv[2] === name;
+
+// Every pid's row, written by hand from the contract's rules (the comment above memoryReadingProblem),
+// not read from proc-expected.json: kind from argv[0]'s basename's first word, never comm; a
+// subcommand only for the devteam kind, the word after the script when it's a COMMANDS key; project
+// by the root holding cwd; session for an agent whose cwd is inside <root>/.worktrees/<name>.
+const ROWS = {
+  27: { kind: 'other' }, // kernel thread: empty cmdline, comm kworker/0:1, no cwd, all-zero statm
+  640: { kind: 'other' }, // sleep 600 in /tmp: outside every root
+  700: { kind: 'node' }, // node /srv/other-user/app.js, cwd unreadable: kind by cmdline, no project, no session
+  812: { kind: 'other', project: 'devteam-dev' }, // bash in the devteam-dev root
+  905: { kind: 'other' }, // bash in /fixture/code/devteam-dev-old: a name that starts like a root isn't inside it
+  1001: { kind: 'agent', project: 'devteam-dev' }, // the supervisor claude in its root: not a session
+  1102: { kind: 'devteam', subcommand: 'dashboard', project: 'devteam-dev' }, // node devteam.mjs dashboard
+  1150: { kind: 'devteam', subcommand: 'wait', project: 'mothership' }, // node devteam.mjs wait
+  1203: { kind: 'agent', project: 'devteam-dev', session: true }, // claude in .worktrees/kit-1-fixture, with the fake secret
+  1240: { kind: 'devteam', subcommand: 'hello', project: 'devteam-dev' }, // devteam.mjs hello --json --pane in a worktree: no session (not an agent)
+  1302: { kind: 'agent', project: 'mothership', session: true }, // codex in .worktrees/m-2-fixture/app: a subfolder counts
+  1311: { kind: 'agent', project: 'mothership', session: true }, // opencode in .worktrees/m-3-fixture
+  1350: { kind: 'devteam', subcommand: 'gate', project: 'mothership' }, // comm MainThread: devteam.mjs gate ci -- npm test
+  1388: { kind: 'install', project: 'devteam-dev' }, // cmdline and comm "npm ci": argv[0]'s first word is npm
+  1420: { kind: 'browser', project: 'mothership' }, // chromium --headless in a worktree: not a session
+  1466: { kind: 'node', project: 'mothership' }, // node server.js
+  1490: { kind: 'devteam', project: 'mothership' }, // devteam.mjs --help: --help is no command name, so no subcommand
+};
+
+test('check 8: the fake /proc holds what the done-when lists', () => {
+  const ps = readProc();
+  const inWorktree = (cwd) => Object.values(ROOTS).some((r) => cwd?.startsWith(`${r}/.worktrees/`));
+  assert.ok(ps.some((p) => ['claude', 'codex', 'opencode'].includes(argv0(p)) && inWorktree(p.cwd)), 'an agent in a worktree');
+  assert.ok(ps.some((p) => argv0(p) === 'claude' && Object.values(ROOTS).includes(p.cwd)), 'a claude in a root');
+  for (const a of ['codex', 'opencode']) assert.ok(ps.some((p) => argv0(p) === a && inWorktree(p.cwd)), `a ${a} in a worktree`);
+  assert.ok(ps.some((p) => argv0(p) === 'node' && isScript(p, 'dashboard')), 'a devteam.mjs dashboard');
+  assert.ok(ps.some((p) => argv0(p) === 'node' && isScript(p, 'hello')), 'a devteam.mjs hello');
+  assert.ok(ps.some((p) => argv0(p) === 'node' && isScript(p, 'wait')), 'a devteam.mjs wait');
+  assert.ok(ps.some((p) => p.comm === 'MainThread\n' && argv0(p) === 'node' && isScript(p, 'gate')), 'a MainThread node running devteam.mjs gate');
+  assert.ok(ps.some((p) => argv0(p) === 'chromium' && p.argv.some((a) => a.startsWith('--headless')) && inWorktree(p.cwd)), 'a headless chromium in a worktree');
+  assert.ok(ps.some((p) => p.comm === 'npm ci\n' && p.cmdline === 'npm ci\0'), 'an npm ci, comm and cmdline');
+  assert.ok(ps.some((p) => argv0(p) === 'bash'), 'a bash');
+  assert.ok(ps.some((p) => p.cwd && !Object.values(ROOTS).some((r) => p.cwd === r || p.cwd.startsWith(`${r}/`))), 'a process outside every root');
+  assert.ok(ps.some((p) => p.cwd === null && p.argv.length > 0), 'a pid with a readable cmdline and no cwd');
+  const kt = ps.filter((p) => p.cmdline === '' && p.cwd === null);
+  assert.equal(kt.length, 1, 'one kernel thread');
+  assert.equal(kt[0].comm, 'kworker/0:1\n');
+  assert.equal(kt[0].statm, '0 0 0 0 0 0 0\n');
+  const secret = ps.filter((p) => p.argv.includes(`--api-key=${SECRET}`));
+  assert.equal(secret.length, 1, 'the fake secret is on one cmdline');
+  assert.equal(argv0(secret[0]), 'claude');
+  assert.ok(secret[0].cwd.startsWith(`${ROOTS['devteam-dev']}/.worktrees/`), 'on the worktree claude');
+  for (const p of ps) {
+    assert.ok(p.cmdline === '' || p.cmdline.endsWith('\0'), `${p.pid}: cmdline ends with a NUL`);
+    assert.ok(p.comm.endsWith('\n') && p.comm.length > 1, `${p.pid}: comm ends with its newline`);
+    assert.match(p.statm, /^\d+( \d+){6}\n$/, `${p.pid}: statm is seven page counts`);
+    if (p.cwd !== null) {
+      assert.ok(fs.lstatSync(path.join(procDir, p.pid, 'cwd')).isSymbolicLink(), `${p.pid}: cwd is a symlink`);
+      assert.ok(path.isAbsolute(p.cwd), `${p.pid}: cwd's target is absolute`);
+    }
+  }
+  for (const f of ['memory.max', 'memory.current', 'memory.stat']) assert.ok(fs.existsSync(path.join(cgroupDir, f)), `cgroup/${f}`);
+  const stat = cgroupStat();
+  for (const k of ['anon', 'file', 'shmem', 'inactive_file', 'active_file']) assert.ok(Number.isSafeInteger(stat[k]), `memory.stat has ${k}`);
+  assert.ok(stat.inactive_file < cgroupNumber('memory.current'), 'inactive_file is less than memory.current');
+  assert.equal(cgroupNumber('memory.max'), 51539607552);
+});
+
+test('check 9: every pid\'s row is the contract\'s, and the expected reading is the fake\'s sums', () => {
+  const ex = expected();
+  const ps = readProc();
+  assert.deepEqual(Object.keys(ex).sort(), ['page_size', 'processes', 'reading', 'roots']);
+  assert.deepEqual(ex.roots, ROOTS);
+  assert.equal(ex.page_size, PAGE);
+  assert.deepEqual(Object.keys(ex.processes), pids(), 'processes names every pid in proc/ and no other');
+  assert.deepEqual(Object.keys(ROWS), pids(), 'the literal table names every pid in proc/');
+  assert.deepEqual(ex.processes, ROWS);
+  assert.deepEqual(ex.processes[27], { kind: 'other' });
+  const noCwd = ps.find((p) => p.cwd === null && p.argv.length > 0);
+  assert.ok(!('project' in ex.processes[noCwd.pid]) && !('session' in ex.processes[noCwd.pid]), 'the no-cwd row has no project or session');
+  // The table against the files, where the rule is a path or a word: project, session, subcommand.
+  const keys = commandKeys();
+  for (const p of ps) {
+    const row = ROWS[p.pid];
+    const project = Object.entries(ROOTS).find(([, r]) => p.cwd === r || p.cwd?.startsWith(`${r}/`))?.[0];
+    assert.equal(row.project, project, `${p.pid}: project by cwd`);
+    const session = row.kind === 'agent' && Object.values(ROOTS).some((r) => new RegExp(`^${r}/\\.worktrees/[^/]+(/|$)`).test(p.cwd ?? ''));
+    assert.equal(row.session, session || undefined, `${p.pid}: session`);
+    assert.equal(row.subcommand, row.kind === 'devteam' && keys.has(p.argv[2]) ? p.argv[2] : undefined, `${p.pid}: subcommand`);
+  }
+  // The sums, recomputed from statm and the rows.
+  const rss = Object.fromEntries(ps.map((p) => [p.pid, p.resident * PAGE]));
+  const kinds = {}, devteam = {}, projects = {};
+  let sessions = 0;
+  for (const [pid, row] of Object.entries(ROWS)) {
+    const k = (kinds[row.kind] ??= { n: 0, rss: 0 }); k.n++; k.rss += rss[pid];
+    if (row.subcommand) { const d = (devteam[row.subcommand] ??= { n: 0, rss: 0 }); d.n++; d.rss += rss[pid]; }
+    if (row.session) sessions++;
+    if (row.project) {
+      const pr = (projects[row.project] ??= { rss: 0 });
+      pr.rss += rss[pid];
+      if (row.session) pr.sessions = (pr.sessions ?? 0) + 1;
+      if (row.subcommand) { pr.devteam ??= {}; pr.devteam[row.subcommand] = (pr.devteam[row.subcommand] ?? 0) + rss[pid]; }
+    }
+  }
+  const r = ex.reading;
+  assert.equal(r.v, 1);
+  assert.equal(r.working_set, cgroupNumber('memory.current') - cgroupStat().inactive_file, 'working_set is memory.current less inactive_file');
+  assert.equal(r.max, cgroupNumber('memory.max'));
+  assert.equal(r.source, 'cgroup');
+  assert.ok(!('ceiling' in r), 'no ceiling: it comes from roots\' settings that don\'t exist here');
+  assert.equal(r.sessions, Object.values(ex.processes).filter((x) => x.session === true).length);
+  assert.equal(r.sessions, sessions);
+  assert.deepEqual(r.kinds, kinds);
+  assert.deepEqual(r.kinds.other.n, Object.values(ROWS).filter((x) => x.kind === 'other').length, 'the kernel thread counts in kinds.other');
+  assert.deepEqual(r.devteam, devteam);
+  assert.deepEqual(r.projects, projects);
+  for (const k of KINDS) assert.ok(r.kinds[k], `kind ${k} in the reading`);
+});
+
+test('check 1: the expected reading passes the check, as text and as an object', () => {
+  const { memoryReadingProblem } = fns();
+  const r = expected().reading;
+  assert.equal(memoryReadingProblem(JSON.stringify(r)), null);
+  assert.equal(memoryReadingProblem(r), null);
+});
+
+test('check 7: the expected reading\'s subcommands are COMMANDS keys, and the fake secret stays in proc/', () => {
+  const keys = commandKeys();
+  const r = expected().reading;
+  const used = new Set([...Object.keys(r.devteam), ...Object.values(r.projects).flatMap((p) => Object.keys(p.devteam || {}))]);
+  assert.ok(used.size >= 4);
+  for (const k of used) assert.ok(keys.has(k), `${k} is a COMMANDS key`);
+  for (const row of Object.values(expected().processes)) if (row.subcommand) assert.ok(keys.has(row.subcommand), `${row.subcommand} is a COMMANDS key`);
+  assert.ok(readProc().some((p) => p.cmdline.includes(SECRET)), 'the secret is in a cmdline');
+  assert.ok(!expectedText().includes(SECRET), 'not in proc-expected.json');
+  assert.ok(!dayBytes().includes(SECRET), 'not in readings.jsonl');
+});
+
+test('check 10: every top-level key of the expected reading is named in the comment', () => {
+  const c = contractComment();
+  for (const k of Object.keys(expected().reading)) assert.ok(c.includes(`\`${k}\``), `the comment names \`${k}\``);
+});
+
+test('the proc generator, imported, gives the committed files and writes nothing', async () => {
+  const before = expectedText();
+  const mod = await import(new URL('./fixtures/box-memory/make-proc.mjs', import.meta.url).href);
+  assert.equal(expectedText(), before, 'importing the generator writes nothing');
+  assert.equal(mod.makeExpected(), before, 'makeExpected() is proc-expected.json, byte for byte');
+  const files = mod.procFiles();
+  const onDisk = [];
+  const walk = (rel) => {
+    for (const e of fs.readdirSync(path.join(procDir, rel), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(r); else onDisk.push(r);
+    }
+  };
+  walk('');
+  assert.deepEqual(onDisk.sort(), Object.keys(files).sort(), 'proc/ holds exactly the generator\'s files');
+  for (const [rel, f] of Object.entries(files)) {
+    const p = path.join(procDir, rel);
+    if ('link' in f) assert.equal(fs.readlinkSync(p), f.link, rel);
+    else assert.equal(fs.readFileSync(p, 'utf8'), f.text, rel);
   }
 });
