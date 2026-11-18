@@ -588,18 +588,27 @@ export const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${l
 // when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
 // and capped; one alert on every repo's tab is one push.
 const ALERT_MAX = 200;
+const BOX_KEY = '\u0000box';
 export function alertNews(seen, instances, ports, resting = new Set()) {
   const list = listedByRoot(instances, ports);
   const next = {};
   const fresh = new Map();
+  // the box's own alert (box_alert, the same on every hello) is one push named for the box; a
+  // project's alert is its own, less the box's where an older kit still folds it in
+  const boxText = list.map((x) => (typeof x.box_alert === 'string' ? wellFormed(x.box_alert.trim().slice(0, ALERT_MAX)) : '')).find(Boolean) || '';
+  if (boxText) {
+    next[BOX_KEY] = boxText;
+    if (seen[BOX_KEY] !== boxText && !resting.has(`alert:${boxText}`)) fresh.set(boxText, ['the box']);
+  }
   for (const x of list) {
-    if (typeof x.alert !== 'string' || !x.alert) continue;
-    const text = wellFormed(x.alert.trim().slice(0, ALERT_MAX));
+    const own = typeof x.alert === 'string' ? x.alert.split(' · ').map((p) => p.trim()).filter((p) => p && p !== boxText).join(' · ') : '';
+    if (!own) continue;
+    const text = wellFormed(own.slice(0, ALERT_MAX));
     if (!text) continue;
     next[x.root] = text;
     if (seen[x.root] !== text && !resting.has(`alert:${text}`)) (fresh.get(text) ?? fresh.set(text, []).get(text)).push(wellFormed(String(x.name ?? x.root).slice(0, 80)));
   }
-  let messages = [...fresh.entries()].map(([text, names]) => ({ title: `Box alert (${names.join(', ').slice(0, 80)})`, body: text, tag: wellFormed(`devteam-alert-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`), url: '/' }));
+  let messages = [...fresh.entries()].map(([text, names]) => ({ title: names.length === 1 && names[0] === 'the box' ? 'Box alert' : `Alert (${names.join(', ').slice(0, 80)})`, body: text, tag: wellFormed(`devteam-alert-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`), url: '/' }));
   const keys = [...fresh.keys()].map((t) => `alert:${t}`);
   if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} alerts on this box`, body: [...fresh.keys()].join(' · ').slice(0, ALERT_MAX), tag: 'devteam-alerts', url: '/' }];
   return { seen: next, messages, keys };

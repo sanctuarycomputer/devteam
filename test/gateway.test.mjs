@@ -602,13 +602,28 @@ test('a push is encrypted as RFC 8291 says, and signed so a push service believe
   assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
 });
 
+test("the box's own alert is one push named for the box, and left out of each project's", () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, extra = {}) => ({ root, name, port, ...extra });
+  const box = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { box_alert: 'memory at the limit' })], ports);
+  assert.equal(box.messages.length, 1, 'one push for the box, not one per project');
+  assert.equal(box.messages[0].title, 'Box alert');
+  assert.equal(box.messages[0].body, 'memory at the limit');
+  assert.deepEqual(G.alertNews(box.seen, [r('/a', 'a', P, { box_alert: 'memory at the limit' })], ports).messages, [], 'not news twice');
+  // an older kit folds the box's alert into its own: only the project's part is its own news
+  const mixed = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { alert: 'at a usage limit · memory at the limit' })], ports);
+  assert.deepEqual(mixed.messages.map((m) => [m.title, m.body]).sort(), [['Alert (b)', 'at a usage limit'], ['Box alert', 'memory at the limit']]);
+  const onlyBox = G.alertNews({}, [r('/a', 'a', P, { box_alert: 'memory at the limit' }), r('/b', 'b', P + 1, { alert: 'memory at the limit' })], ports);
+  assert.deepEqual(onlyBox.messages.map((m) => m.title), ['Box alert'], "an older kit's copy of the box's alert is not a project's own");
+});
+
 test('an alert on the hub is pushed once, when it turns up or changes', () => {
   const ports = [P, P + 1];
   const r = (root, name, port, alert) => ({ root, name, port, ...(alert === undefined ? {} : { alert }) });
   assert.deepEqual(G.alertNews({}, [r('/a', 'a', P)], ports).messages, [], 'no alert, no news');
   const one = G.alertNews({}, [r('/a', 'a', P, 'disk is full')], ports);
   assert.equal(one.messages.length, 1);
-  assert.equal(one.messages[0].title, 'Box alert (a)');
+  assert.equal(one.messages[0].title, 'Alert (a)');
   assert.equal(one.messages[0].body, 'disk is full');
   assert.deepEqual(one.seen, { '/a': 'disk is full' });
   assert.deepEqual(G.alertNews(one.seen, [r('/a', 'a', P, 'disk is full')], ports).messages, [], 'the same alert is not news twice');
@@ -617,7 +632,7 @@ test('an alert on the hub is pushed once, when it turns up or changes', () => {
   // one box-wide alert across every repo's tab is one push, however many tabs carry it
   const both = G.alertNews({}, [r('/a', 'a', P, 'same'), r('/b', 'b', P + 1, 'same')], ports);
   assert.equal(both.messages.length, 1);
-  assert.equal(both.messages[0].title, 'Box alert (a, b)');
+  assert.equal(both.messages[0].title, 'Alert (a, b)');
   assert.deepEqual(both.keys, ['alert:same'], 'resting is by text');
   assert.equal(G.alertNews({}, [r('/a', 'a', P, 'same')], ports, new Set(['alert:same'])).messages.length, 0, 'at rest it waits');
   const long = G.alertNews({}, [r('/a', 'a', P, 'x'.repeat(500))], ports);
