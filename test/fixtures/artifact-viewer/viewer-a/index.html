@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Viewer A</title>
+<style>
+  body { margin: 0; font: 16px/1.4 sans-serif; }
+  /* at fixed places, so a click inside the frame lands where the test aims */
+  #to-b, #to-anchor, #pin-me, #other, #anchor { position: absolute; display: block; box-sizing: border-box; }
+  #to-b { left: 40px; top: 40px; width: 160px; height: 32px; }
+  #to-anchor { left: 40px; top: 100px; width: 160px; height: 32px; }
+  #pin-me { left: 320px; top: 200px; width: 120px; height: 40px; }
+  #other { left: 40px; top: 300px; width: 200px; height: 120px; background: #eef; }
+  #anchor { left: 320px; top: 300px; width: 160px; height: 32px; }
+</style></head>
+<body>
+<a id="to-b" href="b.html">To page B</a>
+<a id="to-anchor" href="#anchor">To the anchor</a>
+<button id="pin-me" type="button">Pin me</button>
+<div id="other">Another box</div>
+<p id="anchor">The anchor</p>
+<script>
+// Where this page is, and where its elements are in its own viewport, told to the dashboard's window
+// (the frame's origin is opaque, so the test reads nothing in here itself): on load and on a fragment move.
+const rects = () => Object.fromEntries(['to-b', 'to-anchor', 'pin-me', 'other'].map((id) => { const r = document.getElementById(id).getBoundingClientRect(); return [id, { x: r.left, y: r.top, w: r.width, h: r.height }]; }));
+const say = () => parent.postMessage({ own: 'at', page: 'viewer-a/index.html', hash: location.hash, rects: rects() }, '*');
+// (and again once drawn, and on a resize: a frame laid out before the stage had its size says 0x0)
+addEventListener('load', () => { say(); requestAnimationFrame(() => requestAnimationFrame(say)); });
+addEventListener('resize', say);
+addEventListener('hashchange', say);
+</script>
+</body></html>

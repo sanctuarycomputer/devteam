@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Viewer B</title>
+<style>body { margin: 0; font: 16px/1.4 sans-serif; }</style></head>
+<body>
+<p id="b">The second artifact</p>
+<script>
+addEventListener('load', () => parent.postMessage({ own: 'at', page: 'viewer-b/index.html', hash: location.hash, rects: {} }, '*'));
+</script>
+</body></html>
