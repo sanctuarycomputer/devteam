@@ -35,19 +35,20 @@ Every route refuses a request marked by the preview relay (`x-devteam-relay`, wh
 - **Order of checks.** Each request is checked in this order, and the first check that fails decides the answer:
   1. the path and the method (404, 405);
   2. `host`, `view`, `relay`, `not-loopback`, `cross-site`, in that order: the first that applies is the `why`, so a View request reads `view` unless its host is wrong, and the page can hide the tabs;
-  3. the content type (403);
+  3. the content type (403, with no `why`);
   4. the body cap (413);
   5. JSON (400);
   6. the token (403: a body whose `token` is missing or wrong is 403, before its shape is checked);
-  7. the shape (400);
-  8. the gateway's proof (403);
-  9. the pane (409, 423);
-  10. the repeat drop (§8: a `seq` at or below the last answers 200 and types nothing);
-  11. the typing lock (503).
+  7. the shape (400), and for history its `before` and `count` (400);
+  8. the `data` and `paste` size caps (413);
+  9. the gateway's proof (403);
+  10. the pane (409, 423);
+  11. the repeat drop (§8: a `seq` at or below the last answers 200 and types nothing);
+  12. the typing lock (503).
 
 ## 4. Refusals
 
-A refused token, screen or history request answers JSON `{ why }`. `why` is one of `view`, `not-loopback`, `cross-site`, `relay`, `host`, and nothing else.
+A token, screen or history request refused by a guard (§2, §3) answers JSON `{ why }`; any other refusal (a 400 or 404) answers `{ error }`. `why` is one of `view`, `not-loopback`, `cross-site`, `relay`, `host`, and nothing else.
 
 The gateway's View deny on `/api/term/*` is a second producer of the same answer, since on a box a View request never reaches the dashboard: status 403, `Content-Type: application/json`, and the body exactly `{"why":"view"}`. The page asks for a token once on load, so on `view` it hides both tabs before either is pressed; on the others it says why.
 
@@ -68,7 +69,7 @@ Nothing is typed on any refusal.
 
 ## 5. Token
 
-`GET /api/term/token` answers `{ token }` (§3). A page that gets 403 asks once more; if it still gets 403, or its browser sends no `Sec-Fetch-Site` at all, the tabs say the browser can't use them and the page stops asking.
+`GET /api/term/token` answers `{ token }` (§3), and nothing else. A page that gets 403 asks once more; if it still gets 403, or its browser sends no `Sec-Fetch-Site` at all, the tabs say the browser can't use them and the page stops asking.
 
 ## 6. Screen
 
@@ -81,7 +82,7 @@ Nothing is typed on any refusal.
 
 - `pane` is the tmux pane id, `%<n>`.
 - `state` is `live` or `gone` (no pane: the supervisor isn't running, or Shell hasn't been opened).
-- `cols` and `rows` are the pane's size. The pane keeps the size its own terminal gives it.
+- `cols` and `rows` are the pane's size. The supervisor's pane keeps the size its own terminal gives it; the Shell window is sized by `shell/open` (§9).
 - `cursor.x` and `cursor.y` count from 0, from the top left of the visible rows (tmux's `cursor_x` and `cursor_y`).
 - `modes` are booleans from `#{keypad_cursor_flag}` and `#{keypad_flag}`, so the page sets xterm's modes and arrow keys encode as the program expects.
 - `history_size` is `#{history_size}`.
@@ -166,7 +167,7 @@ Held lines go in once the floor is released.
 - When the lock stays busy, a kit writer holds its line in `run/held/` after 10 s without it, and the keys route answers 503 after 2 s.
 - `paneAnswer` releases it after its Enter and before it runs `pane answered`, so that command's own flush takes the lock afresh.
 
-**Every writer.** Each takes the lock and, but for `paneAnswer`, waits for the floor; each has a test:
+**Every writer.** Each takes the lock, and each has a test. The kit's own writers wait for the floor; the keys and paste routes are the owner's typing, so they set the floor and never wait for it; `paneAnswer` is exempt:
 - the keys and paste routes;
 - `typeNow`, under `typeInto`;
 - `flushHeld` and `flushAllHeld`;
@@ -187,6 +188,8 @@ On a laptop, a program on the machine that drives a browser at the dashboard can
 ## 14. The fake
 
 `test/fixtures/term-fake.mjs` answers these routes from a scripted screen, with Node built-ins only, so the page's tests run without tmux. `startTermFake(opts)` starts it on `127.0.0.1`, port 0, and resolves to `{ url, port, token, set(patch), screen(which), typed(which), close() }`; it also exports `WHYS`, the five `why` values.
+
+`typed(which)` returns one string per accepted post: a `data` post's bytes as latin1, a paste's text (bracketed when `bracketPaste` is on); `screen(which)` returns the screen object the screen route would; `close()` resolves once the server has stopped. It accepts `Host` only as `127.0.0.1:<port>` or `localhost:<port>`, and with `serve` null any other path is 404.
 
 It enforces every check of §3 in §3's order, handles one post at a time per pane, keeps the last `seq` per `page` and `which`, and echoes typed bytes into its screen (a printable byte at the cursor, `\r` to the next row, `\x7f` erasing one). It doesn't verify the gateway's signature, take the lock or keep the floor.
 
