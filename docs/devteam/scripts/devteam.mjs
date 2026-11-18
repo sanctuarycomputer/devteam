@@ -587,6 +587,10 @@ const SETTINGS_DEFAULTS = {
   // A shell command run in every new worker, planner and gate worktree, and a chore worktree from
   // `chore start`, after worktree_files are copied (install dependencies, link env files). Empty for none.
   worktree_setup: '',
+  // Installed folders a new session or chore worktree copies from the main checkout when the lockfile matches: [{ path, key }]. Never gate checkouts.
+  worktree_copy: [],
+  // Run worktree_setup on every session start, even when nothing it installs from changed. Session and chore worktrees only; gate checkouts never.
+  worktree_setup_always: false,
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
@@ -654,6 +658,8 @@ const SETTINGS_WORDS = Object.freeze({
   agent_trust_command: ['Agents and sessions', 'Folder-trust answer', 'a command run before each agent starts so it trusts its worktree; empty runs nothing', 'hidden'],
   worker_denied_commands: ['Agents and sessions', 'Commands workers may not run', 'patterns refused in every worker and planner', 'value'],
   worktree_setup: ['Agents and sessions', 'Worktree setup', "a command run in each new worktree after its files are copied", 'hidden'],
+  worktree_copy: ['Agents and sessions', 'Installed folders copied into new worktrees', 'folders copied from the main checkout into a new session or chore worktree whose lockfile matches', 'count'],
+  worktree_setup_always: ['Agents and sessions', 'Always run worktree setup', 'run worktree_setup on every session start, even when nothing it installs from changed', 'value'],
   worktree_files: ['Agents and sessions', 'Files copied into worktrees', 'untracked files each worktree needs, copied from the main checkout', 'value'],
   usage_command: ['Agents and sessions', 'Usage command', "a command that reports spend for a harness the kit can't read", 'hidden'],
   usage_sources: ['Agents and sessions', 'Usage sources', "which agents' own logs spend is read from", 'value'],
@@ -694,6 +700,7 @@ const settingLines = (v) => Array.isArray(v) && v.every((s) => typeof s === 'str
 const SETTING_SHAPES = Object.freeze({
   ...Object.fromEntries(['max_active_tickets', 'max_active_per_component', 'max_active_planners', 'machine_memory_ceiling', 'tick_minutes', 'stale_after_minutes', 'dashboard_port', 'slow_gate_minutes', 'hold_review_days', 'question_default_after_hours', 'finding_ack_hours', 'upstream_check_hours', 'incident_slots', 'retro_every_days', 'research_every_days'].map((k) => [k, settingNum])),
   merge_admin: (v) => typeof v === 'boolean',
+  worktree_setup_always: (v) => typeof v === 'boolean',
   forge: (v) => ['github', 'git'].includes(v),
   merge_method: (v) => ['merge', 'squash', 'rebase'].includes(v),
   upstream_sync: (v) => ['adopt', 'ask'].includes(v),
@@ -943,13 +950,13 @@ const OWNER_ACTS = ['artifact-publish', 'pane-answer', 'goal-order', 'owner-sett
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
-const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records'];
+const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project', 'records', 'worktree_copy', 'worktree_setup_always'];
 const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
 const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
 // records: where a ticket of this repo keeps its records (spec, plan, verification, reviews):
 // "repo", in its own project folder, landing with its code; or "home", on home's ticket/<id> in
 // home's project folder, so nothing of the project lands in the linked repo (recordsInHome).
-const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo' };
+const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project', records: 'repo', worktree_copy: [], worktree_setup_always: false };
 const RECORDS_WHERE = ['repo', 'home'];
 // what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
 const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
@@ -975,6 +982,7 @@ const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string', records: 'string',
+  worktree_copy: 'any', worktree_setup_always: 'boolean',
 });
 const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
