@@ -343,7 +343,7 @@ test('with a worktree_setup, a later relaunch in a tick starts only with the ful
     F.worker('demo-93-marked');
     matchingMarker(F, 'demo-93-marked', 'sleep 12');
     F.tick(UNDER(F));
-    assert.deepEqual(F.state().relaunched, ['demo-90-a', 'demo-93-marked'], 'the first took 12 s of the 110: under 100 s left for another with a setup to run, but enough for one whose marker matches');
+    assert.deepEqual(F.state().relaunched, ['demo-93-marked', 'demo-90-a'], 'the one whose marker matches goes first, so no setup can hold it back; then the first with a setup, which took 12 s of the 110: under 100 s left for another');
     const record = json(fs.readFileSync(F.restartsFile, 'utf8'));
     assert.ok(!record['plan-p91'] && !record['demo-92-c'], 'the others are not claimed');
     F.tick(UNDER(F));
@@ -366,7 +366,7 @@ const withSetup = (F, cmd) => {
 // a process's start time as the kit reads it: field 22 of /proc/<pid>/stat, or ps lstart off Linux
 function startOf(pid) {
   try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19]; } catch {}
-  return (spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '').trim() || null;
+  return (spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }).stdout ?? '').trim() || null;
 }
 // slot n held by a live process (a sleep this test starts), its holder written temp-then-rename
 async function holdSlot(n) {
@@ -467,11 +467,29 @@ test('5b: a gone session whose resume finds no setup slot waits, spending no att
       assert.ok(!restarts(F)['demo-104-slot'], `no attempt in the record: ${JSON.stringify(restarts(F))}`);
     }
     assert.ok(!observations(F).some((o) => o.kind === 'session-relaunched' && /could not/.test(o.detail)), 'no failure logged');
-    assert.ok(!findings(F).some((f) => f.kind === 'restart-gave-up'));
+    const fs1 = findings(F);
+    assert.ok(!fs1.some((f) => f.kind === 'restart-gave-up'));
+    // never silent: a finding says how many wait and since when, high past 30 minutes
+    const since = F.state().slot_held_since;
+    assert.ok(Number.isFinite(Date.parse(since)), `slot_held_since is a time: ${since}`);
+    const wait = fs1.filter((f) => f.kind === 'setup-slot-wait');
+    assert.equal(wait.length, 1, JSON.stringify(fs1.map((f) => f.kind)));
+    assert.equal(wait[0].severity, 'medium');
+    assert.equal(wait[0].subject, 'setup-slots');
+    assert.match(wait[0].detail, /1 gone session/);
+    assert.match(wait[0].suggestion, /DEVTEAM_SETUP_SLOTS/);
+    const af = path.join(F.root, 'docs/devteam/run/accounts.json');
+    fs.writeFileSync(af, JSON.stringify({ ...F.state(), slot_held_since: new Date(Date.now() - 31 * 60000).toISOString() }));
+    assert.equal(findings(F).find((f) => f.kind === 'setup-slot-wait')?.severity, 'high', 'past 30 minutes');
+    const out1 = F.tick({ ...UNDER(F), DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(2000) });
+    assert.doesNotMatch(out1, /relaunched/);
+    assert.ok(Date.now() - Date.parse(F.state().slot_held_since) > 30 * 60000, 'kept while the wait goes on');
     await free();
     const out = F.tick({ ...UNDER(F), DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
     assert.match(out, /relaunched demo-104-slot/);
     assert.equal(F.state().slot_held, 0);
+    assert.equal(F.state().slot_held_since, undefined, 'dropped at 0');
+    assert.ok(!findings(F).some((f) => f.kind === 'setup-slot-wait'), 'the finding is gone once none waits');
     assert.equal(restarts(F)['demo-104-slot'].length, 1);
     await until(() => F.relaunched().length === 1, 'resumed');
   } finally { await free(); clearSlots(); F.done(); }

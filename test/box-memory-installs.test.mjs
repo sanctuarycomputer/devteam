@@ -44,7 +44,7 @@ const pgidOf = (pid) => Number((spawnSync('ps', ['-o', 'pgid=', '-p', String(pid
 // a process's start time as the kit reads it: field 22 of /proc/<pid>/stat, or ps lstart off Linux
 function startOf(pid) {
   try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19]; } catch {}
-  return (spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '').trim() || null;
+  return (spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } }).stdout ?? '').trim() || null;
 }
 // written temp-then-rename, as the runner writes its own
 function hold(dir, n, h) {
@@ -164,6 +164,50 @@ test('4d: with the one slot held by a live process, the deadline gives exit 75 a
     assert.equal(r.status, 75, r.err);
     assert.match(r.err, /setup-slot-wait/);
     assert.match(r.err, /waiting for a setup slot \(1 of 1 in use on this machine\)/);
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+test('4d\': a slot that comes free only after a wait, its setup then killed at the deadline, is still a slot wait (75), and nothing is left', async () => {
+  const token = `t596w-${process.pid}-${Date.now()}`;
+  const S = slotFleet('installs-4d2', () => `: ${token}; echo $$ > sh.pid; sleep 64 & echo $! > gc.pid; sleep 64`);
+  let sh = null;
+  let gc = null;
+  const ours = () => pgrep('sleep 64').filter((p) => p === gc || (sh && pgidOf(p) === sh));
+  try {
+    const p = S.live();
+    hold(S.slots, 0, { pid: p.pid, start: startOf(p.pid) });
+    const deadline = Date.now() + 5000;
+    const run = S.startAsync('one', { DEVTEAM_SETUP_SLOTS: '1', DEVTEAM_SETUP_DEADLINE: String(deadline) });
+    await until(() => pgrep(token).length, 4000, `a runner whose argv names ${token}`);
+    // at least one wait round passes, then the holder goes about 1.5 s before the deadline
+    await sleepMs(Math.max(1100, deadline - 1500 - Date.now()));
+    p.kill('SIGKILL');
+    const r = await run;
+    const shf = path.join(S.wt('one'), 'sh.pid');
+    assert.ok(fs.existsSync(shf), `the setup got the slot and started before the deadline: ${r.stderr}`);
+    sh = Number(fs.readFileSync(shf, 'utf8'));
+    gc = Number(fs.readFileSync(path.join(S.wt('one'), 'gc.pid'), 'utf8'));
+    assert.equal(r.status, 75, r.stderr);
+    assert.match(r.stderr, /setup-slot-wait/);
+    await until(() => !alive(sh) && ours().length === 0, 2000, 'the setup\'s shell and sleeps to be gone').catch((e) => { for (const q of ours()) try { process.kill(q, 'SIGKILL'); } catch {} throw e; });
+    assert.deepEqual(fs.readdirSync(S.slots).filter((e) => /^\d+$/.test(e)), [], 'the slot is released');
+  } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
+});
+
+test('a chore start cut short at the deadline leaves no marker, so the next chore start in that worktree runs the setup', () => {
+  const S = slotFleet('installs-retry', (F) => `echo run >> ${F.base}/retry.log; test -f ${F.base}/retry.fast || sleep 65`);
+  const runs = () => { const f = path.join(S.F.base, 'retry.log'); return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').length : 0; };
+  try {
+    let r = S.start('one', deadlineIn(2000));
+    assert.equal(r.status, 124, r.err);
+    assert.equal(runs(), 1);
+    fs.writeFileSync(path.join(S.F.base, 'retry.fast'), '');
+    r = S.start('one', deadlineIn(20000));
+    assert.equal(r.status, 0, r.err);
+    assert.equal(runs(), 2, 'the retry in the existing worktree ran the setup');
+    r = S.start('one', deadlineIn(20000));
+    assert.equal(r.status, 0, r.err);
+    assert.equal(runs(), 2, 'once it passed, its marker matches: no setup');
   } catch (e) { S.failed = e; throw e; } finally { S.finish(); }
 });
 
@@ -442,6 +486,15 @@ test('1a-1d, 2a, 2a\', 2b: a new worktree gets main\'s installed folders when it
     fs.rmSync(path.join(w, `vendor.devteam-copy-${process.pid}`), { recursive: true, force: true });
     assert.equal(fs.readFileSync(path.join(w, 'node_modules/marker.txt'), 'utf8'), 'changed in the worktree\n', 'a resume never overwrites the worktree\'s own install');
     assert.equal(I.marker(w).files['.deps-key'], sha('deps 2\n'));
+    // an installed folder deleted (its key still main's): the marker matches, but the resume runs the setup, copying it back first
+    fs.rmSync(path.join(w, 'node_modules'), { recursive: true, force: true });
+    r = I.resume('ch-01-a');
+    assert.equal(r.status, 0, r.err);
+    assert.equal(I.runs('ch-01-a').length, 3, 'a deleted node_modules runs the setup again');
+    assert.equal(I.runs('ch-01-a')[2], 'had', 'copied back from main before the setup');
+    r = I.resume('ch-01-a');
+    assert.equal(r.status, 0, r.err);
+    assert.equal(I.runs('ch-01-a').length, 3, 'and the next resume skips it again');
     // 1d: a ticket branch whose package-lock.json differs from main's gets no node_modules
     const tmp = path.join(F.base, 'branch-b');
     F.g(['worktree', 'add', '-q', '-b', 'ticket/ch-02-b', tmp, 'origin/main'], F.old);

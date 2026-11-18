@@ -5463,7 +5463,9 @@ const setupMarker = Object.freeze({
     for (const e of Array.isArray(s.worktree_copy) ? s.worktree_copy : []) if (isObj(e) && typeof e.key === 'string' && e.key && !path.isAbsolute(e.key) && !path.normalize(e.key).split(/[\\/]/).includes('..')) add(path.normalize(e.key));
     return { v: 1, setup: sha256(String(s.worktree_setup ?? '')), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) };
   },
-  needed(wt, s) {
+  // root (the repo's main checkout): a worktree_copy folder main has, whose key matches main's, but
+  // that is missing here (deleted since: rm -rf node_modules) needs the setup, whatever the marker says
+  needed(wt, s, root = null) {
     if (s.worktree_setup_always === true) return true;
     const g = setupMarker.gitDir(wt);
     if (!g) return true;
@@ -5472,7 +5474,11 @@ const setupMarker = Object.freeze({
     const now = setupMarker.state(wt, s);
     if (!isObj(m) || m.v !== 1 || m.setup !== now.setup || !isObj(m.files)) return true;
     const keys = Object.keys(now.files);
-    return keys.length !== Object.keys(m.files).length || keys.some((k) => m.files[k] !== now.files[k]);
+    if (keys.length !== Object.keys(m.files).length || keys.some((k) => m.files[k] !== now.files[k])) return true;
+    const ok = (p) => typeof p === 'string' && p !== '' && !path.isAbsolute(p) && !path.normalize(p).split(/[\\/]/).includes('..');
+    const has = (p, link = true) => { try { const st = fs.lstatSync(p); return link || !st.isSymbolicLink(); } catch { return false; } };
+    const same = (a, b) => { try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; } };
+    return !!root && (Array.isArray(s.worktree_copy) ? s.worktree_copy : []).some((e) => isObj(e) && ok(e.path) && ok(e.key) && !has(path.join(wt, e.path)) && has(path.join(root, e.path), false) && same(path.join(root, e.key), path.join(wt, e.key)));
   },
   write(wt, s) {
     const g = setupMarker.gitDir(wt);
@@ -5523,7 +5529,8 @@ const setupSlots = Object.freeze({
       if (proc) {
         try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19] ?? null; } catch { return null; }
       }
-      const r = cp.spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000 });
+      // one locale and zone, so runners started from different environments read the same text
+      const r = cp.spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', timeout: 10000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } });
       return (r.status === 0 && r.stdout.trim()) || null;
     }
     const same = (pid, start) => { const s = startTime(pid); return s !== null && s === start; };
@@ -5623,8 +5630,10 @@ const setupSlots = Object.freeze({
 // slots), so self-contained. It takes a slot (waiting 1 s between rounds until config.deadline, or
 // config.maxWaitMs with none), runs `sh -c config.cmd` as the leader of its own process group,
 // forwards SIGINT, SIGTERM and SIGHUP to that group, kills the group at the deadline, releases the
-// slot, and writes its report as one JSON line to fd 3: { outcome: 'ran' | 'no-slot' | 'deadline',
-// code, signal, took_over }. Exit 0 (ran, the setup exited 0), 75 (no slot), 124 (deadline), else 1.
+// slot, and writes its report as one JSON line to fd 3: { outcome: 'ran' | 'no-slot' |
+// 'waited-deadline' | 'deadline', code, signal, took_over }. Exit 0 (ran, the setup exited 0), 75 (no
+// slot; or killed at the deadline after waiting for its slot, so the time lost was a slot wait), 124
+// (killed at the deadline with its slot got at once), else 1.
 async function setupRunner(config, slots) {
   const fs = require('fs');
   const path = require('path');
@@ -5648,6 +5657,8 @@ async function setupRunner(config, slots) {
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, onSignal);
   let slot = null;
+  // at least one wait round (1 s) passed before the take
+  let waited = false;
   // a slots folder that can't be made or written to stops no install: the setup runs without a slot
   let haveDir = true;
   const broken = (e) => {
@@ -5661,7 +5672,7 @@ async function setupRunner(config, slots) {
     const limit = config.deadline ?? Date.now() + config.maxWaitMs;
     const memo = {};
     let told = 0;
-    for (;;) {
+    for (;; waited = true) {
       const now = Date.now();
       slots.sweep(dir, now);
       slot = take();
@@ -5732,6 +5743,7 @@ async function setupRunner(config, slots) {
   clearTimeout(timer);
   finished = true;
   if (slot !== null) slots.release(dir, slot, me.id);
+  if (hit && waited) { report('waited-deadline', code, signal); process.exit(75); }
   if (hit) { report('deadline', code, signal); process.exit(124); }
   report('ran', code, signal);
   process.exit(code === 0 ? 0 : 1);
@@ -5749,7 +5761,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
   }
   if (setup && s.worktree_setup && session) {
     // a resume whose setup already passed for this setup string and these lockfiles skips it
-    if (!setupMarker.needed(wt, s)) return;
+    if (!setupMarker.needed(wt, s, R.root)) return;
     setupMarker.clear(wt);
     const d = process.env.DEVTEAM_SETUP_DEADLINE;
     const deadline = d && Number.isFinite(Number(d)) ? Number(d) : null;
@@ -5818,6 +5830,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
     }
     if (rep?.outcome === 'ran' && rep.code === 0) { setupMarker.write(wt, s); return; }
     if (rep?.outcome === 'no-slot') die('setup-slot-wait: no setup slot free before the deadline', setupSlots.SLOT_WAIT);
+    if (rep?.outcome === 'waited-deadline') die(`setup-slot-wait: a setup slot came free too late for worktree_setup to finish before the deadline in ${wt}`, setupSlots.SLOT_WAIT);
     if (rep?.outcome === 'deadline') die(`worktree_setup ran past its deadline in ${wt}`, setupSlots.PAST_DEADLINE);
     const hint = pinsHint(missingPins(R.root), R.root);
     die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
@@ -12727,10 +12740,15 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
+  const existed = fs.existsSync(wt);
+  if (!existed) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup, session: true }); }
   else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
+  // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
+  // the marker is cleared before a setup and written only after one passes) is seeded now
+  const home = repo('home');
+  if (existed && setup && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
   return wt;
 }
 function openPr(wt, branch, title, bodyText) {
@@ -13889,6 +13907,11 @@ function collectMetrics(since) {
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
   for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
+  if (accounts?.slot_held) {
+    const since = accounts.slot_held_since ? Date.parse(accounts.slot_held_since) : Date.parse(accounts.at);
+    const mins = Math.max(0, Math.round((Date.now() - since) / 60000));
+    add(mins > 30 ? 'high' : 'medium', 'setup-slot-wait', 'setup-slots', `${plural(accounts.slot_held, 'gone session')} ${accounts.slot_held === 1 ? 'has' : 'have'} waited ${mins} min for a machine-wide setup slot to relaunch (each wait costs no attempt, so none of them ever gives up)`, 'a shorter worktree_setup (worktree_copy with npm install --prefer-offline), or more DEVTEAM_SETUP_SLOTS on this machine; ls ~/.devteam/setup-slots (each holder.json names its pid) shows what holds them');
+  }
   if (accounts?.supervisor_limit) {
     // the id is read back from a file any agent could write: only one that could be an id is shown
     const id = SESSION_ID.test(accounts.supervisor_limit.session ?? '') ? accounts.supervisor_limit.session : null;
@@ -15056,8 +15079,9 @@ function plannerAwaitsOwner(name, feature) {
 function hasWorktreeSetup(name, [role]) {
   const t = role === 'worker' ? tickets().get(name) : null;
   if (t && !repoReadable(repoOfTicketLink(t))) return true;
-  const s = (t ? repoOfTicket(t) : repo('home')).settings;
-  return !!s.worktree_setup && setupMarker.needed(path.join(mainRoot, '.worktrees', name), s);
+  const R = t ? repoOfTicket(t) : repo('home');
+  const s = R.settings;
+  return !!s.worktree_setup && setupMarker.needed(path.join(mainRoot, '.worktrees', name), s, R.root);
 }
 // Bring one back in a new window: 'relaunched', 'failed', 'gave-up', 'slot-held' (its setup found no
 // slot before the deadline: the attempt given back, tried next tick), or null when not due. --if-gone
@@ -17000,7 +17024,7 @@ function accountsState() {
   try {
     const s = JSON.parse(readText(ACCOUNTS_FILE));
     const age = Date.now() - Date.parse(s.at);
-    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [] } : null;
+    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [], slot_held: Number.isInteger(s.slot_held) && s.slot_held > 0 ? s.slot_held : 0, slot_held_since: Number.isFinite(Date.parse(s.slot_held_since)) ? s.slot_held_since : null } : null;
   } catch { return null; }
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
@@ -17094,14 +17118,16 @@ function cmdAccountsTick() {
   // cut short into a spent attempt; it waits for the next tick instead.
   state.memory_held = 0;
   if (!state.active_no_room) {
-    const gone = sessionsToRelaunch(launchOf, held);
+    // those whose resume runs no setup first (order kept within each), so one waiting for a setup
+    // slot, which can take the whole tick, never holds back one that would be back in seconds
+    const gone = sessionsToRelaunch(launchOf, held).map((g) => ({ ...g, setup: hasWorktreeSetup(g.name, g.launch) })).sort((a, b) => a.setup - b.setup);
     const settings = gone.length ? loadSettings() : null;
     let said = null;
-    for (const { name, launch } of gone) {
+    for (const { name, launch, setup } of gone) {
       const full = memoryFull(settings);
       const could = full ? budget(3) : 0;
       if (full) said = full;
-      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
+      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && setup ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
       else if (did === 'slot-held') state.slot_held += 1;
       else if (did) tries += 1;
@@ -17110,6 +17136,8 @@ function cmdAccountsTick() {
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
+  // since when any has waited, kept while some still do, so the wait is a finding, never silent
+  if (state.slot_held) state.slot_held_since = (before?.slot_held && before.slot_held_since) || state.at;
   if (state.slot_held && state.slot_held !== before?.slot_held) out(`${plural(state.slot_held, 'gone session')} wait${state.slot_held === 1 ? 's' : ''} for a setup slot`);
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
