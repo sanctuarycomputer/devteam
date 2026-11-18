@@ -1,0 +1,1011 @@
+{
+ "about": "turn-authority-1 (docs/devteam/schema/log.schema.json): the fake. log is a hand-written log, dated 2026-01-10, of owner turns and the bindings recorded from them: whole-clause answers (said, said_at, answer_seen) to questions asked about a turn (about_turn, seen), a held remediation lifted by a clause (owner_said, owner_said_turn, owner_said_at), and corrections from a thread or chat (corrected.said, said_at, turn). Every line passes log-check. unbound lists the lines metrics must flag as thread-answer-unbound, by subject, with a stem of the reason; every other binding is sound. refused lists lines log-check must refuse, each tried alone, with a stem of the error.",
+ "log": [
+  {
+   "v": 1,
+   "id": "t-20260110-100000000-owner",
+   "at": "2026-01-10T10:00:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Dashboard PR",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-100001000-owner",
+   "at": "2026-01-10T10:00:01.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-100000000-owner",
+   "text": "Merge the dashboard PR. Then tell the team.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-100100000-supervisor",
+   "at": "2026-01-10T10:01:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Merge the dashboard PR now?",
+   "thread": "t-20260110-100000000-owner",
+   "about_turn": "u-20260110-100001000-owner",
+   "seen": "u-20260110-100001000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-100100001-supervisor",
+   "at": "2026-01-10T10:01:00.001Z",
+   "by": "supervisor",
+   "type": "turn",
+   "thread": "t-20260110-100000000-owner",
+   "text": "About your message: \"Merge the dashboard PR. Then tell the team.\"\nMerge the dashboard PR now?",
+   "question": "q-20260110-100100000-supervisor",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-100100000-supervisor",
+   "at": "2026-01-10T10:02:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Merge the dashboard PR.",
+   "turn": "u-20260110-100001000-owner",
+   "said_at": [
+    0,
+    23
+   ],
+   "answer_seen": "u-20260110-100001000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-100300000-supervisor",
+   "at": "2026-01-10T10:03:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Tell the team?",
+   "thread": "t-20260110-100000000-owner",
+   "about_turn": "u-20260110-100001000-owner",
+   "seen": "u-20260110-100001000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-100300001-supervisor",
+   "at": "2026-01-10T10:03:00.001Z",
+   "by": "supervisor",
+   "type": "turn",
+   "thread": "t-20260110-100000000-owner",
+   "text": "About your message: \"Merge the dashboard PR. Then tell the team.\"\nTell the team?",
+   "question": "q-20260110-100300000-supervisor",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-100300000-supervisor",
+   "at": "2026-01-10T10:04:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Then tell the team.",
+   "turn": "u-20260110-100001000-owner",
+   "said_at": [
+    24,
+    43
+   ],
+   "answer_seen": "u-20260110-100001000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-100500000-supervisor",
+   "at": "2026-01-10T10:05:00.000Z",
+   "by": "supervisor",
+   "type": "decision",
+   "class": "release-scope",
+   "what": "Slipped the export story to v2",
+   "authority": "rung",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-100600000-owner",
+   "at": "2026-01-10T10:06:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Correct",
+   "subject": {
+    "kind": "item",
+    "ref": "decision:d-20260110-100500000-supervisor"
+   },
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-100600001-owner",
+   "at": "2026-01-10T10:06:00.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-100600000-owner",
+   "text": "That was the wrong call: the PR needed review.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-100500000-supervisor",
+   "at": "2026-01-10T10:07:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "decision",
+   "corrected": {
+    "reason": "That was the wrong call: the PR needed review.",
+    "said": "That was the wrong call: the PR needed review.",
+    "said_at": [
+     0,
+     46
+    ],
+    "turn": "u-20260110-100600001-owner"
+   },
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "a-20260110-100800000-supervisor",
+   "at": "2026-01-10T10:08:00.000Z",
+   "by": "supervisor",
+   "type": "act",
+   "class": "release-scope",
+   "what": "Tagged v1.0.1",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "a-20260110-100800000-supervisor",
+   "at": "2026-01-10T10:09:00.000Z",
+   "by": "owner",
+   "channel": "chat",
+   "type": "act",
+   "corrected": {
+    "reason": "wrong call, roll it back",
+    "said": "wrong call, roll it back"
+   },
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "a-20260110-100930000-supervisor",
+   "at": "2026-01-10T10:09:30.000Z",
+   "by": "supervisor",
+   "type": "act",
+   "class": "release-scope",
+   "what": "Tagged v1.0.2",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-100940000-owner",
+   "at": "2026-01-10T10:09:40.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Correct",
+   "subject": {
+    "kind": "item",
+    "ref": "act:a-20260110-100930000-supervisor"
+   },
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-100940001-owner",
+   "at": "2026-01-10T10:09:40.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-100940000-owner",
+   "text": "Not yet.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "a-20260110-100930000-supervisor",
+   "at": "2026-01-10T10:09:50.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "act",
+   "corrected": {
+    "reason": "Not yet.",
+    "said": "Not yet.",
+    "said_at": [
+     0,
+     8
+    ],
+    "turn": "u-20260110-100940001-owner"
+   },
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-101020000-owner",
+   "at": "2026-01-10T10:10:20.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Restart",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-101030000-owner",
+   "at": "2026-01-10T10:10:30.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-101020000-owner",
+   "text": "Restart it.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101040000-supervisor",
+   "at": "2026-01-10T10:10:40.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Restart web?",
+   "stake": 1,
+   "urgency": 1,
+   "class": "production-remediation",
+   "blocks": [
+    "remediation:restart-web"
+   ],
+   "recommendation": "restart it",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101040000-supervisor",
+   "at": "2026-01-10T10:11:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "question",
+   "answer": "no",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-101200000-owner",
+   "at": "2026-01-10T10:12:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-101020000-owner",
+   "text": "Restart it now, the fix is in.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101300000-supervisor",
+   "at": "2026-01-10T10:13:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Restart web again?",
+   "thread": "t-20260110-101020000-owner",
+   "about_turn": "u-20260110-101200000-owner",
+   "seen": "u-20260110-101200000-owner",
+   "recommendation": "restart it",
+   "stake": 1,
+   "urgency": 1,
+   "class": "production-remediation",
+   "blocks": [
+    "remediation:restart-web"
+   ],
+   "owner_said": "Restart it now, the fix is in.",
+   "owner_said_turn": "u-20260110-101200000-owner",
+   "owner_said_at": [
+    0,
+    30
+   ],
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101400000-supervisor",
+   "at": "2026-01-10T10:14:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Restart web, once more?",
+   "thread": "t-20260110-101020000-owner",
+   "about_turn": "u-20260110-101200000-owner",
+   "seen": "u-20260110-101200000-owner",
+   "recommendation": "restart it",
+   "stake": 1,
+   "urgency": 1,
+   "class": "production-remediation",
+   "blocks": [
+    "remediation:restart-web"
+   ],
+   "owner_said": "Restart it later.",
+   "owner_said_turn": "u-20260110-101200000-owner",
+   "owner_said_at": [
+    0,
+    30
+   ],
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-101500000-supervisor",
+   "at": "2026-01-10T10:15:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Restart web, from the first turn?",
+   "thread": "t-20260110-101020000-owner",
+   "about_turn": "u-20260110-101030000-owner",
+   "seen": "u-20260110-101200000-owner",
+   "recommendation": "restart it",
+   "stake": 1,
+   "urgency": 1,
+   "class": "production-remediation",
+   "blocks": [
+    "remediation:restart-web"
+   ],
+   "owner_said": "Restart it.",
+   "owner_said_turn": "u-20260110-101030000-owner",
+   "owner_said_at": [
+    0,
+    11
+   ],
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-102000000-owner",
+   "at": "2026-01-10T10:20:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Ship",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-102030000-supervisor",
+   "at": "2026-01-10T10:20:30.000Z",
+   "by": "supervisor",
+   "type": "turn",
+   "thread": "t-20260110-102000000-owner",
+   "text": "Looking.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-102900000-supervisor",
+   "at": "2026-01-10T10:29:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Ship the release?",
+   "thread": "t-20260110-102000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-103000000-owner",
+   "at": "2026-01-10T10:30:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-102000000-owner",
+   "text": "Ship it. Wait for CI? Tell the team.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103100000-supervisor",
+   "at": "2026-01-10T10:31:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question g?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103200000-supervisor",
+   "at": "2026-01-10T10:32:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b1?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103300000-supervisor",
+   "at": "2026-01-10T10:33:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b2?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103400000-supervisor",
+   "at": "2026-01-10T10:34:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b5?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103500000-supervisor",
+   "at": "2026-01-10T10:35:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b8?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103100000-supervisor",
+   "at": "2026-01-10T10:40:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Ship it.",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    0,
+    8
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103200000-supervisor",
+   "at": "2026-01-10T10:41:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Ship it.",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    9,
+    17
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103300000-supervisor",
+   "at": "2026-01-10T10:42:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Wait for CI",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    9,
+    20
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103400000-supervisor",
+   "at": "2026-01-10T10:43:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Ship it.",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    0,
+    8
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-103500000-supervisor",
+   "at": "2026-01-10T10:44:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Looking.",
+   "turn": "u-20260110-102030000-supervisor",
+   "said_at": [
+    0,
+    8
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-102900000-supervisor",
+   "at": "2026-01-10T10:45:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Ship it. Wait for CI? Tell the team.",
+   "turn": "u-20260110-103000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-105000000-supervisor",
+   "at": "2026-01-10T10:50:00.000Z",
+   "by": "supervisor",
+   "type": "decision",
+   "class": "release-scope",
+   "what": "Slipped the import story",
+   "authority": "rung",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-105100000-owner",
+   "at": "2026-01-10T10:51:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Correct",
+   "subject": {
+    "kind": "item",
+    "ref": "decision:d-20260110-100500000-supervisor"
+   },
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-105100001-owner",
+   "at": "2026-01-10T10:51:00.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-105100000-owner",
+   "text": "Wrong again.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-105000000-supervisor",
+   "at": "2026-01-10T10:52:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "decision",
+   "corrected": {
+    "reason": "Wrong again.",
+    "said": "Wrong again.",
+    "said_at": [
+     0,
+     12
+    ],
+    "turn": "u-20260110-105100001-owner"
+   },
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-105300000-supervisor",
+   "at": "2026-01-10T10:53:00.000Z",
+   "by": "supervisor",
+   "type": "decision",
+   "class": "release-scope",
+   "what": "Slipped the audit story",
+   "authority": "rung",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "t-20260110-105400000-owner",
+   "at": "2026-01-10T10:54:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "thread",
+   "title": "Correct",
+   "subject": {
+    "kind": "item",
+    "ref": "decision:d-20260110-105300000-supervisor"
+   },
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-105400001-owner",
+   "at": "2026-01-10T10:54:00.001Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-105400000-owner",
+   "text": "Bad call.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "d-20260110-105300000-supervisor",
+   "at": "2026-01-10T10:55:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "decision",
+   "corrected": {
+    "reason": "Bad call!",
+    "said": "Bad call!",
+    "said_at": [
+     0,
+     9
+    ],
+    "turn": "u-20260110-105400001-owner"
+   },
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "u-20260110-110000000-owner",
+   "at": "2026-01-10T11:00:00.000Z",
+   "by": "owner",
+   "channel": "cli",
+   "type": "turn",
+   "thread": "t-20260110-102000000-owner",
+   "text": "Fine.",
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110100000-supervisor",
+   "at": "2026-01-10T11:01:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b3?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-110000000-owner",
+   "seen": "u-20260110-110000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110100000-supervisor",
+   "at": "2026-01-10T11:02:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Wait for CI?",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    9,
+    21
+   ],
+   "answer_seen": "u-20260110-110000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110300000-supervisor",
+   "at": "2026-01-10T11:03:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b4?",
+   "thread": "t-20260110-100000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110300000-supervisor",
+   "at": "2026-01-10T11:04:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Wait for CI?",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    9,
+    21
+   ],
+   "answer_seen": "u-20260110-110000000-owner",
+   "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110500000-supervisor",
+   "at": "2026-01-10T11:05:00.000Z",
+   "by": "supervisor",
+   "type": "question",
+   "kind": "owner-decision",
+   "question": "Question b7?",
+   "thread": "t-20260110-102000000-owner",
+   "about_turn": "u-20260110-103000000-owner",
+   "seen": "u-20260110-103000000-owner",
+   "recommendation": "Yes",
+   "stake": 1,
+   "urgency": 1,
+   "op": "new"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-110500000-supervisor",
+   "at": "2026-01-10T11:06:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Tell the team.",
+   "turn": "u-20260110-103000000-owner",
+   "said_at": [
+    22,
+    36
+   ],
+   "answer_seen": "u-20260110-103000000-owner",
+   "op": "set"
+  }
+ ],
+ "unbound": [
+  {
+   "subject": "q-20260110-103200000-supervisor",
+   "why": "aren't what the turn says"
+  },
+  {
+   "subject": "q-20260110-103300000-supervisor",
+   "why": "part of a clause"
+  },
+  {
+   "subject": "q-20260110-103400000-supervisor",
+   "why": "overlaps"
+  },
+  {
+   "subject": "q-20260110-103500000-supervisor",
+   "why": "supervisor's"
+  },
+  {
+   "subject": "q-20260110-102900000-supervisor",
+   "why": "clause binding"
+  },
+  {
+   "subject": "q-20260110-110100000-supervisor",
+   "why": "about another turn"
+  },
+  {
+   "subject": "q-20260110-110300000-supervisor",
+   "why": "another thread"
+  },
+  {
+   "subject": "q-20260110-110500000-supervisor",
+   "why": "answer_seen"
+  },
+  {
+   "subject": "q-20260110-101400000-supervisor",
+   "why": "aren't what the turn says"
+  },
+  {
+   "subject": "q-20260110-101500000-supervisor",
+   "why": "older than the no"
+  },
+  {
+   "subject": "d-20260110-105000000-supervisor",
+   "why": "about another record"
+  },
+  {
+   "subject": "d-20260110-105300000-supervisor",
+   "why": "aren't what the turn says"
+  }
+ ],
+ "refused": [
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-100100000-supervisor",
+    "op": "set",
+    "type": "question",
+    "at": "2026-01-10T12:00:00.000Z",
+    "by": "owner",
+    "channel": "thread",
+    "answer": "Yes",
+    "said": "Merge the dashboard PR.",
+    "turn": "u-20260110-100001000-owner",
+    "said_at": [
+     3
+    ],
+    "answer_seen": "u-20260110-100001000-owner"
+   },
+   "why": "said_at needs at least 2"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-100100000-supervisor",
+    "op": "set",
+    "type": "question",
+    "at": "2026-01-10T12:00:01.000Z",
+    "by": "owner",
+    "channel": "thread",
+    "answer": "Yes",
+    "said": "Merge the dashboard PR.",
+    "turn": "u-20260110-100001000-owner",
+    "said_at": [
+     5,
+     5
+    ],
+    "answer_seen": "u-20260110-100001000-owner"
+   },
+   "why": "said_at is \\[start, end\\] with start before end"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-100500000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:02.000Z",
+    "by": "supervisor",
+    "corrected": {
+     "reason": "x",
+     "said": "x"
+    }
+   },
+   "why": "on the owner's correction recorded from a thread or chat only"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105000000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:03.000Z",
+    "by": "owner",
+    "channel": "chat",
+    "corrected": {
+     "reason": "a",
+     "said": "b"
+    }
+   },
+   "why": "gives them as its reason"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105300000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:04.000Z",
+    "by": "owner",
+    "channel": "thread",
+    "corrected": {
+     "reason": "Bad call.",
+     "said": "Bad call."
+    }
+   },
+   "why": "names the owner's turn"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-100100000-supervisor",
+    "op": "set",
+    "type": "question",
+    "at": "2026-01-10T12:00:05.000Z",
+    "by": "owner",
+    "channel": "thread",
+    "answer": "Yes",
+    "said": "Merge the dashboard PR.",
+    "turn": "u-20260110-100001000-owner",
+    "said_at": [
+     0,
+     23
+    ]
+   },
+   "why": "said_at and answer_seen go together"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-120006000-supervisor",
+    "op": "new",
+    "type": "question",
+    "at": "2026-01-10T12:00:06.000Z",
+    "by": "supervisor",
+    "kind": "owner-decision",
+    "question": "x?",
+    "owner_said": "x",
+    "owner_said_at": [
+     0,
+     1
+    ]
+   },
+   "why": "owner_said_turn and owner_said_at go together"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-120007000-supervisor",
+    "op": "new",
+    "type": "question",
+    "at": "2026-01-10T12:00:07.000Z",
+    "by": "supervisor",
+    "kind": "owner-decision",
+    "question": "x?",
+    "thread": "t-20260110-100000000-owner",
+    "seen": "u-20260110-100001000-owner"
+   },
+   "why": "seen goes with about_turn"
+  }
+ ]
+}

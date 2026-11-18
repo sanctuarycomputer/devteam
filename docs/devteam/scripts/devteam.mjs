@@ -1487,7 +1487,30 @@ function checkLine(o, file) {
   // A chat or thread line is an answer, with the owner's words in said, or what that answer
   // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
   // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
-  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  // A correction the supervisor recorded from the owner's words (correct --from-turn|--from-chat --said) is one too.
+  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision) || (['decision', 'act'].includes(o.type) && o.op === 'set' && isObj(o.corrected) && typeof o.corrected.said === 'string'))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, the standing rule or goal verdict that answer carried, or a correction with the owner's words in corrected.said`);
+  // turn-authority-1: what a clause binding carries, and only where it can be
+  const offsetsBad = (x) => Array.isArray(x) && x.length === 2 && Number.isInteger(x[0]) && Number.isInteger(x[1]) && !(x[0] < x[1]);
+  if (['decision', 'act'].includes(o.type) && isObj(o.corrected)) {
+    const c = o.corrected;
+    const bound = c.said !== undefined || c.said_at !== undefined || c.turn !== undefined;
+    if (bound && (o.by !== 'owner' || !['chat', 'thread'].includes(o.channel))) errs.push("corrected.said, said_at and turn are on the owner's correction recorded from a thread or chat only");
+    else if (o.channel === 'chat' && (c.said_at !== undefined || c.turn !== undefined)) errs.push('a correction recorded from chat has no turn or said_at');
+    else if (o.channel === 'thread' && (c.turn === undefined || c.said_at === undefined)) errs.push("a correction recorded from a thread names the owner's turn and where in it the words are (corrected.turn, corrected.said_at)");
+    if (['chat', 'thread'].includes(o.channel) && typeof c.said === 'string') {
+      if (c.reason !== c.said) errs.push("a correction recorded from the owner's words gives them as its reason (corrected.reason is corrected.said)");
+      if (c.severity !== undefined || c.impact !== undefined) errs.push("a correction recorded from the owner's words carries no severity or impact");
+    }
+    if (offsetsBad(c.said_at)) errs.push('corrected.said_at is [start, end] with start before end');
+  }
+  if (o.type === 'question') {
+    if ((o.said_at !== undefined || o.answer_seen !== undefined) && !(o.channel === 'thread' && o.said_at !== undefined && o.answer_seen !== undefined)) errs.push('said_at and answer_seen go together, on an answer recorded from a clause of a thread turn (channel thread)');
+    if ((o.owner_said_turn !== undefined || o.owner_said_at !== undefined) && !(o.owner_said_turn !== undefined && o.owner_said_at !== undefined && typeof o.owner_said === 'string')) errs.push('owner_said_turn and owner_said_at go together, with owner_said');
+    if (o.seen !== undefined && o.about_turn === undefined) errs.push('seen goes with about_turn');
+    if (o.about_turn !== undefined && o.thread === undefined) errs.push('about_turn is on a question asked in a thread (thread ask --turn)');
+    if (offsetsBad(o.said_at)) errs.push('said_at is [start, end] with start before end');
+    if (offsetsBad(o.owner_said_at)) errs.push('owner_said_at is [start, end] with start before end');
+  }
   // dropped files go with the owner's own answer, never words the supervisor recorded for them
   if (o.type === 'question' && ['chat', 'thread'].includes(o.channel) && o.files !== undefined) errs.push(`files are on the owner's own answer, never one recorded from ${o.channel}`);
   if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
