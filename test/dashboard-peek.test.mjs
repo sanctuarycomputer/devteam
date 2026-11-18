@@ -498,14 +498,18 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     const FL = Number(process.env.DEVTEAM_TEST_FRAME_LATENCY_MS) || 0;
     const latency = (ms) => p.send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 });
     if (FL) { await p.send('Network.enable'); await latency(FL); }
-    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
-    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
-    await p.click('#av-close');
-    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
-    assert.ok(await p.ev(isOpen), 'the peek is still open');
-    assert.ok(await p.ev(scrimShown), 'with its scrim');
-    await closePeek();
-    if (FL) await latency(0);
+    // (taken off again however the section ends, so a later subtest's failure is never the knob's)
+    try {
+      await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+      await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+      await p.click('#av-close');
+      await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed');
+      assert.ok(await p.ev(isOpen), 'the peek is still open');
+      assert.ok(await p.ev(scrimShown), 'with its scrim');
+      await closePeek();
+    } finally {
+      if (FL) await latency(0).catch(() => {});
+    }
     // the viewer over a review: closing it leaves the review's scrim dark (R1)
     await load('#library');
     await p.ev("location.hash = '#review-preview?path=review%2Fpage.html&ref=main'");
