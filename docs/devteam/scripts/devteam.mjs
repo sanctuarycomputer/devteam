@@ -14910,14 +14910,16 @@ function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return super
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
 function supervisorPaneIn(repo, noted, rec, { notedOnly = false, strict = false } = {}) {
-  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
+  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}\t#{@devteam-shell}']);
   if (listed === null) return null;
   if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
   const root = realPath(repo);
   const server = tmuxServerPid();
   let other = null;
   for (const l of listed.split('\n').filter(Boolean)) {
-    const [id, win, start, cmd] = l.split('\t');
+    const [id, win, start, cmd, tag] = l.split('\t');
+    // a pane tagged @devteam-shell is a terminal's own shell, never the supervisor unless noted as it
+    if (tag && id !== noted) continue;
     if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
     const at = realPath(start);
     if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
@@ -17127,6 +17129,387 @@ function kitHandOver() {
   }
   return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
 }
+/* term-server start */
+// The dashboard's terminal (terminal@1, test/contracts/terminal.md): the supervisor's pane and the
+// project's Shell, read and typed into over /api/term/*. Sizes in bytes, times in ms.
+const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, CACHE_MS: 100, SETTLE_MS: 50, TMUX_MS: 30000 };
+// What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
+const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
+const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+// What tmuxServerEnv() removes but TMUX_PANE (tmux sets it fresh for the new pane, and the shell
+// needs it): the Shell's command unsets each, since a new window gets the tmux server's environment,
+// never the calling client's (S7); its session markers are found at open, as sessionMarkerPrefix does.
+const TERM_SHELL_UNSET = ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD', 'DEVTEAM_CHANNEL'];
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again', open: 'the shell could not be opened' };
+// A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
+const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
+// The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
+const TERM_FIELDS = ['pane_id', 'pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'cursor_flag', 'keypad_cursor_flag', 'keypad_flag', 'history_size', 'pane_dead', 'pane_current_command', '@devteam-shell', 'session_name', 'pane_start_path', 'pid'];
+// A paste without bracketed-paste markers: tmux passes them through, so one inside a paste would end its
+// bracket early and the rest, an Enter too, would arrive typed. A drop can join two halves into a new
+// one (ESC[20 ESC[201~ 0~), so each is dropped as it completes the output so far: one linear pass (each
+// char pushed once, popped at most once; neither marker overlaps itself or the other), the same text as
+// dropping them again until none is left, which is quadratic on nested markers.
+const termUnbracket = (s) => { const o = []; for (const c of s) { o.push(c); const n = o.length; if (c === '~' && n >= 6 && o[n - 6] === '\x1b' && o[n - 5] === '[' && o[n - 4] === '2' && o[n - 3] === '0' && (o[n - 2] === '0' || o[n - 2] === '1')) o.length = n - 6; } return o.join(''); };
+// tmux's answer that the pane, or the server, isn't there; any other failure is not "gone" (P4)
+const TERM_MISSING = /can't find (pane|session|window)|no server running|error connecting to|no current/;
+// A captured line as the page shows it (S10): SGR kept; a CSI, a string (OSC, DCS, SOS, PM, APC, to
+// BEL or ESC \ or the line's end, so an OSC 8 link's URL never shows) and any other escape dropped
+// (with its intermediates, so ESC ( B goes whole); then C0 and DEL; then trailing spaces.
+function termLine(s) {
+  return s.replace(/\x1b(?:\[([0-9;:]*)m|\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\]PX^_](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\|$)|[\x20-\x2f]*[\s\S]?)/g, (m, sgr) => (sgr === undefined ? '' : m))
+    // every ESC left opens a kept SGR
+    .replace(/[\x00-\x1a\x1c-\x1f\x7f]/g, '').replace(/ +$/, '');
+}
+// The /api/term/* routes, for cmdDashboard: `port` a getter (the dashboard re-picks its port when the
+// first is taken), `host` its bind address, `log` its own output (a refusal's reason, never a body).
+function termRoutes({ port, host, log }) {
+  // tests only (P6): a longer cache, so a test can hold a read inside it
+  const cacheMs = Number(process.env.DEVTEAM_TERM_CACHE_MS) || TERM.CACHE_MS;
+  // read once, at the start: tmuxSession() may spawn synchronously, which a request never waits on
+  const session = tmuxSession();
+  const loopback = TERM_LOOPBACK.has(host);
+  // the token's own input, so it is never a pane-answer token; valid until the server restarts
+  const termSecret = crypto.randomBytes(32);
+  const termToken = () => crypto.createHmac('sha256', termSecret).update('devteam-term-token-v1').digest('hex');
+  const tokenOk = (t) => { if (typeof t !== 'string') return false; const a = Buffer.from(t), b = Buffer.from(termToken()); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+  // every terminal route's gateway nonces: each once, pruned after twice the window
+  const nonces = new Map();
+  const json = (res, status, obj, extra = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra }); res.end(JSON.stringify(obj)); };
+  // Every tmux call: async (no request blocks the server), -u (a C locale prints a format's tab as _; P1).
+  const tmuxCall = (args, input = null) => new Promise((resolve) => {
+    let child;
+    try {
+      child = execFile('tmux', ['-u', ...args], { encoding: 'utf8', timeout: TERM.TMUX_MS, maxBuffer: 64 * 1024 * 1024 }, (e, out, err) => {
+        const timedOut = !!e?.killed;
+        resolve({ ok: !e, out: out ?? '', err: err ?? '', timedOut, missing: !!e && !timedOut && typeof e.code === 'number' && TERM_MISSING.test(err ?? '') });
+      });
+    } catch (e) { return resolve({ ok: false, out: '', err: String(e?.message ?? e), timedOut: false, missing: false }); }
+    child.stdin.on('error', () => {});
+    child.stdin.end(typeof input === 'string' ? input : undefined);
+  });
+  const root = realPath(mainRoot);
+  const fmt = TERM_FIELDS.map((f) => `#{${f}}`).join('\t');
+  // the display line, by field name (a tab in the start path stays in it)
+  const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
+  // the supervisor's: the marked pane only, as an id (S11)
+  const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
+  // the Shell's: remembered, else the lowest-numbered live pane of this session tagged with this root,
+  // not the marked one (a dead one, kept by remain-on-exit, would shadow a live one; T5-1). A lookup
+  // tmux failed (not "isn't there") is { error }, never no pane (P4).
+  let shellPane = null;
+  async function paneOf(which) {
+    if (which === 'supervisor') return marked();
+    if (shellPane) return shellPane;
+    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{@devteam-shell}']);
+    if (!got.ok) { if (got.missing) return null; log(`/api/term/shell: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const m = marked();
+    // the tag last, whole: a tab in a root stays in it
+    const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
+    return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
+  }
+  // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
+  const held = () => ({ count: 0, oldest_ms: 0, prompt: 'readable' });
+  const withEtag = (s, raw) => {
+    const etag = sha256(JSON.stringify({ ...s, held: { ...s.held, oldest_ms: s.held.oldest_ms >= 120000 } })).slice(0, 20);
+    // raw, the read's fields, for the keys route's 423s and 409s: never sent
+    return Object.defineProperty({ ...s, etag }, 'raw', { value: raw, enumerable: false });
+  };
+  const gone = (which, raw = null) => withEtag({ v: 1, which, pane: null, state: 'gone', cols: 0, rows: 0, cursor: { x: 0, y: 0, visible: false }, modes: { app_cursor: false, app_keypad: false }, history_size: 0, held: held(), lines: [] }, raw);
+  // Why the read pane isn't the route's, or null. Supervisor: resolvePane's checks, the tag, and a
+  // noted id from another server (S1); shell: its tag, session, and never the marked pane.
+  const notOurs = (which, f) => {
+    if (f.pane_dead === '1') return 'dead';
+    if (which === 'shell') return f['@devteam-shell'] !== root || f.session_name !== session || f.pane_id === marked() ? 'moved' : null;
+    if (SHELLS.has(f.pane_current_command.replace(/^-/, ''))) return 'shell';
+    if (f['@devteam-shell']) return 'tagged';
+    const rec = supervisorUpRecord();
+    return (rec?.server ? String(rec.server) !== f.pid : realPath(f.pane_start_path) !== root) ? 'foreign' : null;
+  };
+  // One call: display first, so its line is the first, then capture's rows (S16).
+  async function readNow(which, again = true) {
+    const P = await paneOf(which);
+    if (P?.error) return P;
+    if (!P) return gone(which, { pane: null, why: 'none' });
+    const got = await tmuxCall(['display', '-p', '-t', P, fmt, ';', 'capture-pane', '-e', '-p', '-t', P]);
+    if (!got.ok && !got.missing) { log(`/api/term/${which}: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
+    const out = got.ok ? got.out.split('\n') : [];
+    const f = got.ok ? fieldsOf(out[0]) : null;
+    // a display line that didn't parse is a failed read, never a screen
+    if (f && !(/^%\d+$/.test(f.pane_id) && /^\d+$/.test(f.pane_width) && /^\d+$/.test(f.pane_height))) { log(`/api/term/${which}: tmux's display line didn't parse`); return { error: TERM_WORDS.read }; }
+    const why = f ? notOurs(which, f) : 'missing';
+    // the Shell's pane moved or went: forget it, and look once more
+    if (why && which === 'shell') { shellPane = null; if (again) return readNow(which, false); }
+    if (why) return gone(which, { pane: P, why, fields: f });
+    const rows = Number(f.pane_height);
+    const lines = out.slice(1, 1 + rows).map(termLine);
+    while (lines.length < rows) lines.push('');
+    return withEtag({
+      v: 1, which, pane: f.pane_id, state: 'live', cols: Number(f.pane_width), rows,
+      cursor: { x: Number(f.cursor_x), y: Number(f.cursor_y), visible: f.cursor_flag === '1' },
+      modes: { app_cursor: f.keypad_cursor_flag === '1', app_keypad: f.keypad_flag === '1' },
+      history_size: Number(f.history_size), held: held(), lines,
+    }, { pane: P, why: null, fields: f });
+  }
+  // Per which: the read in flight, shared, and its result for cacheMs. A send voids it and bumps the
+  // generation, so a read begun before the send never fills the cache after it (S12); a failed read
+  // is never cached.
+  const screens = { supervisor: { gen: 0, at: 0, val: null, flight: null }, shell: { gen: 0, at: 0, val: null, flight: null } };
+  function readScreen(which, { fresh = false } = {}) {
+    const c = screens[which];
+    if (!fresh && c.val && Date.now() - c.at < cacheMs) return Promise.resolve(c.val);
+    if (!fresh && c.flight) return c.flight;
+    const gen = c.gen;
+    const p = readNow(which).then((s) => { if (c.gen === gen && !s.error) { c.val = s; c.at = Date.now(); } return s; })
+      .finally(() => { if (c.flight === p) c.flight = null; });
+    c.flight = p;
+    return p;
+  }
+  const voidScreen = (which) => { const c = screens[which]; c.gen++; c.val = null; c.flight = null; };
+  // History (§7): lines max(0, n - k) to n - 1, by offsets from history_size, with history_size read
+  // after them in the same call; read once more if it moved.
+  async function readHistory(P, n, k, hs) {
+    for (let again = true; ; again = false) {
+      const a = Math.max(0, n - k), b = n - 1;
+      const got = await tmuxCall(['capture-pane', '-e', '-p', '-S', String(a - hs), '-E', String(b - hs), '-t', P, ';', 'display', '-p', '-t', P, '#{history_size}']);
+      if (!got.ok && !got.missing) log(`/api/term/: tmux failed on history: ${got.timedOut ? 'timed out' : got.err.trim()}`);
+      if (!got.ok) return got.missing ? { gone: true } : { error: TERM_WORDS.read };
+      const out = got.out.split('\n');
+      if (out.at(-1) === '') out.pop();
+      const now = Number(out.pop());
+      if (now === hs || !again || !Number.isInteger(now)) return { lines: out.map(termLine), hs };
+      if (n > now) return { range: true };
+      hs = now;
+    }
+  }
+  // Keys (§8): one post at a time per pane, in arrival order; the last taken seq per page and which,
+  // for the server's life (never pruned, so a late resend never types twice).
+  const chains = { supervisor: Promise.resolve(), shell: Promise.resolve() };
+  const queue = (which, f) => { const p = chains[which].then(f); chains[which] = p.then(() => {}, () => {}); return p; };
+  const lastSeq = new Map();
+  const sendData = (pane, buf) => tmuxCall(['send-keys', '-t', pane, '-H', ...[...buf].map((b) => b.toString(16).padStart(2, '0'))]);
+  // A paste as one buffer, its text on stdin (never a file or an argument); a failed paste deletes its
+  // buffer, so the text never stays in the tmux server.
+  let buffers = 0;
+  async function sendPaste(pane, text) {
+    const name = `devteam-term-${process.pid}-${++buffers}`;
+    const loaded = await tmuxCall(['load-buffer', '-b', name, '-'], text);
+    const sent = loaded.ok ? await tmuxCall(['paste-buffer', '-p', '-d', '-b', name, '-t', pane]) : loaded;
+    if (!sent.ok) {
+      const gone = await tmuxCall(['delete-buffer', '-b', name]);
+      // its name only, so the owner can delete it by hand; never its text
+      if (!gone.ok && !/unknown buffer/.test(gone.err)) log(`/api/term/: tmux buffer ${name} kept after a failed paste; delete it with tmux delete-buffer -b ${name}`);
+    }
+    return sent;
+  }
+  // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
+  // the cache (S2), so keys sent just after the supervisor exits find the shell prompt.
+  async function keys(res, which, b, left) {
+    const no = (status, error, reason) => { log(`refused /api/term/${which}/keys: ${reason}`); return json(res, status, { error }); };
+    // checked at the turn's start and again just before the seq (the read can take a while): a refusal
+    // before the send, so its seq stays free (§8)
+    const went = () => left() && (log(`refused /api/term/${which}/keys: the client went before its turn`), true);
+    if (went()) return;
+    const s = await readScreen(which, { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    // the pane step, in the spec's order (S3); a tagged or marked pane is never the other route's
+    if (which === 'supervisor') {
+      const { pane, fields } = s.raw;
+      if (!pane) return no(409, TERM_WORDS.supervisor, 'no marked pane');
+      if (b.pane !== pane) return no(423, TERM_WORDS.moved, 'not the marked pane');
+      if (fields?.['@devteam-shell']) return no(423, TERM_WORDS.moved, 'the marked pane is the Shell\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.supervisor, `the marked pane is ${s.raw.why}`);
+    } else {
+      if (b.pane === marked()) return no(423, TERM_WORDS.moved, 'the marked pane is the supervisor\'s');
+      if (s.state === 'gone') return no(409, TERM_WORDS.shell, 'no Shell pane');
+      if (b.pane !== s.pane) return no(423, TERM_WORDS.moved, 'not the Shell\'s pane');
+    }
+    if (went()) return;
+    const key = `${b.page}\n${which}`;
+    if (b.seq <= (lastSeq.get(key) ?? 0)) return json(res, 200, { ...s, taken: false });
+    // taken the moment the send starts: a send that fails part way is never typed again
+    lastSeq.set(key, b.seq);
+    // kit-618: the typing lock, then the owner's floor, go here (supervisor only)
+    const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
+    voidScreen(which);
+    if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
+    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
+    // last, so if every read fails the answer is the pre-send screen, taken: the keys went (their seq
+    // is spent), and a 500 would tell the page they may not have; its next poll shows the change
+    let now = s;
+    for (const stop = Date.now() + TERM.SETTLE_MS; ;) {
+      const got = await readScreen(which, { fresh: true });
+      if (got.error) break;
+      now = got;
+      if (now.etag !== s.etag || Date.now() >= stop) break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    return json(res, 200, { ...now, taken: true });
+  }
+  // Shell open (§9), inside the Shell's turn: the found pane (the read checks a remembered one, and
+  // looks again if it moved), else a new window in this project's session, tagged; sized on every
+  // call (the kit is the only one that sizes it); then the screen.
+  async function openShell(res, b) {
+    const failed = (status, reason) => { log(status === 409 ? `refused /api/term/shell/open: ${reason}` : `/api/term/shell/open: tmux failed: ${reason}`); return json(res, status, { error: TERM_WORDS.open }); };
+    const why = (got) => (got.timedOut ? 'timed out' : got.err.trim());
+    const s = await readScreen('shell', { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    let pane = s.state === 'live' ? s.pane : null;
+    if (!pane) {
+      const has = await tmuxCall(['has-session', '-t', `=${session}`]);
+      if (!has.ok) return has.missing ? failed(409, `no tmux session ${session}`) : failed(500, why(has));
+      // the markers the new window would get: a failed read could miss one, so it is no open
+      const envs = await Promise.all([['-g'], ['-t', `=${session}`]].map((a) => tmuxCall(['show-environment', ...a])));
+      const bad = envs.find((e) => !e.ok);
+      if (bad) return failed(bad.missing ? 409 : 500, why(bad));
+      const markers = [...new Set(envs.flatMap((e) => e.out.split('\n')).map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+      const ds = await tmuxCall(['show-options', '-gv', 'default-shell']);
+      const shell = (ds.ok && ds.out.trim()) || '/bin/sh';
+      const made = await tmuxCall(['new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'shell', '-c', root, '-t', `=${session}:`, 'env', ...[...TERM_SHELL_UNSET, ...markers].flatMap((k) => ['-u', k]), shell, '-l']);
+      pane = made.out.trim();
+      if (!made.ok || !/^%\d+$/.test(pane)) return failed(made.missing ? 409 : 500, made.ok ? `new-window answered ${JSON.stringify(pane)}` : why(made));
+      const tagged = await tmuxCall(['set-option', '-p', '-t', pane, '@devteam-shell', root]);
+      // an untagged window would never be found, and the next open would make another
+      if (!tagged.ok) { await tmuxCall(['kill-pane', '-t', pane]); return failed(500, why(tagged)); }
+    }
+    const sized = await tmuxCall(['resize-window', '-t', pane, '-x', String(b.cols), '-y', String(b.rows)]);
+    if (!sized.ok) { shellPane = null; return failed(sized.missing ? 409 : 500, why(sized)); }
+    shellPane = pane;
+    // a read begun before the open never fills the cache after it
+    voidScreen('shell');
+    const now = await readScreen('shell', { fresh: true });
+    if (now.error) return json(res, 500, { error: now.error });
+    if (now.state !== 'live') return failed(409, `the Shell's pane ${pane} went`);
+    return json(res, 200, now);
+  }
+  function route(pathname) {
+    if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
+    if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
+    const m = /^\/api\/term\/(supervisor|shell)\/(screen|history|keys)$/.exec(pathname);
+    return m ? { name: m[2], method: m[2] === 'keys' ? 'POST' : 'GET', which: m[1] } : null;
+  }
+  // §3 step 3: view, not-loopback, cross-site, the first that applies
+  function whyOf(req, r) {
+    if (req.headers['x-devteam-level'] === 'view') return 'view';
+    if (!loopback) return 'not-loopback';
+    const site = req.headers['sec-fetch-site'];
+    if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
+    if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
+    return site === 'same-origin' && req.headers.origin === `http://${req.headers.host}` ? null : 'cross-site';
+  }
+  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP
+  // cut off. A client that goes first (a destroyed slow body) settles it too, as gone.
+  const readBody = (req) => new Promise((resolve) => {
+    const chunks = [];
+    let n = 0;
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > 4 * TERM.CAP) { chunks.length = 0; resolve({ cut: true }); return req.destroy(); }
+      if (n <= TERM.CAP) chunks.push(c); else chunks.length = 0;
+    });
+    req.on('end', () => resolve(n > TERM.CAP ? { over: true } : { body: Buffer.concat(chunks) }));
+    for (const ev of ['error', 'aborted', 'close']) req.on(ev, () => resolve({ gone: true }));
+  });
+  const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
+  const PAGE = /^[A-Za-z0-9_-]{16,64}$/;
+  const shapeOk = {
+    keys(b, which) {
+      const ks = Object.keys(b).sort().join(',');
+      if (ks !== 'data,page,pane,seq,token,which' && ks !== 'page,pane,paste,seq,token,which') return false;
+      if (b.which !== which || typeof b.pane !== 'string' || !/^%\d+$/.test(b.pane)) return false;
+      if (typeof b.page !== 'string' || !PAGE.test(b.page) || !Number.isSafeInteger(b.seq) || b.seq < 1) return false;
+      if ('data' in b) return typeof b.data === 'string' && /^(?:[0-9a-fA-F]{2})+$/.test(b.data);
+      return typeof b.paste === 'string' && b.paste.length > 0;
+    },
+    open(b) {
+      const ks = Object.keys(b).sort().join(',');
+      return ks === 'cols,page,rows,token,which' && b.which === 'shell' && typeof b.page === 'string' && PAGE.test(b.page)
+        && Number.isInteger(b.cols) && b.cols >= 20 && b.cols <= 500 && Number.isInteger(b.rows) && b.rows >= 5 && b.rows <= 200;
+    },
+  };
+  // §3 step 10, on a box only: the gateway's proof, bound to this route, its which and this port
+  function proofWhy(req, r, body) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    if (!(gw('ts') && gw('nonce') && gw('sig'))) return 'it carries no signature from the gateway';
+    const proof = { port: port(), ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: body.toString('base64') };
+    const why = dashboardProofProblem(proof, termSigned(r.name === 'open' ? 'devteam-term-open-v1' : 'devteam-term-keys-v1', r.which)) ?? (nonces.has(proof.nonce) ? 'its signature was used already' : null);
+    if (why) return why;
+    const now = Date.now();
+    for (const [n, at] of nonces) if (now - at > 2 * OPERATOR_PROOF_MS) nonces.delete(n);
+    nonces.set(proof.nonce, now);
+    return null;
+  }
+  async function serve(req, res, u) {
+    const at = u.pathname.slice('/api/term/'.length);
+    // a refusal: its reason to the dashboard's output, never a body
+    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); termDrain(req); return json(res, status, obj); };
+    const r = route(u.pathname);
+    if (!r) return no(404, { error: 'not found' });
+    if (req.method !== r.method) return no(405, { error: 'not this method' });
+    const why = whyOf(req, r);
+    if (why) return no(403, r.method === 'GET' ? { why } : { error: TERM_WORDS.page, why });
+    if (r.name === 'token') return json(res, 200, { token: termToken() });
+    if (r.name === 'history') {
+      // the shape (§7); before's top, history_size, is the screen read's
+      const before = u.searchParams.get('before'), count = u.searchParams.get('count');
+      if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
+      const n = Number(before), k = Number(count);
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const answer = (pane, hs, lines) => json(res, 200, { v: 1, which: r.which, pane, before: n, history_size: hs, lines });
+      // before=0: nothing above it, no history call, live or gone (S8)
+      if (n === 0) return answer(s.pane, s.history_size, []);
+      if (s.state === 'gone' || n > s.history_size) return no(400, { error: 'before is past the screen\'s top' });
+      const h = await readHistory(s.pane, n, k, s.history_size);
+      if (h.error) return json(res, 500, { error: h.error });
+      if (h.gone) { voidScreen(r.which); return no(400, { error: 'the pane is gone' }); }
+      if (h.range) return no(400, { error: 'before is past the screen\'s top' });
+      return answer(s.pane, h.hs, h.lines);
+    }
+    if (r.name === 'screen') {
+      const s = await readScreen(r.which);
+      if (s.error) return json(res, 500, { error: s.error });
+      const etag = `"${s.etag}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { 'cache-control': 'no-store', etag }); return res.end(); }
+      return json(res, 200, s, { etag });
+    }
+    // the two POSTs, §3 steps 4 to 10
+    if (!jsonType(req.headers['content-type'])) return no(403, { error: TERM_WORDS.page }, 'not application/json');
+    const got = await readBody(req);
+    if (got.cut) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.gone) return void log(`refused /api/term/${at}: the client went before its body ended`);
+    if (got.over) return no(413, { error: TERM_WORDS.big }, 'a body over the cap');
+    let b;
+    try { b = JSON.parse(got.body.toString('utf8')); } catch { return no(400, { error: TERM_WORDS.shape }, 'not JSON'); }
+    if (b === null || typeof b !== 'object' || Array.isArray(b)) return no(400, { error: TERM_WORDS.shape }, 'not a JSON object');
+    if (!tokenOk(b.token)) return no(403, { error: TERM_WORDS.token }, 'a missing or wrong token');
+    if (!shapeOk[r.name](b, r.which)) return no(400, { error: TERM_WORDS.shape }, 'not the route\'s shape');
+    // once, with the shape (step 8), before the cap: the cap then measures what would be typed, and a
+    // paste of markers only is the empty paste the shape refuses (400, §4's malformed body)
+    if (r.name === 'keys' && 'paste' in b && !(b.paste = termUnbracket(b.paste))) return no(400, { error: TERM_WORDS.shape }, 'a paste of bracket markers only');
+    if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
+    if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
+    if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
+    if (r.name === 'keys') {
+      // a client that goes while its post waits (a timed-out gateway, a closed tab): its turn types
+      // nothing, so a line the owner types again never arrives twice (B-2)
+      let left = false;
+      res.on('close', () => { left = true; });
+      return queue(r.which, () => keys(res, r.which, b, () => left));
+    }
+    return queue('shell', () => openShell(res, b));
+  }
+  return {
+    // any throw answers 500 and never ends the dashboard (S15)
+    async handle(req, res, u) {
+      try { await serve(req, res, u); } catch (e) {
+        log(`/api/term/ failed: ${e?.message ?? e}`);
+        if (!res.headersSent) json(res, 500, { error: String(e?.message ?? e) }); else res.destroy();
+      }
+    },
+  };
+}
+/* term-server end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -17137,6 +17520,8 @@ async function cmdDashboard() {
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   processLog(log, 'dashboard');
+  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
+  const term = termRoutes({ port: () => port, host, log });
   const page = path.join(kitDir, 'dashboard', 'index.html');
   // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
@@ -17658,10 +18043,15 @@ async function cmdDashboard() {
     req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+    const isTerm = req.url.startsWith('/api/term/');
+    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); termDrain(req); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // the terminal: right after the global guards, before any other route
+    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
     // a file dropped on the page: before every other route, and before a byte of its body is read
     if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
       clearTimeout(bodyTimer);
