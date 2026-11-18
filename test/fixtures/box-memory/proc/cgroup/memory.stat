@@ -1,0 +1,13 @@
+anon 15032385536
+file 8053063680
+kernel 536870912
+kernel_stack 41943040
+sock 4194304
+shmem 536870912
+file_mapped 1073741824
+file_dirty 8388608
+inactive_anon 2147483648
+active_anon 12884901888
+inactive_file 3221225472
+active_file 4294967296
+unevictable 0
