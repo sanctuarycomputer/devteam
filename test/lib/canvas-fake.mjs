@@ -2646,7 +2646,9 @@ export function exchangeProblems(x, { fixturesDir }) {
       const errs = isObj(m) && PAGE_KINDS.includes(m.t) ? shapeErrors(m.t, m) : [`unknown kind ${JSON.stringify(isObj(m) ? m.t : m)}`];
       const mine = Array.isArray(expect[s.as]) ? expect[s.as] : [];
       const excused = mine.some((r) => isObj(r) && r.t === 'refused' && r.why === 'shape' && isObj(m) && r.client === m.client && r.seq === m.seq)
-        || (mine.length > 0 && isClose(mine[mine.length - 1]) && mine[mine.length - 1].$close === 1008);
+        || (mine.length > 0 && isClose(mine[mine.length - 1]) && mine[mine.length - 1].$close === 1008)
+        // a select off its shape is ignored (§5): the step expects nothing for anyone
+        || (isObj(m) && m.t === 'select' && Object.values(expect).every((l) => Array.isArray(l) && l.length === 0));
       if (errs.length && !excused) for (const e of errs) out.push(`${where}: send: ${e}`);
     }
     if (own(s, 'doc')) docProblem(where, s.doc);
@@ -2669,11 +2671,13 @@ let exchangeTrips = 0;
 // Plays one exchange (§14) against `fake` (started with `exchangeOptions`, or a server with the same
 // controls): each step's action, then every open connection's new messages compared with its `expect`
 // list exactly, in order (none for a connection not named), a `$close` awaited with its code, and the
-// document compared when the step gives one. It also holds `welcome` and `reload` to §3's session rule:
-// a welcome on a canvas with no open connection, and every reload, carries an id not seen before in the
-// exchange; any other welcome the open session's. A failure names the exchange, the step and the
-// connection. `waitMs` bounds each wait for a message, a close or a pong. Every connection it opens is
-// closed when it ends, however it ends.
+// document compared when the step gives one. Every received message must first hold to its kind's
+// shape, and every connection's conn be its own. It also holds `welcome` and `reload` to §3's session
+// rule: a welcome on a canvas with no open connection, and every reload, carries an id not seen before
+// in the exchange (a step's reloads all the same one); any other welcome the open session's. After the
+// last step, a round trip per connection and a 50 ms settle, then silence. A failure names the
+// exchange, the step and the connection. `waitMs` bounds each wait for a message, a close or a pong.
+// Every connection it opens is closed when it ends, however it ends.
 export async function playExchange(fake, x, { fixturesDir, name = 'exchange', waitMs = 3000 } = {}) {
   const problems = exchangeProblems(x, { fixturesDir });
   assert.deepEqual(problems, [], `${name}: holds to the exchange rules`);
@@ -2696,6 +2700,8 @@ export async function playExchange(fake, x, { fixturesDir, name = 'exchange', wa
       const where = `${name} step ${i + 1} (${act} ${JSON.stringify(s[act]).slice(0, 60)})`;
       const expect = s.expect || {};
       const liveBefore = live().length;
+      const before = current; // the session as it stood before this step
+      let reloaded = null; // the id this step's reloads carry
       let sender = null;
       if (act === 'open') {
         const headers = {};
@@ -2728,8 +2734,8 @@ export async function playExchange(fake, x, { fixturesDir, name = 'exchange', wa
           method: 'POST', headers: { 'x-devteam-canvas-token': fake.token, 'Content-Type': 'application/json' }, body: s.local,
         });
         assert.equal(res.status, s.status, `${where}: the local route's status`);
+        // no `body`: the status alone is checked (§14)
         if (own(s, 'body')) assert.deepEqual(res.json, s.body, `${where}: the local route's body`);
-        else assert.equal(res.json, undefined, `${where}: the local route's answer has no JSON body`);
       } else if (act === 'do') {
         const arg = s.do === 'replace' ? readFixture(fixturesDir, s.arg) : s.arg;
         await (own(s, 'arg') ? fake[s.do](x.slug, arg) : fake[s.do](x.slug));
@@ -2756,15 +2762,23 @@ export async function playExchange(fake, x, { fixturesDir, name = 'exchange', wa
         const got = e.c.messages.slice(e.mark);
         e.mark = e.c.messages.length;
         for (const m of got) {
+          // every received message holds to its kind's shape, before any matching
+          assert.ok(isObj(m) && SERVER_KINDS.includes(m.t), `${where}: connection ${cn}: a server kind, not ${JSON.stringify(isObj(m) ? m.t : m)}`);
+          assert.deepEqual(shapeErrors(m.t, m), [], `${where}: connection ${cn}: a ${m.t} holding to its shape`);
           if (m.t === 'welcome' && act === 'open' && cn === s.open) {
             if (liveBefore === 0) assert.ok(!seen.has(m.session), `${where}: connection ${cn}: a new session's id, never seen before`);
             else assert.equal(m.session, current, `${where}: connection ${cn}: the open session's id`);
             current = m.session;
             seen.add(m.session);
+            for (const [other, conn] of connOf) assert.ok(other === cn || conn !== m.you.conn, `${where}: connection ${cn}: a conn of its own, not ${other}'s`);
             connOf.set(cn, m.you.conn);
           } else if (m.t === 'reload') {
-            assert.ok(m.session === current || !seen.has(m.session), `${where}: connection ${cn}: a reload's session is new`);
-            if (m.session !== current) { current = m.session; seen.add(m.session); }
+            if (reloaded === null) {
+              assert.ok(m.session !== before && !seen.has(m.session), `${where}: connection ${cn}: a reload's session is new, never seen before`);
+              reloaded = m.session;
+              current = m.session;
+              seen.add(m.session);
+            } else assert.equal(m.session, reloaded, `${where}: connection ${cn}: the same new session as the step's other reloads`);
           }
         }
         const msgs = (closeWant === null ? want : want.slice(0, -1)).map((m) => filled(m, sessionNow(), connOf));
@@ -2777,10 +2791,13 @@ export async function playExchange(fake, x, { fixturesDir, name = 'exchange', wa
       if (live().length === 0) current = null;
       if (own(s, 'doc')) assert.deepEqual(fake.doc(x.slug), s.doc, `${where}: the canvas's doc`);
     }
-    // nothing more after the last step
+    // nothing more after the last step: a round trip each, then a short settle, then silence
+    for (const [cn, e] of live()) await roundTrip(e, `${name} end: connection ${cn}`);
+    await new Promise((r) => setTimeout(r, 50));
+    await settle();
     for (const [cn, e] of live()) {
-      await roundTrip(e, `${name} end: connection ${cn}`);
       assert.deepEqual(e.c.messages.slice(e.mark), [], `${name} end: connection ${cn}: nothing after the last step`);
+      assert.equal(e.code, null, `${name} end: connection ${cn}: not closed after the last step`);
     }
   } finally {
     for (const e of conns.values()) e.c.destroy();

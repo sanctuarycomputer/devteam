@@ -1744,10 +1744,13 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'In expected messages `"$session"` matches the canvas\'s current session id and `"$conn:<name>"` that connection\'s conn; nothing else is a placeholder.',
       '**An HTTP fixture** (`http-<route key>-<case>.json`)',
       "An `open`'s `person` and `level` are the `x-devteam-person` and `x-devteam-level` headers, null for none (both null is the owner).",
-      'A `local` step posts its body with the fake\'s token and `Content-Type: application/json`; a step with no `body` expects an answer with no JSON body.',
+      'A `local` step posts its body with the fake\'s token and `Content-Type: application/json`; a step with no `body` checks the status alone, saying nothing of the answer\'s body.',
       "A `do`'s `arg` is the `why` for `pause` (`branch-moved` when absent) and a document fixture's name for `replace`; the other controls take none.",
       'A connection name is opened once; one refused (a `status` other than 101) receives nothing.',
-      "a `welcome` on a canvas with no open connection, and every `reload`, carries an id not seen before in the exchange; any other `welcome` carries the open session's",
+      "a `welcome` on a canvas with no open connection, and every `reload`, carries an id not seen before in the exchange (so never the session it replaces), and a step's reloads all carry the same one",
+      'Every received message is first held to its kind\'s shape (`shapeErrors`), and each connection\'s `conn` is its own',
+      'After the last step every open connection gets a round trip and a 50 ms settle, and must then have received nothing more.',
+      "or, for a `select`, which §5 ignores whole, the step expects nothing for anyone)",
       'The ticks of an exchange add up to less than 20000 ms, so no ping falls due and no exchange expects one',
       'the exchanges together cover every other message kind, every op (pages included), every refusal code, every `via` and every `paused` and `closed` why',
       "No two windows (`saved`, `selections`) end at the same instant, since their order then is the server's to choose.",
@@ -2301,7 +2304,8 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       ['an expected kind no server sends', (x) => { x.steps[0].expect.a.push({ t: 'hello' }); }, 'unknown kind'],
       ['an expected ping', (x) => { x.steps[0].expect.a.push({ t: 'ping' }); }, 'ping'],
       ['a sent edit off its shape, neither refused shape nor closed 1008', (x) => { editStep(x).send.client = 'BAD'; }, 'edit.client'],
-      ['a sent select off its shape', (x) => { x.steps.splice(2, 0, { as: 'a', send: { t: 'select', ids: ['no good'] } }); }, 'select.ids'],
+      ['a sent select off its shape in a step that expects a message', (x) => { x.steps.splice(3, 0, { as: 'a', send: { t: 'select', ids: ['no good'] }, expect: { a: [{ t: 'saved', rev: 0 }] } }); }, 'select.ids'],
+      ['a sent edit off its shape in a step that expects nothing', (x) => { x.steps.splice(3, 0, { as: 'a', send: { t: 'edit', client: 'BAD', seq: 1, ops: [] } }); }, 'edit.client'],
       ['an invalid doc', (x) => { stepOf(x, (s) => s.doc).doc.rev = -1; }, 'doc'],
       ['an invalid canvas', (x) => { x.canvas = 'msg-ping.json'; }, 'canvas'],
       ['an expect naming no connection', (x) => { x.steps[0].expect.zz = []; }, 'zz'],
@@ -2323,13 +2327,16 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       const p = exchangeProblems(x, { fixturesDir: FIX });
       assert.ok(p.some((s) => s.includes(needle)), `${label}: a problem naming ${JSON.stringify(needle)} in ${JSON.stringify(p)}`);
     }
-    // and allow what §14 allows: a sent message off its shape the same step refuses shape, or closes 1008
+    // and allow what §14 allows: a sent message off its shape the same step refuses shape, or closes 1008,
+    // or a select (ignored whole, §5) in a step that expects nothing for anyone
     const allowed = clone(base);
     allowed.steps.push(
       { as: 'a', send: { t: 'edit', client: 'abcdefghij012345', seq: 9, ops: 'nope' }, expect: { a: [{ t: 'refused', client: 'abcdefghij012345', seq: 9, why: 'shape' }] } },
       { as: 'a', send: { t: 'edit', client: 'BAD', seq: 1, ops: [] }, expect: { a: [{ $close: 1008 }] } },
+      { as: 'b', send: { t: 'select', ids: ['no good'] } },
+      { as: 'b', send: { t: 'select', ids: ['x'] }, expect: { a: [], b: [] } },
     );
-    assert.deepEqual(exchangeProblems(allowed, { fixturesDir: FIX }), [], 'refused shape and closed 1008 excuse a broken send');
+    assert.deepEqual(exchangeProblems(allowed, { fixturesDir: FIX }), [], 'refused shape, closed 1008 and an ignored select excuse a broken send');
   });
 
   await t.test('exchanges: the fake answers each', async () => {

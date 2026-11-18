@@ -299,13 +299,10 @@
         "seq": 10,
         "ops": [
           {
-            "op": "add",
-            "node": {
-              "id": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
-              "type": "rect",
-              "parent": "card"
-            },
-            "after": null
+            "op": "set",
+            "id": "button",
+            "prop": "variants.\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+            "value": {}
           }
         ]
       },
@@ -315,7 +312,7 @@
             "t": "refused",
             "client": "anapage000000001",
             "seq": 10,
-            "why": "shape"
+            "why": "prop"
           }
         ]
       }
@@ -329,9 +326,11 @@
         "ops": [
           {
             "op": "set",
-            "id": "card",
-            "prop": "figma",
-            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+            "id": "button",
+            "prop": "variants",
+            "value": {
+              "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n": {}
+            }
           }
         ]
       },
@@ -355,9 +354,16 @@
         "ops": [
           {
             "op": "set",
-            "id": "buy",
-            "prop": "overrides.button-label.name",
-            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+            "id": "button",
+            "prop": "props.\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+            "value": {
+              "type": "text",
+              "default": "x",
+              "target": {
+                "id": "button-label",
+                "prop": "text"
+              }
+            }
           }
         ]
       },
@@ -378,6 +384,87 @@
         "t": "edit",
         "client": "anapage000000001",
         "seq": 13,
+        "ops": [
+          {
+            "op": "add",
+            "node": {
+              "id": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+              "type": "rect",
+              "parent": "card"
+            },
+            "after": null
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 13,
+            "why": "shape"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 14,
+        "ops": [
+          {
+            "op": "set",
+            "id": "card",
+            "prop": "figma",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 14,
+            "why": "value"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 15,
+        "ops": [
+          {
+            "op": "set",
+            "id": "buy",
+            "prop": "overrides.button-label.name",
+            "value": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n"
+          }
+        ]
+      },
+      "expect": {
+        "a": [
+          {
+            "t": "refused",
+            "client": "anapage000000001",
+            "seq": 15,
+            "why": "prop"
+          }
+        ]
+      }
+    },
+    {
+      "as": "a",
+      "send": {
+        "t": "edit",
+        "client": "anapage000000001",
+        "seq": 16,
         "ops": [
           {
             "op": "set",
@@ -442,7 +529,7 @@
             },
             "ack": {
               "client": "anapage000000001",
-              "seq": 13
+              "seq": 16
             },
             "ops": [
               {
@@ -497,6 +584,484 @@
             ]
           }
         ]
+      },
+      "doc": {
+        "canvas": 1,
+        "rev": 58,
+        "tokens": {
+          "color": {
+            "brand": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  0.231,
+                  0.357,
+                  0.859
+                ],
+                "alpha": 1,
+                "hex": "#3b5bdb"
+              }
+            },
+            "surface": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  1,
+                  1,
+                  1
+                ]
+              }
+            },
+            "ink": {
+              "$type": "color",
+              "$value": {
+                "colorSpace": "srgb",
+                "components": [
+                  0.067,
+                  0.067,
+                  0.067
+                ],
+                "hex": "#111111"
+              }
+            }
+          },
+          "space": {
+            "s": {
+              "$type": "dimension",
+              "$value": {
+                "value": 4,
+                "unit": "px"
+              }
+            },
+            "m": {
+              "$type": "dimension",
+              "$value": {
+                "value": 16,
+                "unit": "px"
+              }
+            }
+          },
+          "family": {
+            "display": {
+              "$type": "fontFamily",
+              "$value": "serif"
+            }
+          },
+          "weight": {
+            "bold": {
+              "$type": "fontWeight",
+              "$value": 700
+            }
+          },
+          "ratio": {
+            "loose": {
+              "$type": "number",
+              "$value": 1.5
+            }
+          },
+          "type": {
+            "body": {
+              "$type": "typography",
+              "$value": {
+                "fontFamily": "sans",
+                "fontSize": {
+                  "value": 16,
+                  "unit": "px"
+                },
+                "fontWeight": 400,
+                "letterSpacing": {
+                  "value": 0,
+                  "unit": "px"
+                },
+                "lineHeight": 1.4
+              }
+            }
+          }
+        },
+        "pages": [
+          {
+            "id": "p-main",
+            "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+            "children": [
+              "card",
+              "loose",
+              "tiles"
+            ]
+          },
+          {
+            "id": "p-parts",
+            "name": "Parts",
+            "children": [
+              "button"
+            ]
+          }
+        ],
+        "nodes": {
+          "card": {
+            "type": "frame",
+            "parent": "p-main",
+            "name": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": 360,
+              "h": "hug"
+            },
+            "figma": "12:34",
+            "fill": {
+              "$ref": "color.surface"
+            },
+            "stroke": "#d0d4dc",
+            "strokeWidth": 1,
+            "radius": {
+              "$ref": "space.s"
+            },
+            "clip": true,
+            "layout": {
+              "mode": "column",
+              "gap": {
+                "$ref": "space.m"
+              },
+              "padding": [
+                16,
+                16,
+                16,
+                16
+              ],
+              "align": "stretch",
+              "justify": "between",
+              "wrap": false,
+              "columns": [
+                "auto",
+                "1fr",
+                120
+              ],
+              "rows": [
+                "auto"
+              ]
+            },
+            "children": [
+              "title",
+              "rule",
+              "dot",
+              "icon",
+              "photo",
+              "actions"
+            ]
+          },
+          "title": {
+            "type": "text",
+            "parent": "card",
+            "name": "Title",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": "fill",
+              "h": "hug"
+            },
+            "figma": "12:34",
+            "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+            "font": {
+              "$ref": "type.body"
+            },
+            "color": {
+              "$ref": "color.ink"
+            },
+            "align": "left"
+          },
+          "rule": {
+            "type": "rect",
+            "parent": "card",
+            "name": "Rule",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": "fill",
+              "h": 1
+            },
+            "figma": "12:34",
+            "fill": "#e5e7eb",
+            "stroke": null,
+            "strokeWidth": 0,
+            "radius": 0
+          },
+          "dot": {
+            "type": "ellipse",
+            "parent": "card",
+            "name": "Dot",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": 8,
+              "h": 8
+            },
+            "figma": "12:34",
+            "fill": {
+              "$ref": "color.brand"
+            },
+            "stroke": "#fff",
+            "strokeWidth": 0.5
+          },
+          "icon": {
+            "type": "vector",
+            "parent": "card",
+            "name": "Check",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": 16,
+              "h": 16
+            },
+            "figma": "12:34",
+            "path": "M2 8 L6 12 L14 4",
+            "fill": null,
+            "stroke": "#111111ff",
+            "strokeWidth": 2
+          },
+          "photo": {
+            "type": "image",
+            "parent": "card",
+            "name": "Photo",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": "fill",
+              "h": 120
+            },
+            "figma": "12:34",
+            "src": "images/429be16d0a91e377.png",
+            "fit": "cover",
+            "radius": 8
+          },
+          "actions": {
+            "type": "frame",
+            "parent": "card",
+            "name": "Actions",
+            "layout": {
+              "mode": "row",
+              "gap": 8
+            },
+            "size": {
+              "w": "fill",
+              "h": "hug"
+            },
+            "children": [
+              "buy"
+            ]
+          },
+          "buy": {
+            "type": "instance",
+            "parent": "actions",
+            "name": "Buy",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": "hug",
+              "h": "hug"
+            },
+            "figma": "12:34",
+            "component": "button",
+            "variant": "primary",
+            "props": {
+              "label": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+              "enabled": true
+            },
+            "overrides": {
+              "button-label": {
+                "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+                "color": "#ffffff"
+              },
+              "button-bg": {
+                "size.w": "fill",
+                "fill": {
+                  "$ref": "color.brand"
+                }
+              }
+            }
+          },
+          "loose": {
+            "type": "frame",
+            "parent": "p-main",
+            "name": "Loose",
+            "layout": {
+              "mode": "none"
+            },
+            "size": {
+              "w": 200,
+              "h": 200
+            },
+            "x": 400,
+            "y": 0,
+            "children": [
+              "badge"
+            ]
+          },
+          "badge": {
+            "type": "rect",
+            "parent": "loose",
+            "name": "Badge",
+            "x": 12,
+            "y": -8,
+            "size": {
+              "w": 24,
+              "h": 24
+            },
+            "radius": 12,
+            "fill": "#ef4444"
+          },
+          "tiles": {
+            "type": "frame",
+            "parent": "p-main",
+            "name": "Tiles",
+            "layout": {
+              "mode": "grid",
+              "columns": [
+                "1fr",
+                "1fr"
+              ],
+              "rows": [
+                80,
+                "auto"
+              ],
+              "gap": 4
+            },
+            "children": []
+          },
+          "button": {
+            "type": "component",
+            "parent": "p-parts",
+            "name": "Button",
+            "visible": true,
+            "opacity": 1,
+            "x": 0,
+            "y": 0,
+            "size": {
+              "w": "hug",
+              "h": "hug"
+            },
+            "figma": "12:34",
+            "fill": {
+              "$ref": "color.surface"
+            },
+            "stroke": "#d0d4dc",
+            "strokeWidth": 1,
+            "radius": {
+              "$ref": "space.s"
+            },
+            "clip": true,
+            "layout": {
+              "mode": "row",
+              "gap": {
+                "$ref": "space.m"
+              },
+              "padding": [
+                16,
+                16,
+                16,
+                16
+              ],
+              "align": "stretch",
+              "justify": "between",
+              "wrap": false,
+              "columns": [
+                "auto",
+                "1fr",
+                120
+              ],
+              "rows": [
+                "auto"
+              ]
+            },
+            "children": [
+              "button-bg",
+              "button-label"
+            ],
+            "props": {
+              "label": {
+                "type": "text",
+                "default": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+                "target": {
+                  "id": "button-label",
+                  "prop": "text"
+                }
+              },
+              "enabled": {
+                "type": "bool",
+                "default": true,
+                "target": {
+                  "id": "button-bg",
+                  "prop": "visible"
+                }
+              }
+            },
+            "variants": {
+              "primary": {
+                "button-label": {
+                  "text": "\"'><script>alert(1)</script><style>@import url(javascript:a);@font-face{src:url(https://evil.example/f.woff)}</style><b onerror=alert(2) onload=b>expression(c) \\(d) `e` # } [x](javascript:f)\n",
+                  "color": "#ffffff"
+                },
+                "button-bg": {
+                  "fill": "#3b5bdb"
+                }
+              },
+              "quiet": {
+                "button-bg": {
+                  "fill": null,
+                  "layout.gap": 0
+                }
+              }
+            }
+          },
+          "button-bg": {
+            "type": "frame",
+            "parent": "button",
+            "name": "Background",
+            "layout": {
+              "mode": "row",
+              "gap": 0
+            },
+            "fill": "#e5e7eb",
+            "radius": 6,
+            "children": []
+          },
+          "button-label": {
+            "type": "text",
+            "parent": "button",
+            "name": "Label",
+            "text": "Base label",
+            "font": {
+              "family": {
+                "$ref": "family.display"
+              },
+              "size": {
+                "$ref": "space.m"
+              },
+              "weight": {
+                "$ref": "weight.bold"
+              },
+              "lineHeight": {
+                "$ref": "ratio.loose"
+              }
+            },
+            "color": "#111"
+          }
+        }
       }
     },
     {
