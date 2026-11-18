@@ -1437,3 +1437,49 @@ test('a spike whose touches are only its own ticket folder validates; D9 says th
     assert.doesNotMatch(d9, /project\/designs\//);
   } finally { F.done(); }
 });
+
+test('ask refuses a goal approval asked as another kind, so goal decide can use the yes', () => {
+  const F = threadsFixture('approval-kind');
+  try {
+    const R = ['--stake', '1', '--urgency', '1'];
+    const cmd = (g) => new RegExp(`ask --kind goal-approval --goal ${g}`);
+    const refused = (args, g = F.goal) => assert.match(F.fails([...args, ...R], F.SUP), cmd(g), args.join(' '));
+    const asked = (args) => { const id = F.sup([...args, ...R]).split('\n')[0]; assert.match(id, /^q-/, args.join(' ')); return id; };
+    const openFor = (g) => JSON.parse(F.owner(['questions', '--json'])).filter((q) => q.goal === g && q.status === 'open').map((q) => q.id).sort();
+    const on = (...a) => ['ask', '--goal', F.goal, ...a];
+    const before = openFor(F.goal);
+    // DW1: an approval of the draft goal asked as another kind is refused, naming the command
+    refused(on('--kind', 'owner-decision', '--question', 'Ready to build the goal as the design says?', '--choices', JSON.stringify([{ label: 'Approve' }, { label: 'Refine' }]))); // A1a
+    refused(on('--question', 'Approve launch checkout?')); // A1b
+    refused(on('--question', 'Do you approve the design?')); // A1c
+    refused(on('--question', 'Is the goal ready to build?', '--options', 'Approve', 'Refine')); // A1d
+    refused(on('--question', 'Is the goal ready to build?', '--recommendation', 'Approve'));
+    refused(on('--question', 'Is the goal ready to build?', '--default', 'Approve'));
+    refused(on('--kind', 'clarification', '--question', 'Approve the goal?')); // A1e
+    const T = F.owner(['thread', 'new', 'About checkout', '--title', 'Checkout']).split('\n')[0];
+    refused(['thread', 'ask', T, '--goal', F.goal, '--question', 'Approve the goal?']); // A1f
+    for (const q of ['Sign off on the plan?', 'Can we get approval of the approach?', 'Green-light launch checkout?']) refused(on('--question', q)); // A1g
+    assert.deepEqual(openFor(F.goal), before, 'A1h: no refused call recorded a question');
+    // DW2: questions that legitimately name a draft goal are asked
+    asked(on('--kind', 'goal-definition', '--question', "Approve the goal's measure as self-serve share?")); // A2a
+    asked(on('--kind', 'one-way-door', '--question', 'Approve the design: move orders to a new database?', '--recommendation', 'yes')); // A2b
+    asked(on('--kind', 'owner-action', '--question', 'Approve the plan in the billing console?')); // A2c
+    const QD = asked(on('--question', 'Which card processor should checkout use?', '--choices', JSON.stringify([{ label: 'Stripe' }, { label: 'Adyen' }]))); // A2d
+    // A2g: approvals of something else
+    asked(on('--question', 'Approve the $40 card fee?'));
+    asked(on('--question', 'Which processor should the design use?', '--choices', JSON.stringify([{ label: 'Approve option A' }, { label: 'Approve option B' }])));
+    asked(on('--question', 'Store cards with Stripe?', '--choices', JSON.stringify([{ label: 'Approve' }, { label: 'Reject' }])));
+    asked(on('--question', 'Should we approve a plan B for payments if Stripe fails?'));
+    // A2f, A3c, A2e: the goal-approval path still works, goal decide approves through it, and a goal no longer draft is not caught
+    const A = F.approval();
+    assert.match(A.question, /^q-/);
+    F.owner(['goal', 'decide', A.goal, 'approve']);
+    assert.equal(JSON.parse(F.owner(['goal', 'show', A.goal, '--json'])).status, 'ready');
+    asked(['ask', '--goal', A.goal, '--question', 'Approve self-serve billing?']);
+    // DW3: goal decide still takes only a goal-approval answer
+    F.owner(['answer', QD, 'Stripe']);
+    assert.match(F.fails(['goal', 'decide', F.goal, 'approve', '--question', QD]), /is not a goal-approval question for/); // A3a
+    F.sup(['goal', 'reading', F.goal, '--run']);
+    assert.match(F.fails(['goal', 'decide', F.goal, 'approve']), /has no design up for approval/); // A3b
+  } finally { F.done(); }
+});
