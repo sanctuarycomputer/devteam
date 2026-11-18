@@ -507,6 +507,15 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
       assert.ok(await p.ev(isOpen), 'the peek is still open');
       assert.ok(await p.ev(scrimShown), 'with its scrim');
       await closePeek();
+      // the peek's close lands on the page it was opened over, not on an entry the viewer's frame left
+      // (kit-303): a reload then shows the board, with no peek
+      assert.equal(await p.ev('location.hash'), '#board', 'the peek closed to #board');
+      await p.ev('window.__beforeReload = true');
+      await p.send('Page.reload');
+      await soon("!window.__beforeReload && location.protocol === 'http:' && !!document.querySelector('main') && !document.querySelector('main.waiting')", 'the dashboard drawn again');
+      assert.equal(await p.ev('location.hash'), '#board', 'reloaded on #board');
+      const after = await p.ev(`({ closed: ${isClosed}, board: document.getElementById('board').classList.contains('on') })`);
+      assert.deepEqual(after, { closed: true, board: true }, 'the reload shows the board, not the ticket');
     } finally {
       if (FL) await latency(0).catch(() => {});
     }
@@ -522,6 +531,47 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
     assert.ok(await p.ev(`!document.getElementById('review-view').hidden && document.body.classList.contains('overlay-open') && ${scrimShown}`), 'the review keeps its scrim');
     // (not closed here by the scrim: the viewer's frame left an entry in the joint history, so the review's
     // history.back() would move that frame; a fresh visit instead)
+    await load('#board');
+  });
+
+  // the viewer's frame has loaded the artifact (a frame of its own process: the page hears it, as a load in the
+  // capture phase on the frame with a src); armed after each visit's load, before the viewer opens
+  const armLoad = () => p.ev("window.__avLoaded = false; if (!window.__avArmed) { window.__avArmed = true; document.addEventListener('load', (e) => { if (e.target.id === 'av-frame' && e.target.getAttribute('src')) window.__avLoaded = true; }, true); } true");
+  const frameLoaded = () => p.ev('window.__avLoaded === true');
+  await t.test('closing the viewer by its × adds no history entry once its frame has loaded (kit-303)', async () => {
+    // back to the peek's entry, with the viewer's entry still ahead of it: an entry the close pushed for the frame
+    // would have replaced that one, and the peek's next close would move only the frame
+    const nav = () => p.send('Page.getNavigationHistory');
+    await load('#board');
+    await openPeek(`#ticket/${T}`);
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer over the peek');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const open = await nav();
+    await p.click('#av-close');
+    await soon(`document.getElementById('artifact-view').hidden && location.hash === '#ticket/${T}'`, 'the viewer closed by ×');
+    await new Promise((r) => setTimeout(r, 400));
+    const shut = await nav();
+    assert.equal(shut.entries.length, open.entries.length, 'as many entries');
+    assert.equal(shut.currentIndex, open.currentIndex - 1, 'one back');
+    assert.match(shut.entries[open.currentIndex].url, /#artifact\//, "the viewer's entry is still ahead");
+    await closePeek();
+    await load('#board');
+  });
+
+  await t.test('closing the viewer by a route away adds no history entry once its frame has loaded (kit-303)', async () => {
+    // history.length goes up by the new hash's entry, and by none for the frame
+    await load('#library');
+    await armLoad();
+    await p.ev(`location.hash = '#artifact/main/${ids.artifact}'`);
+    await soon("!document.getElementById('artifact-view').hidden", 'the viewer');
+    await until(frameLoaded, "the viewer's frame loaded");
+    const before = await p.ev('history.length');
+    await p.ev("location.hash = '#board'");
+    await soon("document.getElementById('artifact-view').hidden && document.getElementById('board').classList.contains('on')", 'the viewer closed by a route');
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(await p.ev('history.length'), before + 1, "the route's entry only");
     await load('#board');
   });
 
