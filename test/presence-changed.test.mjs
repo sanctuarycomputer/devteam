@@ -243,8 +243,8 @@ async function post(X, name, body) {
 const good = (r, what) => { assert.equal(r.status, 200, `${what}: 200`); assert.equal(r.stale, null, `${what}: its own build, not the last good data`); assert.ok(r.page, `${what}: says its page version`); };
 // waits until the last build ended at least `ms` ago (so it is no longer young)
 async function aged(X, ms = 3500) {
-  const b = builds(X).at(-1);
-  await until(() => b.end !== null || builds(X).at(-1).end, 'the last build to end', 60000);
+  if (!builds(X).length) return;
+  await until(() => builds(X).at(-1).end !== null, 'the last build to end', 60000);
   const end = builds(X).at(-1).end;
   await sleep(Math.max(0, end + ms - Date.now()));
 }
@@ -270,14 +270,17 @@ test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, as
   assert.equal(builds(S).length, 1, 'a GET within 3 s of a fresh build is served from it');
   assert.equal(b.body, ten[0].body, 'the same data');
 
-  // (c) an append during a build: a GET after it waits for the next build
+  // (c) an append during a build: a GET after it waits for the next build. B sleeps 1 s and the
+  // builds after it don't, so without the 3 s cap B' would start about 1.5 s after B (red at 2700)
   await aged(S);
-  setSleep(S, 2000);
+  setSleep(S, 1000);
   let n = builds(S).length;
   const g1 = data(S);
   const B = await started(S, n);
+  setSleep(S, 0);
   assert.equal(builds(S)[n].end, null, 'B is running');
   const tApp = append(S);
+  assert.equal(builds(S)[n].end, null, "the append landed while B ran");
   const g2 = data(S);
   const [r1, r2] = await Promise.all([g1, g2]);
   good(r1, '(c) the GET that started B');
@@ -291,7 +294,6 @@ test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, as
   assert.ok(r1.at < B2.end, 'the GET that started B was answered by B');
 
   // (d) an append after a build, while it is young: the next GET waits for a new build
-  setSleep(S, 0);
   n = builds(S).length;
   const tApp2 = append(S);
   const r3 = await data(S);
