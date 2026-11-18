@@ -13516,7 +13516,16 @@ function probeHello(port, ms = 300) {
 // Free means nothing answers there and this process could bind it: a dev server on localhost (::1)
 // or on every interface would still pass a bind of 127.0.0.1 alone, then take the owner's
 // localhost:<port> while the dashboard holds 127.0.0.1:<port>.
-const answers = (port, host) => new Promise((resolve) => { const c = net.connect({ port, host, timeout: 300 }); c.once('connect', () => { c.destroy(); resolve(true); }); c.once('timeout', () => { c.destroy(); resolve(false); }); c.once('error', () => resolve(false)); });
+// A blocked loop runs timers before I/O when it wakes, so the timeout could fire before a connect
+// already made is heard: the timeout's verdict waits one turn (setImmediate), and a connect wins.
+const answers = (port, host) => new Promise((resolve) => {
+  let done = false;
+  const settle = (v) => { if (!done) { done = true; resolve(v); } };
+  const c = net.connect({ port, host, timeout: 300 });
+  c.once('connect', () => { c.destroy(); settle(true); });
+  c.once('timeout', () => setImmediate(() => { c.destroy(); settle(false); }));
+  c.once('error', () => settle(false));
+});
 const binds = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
 const portFree = async (port) => !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await binds(port));
 // The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,

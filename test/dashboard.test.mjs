@@ -4232,6 +4232,8 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
   const card = `[data-preview="${name}"]`;
   await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
+  const said = await soon(`(() => { const b = document.querySelector('${card} .art-t .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
+  assert.equal(said, 'live', `an app answering on 127.0.0.1 reads live from the dashboard's first probe: ${said}`);
   assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
   assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
   assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
