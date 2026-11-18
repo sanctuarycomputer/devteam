@@ -430,9 +430,15 @@ test('1a-1d, 2a, 2a\', 2b: a new worktree gets main\'s installed folders when it
     assert.equal(I.runs('ch-01-a').length, 1, 'no setup on a matching resume');
     // 2a': a copy key changed in the worktree: the resume runs it again, and the copy (there already) is left as it is
     fs.writeFileSync(path.join(w, '.deps-key'), 'deps 2\n');
+    // stale temp copies a killed seed left are swept whenever the entry is looked at, even one that
+    // copies nothing now (its folder is there, its key differs); a live pid's is left alone
+    const dead = spawnSync('true').pid;
+    for (const x of [`node_modules.devteam-copy-${dead}`, `vendor.devteam-copy-${dead}`, `vendor.devteam-copy-${process.pid}`]) write(path.join(w, x, 'half.txt'), 'half\n');
     r = I.resume('ch-01-a');
     assert.equal(r.status, 0, r.err);
     assert.equal(I.runs('ch-01-a').length, 2, 'a changed copy key runs the setup again');
+    assert.deepEqual(fs.readdirSync(w).filter((e) => e.includes('.devteam-copy-')), [`vendor.devteam-copy-${process.pid}`], 'the dead pids\' temp copies are swept, the live one\'s kept');
+    fs.rmSync(path.join(w, `vendor.devteam-copy-${process.pid}`), { recursive: true, force: true });
     assert.equal(fs.readFileSync(path.join(w, 'node_modules/marker.txt'), 'utf8'), 'changed in the worktree\n', 'a resume never overwrites the worktree\'s own install');
     assert.equal(I.marker(w).files['.deps-key'], sha('deps 2\n'));
     // 1d: a ticket branch whose package-lock.json differs from main's gets no node_modules
@@ -504,6 +510,63 @@ test('2c-2f: a resume runs the setup again when a lockfile, the setup string or 
     assert.equal(r.status, 0, r.err);
     assert.equal(n(), 7, 'the resume after a failure runs it again');
     assert.ok(I.marker(w));
+  } finally { I.finish(); }
+});
+
+test('the copy refuses what it must: invalid entries, worktree_files, a symlinked main folder; a nested path; cut short at the deadline', () => {
+  const ENTRIES = [
+    { path: 'node_modules', key: 'package-lock.json' },
+    { path: '/abs/folder', key: 'package-lock.json' },
+    { path: '../up', key: 'package-lock.json' },
+    { path: 'vendor', key: '../package-lock.json' },
+    'not an object',
+    { path: 'config', key: '.deps-key' },
+    { path: 'build/deps', key: '.deps-key' },
+  ];
+  const I = installFleet('installs-refuse', (F) => ({ worktree_copy: ENTRIES, worktree_setup: `${RECORD(F)}; mkdir -p node_modules; echo worktree > node_modules/w.txt` }));
+  const { F } = I;
+  try {
+    write(path.join(F.old, 'config/extra.txt'), 'gitignored, beside the worktree_files key\n');
+    write(path.join(F.old, 'build/deps/d.txt'), 'deps\n');
+    write(path.join(F.old, '.gitignore'), `${fs.readFileSync(path.join(F.old, '.gitignore'), 'utf8')}config/extra.txt\nbuild/\n`);
+    F.g(['commit', '-qam', 'ignores'], F.old);
+    F.g(['push', '-q', 'origin', 'main'], F.old);
+    // invalid entries and a worktree_files overlap are warned and skipped; the rest copy, a nested
+    // path whose parent the worktree lacks among them
+    let r = F.run(F.old, ['chore', 'start', 'a'], I.role());
+    assert.equal(r.status, 0, r.err);
+    for (const bad of ['/abs/folder', '../up', '../package-lock.json', 'not an object']) assert.ok(r.err.includes(`worktree_copy: ${JSON.stringify(ENTRIES.find((e) => JSON.stringify(e).includes(JSON.stringify(bad))))} is not`), `${bad} warned: ${r.err}`);
+    assert.match(r.err, /worktree_copy: config is or holds a worktree_files entry/);
+    const wa = I.wt('chore-a');
+    assert.equal(fs.existsSync(path.join(wa, 'config/extra.txt')), false, 'a worktree_files folder is never copied');
+    assert.equal(fs.readFileSync(path.join(wa, 'config/dev.key'), 'utf8'), 'not a real key\n', 'worktree_files still copied');
+    assert.equal(fs.readFileSync(path.join(wa, 'build/deps/d.txt'), 'utf8'), 'deps\n', 'a path whose parent the worktree lacks is copied');
+    assert.deepEqual(I.runs('chore-a'), ['had']);
+    assert.doesNotMatch(r.err, /could not copy/);
+    // cut short at the deadline: a cp that never finishes is killed, its temp removed, no folder left
+    const shims = fs.mkdtempSync(path.join(F.base, 'shims-'));
+    fs.writeFileSync(path.join(shims, 'cp'), '#!/bin/sh\nfor a; do last="$a"; done; mkdir -p "$last"; exec sleep 63\n', { mode: 0o755 });
+    const t0 = Date.now();
+    r = F.run(F.old, ['chore', 'start', 'b'], I.role({ PATH: `${shims}${path.delimiter}${process.env.PATH}`, ...deadlineIn(2000) }));
+    assert.ok(Date.now() - t0 < 10000, `took ${Date.now() - t0} ms`);
+    assert.match(r.err, /worktree_copy: could not copy node_modules .*cut short at the deadline/);
+    assert.equal(r.status, 124, r.err);
+    const wb = I.wt('chore-b');
+    assert.equal(fs.existsSync(path.join(wb, 'node_modules/marker.txt')), false, 'no copy');
+    assert.deepEqual(fs.readdirSync(wb).filter((e) => e.includes('.devteam-copy-')), [], 'no temp copy left');
+    assert.deepEqual(pgrep('sleep 63'), [], 'the cut-short cp is gone');
+    // main's folder a symlink (to a shared store): never copied, so the setup can't write through it
+    const store = path.join(F.base, 'store');
+    fs.renameSync(path.join(F.old, 'node_modules'), store);
+    fs.symlinkSync(store, path.join(F.old, 'node_modules'));
+    r = F.run(F.old, ['chore', 'start', 'c'], I.role());
+    assert.equal(r.status, 0, r.err);
+    assert.match(r.err, /worktree_copy: node_modules not copied: .* is a symlink/);
+    const wc = I.wt('chore-c');
+    assert.deepEqual(I.runs('chore-c'), ['none']);
+    assert.equal(fs.lstatSync(path.join(wc, 'node_modules')).isSymbolicLink(), false);
+    assert.equal(fs.existsSync(path.join(store, 'w.txt')), false, 'the setup wrote nothing into main\'s store');
+    assert.deepEqual(fs.readdirSync(store), ['marker.txt']);
   } finally { I.finish(); }
 });
 

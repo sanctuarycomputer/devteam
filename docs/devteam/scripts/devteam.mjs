@@ -5656,22 +5656,40 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home'), session = fals
       const from = path.join(R.root, rel);
       const to = path.join(wt, rel);
       const tmp = `${to}.devteam-copy-${process.pid}`;
+      // inside root once links are resolved (a missing path resolves as far as it exists)
+      const inside = (p, root) => { const r = realPath(root); const q = realPathMade(p); return q === r || q.startsWith(`${r}${path.sep}`); };
+      const skip = (why) => warn(`worktree_copy: ${e.path} not copied: ${why}`);
       try {
+        // a copy a killed process left (its pid gone), and one of this pid's from before: swept
+        // whatever the entry's state now, and only where the folder is the worktree's own
+        const parent = path.dirname(to);
+        if (fs.existsSync(parent) && inside(parent, wt)) {
+          const prefix = `${path.basename(to)}.devteam-copy-`;
+          for (const x of fs.readdirSync(parent)) {
+            const pid = x.startsWith(prefix) ? Number(x.slice(prefix.length)) : NaN;
+            if (Number.isInteger(pid) && (pid === process.pid || !pidAlive(pid))) fs.rmSync(path.join(parent, x), { recursive: true, force: true });
+          }
+        }
         const mainKey = path.join(R.root, e.key);
         const wtKey = path.join(wt, e.key);
-        if (!fs.existsSync(mainKey) || !fs.existsSync(wtKey) || !fs.readFileSync(mainKey).equals(fs.readFileSync(wtKey))) continue;
-        if (!fs.existsSync(from)) continue;
+        if (!fs.existsSync(mainKey) || !fs.existsSync(wtKey)) continue;
+        if (!inside(mainKey, R.root) || !inside(wtKey, wt)) { skip(`its key ${e.key} resolves outside the checkout`); continue; }
+        if (!fs.readFileSync(mainKey).equals(fs.readFileSync(wtKey))) continue;
+        let st;
+        try { st = fs.lstatSync(from); } catch { continue; }
+        // a link (to a shared store, say) would be copied as the link, and the worktree's install
+        // would write through it into main's
+        if (st.isSymbolicLink()) { skip(`${from} is a symlink, and a copy of it would write into what it points to`); continue; }
+        if (!inside(from, R.root)) { skip(`${from} resolves outside ${R.root}`); continue; }
         try { fs.lstatSync(to); continue; } catch {}
-        // a copy a killed process left (its pid gone), and one of this pid's from before
-        const prefix = `${path.basename(to)}.devteam-copy-`;
-        for (const x of fs.readdirSync(path.dirname(to))) {
-          const pid = x.startsWith(prefix) ? Number(x.slice(prefix.length)) : NaN;
-          if (Number.isInteger(pid) && (pid === process.pid || !pidAlive(pid))) fs.rmSync(path.join(path.dirname(to), x), { recursive: true, force: true });
-        }
-        const left = deadline === null ? undefined : deadline - Date.now();
-        if (left !== undefined && left <= 0) { warn(`worktree_copy: no time left before the deadline to copy ${e.path}`); continue; }
-        fs.mkdirSync(path.dirname(to), { recursive: true });
-        const cp = (args) => spawnSync('cp', [...args, from, tmp], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: left, killSignal: 'SIGKILL' });
+        if (!inside(parent, wt)) { skip(`${parent} resolves outside the worktree`); continue; }
+        fs.mkdirSync(parent, { recursive: true });
+        const timeLeft = () => (deadline === null ? undefined : deadline - Date.now());
+        const cp = (args) => {
+          const left = timeLeft();
+          if (left !== undefined && left <= 0) return { status: null, error: { code: 'ETIMEDOUT' } };
+          return spawnSync('cp', [...args, from, tmp], { stdio: ['ignore', 'ignore', 'pipe'], encoding: 'utf8', timeout: left, killSignal: 'SIGKILL' });
+        };
         let r = os.platform() === 'darwin' ? cp(['-cR']) : os.platform() === 'linux' ? cp(['-a', '--reflink=auto']) : cp(['-R']);
         if (os.platform() === 'darwin' && r.status !== 0 && !r.error) { fs.rmSync(tmp, { recursive: true, force: true }); r = cp(['-R']); }
         if (r.status !== 0) throw new Error(r.error?.code === 'ETIMEDOUT' ? 'cut short at the deadline' : (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200));
