@@ -22503,14 +22503,25 @@ function guardEndToEnd(headers) {
 // A plain request, sent on the socket it dialled (createConnection, no agent: with agent: false Node
 // would ignore it and dial the host itself), its answer streamed back.
 function guardForward(req, res, t, sock, fail) {
-  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers: { ...guardEndToEnd(req.headers), host: t.hostHeader }, createConnection: () => sock });
+  // the client may have left while the name resolved or the socket dialled: nothing to send it
+  if (req.socket?.destroyed || res.destroyed) return void sock.destroy();
+  const headers = { ...guardEndToEnd(req.headers), host: t.hostHeader };
+  // a chunked body is framed again on the way out (Node frames none for GET, HEAD, DELETE, OPTIONS)
+  if (req.headers['transfer-encoding']) headers['transfer-encoding'] = 'chunked';
+  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers, createConnection: () => sock });
   up.on('response', (ur) => {
-    res.writeHead(ur.statusCode, ur.statusMessage, guardEndToEnd(ur.headers));
+    // a status line Node reads but won't write (a control character, a code under 100) is the
+    // site's fault: a 502, never a throw out of this listener
+    try { res.writeHead(ur.statusCode, guardEndToEnd(ur.headers)); } catch {
+      ur.destroy();
+      up.destroy();
+      return void fail('the site sent an answer the guard could not pass on');
+    }
     ur.on('error', () => res.destroy());
     ur.pipe(res);
   });
   up.on('error', (e) => { if (res.headersSent) res.destroy(); else fail(e?.code ?? 'the site closed the connection'); });
-  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
+  res.on('close', () => { if (!res.writableFinished) { up.destroy(); sock.destroy(); } });
   req.pipe(up);
 }
 // A CONNECT tunnel on the socket it dialled.
@@ -22614,6 +22625,7 @@ async function startBrowserGuard({ port = 0 } = {}) {
   // Chrome tunnels ws: and wss: through CONNECT, so an Upgrade in absolute form is none of its own
   server.on('upgrade', (req, sock) => {
     sock.on('error', () => {});
+    if (!guardTarget(req.method, req.url)) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
     guardSocketAnswer(sock, 501, "The supervisor's browser proxy tunnels WebSockets through CONNECT; it doesn't upgrade a request.\n", 'text/plain; charset=utf-8');
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });

@@ -49,13 +49,14 @@ dns.lookup = function (name, opts, cb) {
   const list = DNS[name];
   seen[name] = (seen[name] ?? -1) + 1;
   const a = list[Math.min(seen[name], list.length - 1)];
-  process.nextTick(() => {
+  const delay = JSON.parse(E.GUARD_STUB_DNS_DELAY || '{}')[name] || 0;
+  setTimeout(() => {
     const nf = () => { const e = new Error('getaddrinfo ENOTFOUND ' + name); e.code = 'ENOTFOUND'; return e; };
     if (a === 'ENOTFOUND') return cb(nf());
     if (opts && opts.all) return cb(null, a);
     if (!a.length) return cb(nf());
     cb(null, a[0].address, a[0].family);
-  });
+  }, delay);
 };
 const DIAL = JSON.parse(E.GUARD_STUB_DIAL || '{}');
 const OK = new Set(String(E.GUARD_STUB_LOOPBACK_OK || '').split(',').filter(Boolean).map(Number));
@@ -525,5 +526,56 @@ test('A9: other answers, headers that stop at the guard, and a guard that stays 
     await g.stop();
     await site.close();
     await new Promise((r2) => echo.close(r2));
+  }
+});
+
+test('a site\'s odd answer, a client that leaves early, a chunked body, an origin-form Upgrade', async () => {
+  // raw sites that send status lines Node reads but won't write back
+  const raw = (line) => net.createServer((s) => { s.on('error', () => {}); s.once('data', () => s.end(`HTTP/1.1 ${line}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok`)); });
+  const odd1 = raw('200 O\x01K');
+  const odd2 = raw('099 Odd');
+  // a site that counts the connections still open to it
+  let open = 0;
+  let opened = 0;
+  const counter = net.createServer((s) => { opened++; open++; s.on('error', () => {}); s.on('close', () => { open--; }); });
+  // a site that answers with the body it received
+  const echo = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ te: req.headers['transfer-encoding'] ?? null, body })); });
+  });
+  for (const s of [odd1, odd2, counter, echo]) await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const at = (s) => `127.0.0.1:${s.address().port}`;
+  const dns = { 'odd1.test': [one('93.184.216.37')], 'odd2.test': [one('93.184.216.38')], 'slow.test': [one('93.184.216.39')], 'echo.test': [one('93.184.216.40')] };
+  const dial = { '93.184.216.37': at(odd1), '93.184.216.38': at(odd2), '93.184.216.39': at(counter), '93.184.216.40': at(echo) };
+  const g = await startGuard({ stub: true, env: { ...stubEnv({ dns, dial }), GUARD_STUB_DNS_DELAY: JSON.stringify({ 'slow.test': 300 }) } });
+  try {
+    // a status line it can't pass on is the site's fault: an answer, never a crash
+    const r1 = await get(g.port, 'http://odd1.test/');
+    assert.ok([200, 502].includes(r1.status), r1.head);
+    assert.ok(!/\x01/.test(r1.head), 'the control character never reaches the client');
+    assert.equal((await get(g.port, 'http://odd2.test/')).status, 502);
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    // a client that leaves while the name resolves: the socket dialled for it is closed
+    for (let i = 0; i < 3; i++) {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.write('GET http://slow.test/ HTTP/1.1\r\nHost: slow.test\r\n\r\n', () => setTimeout(() => s.destroy(), 50));
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(opened, 3, 'each request was dialled once its name resolved');
+    assert.equal(open, 0, 'no dialled socket left open for a client that left');
+    // a chunked body goes out framed
+    const c = await ask(g.port, `GET http://echo.test/ HTTP/1.1\r\nHost: echo.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n`);
+    assert.equal(c.status, 200, c.head);
+    assert.deepEqual(JSON.parse(c.body), { te: 'chunked', body: 'hello' });
+    // an Upgrade that isn't a proxy request is a 400, like any other
+    const u = await ask(g.port, 'GET / HTTP/1.1\r\nHost: x.test\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\r\n');
+    assert.equal(u.status, 400, u.head);
+    assert.equal(refusal(u).rule, 'not-a-proxy-request');
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+  } finally {
+    await g.stop();
+    for (const s of [odd1, odd2, counter, echo]) await new Promise((r) => { s.close(() => r()); s.closeAllConnections?.(); });
   }
 });
