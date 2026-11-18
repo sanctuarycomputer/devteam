@@ -1987,24 +1987,29 @@ function meterRow(label, done, total, note = '', open = null) {
 }
 // p: Progress's data scoped to the page's items (scopeProgress). show: Progress's Show, each row of Features,
 // Stories, Releases and Waves kept by progressShown (done: every one of its tickets merged); an empty list says
-// None. nameGoals (no goal picked): each wave row names its tickets' goals after it, dim.
-function widgets(p, now, show, { nameGoals = false } = {}) {
+// None. nameGoals (no goal picked): each wave row names its tickets' goals after it, dim. all: Progress's whole data:
+// a release's tagged or ready to tag, and a story's done, are facts about the whole release or story, so they are
+// read from it, never from the scope (a goal or a Narrow may hold only the part of a release that is done).
+function widgets(p, now, show, { nameGoals = false, all = p } = {}) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
   const none = empty('None');
   const allDone = (ts) => ts.length > 0 && ts.every(isDone);
   $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return progressShown(allDone(ts), show) ? meterRow(flink(f), pts(ts.filter(isDone)), pts(ts), '', peekFor('feature', f)) : ''; }).join('') || none;
   const storyDone = (s) => allDone(p.tickets.filter((t) => t.serves.includes(s)));
+  const storyDoneAll = (s) => allDone(all.tickets.filter((t) => t.serves.includes(s)));
   const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
   $('w-releases').innerHTML = rels.map((r) => {
     const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
     const ts = p.tickets.filter((t) => t.target_release === r || stories.some((s) => t.serves.includes(s)));
     if (!progressShown(allDone(ts), show)) return '';
-    const shipped = p.tickets.some((t) => t.released_in === r);
+    const shipped = all.tickets.some((t) => t.released_in === r);
     const done = stories.filter(storyDone).length;
-    const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
+    const whole = Object.entries(all.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+    const state = shipped ? '<span class="badge good">tagged</span>' : whole.length && whole.every(storyDoneAll) ? '<span class="badge medium">ready to tag</span>' : '';
     return meterRow(`${rlink(r)} ${state}`, done, stories.length, `${done}/${stories.length} stories`, peekFor('release', r));
   }).join('') || none;
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
+  // the goals a wave's tickets serve, as the Goal select lists them (an abandoned goal is not named)
   const goalsOf = (ts) => filterGoals().filter((g) => { const gf = goalFeatures(g.id); return ts.some((t) => gf.has(t.feature)); }).map((g) => g.title || g.id);
   $('w-waves').innerHTML = waves.map((w) => {
     const ts = p.tickets.filter((t) => t.wave === w);
@@ -2015,7 +2020,7 @@ function widgets(p, now, show, { nameGoals = false } = {}) {
   const storyRows = Object.entries(p.stories).filter(([id]) => progressShown(storyDone(id), show));
   $('w-stories').innerHTML = storyRows.length ? `<div>${storyRows.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
-    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`, peekFor('story', id));
+    return meterRow(`${storyDoneAll(id) ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`, peekFor('story', id));
   }).join('')}</div>` : none;
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
@@ -2240,7 +2245,7 @@ function renderProgress() {
   const f = filtersNow('progress');
   const items = progressItems(p, f);
   burnup(items, now);
-  widgets(scopeProgress(p, items), now, f.show, { nameGoals: !f.goal });
+  widgets(scopeProgress(p, items), now, f.show, { nameGoals: !f.goal, all: p });
   const R = DATA.ooda?.roadmap || {};
   const un = (R.unassigned || []).map((x) => { const r = R.features?.[x]; const tot = r?.points_total ?? 0; return `${flink(x)} <span class="dim">${tot - (r?.points_left ?? 0)} of ${tot} points</span>`; });
   $('w-nogoal').innerHTML = `${un.length ? `No goal: ${un.join(', ')} · ` : ''}${esc(R.rate_points_per_day ?? 0)} points a day`;

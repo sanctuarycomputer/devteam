@@ -813,4 +813,21 @@ test('Progress on the shell: goal and Narrow scope every card, Show filters the 
     await p.ev('DATA.ooda.roadmap.unassigned = []; renderProgress(); void 0');
     assert.equal(await p.ev("document.querySelector('#progress .nogoal').textContent.replace(/\\s+/g, ' ').trim()"), '1.4 points a day');
   });
+
+  await t.test("a release's tagged or ready to tag, and a story's done, are about the whole release or story, never the scope", async () => {
+    // every RECEIPTS-S2 ticket merged, and one PAY-S2 ticket merged and moved to wave 1: under goal2, v0.3.0's receipts
+    // half is done but its pay half isn't; under wave 1, PAY-S2's one ticket there is done but PAY-S2 isn't
+    // (each load is a fresh document with the fixture again, so the change goes in after it, read at the next poll)
+    const FX = `(() => { const at = new Date(Date.parse(window.__fx.progress.now) - 86400000).toISOString(); for (const t of window.__fx.progress.tickets) { if (${J([ids.tHighRisk, ids.tPrompt, ids.tBlockedNoQ])}.includes(t.id)) t.merged_at = at; if (t.id === ${J(ids.tHeld)}) { t.merged_at = at; t.wave = 1; } } })()`;
+    const BADGES = (k) => `Object.fromEntries([...document.querySelectorAll('#w-${k} .row')].map((r) => [decodeURIComponent(r.dataset.open), r.querySelector('.badge')?.textContent ?? null]))`;
+    await progress(`#progress?goal=${ids.goal2}&show=all`);
+    await p.ev(FX);
+    await soon(`${BADGES('stories')}['story/RECEIPTS-S2'] === 'done'`, 'the patched data is in: RECEIPTS-S2 done');
+    assert.deepEqual(await p.ev(BADGES('releases')), { 'release/v0.2.0': 'ready to tag', 'release/v0.3.0': null }, "goal2's half of v0.3.0 is done, PAY-S2 isn't: not ready to tag");
+    await progress(`#progress?narrow=${encodeURIComponent('wave:1')}&show=all`);
+    await p.ev(FX);
+    await soon(`'story/PAY-S2' in ${BADGES('stories')}`, 'PAY-S2 has a ticket in wave 1');
+    assert.equal((await p.ev(BADGES('stories')))['story/PAY-S2'], null, "PAY-S2's wave-1 ticket is merged, its others aren't: not done");
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
 });
