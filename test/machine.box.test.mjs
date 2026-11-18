@@ -740,7 +740,7 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.equal(recovers(), before, 'none started');
   const owed = path.join(h, '.box', 'recover.owed');
   assert.ok(fs.existsSync(owed), 'owed');
-  assert.ok(!read(path.join(h, '.flocks')).split('\n').some((l) => l.split('\x1f').some((a) => /^-[A-Za-z]*w/.test(a) || /^--(wait|timeout)(=|$)/.test(a))), 'the loop never waits on the lock');
+  assert.ok(!read(path.join(h, '.flocks')).split('\n').some((l) => l.split('\x1f').some((a) => /^-[A-Za-z]*w/.test(a) || (a.startsWith('--') && ((n) => n !== '' && ('wait'.startsWith(n) || 'timeout'.startsWith(n)))(a.slice(2).split('=')[0])))), 'the loop never waits on the lock');
   state({ pid: 905, home: ['operator', 'hub'], panes: '' });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'still held: still owed');
