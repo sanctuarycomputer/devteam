@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -424,7 +425,7 @@ const noTicks = (list) => list.filter((m) => m.t !== 'ping');
 function docWith(nodes, extra = {}) {
   const d = { ...minimal(), ...extra, nodes: {} };
   for (const [id, n] of Object.entries(nodes)) {
-    d.nodes[id] = { parent: 'p1', ...n };
+    d.nodes[id] = { parent: 'p1', ...structuredClone(n) };
     if (d.nodes[id].parent === 'p1') d.pages[0].children.push(id);
   }
   for (const [id, n] of Object.entries(d.nodes)) if (n.parent !== 'p1') d.nodes[n.parent].children.push(id);
@@ -470,6 +471,41 @@ function paddedPong(n) {
 // A vector path of exactly `n` bytes: a move and one long number.
 const pathOfBytes = (n) => `M${'0'.repeat(n - 1)}`;
 const isPing = (m) => m.t === 'ping';
+// `obj` as JSON, padded with trailing spaces (still valid JSON) to exactly `n` bytes.
+function padJson(obj, n) {
+  const s = JSON.stringify(obj);
+  assert.ok(Buffer.byteLength(s) <= n);
+  return Buffer.concat([Buffer.from(s), Buffer.alloc(n - Buffer.byteLength(s), 0x20)]);
+}
+// A body in chunked transfer coding (1 MB chunks), sent with no Content-Length.
+function chunked(buf) {
+  const out = [];
+  for (let i = 0; i < buf.length; i += 2 ** 20) {
+    const part = buf.subarray(i, i + 2 ** 20);
+    out.push(Buffer.from(`${part.length.toString(16)}\r\n`), part, Buffer.from('\r\n'));
+  }
+  out.push(Buffer.from('0\r\n\r\n'));
+  return Buffer.concat(out);
+}
+const CHUNKED = { 'Content-Length': null, 'Transfer-Encoding': 'chunked' };
+// A POST that declares `Content-Length: n` and sends no body: true when, `ms` later, the fake has neither
+// answered nor closed (so it did not refuse from the header and abort).
+function silentAfter(fake, where, headers, n, ms = 300) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port: fake.port });
+    let heard = false;
+    sock.on('data', () => { heard = true; });
+    sock.on('close', () => { heard = true; });
+    sock.on('error', () => {});
+    sock.on('connect', () => {
+      const lines = [`Host: 127.0.0.1:${fake.port}`, `Content-Length: ${n}`, ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`)];
+      sock.write(`POST ${where} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`);
+      setTimeout(() => { const quiet = !heard; sock.destroy(); resolve(quiet); }, ms);
+    });
+  });
+}
+// The header of a masked client frame of `len` bytes: the bytes before its payload.
+const headerBytes = (len) => (len < 126 ? 6 : len < 65536 ? 8 : 14);
 
 // Each limit of the contract's Limits table, crossed by one against the fake (document limits through an
 // edit on its socket, or the local route where a page's 64 KB can't carry it). A table row with no entry fails.
@@ -592,9 +628,22 @@ const LIMIT_CHECKS = {
     await onCanvas(minimal(), async (fake, c) => {
       c.frame(paddedPong(LIMITS.pageMsgBytes));
       await until(() => stat(fake, c)?.messages === 1, 'the 256 KB message read');
+      // once joined: two frames, each under the limit, together exactly at it, are read
+      const [a, b] = pieces(paddedPong(LIMITS.pageMsgBytes), 2);
+      c.frame(a, { fin: false });
+      c.frame(b, { opcode: 0 });
+      await until(() => stat(fake, c)?.messages === 2, 'the 256 KB message in two frames read');
+      // and together one over closes 1008 from the second frame's header, before its payload
+      const [x, y] = pieces(paddedPong(LIMITS.pageMsgBytes + 1), 2);
+      assert.ok(x.length < LIMITS.pageMsgBytes && y.length < LIMITS.pageMsgBytes);
+      c.frame(x, { fin: false });
+      c.raw(c.build(y, { opcode: 0 }).subarray(0, headerBytes(y.length)));
+      assert.equal(await closedWithin(c), 1008, 'over once joined');
+    });
+    await onCanvas(minimal(), async (fake, c) => {
       const over = c.build(paddedPong(LIMITS.pageMsgBytes + 1));
-      c.raw(over.subarray(0, 14)); // the header alone: the size is weighed before any payload
-      assert.equal(await closedWithin(c), 1008);
+      c.raw(over.subarray(0, headerBytes(LIMITS.pageMsgBytes + 1))); // the header alone: the size is weighed before any payload
+      assert.equal(await closedWithin(c), 1008, 'one frame over');
     });
   },
   async pageFrames() {
@@ -644,6 +693,32 @@ const LIMIT_CHECKS = {
       assert.deepEqual(noTicks(await since(c, mark)), [], 'no ops sent');
       assert.equal(fake.rev(SLUG), 0, 'nothing changed');
     });
+    // the threshold exactly: one op whose ops message is 1 MB is sent as it is; 1 MB + 1 is refused
+    const by = { id: 'supervisor', name: 'supervisor', via: 'apply' };
+    const opOfMessage = (n, rev) => {
+      const big = Object.fromEntries(range(16).map((i) => [`w${i}`, { path: P64 }]));
+      const op = { op: 'set', id: 'k', prop: 'variants', value: { big } };
+      const size = () => Buffer.byteLength(JSON.stringify({ t: 'ops', rev, by, ack: null, ops: [op] }));
+      big.w15.path = 'M0';
+      big.w15.path = pathOfBytes(2 + n - size());
+      assert.equal(size(), n, `an op whose message is ${n} bytes`);
+      assert.ok(Buffer.byteLength(big.w15.path) <= LIMITS.pathBytes);
+      return op;
+    };
+    await onCanvas(docWith(nodes), async (fake, c) => {
+      const at = opOfMessage(LIMITS.serverMsgBytes, 1);
+      let mark = c.messages.length;
+      const r = await local(fake, localBody([at]));
+      assert.deepEqual([r.status, r.json], [200, { rev: 1, edits: 1, saved: true }], 'a message of exactly 1 MB');
+      const got = (await since(c, mark)).filter((m) => m.t === 'ops');
+      assert.equal(got.length, 1);
+      assert.equal(Buffer.byteLength(JSON.stringify(got[0])), LIMITS.serverMsgBytes, 'sent at exactly 1 MB');
+      mark = c.messages.length;
+      const over = await local(fake, localBody([opOfMessage(LIMITS.serverMsgBytes + 1, 2)]));
+      assert.deepEqual([over.status, over.json], [409, { why: 'limit' }], 'one byte over');
+      assert.deepEqual(noTicks(await since(c, mark)), [], 'no ops sent');
+      assert.equal(fake.rev(SLUG), 1, 'nothing changed');
+    });
   },
   async serverFrameBytes() {
     const P64 = pathOfBytes(LIMITS.pathBytes);
@@ -671,9 +746,10 @@ const LIMIT_CHECKS = {
     });
   },
   async perPerson() {
-    await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+    await withFake({ canvases: { [SLUG]: minimal(), second: minimal() } }, async (fake) => {
       const cs = await fill(fake, SLUG, LIMITS.perPerson, () => 'p-same');
       await oneOver(fake, SLUG, P('p-same'), 'a 9th connection of a person');
+      cs.push(...await fill(fake, 'second', 1, () => 'p-same')); // per canvas: a 9th on another canvas is welcomed
       cs.push(...await fill(fake, SLUG, 1, () => 'p-other'));
       closeAll(cs);
     });
@@ -780,7 +856,7 @@ const LIMIT_CHECKS = {
     await onCanvas(rectsDoc(1), async (fake, c) => {
       await fake.tick(LIMITS.selectionsMs);
       assert.deepEqual(await c.next((m) => m.t === 'selections'), { t: 'selections', people: [{ id: 'owner', name: 'Owner', ids: [] }] }, 'a connection is a change');
-      c.send({ t: 'select', ids: ['r0'] });
+      c.send({ t: 'select', ids: ['r0', 'r0'] }); // an id listed twice counts once
       await roundTrip(c);
       await fake.tick(LIMITS.selectionsMs - 1);
       const mark = c.messages.length;
@@ -803,17 +879,30 @@ const LIMIT_CHECKS = {
   },
   async imageBodyBytes() {
     await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      const body = { name: 'p', data: pngBytes().toString('base64') };
+      const at = await post(fake, 'image', padJson(body, LIMITS.imageBodyBytes));
+      assert.equal(at.status, 200, 'a body of exactly 6 MB, declared and sent');
+      const over = await post(fake, 'image', chunked(padJson(body, LIMITS.imageBodyBytes + 1)), { headers: CHUNKED });
+      assert.equal(over.status, 413, 'one byte over with no Content-Length: judged from what is read');
       assert.equal((await post(fake, 'image', null, { contentLength: LIMITS.imageBodyBytes + 1 })).status, 413, 'declared, never sent');
     });
   },
   async localBodyBytes() {
     await onCanvas(minimal(), async (fake) => {
+      const body = localBody([setName('p1', 'a')]);
+      const at = await local(fake, padJson(body, LIMITS.localBodyBytes));
+      assert.deepEqual([at.status, at.json], [200, { rev: 1, edits: 1, saved: true }], 'a body of exactly 5 MB, declared and sent');
+      const over = await local(fake, chunked(padJson(body, LIMITS.localBodyBytes + 1)), { headers: CHUNKED });
+      assert.equal(over.status, 413, 'one byte over with no Content-Length: judged from what is read');
       assert.equal((await local(fake, null, { contentLength: LIMITS.localBodyBytes + 1 })).status, 413, 'declared, never sent');
-      assert.equal(fake.rev(SLUG), 0);
+      assert.equal(fake.rev(SLUG), 1, 'neither refusal changed anything');
     });
   },
   async importBodyBytes() {
     await withFake({ canvases: { [SLUG]: minimal() } }, async (fake) => {
+      // 50 MB is never sent: a declaration of exactly the limit gets no answer from its header alone
+      const owner = { Origin: originOf(fake), 'Content-Type': 'application/json' };
+      assert.ok(await silentAfter(fake, `/api/canvas/import?slug=${SLUG}`, owner, LIMITS.importBodyBytes), 'exactly 50 MB declared: no 413 from the header');
       assert.equal((await post(fake, 'import', null, { contentLength: LIMITS.importBodyBytes + 1 })).status, 413, 'declared, never sent');
       assert.equal((await post(fake, 'import', { key: 'abc' })).status, 501, 'within the limit');
     });
@@ -1516,6 +1605,7 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       '`move` of a page with parent null reorders it',
     ]);
     all(md, 'Messages', [
+      'an id listed twice counts once',
       'An `edit` at or below it is acked again to that connection only, without being applied, unless it is a refusal the server remembers',
       'whether or not that `seq` itself was applied',
       "A refused edit doesn't raise the client's highest `seq`.",
@@ -1552,6 +1642,9 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       'judged from `Content-Length` before the body is read, and from what is read',
     ]);
     all(md, 'HTTP routes', [
+      'Without `at`, only a canvas open for editing is served: a slug only on main is 404 there and served with `at=main`.',
+      'Statuses in order, past the guards: 413 from `Content-Length`, then 413 from what is read, 423, 404, 400, 413 for an image over 4 MB, 415 by its first bytes, 413 for the folder, then 200.',
+      'Each run is as long as fits: an op starts a new message only when adding it would pass 1 MB, so the ops alone fix `edits` and every `rev`.',
       "The GETs are guarded as the dashboard's other data GETs are (its host check and the relay mark refused, 403)",
       'a same-origin `Origin` (exactly `http://<Host>`; absent or another is 403), no relay mark, the person headers by presence@1 §4 (403), level `full` (View 403), `Content-Type: application/json` (415)',
       'With `&at=main`, the canvas as main has it, for any canvas on main (open for editing or not), `session` null.',
