@@ -437,6 +437,7 @@ try {
   #progress .pg-col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
   #progress .pg-col > .card { margin: 0; }
   #progress #forecast { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progress .card-head > .grow { flex: 1 0 auto; } /* the title never gives way: a long forecast shortens instead */
   #progress .nogoal { font-size: 12px; color: var(--fg-2); border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }

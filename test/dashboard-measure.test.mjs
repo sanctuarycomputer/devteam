@@ -53,7 +53,7 @@ const PAGES = [
   // 1440x900 only (narrow: its view a selector no element has, as kit-90's entries above; a load at 720x800
   // and 390x844 starts 104px below the bar, o-20261116-110914358); every other check runs at all three sizes.
   ...['#board', '#board?att=1'].map((hash) => ({ hash, narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#board [data-ticket]')" })),
-  { hash: '#progress', narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#burnup svg') && !!document.querySelector('#progress [data-ticket], #progress .card')" },
+  { hash: '#progress', narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#burnup svg') && !!document.querySelector('#w-features .row') && !!document.getElementById('forecast').textContent" },
   // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
   // line exist only with it)
   { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
@@ -125,6 +125,7 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
       for (let i = 0; i < 200 && (await p.ev('location.href').catch(() => '')) !== 'about:blank'; i++) await new Promise((r) => setTimeout(r, 50));
       const o = { ready: pg.ready ?? 'true', ...(pg.opts || {}) };
       const res = pg.narrow ? { ...(await measureAt(p, url(pg.hash), { ...o, sizes: SIZES.slice(0, 1) })), ...(await measureAt(p, url(pg.hash), { ...o, ...pg.narrow, sizes: SIZES.slice(1) })) } : await measureAt(p, url(pg.hash), o);
+      assert.deepEqual(Object.keys(res), SIZES.map(([w, h]) => `${w}x${h}`));
       for (const [at, fails] of Object.entries(res)) assert.deepEqual(fails, [], `${pg.hash} at ${at}`);
     } finally {
       await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });

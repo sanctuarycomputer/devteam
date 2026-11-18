@@ -710,6 +710,20 @@ test('Progress on the shell: goal and Narrow scope every card, Show filters the 
     });
   });
 
+  await t.test('every Progress card title shows whole at 390 wide; a long forecast shortens instead', async () => {
+    try {
+      await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+      await progress();
+      await soon("!!document.getElementById('forecast').textContent", 'the forecast');
+      const heads = await p.ev(`[...document.querySelectorAll('#progress .card-head > .grow')].map((g) => [g.textContent.trim(), g.scrollWidth <= g.clientWidth + 0.5 && g.getBoundingClientRect().width > 0])`);
+      assert.deepEqual(heads, ['Burn-up', 'Stories', 'Features', 'Releases', 'Waves', 'Points per week'].map((x) => [x, true]), 'each title unclipped');
+      const f = await p.ev("(() => { const f = document.getElementById('forecast'), h = f.closest('.card-head').getBoundingClientRect(), r = f.getBoundingClientRect(); return { inside: r.right <= h.right + 0.5, ellipsis: getComputedStyle(f).textOverflow }; })()");
+      assert.deepEqual(f, { inside: true, ellipsis: 'ellipsis' }, 'the forecast stays in its head, cut short');
+    } finally {
+      await p.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    }
+  });
+
   await t.test("the forecast sits in the burn-up card's head, at its right", async () => {
     await progress();
     const m = await p.ev(`(() => {
