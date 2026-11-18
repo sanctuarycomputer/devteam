@@ -27,7 +27,7 @@ Version: `presence: 1` in `welcome`; additive changes only, anything else bumps 
 
 ## 3. Close codes
 
-`1008` for anything over a limit (§7) and for a message a page must not send: binary, not JSON, not a JSON object (`[]`, `null`, a number), over 2 KB, more than 16 frames. `1002` for a protocol error, found on the frame header before its length is weighed: an unmasked client frame, a reserved bit set, an unknown opcode, a control frame that is fragmented or carries more than 125 bytes, a continuation with nothing to continue, a text frame while a message is still open, a 64-bit length with its top bit set. `1001` when two pings go unanswered. These are the three codes. A handler that throws closes only that connection (1011); the server keeps running.
+`1008` for anything over a limit (§7) and for a message a page must not send: binary, not JSON, not a JSON object (`[]`, `null`, a number), over 2 KB, more than 16 frames. `1002` for a protocol error, found on the frame header before its length is weighed: an unmasked client frame, a reserved bit set, an unknown opcode, a control frame that is fragmented or carries more than 125 bytes, a continuation with nothing to continue, a text frame while a message is still open, a 64-bit length with its top bit set. `1001` when two pings go unanswered. A handler that throws closes only that connection (1011); the server keeps running.
 
 ## 4. Who you are
 

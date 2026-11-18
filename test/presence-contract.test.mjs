@@ -46,5 +46,5 @@ test('presence C2: the lens, hub-visible, peek and present', () => {
     "Presence's additions to shell@3's sender", "hasn't heard it counts as hidden",
   ]);
   has(section(md, 'Where you are'), "without a version and without `dashboard-shell@3`'s `view`");
-  all(md, "The hello's", ['present', 'present_more', 'at most 50']);
+  all(md, "The hello's", ['`present: [', '`present_more`', 'at most 50']);
 });
