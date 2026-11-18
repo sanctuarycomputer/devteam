@@ -14228,14 +14228,18 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     for (const cancel of Object.values(c.timers)) cancel();
     if (c.here) peopleChanged();
   }
-  // a close frame, the socket ended, and destroyed if the peer hasn't hung up within 5 s
+  // the socket ended with `last`, and destroyed if the peer hasn't hung up within 5 s (its side is half-open)
+  const endSocket = (socket, last) => {
+    try { socket.end(last); } catch {}
+    const t = setTimeout(() => socket.destroy(), L.closeWaitMs);
+    t.unref();
+    socket.once('close', () => clearTimeout(t));
+  };
+  // a close frame, the socket ended
   function kill(c, code) {
     if (!c.open) return;
     c.open = false;
-    try { c.socket.end(closeFrame(code)); } catch {}
-    const t = setTimeout(() => c.socket.destroy(), L.closeWaitMs);
-    t.unref();
-    c.socket.once('close', () => clearTimeout(t));
+    endSocket(c.socket, closeFrame(code));
     leave(c);
   }
   const safe = (c, fn) => { try { fn(); } catch { kill(c, 1011); } };
@@ -14269,11 +14273,7 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')}\r\n\r\n`);
     // §7: counted from the handshake; one over is accepted and closed at once, before welcome
     const mine = [...conns].filter((o) => o.who.id === who.id).length;
-    if (mine >= L.perPerson || conns.size >= L.perServer) {
-      socket.end(closeFrame(1008));
-      setTimeout(() => socket.destroy(), L.closeWaitMs).unref();
-      return;
-    }
+    if (mine >= L.perPerson || conns.size >= L.perServer) return endSocket(socket, closeFrame(1008));
     const c = { conn: `c${++connSeq}`, who, socket, buf: Buffer.alloc(0), msg: null, open: true, timers: {}, here: false, seq: 0, at: null, visible: false, sec: 0, over: 0, unanswered: 0 };
     conns.add(c);
     write(c, textFrame({ t: 'welcome', presence: 1, you: { id: who.id, conn: c.conn } }));
@@ -14335,7 +14335,7 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
     if (op === 8) { // a close: answered with a close of its code and the socket ended
       if (!c.open) return;
       c.open = false;
-      try { c.socket.end(closeFrame(payload.length >= 2 ? payload.readUInt16BE(0) : null)); } catch {}
+      endSocket(c.socket, closeFrame(payload.length >= 2 ? payload.readUInt16BE(0) : null));
       leave(c);
       return;
     }
@@ -14382,7 +14382,7 @@ function presenceRelay({ hub = false, okHost, ownerCwd, draining = () => false }
       socket.on('error', () => {});
       try {
         const who = draining() ? 503 : guard(req, true);
-        if (typeof who === 'number') { socket.end(`HTTP/1.1 ${who} ${STATUS[who]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
+        if (typeof who === 'number') { endSocket(socket, `HTTP/1.1 ${who} ${STATUS[who]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
         accept(req, socket, head, who);
       } catch { socket.destroy(); }
     },
