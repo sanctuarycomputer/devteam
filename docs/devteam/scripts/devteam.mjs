@@ -14243,15 +14243,50 @@ function relaunchChild(launch, flag, budget) {
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
+// A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
+// stopped · your login changed or ended · send a prompt to continue". Its process already has the new
+// login and wants only a prompt, so one is typed (nothing is relaunched). False when the pane isn't
+// stopped so, and the caller goes on as before; otherwise what was done: null (not ours, or not due),
+// 'gave-up' (past the restart caps, which it shares), 'continued' or 'failed'. The stop must be the
+// last thing the agent said, matched by its head (the whole line wraps at 80 columns), with an empty
+// input: a draft is someone's and is never typed over, except the kit's own prompt whose Enter was
+// lost, which gets the Enter (the lost-Enter rescues skip a pane that still shows a limit banner).
+function loginChangedStop(target, name, budget, ours) {
+  const prompt = 'The kit: your login changed and the account has room now. Carry on.';
+  const stopHead = /^\s*(?:[⎿⏺●■✖!]\s*)?Automatic continue stopped · your login changed\b/;
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const raw = paneBottom(target);
+  const at = raw.findLastIndex((l) => !PANE_CODE.test(l.trim()) && stopHead.test(l));
+  if (at === -1) return false;
+  const below = raw.slice(at + 1).map((l) => l.trim());
+  if (below.some((l) => /^[⏺●⎿]/.test(l))) return false;
+  const draft = below.map((l) => INPUT_LINE.exec(l)).filter(Boolean).pop()?.[1] ?? '';
+  if (draft && draft !== prompt) return false;
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (raw.map((l) => l.trim()).some((l) => PANE_BUSY.test(l) || promptRe.test(l) || PANE_TRUST.test(l) || /Enter to confirm/.test(l) || LIMIT_MENU.test(l))) return false;
+  if (clientActiveOn(target) || !ours()) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget, now);
+  if (verdict !== 'go') return verdict;
+  const ok = draft ? tmux(['send-keys', '-t', target, 'Enter']) : typeNow(target, prompt);
+  appendLog({ type: 'observation', source: 'pane', kind: 'login-continued', subject: name, detail: !ok ? 'a session stopped by a login change could not be sent its continue prompt' : draft ? "a session stopped by a login change had the kit's continue prompt unsent in its input: Enter was pressed" : 'a session stopped by a login change was sent a continue prompt on the active account, which has room', detector: 'pane', source_key: `login-continued ${name} ${now}` });
+  if (!ok) out(`could not continue ${name}: tmux did not take the keys`);
+  return ok ? 'continued' : 'failed';
+}
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
 // 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
 // replaces the old process itself, after everything that can refuse, and no key is sent to it.
+// (A session stopped by a login change is another matter: loginChangedStop, above.)
 function restartPane(name, launch, budget) {
   const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  if (problem || !target) return null;
+  // the stop can sit under an old limit banner: it is the newer state, so a prompt, not a relaunch
+  const login = loginChangedStop(target, name, budget, () => launchedByKit(target, name, launch[0]));
+  if (login !== false) return login;
+  if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
   const verdict = claimRestart(name, budget);
   if (verdict !== 'go') return verdict;
@@ -14493,6 +14528,12 @@ function supervisorToRestart() {
 }
 function restartSupervisor(budget) {
   if (draining() || fleetMode()) return null;
+  // stopped by a login change: a prompt into its own pane, no transcript or resume command needed
+  const { target: pane, problem } = resolvePane(supervisorTarget());
+  if (!problem && pane) {
+    const login = loginChangedStop(pane, 'supervisor', budget, () => paneStartedIn(pane, fs.realpathSync(mainRoot)) && isSupervisorProcess(paneAgentProcess(pane)));
+    if (login !== false) return login;
+  }
   const found = supervisorToRestart();
   if (!found || found.refused) return found;
   const { target, id, cmd } = found;
@@ -16145,6 +16186,8 @@ function cmdAccountsTick() {
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
+  // sessions sent a prompt after a login change (loginChangedStop), not restarted: in resumed too
+  const continued = new Set();
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   // a ticket's held field holds it too: nothing runs for a held ticket
@@ -16192,16 +16235,19 @@ function cmdAccountsTick() {
         else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tries += 1;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
+        // continued, it is starting a turn as a restarted one is: no limit to report, no held line now
+        if (sup === 'continued') { supervisorRestarted = true; state.resumed.push('supervisor'); continued.add('supervisor'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
           else if (did) tries += 1;
-          if (did === 'restarted') state.resumed.push(name);
+          if (did === 'restarted' || did === 'continued') state.resumed.push(name);
+          if (did === 'continued') continued.add(name);
         }
       }
-      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(continued.has(w) ? `continued ${w}: its login changed while it was stopped` : `restarted ${w}: it had stopped at a usage limit`);
     }
   }
   // After a dead machine, with or without cswap. Not onto an account known to be full: the session
@@ -16240,7 +16286,7 @@ function cmdAccountsTick() {
   // tick just restarted, whose agent is still coming up
   const session = tmuxSession();
   const supKey = (() => { const { target } = resolvePane(supervisorTarget()); return target ? paneKey(target) : null; })();
-  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed, ...state.relaunched].map((n) => `${session}:${n}`)]);
+  flushAllHeld([...(supervisorRestarted && supKey ? [supKey] : []), ...[...state.resumed.filter((n) => !(n === 'supervisor' && continued.has(n))), ...state.relaunched].map((n) => `${session}:${n}`)]);
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
