@@ -1,0 +1,186 @@
+{
+  "self": {
+    "what": "A note app for independent researchers that keeps every note as plain text.",
+    "makes": "Plain-text notes that sync between a researcher's devices.",
+    "parts": [
+      {
+        "id": "app",
+        "name": "The app",
+        "what": "The editor people write their notes in.",
+        "code": [
+          "app/"
+        ]
+      },
+      {
+        "id": "sync",
+        "name": "Sync service",
+        "what": "Keeps notes the same on every device.",
+        "code": [
+          "sync/",
+          "deploy/sync.yml"
+        ]
+      },
+      {
+        "id": "plugin-api",
+        "name": "Plugin interface",
+        "what": "What plugins build on.",
+        "code": [
+          "app/plugins/"
+        ]
+      }
+    ],
+    "controls": [
+      "its code",
+      "its releases",
+      "its pages"
+    ],
+    "not": [
+      "the storage that holds the synced notes"
+    ]
+  },
+  "exterior": {
+    "entities": [
+      {
+        "entity": "researchers",
+        "relation": "serves",
+        "relation_word": null,
+        "kind": "group",
+        "name": "Independent researchers",
+        "matters": "They are who it is for: if they stop writing in it, nothing else counts.",
+        "weight": 4,
+        "signals": [
+          {
+            "signal": "daily-writers",
+            "what": "Daily visits from the people it serves.",
+            "value": 4,
+            "score": 16
+          },
+          {
+            "signal": "notes-kept",
+            "what": "How many notes people still keep after a year.",
+            "value": 3,
+            "score": 12
+          }
+        ]
+      },
+      {
+        "entity": "cloudberry",
+        "relation": "depends_on",
+        "relation_word": null,
+        "kind": "organisation",
+        "name": "Cloudberry Storage",
+        "matters": "Sync runs on it, so its prices and its outages are ours.",
+        "weight": 3,
+        "signals": [
+          {
+            "signal": "storage-prices",
+            "what": "Their storage prices, which set what sync costs.",
+            "value": 3,
+            "score": 9
+          },
+          {
+            "signal": "storage-incidents",
+            "what": "Incidents on their status page.",
+            "value": 2,
+            "score": 6
+          }
+        ]
+      },
+      {
+        "entity": "inkwell",
+        "relation": "builds_on_it",
+        "relation_word": null,
+        "kind": "work",
+        "name": "Inkwell Plugins",
+        "matters": "The plugins people ask for most; a change to the plugin interface breaks them first.",
+        "weight": 2,
+        "signals": [
+          {
+            "signal": "plugin-releases",
+            "what": "New plugin releases and what they need from the interface.",
+            "value": 2,
+            "score": 4
+          }
+        ]
+      },
+      {
+        "entity": "ledgerpad",
+        "relation": "alternative",
+        "relation_word": null,
+        "kind": "work",
+        "name": "Ledgerpad",
+        "matters": "The tool researchers leave for, or come from.",
+        "weight": 3,
+        "signals": [
+          {
+            "signal": "rival-features",
+            "what": "Features it ships that people ask Quillmark for.",
+            "value": 3,
+            "score": 9
+          }
+        ]
+      },
+      {
+        "entity": "notes-format",
+        "relation": "collaborates",
+        "relation_word": null,
+        "kind": "group",
+        "name": "Open Notes Format group",
+        "matters": "The format is shaped together; a draft that changes it changes the app.",
+        "weight": 2,
+        "signals": [
+          {
+            "signal": "format-drafts",
+            "what": "New drafts of the format.",
+            "value": 2,
+            "score": 4
+          }
+        ]
+      },
+      {
+        "entity": "regulators",
+        "relation": "governs",
+        "relation_word": null,
+        "kind": "group",
+        "name": "Data protection regulators",
+        "matters": "Their rules decide how synced notes may be kept.",
+        "weight": 2,
+        "signals": [
+          {
+            "signal": "rule-changes",
+            "what": "Changes to the rules for personal data where its users live.",
+            "value": 3,
+            "score": 6
+          }
+        ]
+      },
+      {
+        "entity": "libraries",
+        "relation": "affects",
+        "relation_word": null,
+        "kind": "group",
+        "name": "Local libraries",
+        "matters": "They host the workshops that bring new writers.",
+        "weight": 1,
+        "signals": []
+      },
+      {
+        "entity": "press-fair",
+        "relation": "other",
+        "relation_word": "sponsors",
+        "kind": "organisation",
+        "name": "Small Press Fair",
+        "matters": "It sponsors the yearly meetup, where most new plugin writers first come.",
+        "weight": 1,
+        "signals": [
+          {
+            "signal": "meetup-date",
+            "what": "The date of the next meetup.",
+            "value": 1,
+            "score": 1
+          }
+        ]
+      }
+    ]
+  }
+}
