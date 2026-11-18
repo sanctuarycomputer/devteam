@@ -57,8 +57,10 @@ async function listenOn(t, srv, port = 0) {
   defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
   return srv.address().port;
 }
-// box(F): box.json's body, or null for none (404). csp: send frame-src naming F.allowed and the terminal.
-async function fixture(t, { box = null, csp = false, standIns = [] } = {}) {
+// box(F): box.json's body, or null for none (404). csp: send frame-src naming F.allowed (read at each
+// load) and the terminal. hold: ms every hub load after the first waits before it is answered, so the
+// page that asked for it stays up meanwhile (as a slow reload leaves it). F.loads counts the hub's loads.
+async function fixture(t, { box = null, csp = false, standIns = [], hold = 0 } = {}) {
   const F = { list: [], loads: 0, seen: [], asks: [], allowed: [] };
   const nonces = new Set();
   const serve = (q, s) => {
@@ -66,8 +68,11 @@ async function fixture(t, { box = null, csp = false, standIns = [] } = {}) {
     if (q.headers.host === `hub.localhost:${F.port}`) {
       if (u.pathname === '/') {
         F.loads++;
-        s.writeHead(200, { 'content-type': 'text/html', ...(csp ? { 'content-security-policy': `frame-src ${[...F.allowed, `http://term.localhost:${F.port}`].join(' ')}` } : {}) });
-        return s.end(hubHtml());
+        const answer = () => {
+          s.writeHead(200, { 'content-type': 'text/html', ...(csp ? { 'content-security-policy': `frame-src ${[...F.allowed, `http://term.localhost:${F.port}`].join(' ')}` } : {}) });
+          s.end(hubHtml());
+        };
+        return void (hold && F.loads > 1 ? setTimeout(answer, hold) : answer());
       }
       if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: 'v0.57.0', instances: F.list })); }
       const b = u.pathname === '/box.json' && box ? box(F) : null;
@@ -256,4 +261,91 @@ test('a laptop (no box.json): 127.0.0.1 frames, no Terminal tab, and a moved por
   await pause(12000);
   assert.equal(F.seenFrom(`127.0.0.1:${A2}`), 1, 'loaded once, not again on every draw');
   assert.equal(F.loads, 1, 'the hub loaded once');
+});
+
+// ----- a frame the hub's own policy refuses (box: 2's HUB_CSP, fixed until the page reloads) -----
+const UNKNOWN_PANEL = 'The hub doesn\'t know this project yet: the box hasn\'t caught up with it. Reload this page in a moment.';
+const UNKNOWN_ERROR = 'the hub doesn\'t know this project yet; reload this page in a moment';
+const REFUSED = `(() => { try { return JSON.parse(sessionStorage.getItem('devteam-hub-refused') ?? 'null'); } catch { return 'unreadable'; } })()`;
+// the root's view: an iframe, or a visible panel and its text
+const viewOf = (root) => `(() => { const f = items.get(${JSON.stringify(root)})?.frame; return { iframe: f instanceof HTMLIFrameElement, page: f?.matches?.('section.page[role=tabpanel]') ?? false, visible: !!f?.checkVisibility?.(), text: f?.textContent ?? '' }; })()`;
+const kBtn = (k) => `[...document.querySelectorAll('#ov-body [data-k]')].find((b) => b.dataset.k === ${JSON.stringify(k)})`;
+// a card's Park, confirmed (the press clears the card's last error): the time it was confirmed
+async function parkCard(p, root) {
+  await p.until('the Park button', `!!${kBtn(`${root}:park`)}`);
+  await p.ev(`${kBtn(`${root}:park`)}.click()`);
+  await p.until('the confirm, no error', `${kBtn(`${root}:park`)}?.textContent === 'Confirm park' && !${kBtn(`${root}:park`)}.closest('.fleet-switch').querySelector('.err')`);
+  await p.ev(`${kBtn(`${root}:park`)}.click()`);
+  return Date.now();
+}
+const cardError = (name) => `(${cardOf(name)}?.querySelector('.fleet-switch .err')?.textContent ?? null)`;
+
+test('box: 2: the selected tab\'s frame refused reloads the hub once, hash kept, then says the hub doesn\'t know it yet; a frame that loads drops its origin; an already refused one\'s Park answers at once (C2.4, C2.5, C2.6b)', CHROME, async (t) => {
+  // the hub's loads after the first wait 1 s: the page that reloads stays up past its refused frame's load
+  const F = await fixture(t, { box: (F_) => box2(F_), csp: true, hold: 1000 });
+  const [PA, PB] = await freePorts(2, [F.port]);
+  const beta = F.at('beta-app').replace(/\/$/, '');
+  F.allowed = [F.at('alpha').replace(/\/$/, '')];
+  F.list = [hello('alpha', PA), hello('beta-app', PB)];
+  // C2.4
+  const p = await hubPage(t, F.hub('#beta-app'));
+  await until(() => F.loads >= 2, 'the hub reloaded');
+  await p.until('the "doesn\'t know yet" panel', `(() => { const v = ${viewOf('/srv/beta-app')}; return v.page && v.visible; })()`);
+  const v = await p.ev(viewOf('/srv/beta-app'));
+  assert.equal(v.iframe, false, 'no frame');
+  assert.match(v.text, /doesn't know this project yet/);
+  assert.match(v.text, /reload this page in a moment/i);
+  assert.ok(v.text.includes(UNKNOWN_PANEL), `the panel's words: ${v.text}`);
+  assert.equal(await p.ev('location.hash'), '#beta-app', 'the hash kept');
+  assert.equal(F.loads, 2, 'reloaded once');
+  assert.deepEqual(await p.ev(REFUSED), [beta], 'the origin kept for the reload');
+  await pause(12000);
+  assert.equal(F.loads, 2, 'and not again, past a draw');
+  assert.deepEqual(await p.ev(REFUSED), [beta], 'the origin still kept while refused');
+  assert.equal(await p.ev(viewOf('/srv/beta-app') + '.page'), true, 'still the panel');
+  // C2.5: the box catches up; the frame loads and its origin is dropped
+  F.allowed = [F.at('alpha'), F.at('beta-app')].map((u) => u.replace(/\/$/, ''));
+  const seen = F.seenFrom(`beta-app.localhost:${F.port}`);
+  await p.ev('location.reload()').catch(() => {});
+  await until(() => F.loads === 3, 'the test\'s reload');
+  await until(() => F.seenFrom(`beta-app.localhost:${F.port}`) > seen, 'beta-app\'s frame loaded from its host');
+  await p.until('the origin dropped', `(() => { const r = ${REFUSED}; return Array.isArray(r) && !r.includes(${JSON.stringify(beta)}); })()`);
+  // refused again: exactly one more automatic reload
+  F.allowed = [F.at('alpha').replace(/\/$/, '')];
+  await p.ev('location.reload()').catch(() => {});
+  await until(() => F.loads >= 5, 'the hub reloaded once more');
+  await p.until('the panel again', `(() => { const v = ${viewOf('/srv/beta-app')}; return v.page && v.visible; })()`);
+  await pause(3000);
+  assert.equal(F.loads, 5, 'the test\'s reload and the hub\'s one');
+  // C2.6b: from the panel, the Overview, then beta-app's Park: the error at once, no frame, no reload
+  await p.ev(open('\u0000overview'));
+  await p.until('the cards', `!document.getElementById('overview').hidden && ${cardOf('beta-app')} !== undefined`);
+  const at = await parkCard(p, '/srv/beta-app');
+  await p.until('the error', `${cardError('beta-app')} === ${JSON.stringify(UNKNOWN_ERROR)}`);
+  assert.ok(Date.now() - at < 3000, `within 3 s (${Date.now() - at} ms)`);
+  assert.equal(await p.ev(`document.querySelector('#frames iframe[title="beta-app"]')`), null, 'no frame made to ask');
+  assert.equal(F.loads, 5, 'no reload');
+  assert.equal(F.asks.length, 0, 'no ask reached a stand-in');
+});
+
+test('box: 2: a hidden frame refused (the Overview\'s Park) shows the card\'s error and never reloads (C2.6)', CHROME, async (t) => {
+  const F = await fixture(t, { box: (F_) => box2(F_), csp: true });
+  const [PA, PB] = await freePorts(2, [F.port]);
+  F.allowed = [F.at('alpha').replace(/\/$/, '')];
+  F.list = [hello('alpha', PA), hello('beta-app', PB)];
+  const p = await hubPage(t, F.hub());
+  await p.until('the cards', `document.querySelectorAll('.ov-card').length === 2`);
+  const at = await parkCard(p, '/srv/beta-app');
+  await p.until('the error', `${cardError('beta-app')} === ${JSON.stringify(UNKNOWN_ERROR)}`);
+  assert.ok(Date.now() - at < 5000, `at once, not after 20 s (${Date.now() - at} ms)`);
+  await pause(3000);
+  assert.equal(F.loads, 1, 'no reload');
+  assert.equal(await p.ev('location.hash'), '#overview');
+  assert.deepEqual(await p.ev(`${REFUSED} ?? []`), [], 'nothing kept for a reload');
+  assert.equal(F.asks.length, 0, 'no ask reached the stand-in');
+  assert.equal(await p.ev(`items.get('/srv/beta-app').frame`), null, 'the frame made to ask is gone');
+  // refused again on a later Park: the error again
+  await parkCard(p, '/srv/beta-app');
+  await p.until('the error again', `${cardError('beta-app')} === ${JSON.stringify(UNKNOWN_ERROR)}`);
+  assert.equal(F.loads, 1, 'still no reload');
 });
