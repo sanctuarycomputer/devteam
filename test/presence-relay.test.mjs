@@ -631,7 +631,7 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
     assert.equal(closed, false, 'fourteen seconds over in two runs of seven is not closed');
     await sentinel(R, { page: 'zq7-rows' }, [R]);
   });
-  await t.test('(a3) heres, pings and pongs count; a here and a pong over the rate are never dropped', async () => {
+  await t.test('(a3) heres, ping and pong frames and pongs count; a here and a pong over the rate are never dropped', async () => {
     const A = await open(url, { headers: P('zq7-ca') });
     const B = await open(url, { headers: P('zq7-cb') });
     const at = { page: 'zq7-count' };
@@ -647,6 +647,8 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
     A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(Buffer.from('p'), { opcode: 9 })), move('zq7-after-pings')]));
     await wait();
     A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(json({ t: 'pong' }))), move('zq7-after-pongs')]));
+    await wait();
+    A.raw(Buffer.concat([...Array.from({ length: 30 }, () => A.build(Buffer.from('p'), { opcode: 10 })), move('zq7-after-pong-frames')]));
     // over the rate already, a here still lands
     await wait();
     A.raw(Buffer.concat([...Array.from({ length: 40 }, () => A.build(json({ t: 'zz' }))), A.build(json(hereMsg({ ...at, thread: 'zq7-late' })))]));
@@ -654,7 +656,7 @@ test('presence A7: the rate, the per-person and per-server caps, and the ping, e
     await wait();
     A.send({ t: 'move', a: { k: 'zq7-end', x: 0, y: 0 } });
     const end = await B.next((m) => m.t === 'move' && m.a?.k === 'zq7-end', 5000);
-    assert.deepEqual(kinds(between(B, mark, end), 'move').map((m) => m.a.k), [], 'the move after 30 heres, 30 pings or 30 pongs is the 31st and dropped');
+    assert.deepEqual(kinds(between(B, mark, end), 'move').map((m) => m.a.k), [], 'the move after 30 heres, 30 ping frames, 30 pongs or 30 pong frames is the 31st and dropped');
   });
   await t.test('(b) moves over 30 in a second are dropped', async () => {
     const A = await open(url, { headers: P('zq7-ra') });
