@@ -12900,7 +12900,10 @@ const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new 
 const CHAT_QUOTE_WINDOW_MS = 7 * 24 * 3600000;
 function chatQuotesNotFound() {
   if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return [];
-  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at }))];
+  const recent = [...questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS), ...logObjects('question').filter((q) => q.owner_said && !q.owner_said_turn && Date.now() - Date.parse(q.created_at) < CHAT_QUOTE_WINDOW_MS).map((q) => ({ id: q.id, said: q.owner_said, answered_at: q.created_at })),
+    // the owner's correction recorded from chat (correct --from-chat): its words, as an answer's (a hold
+    // lifted from a turn is checked against its turn instead, in threadAnswersUnbound)
+    ...[...logObjects('decision'), ...logObjects('act')].map((o) => ({ o, x: correctionOf(o) })).filter(({ x }) => x?.channel === 'chat' && typeof x.said === 'string' && writerClass(x.by) === 'owner' && Date.now() - Date.parse(x.at) < CHAT_QUOTE_WINDOW_MS).map(({ o, x }) => ({ id: o.id, said: x.said, answered_at: x.at }))];
   const t = recent.length ? supervisorTranscript() : null;
   if (!t) return [];
   const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
@@ -12912,29 +12915,67 @@ function chatQuotesNotFound() {
   const owners = typed.filter((x) => !x.startsWith('from the operator ('));
   return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
-// A thread answer (answer --from-turn) cites the owner's turn it was recorded from. checkLine only
-// checks its shape, so this checks the binding turnAnswer enforced, for lines written some other
-// way: the turn is the owner's, its words are what the line says, it is in the question's thread,
-// it is newer than the question, an Inbox question was named in the turn's thread before it
-// (questionNamed), and no other question line cites it. One reason per answer.
+// Everything the owner's words in a thread bound, checked after the fact for lines written some other
+// way than the writers (checkLine checks only their shape). Each line gives its first failing reason.
+// A whole-turn answer (answer --from-turn): the turn is the owner's, its words are what the line says,
+// it is in the question's thread, newer than the question, an Inbox question was named in the turn's
+// thread before it (questionNamed), the turn has no clause binding before it, and no whole-turn answer
+// cites it before. A clause answer (said_at), a hold lifted from a turn (owner_said_turn) and a
+// correction from a thread (corrected.turn): the turn is the owner's, in the right thread, its raw
+// slice is the words and whole clauses (clauseBounds), and no binding before it on the turn overlaps
+// it; then a clause answer's answer_seen is the newest owner turn at the answer, a lifted hold's turn
+// is newer than the no, and a correction's thread is about its record or the act that carried it out.
 function threadAnswersUnbound() {
   const { objects, lines: all } = readLog();
-  const lines = all.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
-  const first = new Map();
-  return lines.map((l) => {
-    const u = typeof l.turn === 'string' ? logGet(l.turn) : null;
-    const q = logGet(l.id);
-    const firstId = first.get(l.turn);
-    if (l.turn !== undefined && !firstId) first.set(l.turn, l.id);
-    const why = u?.type !== 'turn' ? `names no turn that exists (${l.turn ?? 'none'})`
-      : u.created_by !== 'owner' ? "cites a turn that is the supervisor's, not the owner's"
-      : l.said !== u.text ? "gives words that aren't what the turn says"
-      : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
-      : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
-      : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
-      : firstId ? `cites a turn that already settled ${firstId}` : null;
-    return why ? { id: l.id, why } : null;
-  }).filter(Boolean);
+  const order = new Map(all.map((l, i) => [l, i]));
+  const sorted = [...all].sort((a, b) => String(a.at).localeCompare(String(b.at)) || order.get(a) - order.get(b));
+  const before = (a, b) => String(a.at) < String(b.at) || (a.at === b.at && order.get(a) < order.get(b));
+  const bindings = new Map();
+  const boundBefore = (l, uid) => (bindings.get(uid) ?? (bindings.set(uid, turnBindings(sorted, uid)), bindings.get(uid))).filter((b) => before(b.line, l));
+  const sliceWhy = (u, said, at, what) => (!Array.isArray(at) || typeof said !== 'string' || u.text.slice(at[0], at[1]) !== said ? `gives words that aren't what the turn says${what}`
+    : !clauseBounds(u.text, at[0], at[1]) ? `binds part of a clause${what}, not whole clauses` : null);
+  const overlapWhy = (l, uid, span) => { const b = boundBefore(l, uid).find((x) => spansOverlap(x.span, span)); return b ? `overlaps words of the turn that already bound ${b.id}` : null; };
+  const turnWhy = (uid) => { const u = typeof uid === 'string' ? logGet(uid) : null; return u?.type !== 'turn' ? [null, `names no turn that exists (${uid ?? 'none'})`] : u.created_by !== 'owner' ? [u, "cites a turn that is the supervisor's, not the owner's"] : [u, null]; };
+  const newestOwnerTurn = (thread, at) => ownerTurnsIn(thread).filter((x) => x.created_at <= at).pop()?.id ?? null;
+  const found = [];
+  for (const l of sorted) {
+    let why = null;
+    if (l.type === 'question' && l.op === 'set' && l.channel === 'thread' && Array.isArray(l.said_at)) {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      why = w ?? (q?.thread !== u.thread ? 'cites a turn from another thread than the one the question was asked in'
+        : q.about_turn !== u.id ? `answers a question asked about another turn (${q.about_turn ?? 'none'})`
+          : sliceWhy(u, l.said, l.said_at, '') ?? overlapWhy(l, u.id, l.said_at)
+            ?? (l.answer_seen !== newestOwnerTurn(u.thread, l.at) ? `gives answer_seen ${l.answer_seen ?? 'none'}, not the newest owner turn the answer should have read (${newestOwnerTurn(u.thread, l.at)})` : null));
+    } else if (l.type === 'question' && l.op === 'set' && l.channel === 'thread') {
+      const q = logGet(l.id);
+      const [u, w] = turnWhy(l.turn);
+      const earlier = w ? [] : boundBefore(l, u.id);
+      const clause = earlier.find((b) => b.span);
+      const whole = earlier.find((b) => !b.span && b.kind === 'answer');
+      why = w ?? (l.said !== u.text ? "gives words that aren't what the turn says"
+        : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
+          : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
+            : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
+              : clause ? `settles a whole turn that also has a clause binding (${clause.id})`
+                : whole ? `cites a turn that already settled ${whole.id}` : null);
+    } else if (l.type === 'question' && l.op === 'new' && l.owner_said_turn !== undefined) {
+      const [u, w] = turnWhy(l.owner_said_turn);
+      const rem = asList(l.blocks).find((b) => String(b).startsWith('remediation:'));
+      const no = !w && rem ? remediationAnswers(rem, asList(l.blocks).find((b) => String(b).startsWith('release:')) ?? null).filter((a) => !a.run && a.at < l.at).pop() : null;
+      why = w ?? (u.thread !== l.thread ? 'lifts a hold with a turn from another thread than the question\'s'
+        : sliceWhy(u, l.owner_said, l.owner_said_at, ' to lift a hold')
+          ?? (no && !(u.created_at > no.at) ? `lifts a hold with a turn older than the no it lifts (the owner's, ${no.id})` : null));
+    } else if (['decision', 'act'].includes(l.type) && l.op === 'set' && l.channel === 'thread' && isObj(l.corrected) && l.corrected.turn !== undefined) {
+      const [u, w] = turnWhy(l.corrected.turn);
+      const ref = w ? null : logGet(u.thread)?.subject?.ref ?? null;
+      const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+      why = w ?? (ref !== `${l.type}:${l.id}` && !(via?.type === 'act' && via.decision === l.id) ? `corrects from a thread about another record (${ref ?? 'nothing in particular'})`
+        : sliceWhy(u, l.corrected.said, l.corrected.said_at, '') ?? overlapWhy(l, u.id, l.corrected.said_at));
+    }
+    if (why) found.push({ id: l.id, why });
+  }
+  return found;
 }
 // ===== the Efficiency Score's data (the dashboard design's Efficiency section; kit-173) =====
 

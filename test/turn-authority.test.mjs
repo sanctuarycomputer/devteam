@@ -33,6 +33,7 @@ test('turn authority', async (t) => {
     };
     // the raw lines for a record, as written
     const raw = (id) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).filter((l) => l.id === id).sort((a, b) => a.at.localeCompare(b.at));
+    const logGet = (id) => raw(id)[0];
     const show = (T) => JSON.parse(F.owner(['thread', 'show', T, '--json']));
     const thread = (title, words) => { const T = F.owner(['thread', 'new', '--title', title, '--', words]).split('\n')[0]; return { T, U: show(T).turns[0].id }; };
     const say = (T, words) => F.owner(['thread', 'say', T, '--', words]).split('\n')[0];
@@ -291,6 +292,44 @@ test('turn authority', async (t) => {
       F.sup(['correct', D4, '--from-chat', '--said', 'wrong call, roll it back']);
       assert.deepEqual([set(D4).by, set(D4).channel, set(D4).corrected], ['owner', 'chat', { reason: 'wrong call, roll it back', said: 'wrong call, roll it back' }]);
       ok();
+    });
+
+    await t.test('metrics: chat-quote-not-found reads the owner\'s chat corrections, and leaves a hold lifted from a turn to its turn (A20)', () => {
+      const findings = () => JSON.parse(F.owner(['metrics', '--json'])).findings.filter((x) => x.kind === 'chat-quote-not-found');
+      const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+      const was = fs.readFileSync(sf, 'utf8');
+      assert.match(was, /"resume_command": "true"/);
+      fs.writeFileSync(sf, was.replace('"resume_command": "true"', '"resume_command": "claude --continue"'));
+      F.g(['add', '-A'], F.old);
+      F.g(['commit', '-qm', 'a claude supervisor'], F.old);
+      F.g(['push', '-q', 'origin', 'main'], F.old);
+      // the owner typed one of the two chat corrections (A18's), and never the lifted hold's words
+      const dir = path.join(F.home, 'claude', 'projects', fs.realpathSync(F.old).replace(/[^a-zA-Z0-9]/g, '-'));
+      const ts = new Date(Date.now() - 2 * 3600000).toISOString();
+      const entry = (text) => `${JSON.stringify({ type: 'user', userType: 'external', timestamp: ts, message: { role: 'user', content: text } })}\n`;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'session.jsonl'), entry('You are the supervisor for this repository.') + entry('ok: wrong call, roll it back'));
+      const found = findings();
+      const X = found.map((x) => x.subject);
+      assert.equal(found.length, 1, JSON.stringify(found));
+      assert.equal(logGet(X[0]).type, 'act', 'the standalone act corrected from chat');
+      assert.match(found[0].detail, /never again/);
+      assert.ok(!X.includes(held.Q), 'a hold lifted from a turn is checked against its turn');
+      fs.appendFileSync(path.join(dir, 'session.jsonl'), entry('and never again, please'));
+      assert.deepEqual(findings(), [], 'typed, it clears');
+    });
+
+    await t.test('metrics: thread-answer-unbound flags each of the fake\'s unbound lines for its reason, and nothing the writers wrote (A19)', () => {
+      const unbound = () => JSON.parse(F.owner(['metrics', '--json'])).findings.filter((x) => x.kind === 'thread-answer-unbound');
+      assert.deepEqual(unbound(), [], 'every binding the writers made in this file is sound');
+      const snap = F.snapLog();
+      try {
+        writeLines(FAKE.log);
+        const found = unbound();
+        assert.deepEqual(found.map((x) => x.subject).sort(), FAKE.unbound.map((x) => x.subject).sort(), JSON.stringify(found.map((x) => [x.subject, x.detail])));
+        for (const { subject, why } of FAKE.unbound) assert.match(found.find((x) => x.subject === subject).detail, new RegExp(why), subject);
+        assert.ok(found.every((x) => x.severity === 'medium'));
+      } finally { F.restoreLog(snap); }
     });
   } finally { F.done(); }
 });
