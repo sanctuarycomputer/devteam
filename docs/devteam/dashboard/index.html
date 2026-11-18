@@ -2003,6 +2003,37 @@ function columnOf(t) {
   const byPhase = PHASE_COLUMN[t.phase];
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
+/* board-filter start */
+// The Board's and Progress's pure rules (kit-91), run alone in vm by test/dashboard-board-progress:
+// no page globals. x is a ticket (kind 'ticket' or none) or a planner (kind 'planner').
+// needsAttention: a ticket blocked, waiting at a pane or held by a question; a planner waiting at a
+// pane, with no window, or held by a question.
+function needsAttention(x) {
+  if (x.kind === 'planner') return !!(x.waiting || x.window === false || x.held_by);
+  if (!x.kind || x.kind === 'ticket') return !!(x.phase === 'blocked' || x.waiting || x.held_by);
+  return false;
+}
+// boardKeep: whether the Board shows x under the header's filters f = { goal, feat, repo, att };
+// ctx.goalFeatures is the goal's features (a Set), or null when no goal applies (none, or unknown).
+// A planner is always home's, and is kept by its own goals, not its feature's.
+function boardKeep(x, f, ctx) {
+  const gf = ctx && ctx.goalFeatures ? ctx.goalFeatures : null;
+  if (f.feat && x.feature !== f.feat) return false;
+  if (f.att && !needsAttention(x)) return false;
+  if (x.kind === 'planner') {
+    if (f.goal && gf && !(x.goals || []).includes(f.goal)) return false;
+    return !f.repo || f.repo === 'home';
+  }
+  if (gf && !gf.has(x.feature)) return false;
+  return !f.repo || x.repo === f.repo;
+}
+// progressShown: a Progress row by Show: 'complete' the done, 'all' both, else (Active) the not done.
+function progressShown(done, show) {
+  if (show === 'complete') return !!done;
+  if (show === 'all') return true;
+  return !done;
+}
+/* board-filter end */
 const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
 // A card's pills, most important first: what stops it, then what to know, then what it's doing.
 // Each pill is a word or two and never wraps; the row wraps between pills.
