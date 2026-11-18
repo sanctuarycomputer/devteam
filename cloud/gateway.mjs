@@ -1120,6 +1120,9 @@ export function createGateway(opts = {}) {
     }
     return null;
   };
+  // A write that waited on a body (up to five minutes) asks again, of the state as it is now: a
+  // reclaim or a removal meanwhile must win, so a stolen session's request in flight lands nothing.
+  const stillHeld = (s, session) => (s.passkeys.length ? liveSession(s, (x) => x.hash === session.hash) : null);
   // Adding a passkey takes a sign-in in the last five minutes, not only a session.
   const fresh = (session) => Date.now() - (session.at ?? 0) < CHALLENGE_MS;
   // One cookie for the box and every instance's subdomain. SameSite=None: a review page or an
@@ -2299,6 +2302,7 @@ export function createGateway(opts = {}) {
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
           const { cred, issued } = register(await readJson(req), `add:${session.hash}`);
           const now = store.load();
+          if (!stillHeld(now, session)) return json(res, 401, { error: 'your session ended; sign in again' });
           // the person as they stand now: an add started before they were removed or their role
           // changed must not land where they were
           const who = personOf(now, issued.person);
@@ -2311,7 +2315,10 @@ export function createGateway(opts = {}) {
         }
         if ((p === '/auth/method/remove' || p === '/auth/passkeys/remove') && req.method === 'POST') {
           const body = await readJson(req);
-          const out = removeMethod(store.load(), person, body?.id, session);
+          const now = store.load();
+          const held = stillHeld(now, session);
+          if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+          const out = removeMethod(now, held.person, body?.id, held.session);
           if (!out.next) return json(res, out.status, { error: out.error });
           store.save(out.next);
           log('a sign-in method was removed; its person\'s other sessions ended');
@@ -2334,14 +2341,20 @@ export function createGateway(opts = {}) {
         if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
         // One device, one person: out of every list, then into the subscriber's, capped per person so
         // nobody can push the owner's devices off.
-        const freed = keepSubs(store.load(), (x) => x.endpoint !== sub.endpoint);
-        store.save(withSubs(freed, person, [...subsOf(freed, person), sub].slice(-PUSH_DEVICES)));
+        const now = store.load();
+        const held = stillHeld(now, session);
+        if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        const freed = keepSubs(now, (x) => x.endpoint !== sub.endpoint);
+        store.save(withSubs(freed, held.person, [...subsOf(freed, held.person), sub].slice(-PUSH_DEVICES)));
         return json(res, 200, { ok: true });
       }
       // The hub's "is this working?": one push, to the device that asked, if it is the asker's own.
       if (req.method === 'POST' && p === '/push/test') {
         const body = await readJson(req);
-        const sub = subsOf(store.load(), person).find((x) => x.endpoint === body?.endpoint);
+        const now = store.load();
+        const held = stillHeld(now, session);
+        if (!held) return json(res, 401, { error: 'your session ended; sign in again' });
+        const sub = subsOf(now, held.person).find((x) => x.endpoint === body?.endpoint);
         if (!sub) return json(res, 404, { error: 'this device is not subscribed: reload the hub' });
         let status;
         try { status = await sendPush(sub, PUSH_TEST); } catch (e) { return json(res, 502, { error: e.message }); }

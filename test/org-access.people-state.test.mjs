@@ -866,11 +866,18 @@ test('org-access A11: an older gateway reading the new state admits only the own
 test('org-access A11: a start after an older gateway\'s reclaim ends everyone else\'s sessions, the invites and the owner\'s other methods', async () => {
   const { gw, ana } = await rollbackSetup('a11-old-reclaim');
   await gw.close();
-  const r = reclaimWith(oldGateway(), gw.dir, gw.publicUrl);
+  reclaimWith(oldGateway(), gw.dir, gw.publicUrl);
+  // OLD's link has expired, and the environment names a token: the start saves that claim too,
+  // and must save it over the reset state, not the state it read
   const before = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
-  const again = await gateway('a11-old-reclaim-new', { dir: gw.dir, token: tokenOf(r.stdout) });
+  fs.writeFileSync(gw.file, JSON.stringify({ ...before, claimExpires: Date.now() - 1 }, null, 2));
+  const given = 'x'.repeat(40);
+  process.env.DEVTEAM_CLAIM_TOKEN = given;
+  let again;
+  try { again = await gateway('a11-old-reclaim-new', { dir: gw.dir, token: given }); } finally { delete process.env.DEVTEAM_CLAIM_TOKEN; }
   try {
     assertReset(again, before, { sessions_ended: 1, invites_deleted: 1, methods_deleted: 1 });
+    assert.equal(again.state().claimHash, u(sha(given)), 'the environment\'s claim, saved after the reset');
     assert.deepEqual(again.state().passkeys, [], 'still unclaimed');
     const c = await again.claim(authenticator());
     assert.equal(c.status, 200, c.body);
@@ -942,6 +949,7 @@ test('org-access A11: the new reclaim ends every session, invite and owner metho
   const { gw, anaRow, vicRow } = await rollbackSetup('a11-new-reclaim');
   let s = gw.state();
   gw.write({ ...s, invites: [...s.invites, { hash: u(crypto.randomBytes(32)), person: anaRow.id, expires: Date.now() + 86400e3 }], pushSubs: [pushSub('https://web.push.apple.com/owner')] });
+  gw.seed([{ name: 'Noa', methods: [] }]); // invited, never joined: she can't sign in, so isn't counted
   const before = gw.state();
   await gw.close();
   const r = reclaimWith(NEW, gw.dir, gw.publicUrl);
@@ -965,4 +973,44 @@ test('org-access A11: the new reclaim ends every session, invite and owner metho
   } finally { await alone.close(); }
   const r2 = reclaimWith(NEW, alone.dir, alone.publicUrl);
   assert.doesNotMatch(r2.stdout, /other (people|person)/);
+});
+
+// A POST whose body arrives later: the headers and the first byte now, the rest on finish().
+const slowPost = (gw, route, cookie, body) => {
+  const text = JSON.stringify(body);
+  let done;
+  const answer = new Promise((resolve, reject) => { done = { resolve, reject }; });
+  const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: new URL(gw.publicUrl).host, origin: gw.publicUrl, 'content-type': 'application/json', 'content-length': Buffer.byteLength(text), cookie } }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => done.resolve({ status: res.statusCode, body: b }));
+  });
+  r.on('error', (e) => done.reject(e));
+  r.write(text.slice(0, 1));
+  return { finish: () => { r.end(text.slice(1)); return answer; } };
+};
+
+test('org-access A9: a request in flight when the box is reclaimed lands nothing', async () => {
+  const { gw, ana, ownerCookie, anaRow } = await people('a9-inflight');
+  try {
+    const ac = await signIn(gw, ana);
+    // the owner's session, fresh, starts adding a passkey and subscribing a device; Ana subscribes one
+    const thief = authenticator();
+    const o = await gw.req('POST', '/auth/passkeys/options', { cookie: ownerCookie, body: {} });
+    assert.equal(o.status, 200, o.body);
+    const add = slowPost(gw, '/auth/passkeys/verify', ownerCookie, thief.create(o.json, gw.publicUrl));
+    const sub = slowPost(gw, '/push/subscribe', ownerCookie, subscribing('https://web.push.apple.com/thief'));
+    const hers = slowPost(gw, '/push/subscribe', ac, subscribing('https://web.push.apple.com/ana'));
+    await new Promise((r) => setTimeout(r, 200));
+    const rc = reclaim(gw);
+    assert.equal(rc.status, 0, rc.stderr);
+    for (const [what, x] of [['the add', add], ['the owner\'s subscribe', sub], ['Ana\'s subscribe', hers]]) {
+      const r = await x.finish();
+      assert.equal(r.status, 401, `${what}: ${r.body}`);
+    }
+    const s = gw.state();
+    assert.deepEqual(s.passkeys, [], 'no passkey: the box stays unclaimed');
+    assert.deepEqual(s.pushSubs, [], 'no device of the owner\'s');
+    assert.deepEqual(rowOf(s, anaRow.id).pushSubs, [], 'nor of Ana\'s');
+  } finally { await gw.close(); }
 });
