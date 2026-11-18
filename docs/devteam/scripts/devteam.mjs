@@ -7421,7 +7421,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
@@ -7599,6 +7599,29 @@ const ARTIFACT_LENS = String.raw`(() => {
     else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
   };
 
+  // --- where others' pointers are: by selector alone, apart from the pins' watch list ----------------
+  const PLACE_MAX = 8;
+  // querySelector only, never find's text search; null for nothing there, a bad selector, or not shown
+  const shownRect = (k) => {
+    let el = null;
+    try { el = document.querySelector(k); } catch (e) { el = null; }
+    if (!el) return null;
+    const hidden = el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility));
+    return hidden ? null : rectOf(el);
+  };
+  let placing = [];
+  let placedSent = '';
+  let placeLoop = false;
+  const placedNow = () => placing.map((x) => ({ id: x.id, rect: shownRect(x.k) }));
+  // once a frame while there is a list, sent only when a rect changed; an empty list ends it
+  const placeFrame = () => {
+    if (!placing.length) { placeLoop = false; return; }
+    const rects = placedNow();
+    const now = JSON.stringify(rects);
+    if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    requestAnimationFrame(placeFrame);
+  };
+
   // --- the viewer's questions ------------------------------------------------------------------------
   // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
   // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
@@ -7639,6 +7662,15 @@ const ARTIFACT_LENS = String.raw`(() => {
       if (!a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
       const f = find(a);
       if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+    // the newest list stands until the next; one that is no list is ignored
+    place: (m) => {
+      if (!Array.isArray(m.anchors)) return;
+      placing = m.anchors.slice(0, PLACE_MAX).filter((x) => x && idOk(x.id) && typeof x.k === 'string' && x.k.length > 0 && size(x.k) <= CAPS.selector).map((x) => ({ id: x.id, k: x.k }));
+      const rects = placedNow();
+      placedSent = JSON.stringify(rects);
+      tell({ type: 'placed', rects });
+      if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
     },
   };
   addEventListener('message', (e) => {

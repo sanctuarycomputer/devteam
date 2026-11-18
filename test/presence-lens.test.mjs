@@ -203,6 +203,86 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   assert.deepEqual(got.map(bare), [{ lens: 1, type: 'pointer', k: '#box', x: 0.25, y: 0.25 }, { lens: 1, type: 'pointer', k: null }], 'A15d: #box, then exactly one null');
 });
 
+test('presence A16: place answers each selector\'s rect, once a frame and only on change, apart from the pins', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const { p, said, ask, own, soon } = await openLens(t);
+  const placed = async () => (await said()).filter((m) => m.type === 'placed');
+  // the n-th placed (1-based) once it has arrived
+  const nth = async (n, what) => { await soon(`window.__heard.filter((h) => h.data && h.data.lens === 1 && h.data.type === 'placed').length >= ${n}`, what); return (await placed())[n - 1]; };
+
+  // A16-0: a place is a question, answered before hello as resolve is
+  await ask({ lens: 1, type: 'place', anchors: [{ id: 'c0', k: '#box' }] });
+  let m = await nth(1, 'A16-0: placed before hello');
+  assert.deepEqual(bare(m), { lens: 1, type: 'placed', rects: [{ id: 'c0', rect: { x: 100, y: 100, w: 200, h: 100 } }] }, 'A16-0: #box\'s rect');
+
+  await ask({ lens: 1, type: 'hello' });
+  await soon(`window.__heard.some((h) => h.data && h.data.lens === 1 && h.data.type === 'ready')`, 'ready');
+  // a pin watched, as the viewer's resolve leaves it
+  await ask({ lens: 1, type: 'resolve', id: 'r1', anchors: [{ key: 't-1', anchor: { selector: '#a', tag: 'p', text: 'A' } }] });
+  await soon(`window.__heard.some((h) => h.data && h.data.lens === 1 && h.data.type === 'rects' && h.data.id === 'r1')`, 'the pins\' rects');
+
+  // A16a: 9 anchors: the first 8, in order; null for nothing found, not shown, or a bad selector
+  let n = (await placed()).length;
+  await ask({ lens: 1, type: 'place', anchors: [
+    { id: 'c1', k: '#a' },
+    { id: 'c2', k: '#gone', selector: '#gone', tag: 'p', text: 'decoy' },
+    { id: 'c3', k: '#hid' },
+    { id: 'c4', k: '#inv' },
+    { id: 'c5', k: '<<bad' },
+    { id: 'c6', k: '#mover' },
+    { id: 'c7', k: '#box' },
+    { id: 'c8', k: '#box' },
+    { id: 'c9', k: '#box' },
+  ] });
+  m = await nth(n + 1, 'A16a: placed');
+  assert.deepEqual(m.rects.map((r) => r.id), ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8'], 'A16a: the first 8, in order');
+  assert.deepEqual(m.rects[0].rect, (await own({ ask: 'rect', sel: '#a' })).rect, 'A16a: #a as the frame measures it');
+  assert.deepEqual(m.rects.slice(1, 5).map((r) => r.rect), [null, null, null, null], 'A16a: null for #gone (no text search), #hid, #inv and <<bad');
+  assert.deepEqual(m.rects[5].rect, { x: 100, y: 400, w: 50, h: 20 }, 'A16a: #mover where it is');
+
+  // A16a-ii: a place with no list is ignored: the last place stands
+  n = (await placed()).length;
+  await ask({ lens: 1, type: 'place', anchors: null });
+  await ask({ lens: 1, type: 'place', anchors: {} });
+  await sleep(300);
+  assert.equal((await placed()).length, n, 'A16a-ii: no placed for a place with no list');
+
+  // A16b: it follows #mover, at most once a frame, and goes quiet when nothing moves
+  n = (await placed()).length;
+  assert.deepEqual(await own({ ask: 'move', n: 60 }), { own: 1, ask: 'move', frames: 60 });
+  await sleep(100);
+  let got = (await placed()).slice(n);
+  assert.ok(got.length >= 20 && got.length <= 61, `A16b: ${got.length} placed for 60 frames`);
+  const xs = got.map((p) => p.rects.find((r) => r.id === 'c6').rect.x);
+  assert.ok(xs.every((x, i) => i === 0 || x > xs[i - 1]), `A16b: #mover further on in each: ${xs.join(',')}`);
+  n = (await placed()).length;
+  await sleep(500);
+  assert.equal((await placed()).length, n, 'A16b: nothing sent while nothing changes');
+
+  // A16c: never the text search
+  assert.equal((await own({ ask: 'tags' })).n, 0, 'A16c: no getElementsByTagName call');
+
+  // A16d: the pins' watch list is the pins' own
+  const rectsMsgs = async () => (await said()).filter((x) => x.type === 'rects');
+  let rs = await rectsMsgs();
+  assert.equal(rs[rs.length - 1].id, 'r1', 'A16d: no rects since the pins\' own');
+  const before = rs.length;
+  await own({ ask: 'text' });
+  await soonIn(p, 2000)(`window.__heard.filter((h) => h.data && h.data.lens === 1 && h.data.type === 'rects').length > ${before}`, 'A16d: rects after a text change, in 2 s');
+  rs = (await rectsMsgs()).slice(before);
+  const un = rs.find((x) => x.id === undefined);
+  assert.ok(un, 'A16d: rects unasked');
+  assert.deepEqual(un.rects.map((r) => r.key), ['t-1'], 'A16d: the watch list as resolve left it');
+  assert.deepEqual([un.rects[0].text, un.rects[0].changed], ['A2', true]);
+  n = (await placed()).length;
+  await ask({ lens: 1, type: 'place', anchors: [] });
+  m = await nth(n + 1, 'A16d: placed for an empty list');
+  assert.deepEqual(m.rects, [], 'A16d: an empty list, answered');
+  n = (await placed()).length;
+  await own({ ask: 'move', n: 30 });
+  await sleep(300);
+  assert.equal((await placed()).length, n, 'A16d: stopped: nothing while #mover moves');
+});
+
 // The lens's script, run in vm against a stand-in page (as test/dashboard.test.mjs's artLensRun): its
 // window listeners, what it posts to its parent, and timers that never fire.
 function lensInVm() {
