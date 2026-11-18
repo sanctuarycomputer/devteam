@@ -63,10 +63,15 @@ export async function startTermFake(opts = {}) {
     const { cols, rows } = size(which);
     const buf = rowsOf(which);
     const nl = () => { s.cx = 0; s.cy += 1; if (s.cy >= rows) { s.history.push(buf.shift()); buf.push(''); s.cy = rows - 1; } };
+    let esc = 0; // 0 none, 1 after ESC, 2 inside a CSI sequence, 3 the one character after ESC O
     for (const ch of text) {
+      if (esc === 1) { esc = ch === '[' ? 2 : ch === 'O' ? 3 : 0; continue; }
+      if (esc === 3) { esc = 0; continue; }
+      if (esc === 2) { if (ch >= '@' && ch <= '~') esc = 0; continue; }
+      if (ch === '\x1b') { esc = 1; continue; }
       if (ch === '\r' || ch === '\n') nl();
       else if (ch === '\x7f') { if (s.cx > 0) { s.cx -= 1; const l = buf[s.cy]; buf[s.cy] = l.slice(0, s.cx) + l.slice(s.cx + 1); } }
-      else if (ch >= ' ' && ch !== '\x7f' && ch.codePointAt(0) !== 0x9b) {
+      else if (ch >= ' ' && ch !== '\x7f' && !(ch.codePointAt(0) >= 0x80 && ch.codePointAt(0) <= 0x9f)) {
         const l = buf[s.cy].padEnd(s.cx, ' ');
         buf[s.cy] = l.slice(0, s.cx) + ch + l.slice(s.cx + 1);
         s.cx += 1;
@@ -91,12 +96,18 @@ export async function startTermFake(opts = {}) {
     if (!m) return null;
     return { name: m[2], method: m[2] === 'keys' ? 'POST' : 'GET', which: m[1] };
   }
+  // host, then relay: the dashboard's global guards, before any routing (§3 step 1)
+  function globalWhy(req) {
+    if (o.refuse === 'host' || o.refuse === 'relay') return o.refuse;
+    const host = req.headers.host;
+    if (![`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(host)) return 'host';
+    if (req.headers['x-devteam-relay'] !== undefined) return 'relay';
+    return null;
+  }
   function whyOf(req, r) {
     if (o.refuse) return o.refuse;
     const host = req.headers.host;
-    if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return 'host';
     if (req.headers['x-devteam-level'] === 'view') return 'view';
-    if (req.headers['x-devteam-relay'] !== undefined) return 'relay';
     const site = req.headers['sec-fetch-site'];
     if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
     if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
@@ -149,6 +160,8 @@ export async function startTermFake(opts = {}) {
     const body = req.method === 'POST' ? await readBody(req) : Buffer.alloc(0);
     if (body === null) return;
     if (o.gatewayView) { res.writeHead(403, { 'content-type': 'application/json' }); return res.end('{"why":"view"}'); }
+    const global = globalWhy(req);
+    if (global) return sendJson(res, 403, req.method === 'POST' ? { error: 'the terminal answers only on this page', why: global } : { why: global });
     const r = route(u.pathname);
     if (!r) return sendJson(res, 404, { error: 'not found' });
     if (req.method !== r.method) return sendJson(res, 405, { error: 'not this method' });

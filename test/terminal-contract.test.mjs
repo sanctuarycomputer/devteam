@@ -221,6 +221,9 @@ test('terminal A2: held and why', async () => {
     assert.equal((await screenOf(fake, 'supervisor')).json.etag, s1.etag, 'the etag holds while oldest_ms grows');
     fake.set({ held: { count: 2, oldest_ms: 120000, prompt: 'unknown' } });
     assert.notEqual((await screenOf(fake, 'supervisor')).json.etag, s1.etag, 'the etag changes when the note is due');
+    const arrow = await keys(fake, 'supervisor', { seq: 1, data: hex('\x1b[Ab\x1bOA') });
+    assert.equal(arrow.json.lines[0], 'b', 'an escape sequence is recorded but not drawn');
+    assert.deepEqual(fake.typed('supervisor'), ['\x1b[Ab\x1bOA']);
     for (const w of WHYS) {
       fake.set({ refuse: w });
       for (const p of ['/api/term/token', '/api/term/supervisor/screen', '/api/term/supervisor/history?before=0&count=1']) {
@@ -235,7 +238,9 @@ test('terminal A2: held and why', async () => {
     assert.deepEqual(await why({ 'x-devteam-relay': '1' }), { why: 'relay' });
     assert.deepEqual(await why({ 'sec-fetch-site': 'cross-site' }), { why: 'cross-site' });
     assert.deepEqual(await why({ 'x-devteam-level': 'view', 'sec-fetch-site': 'cross-site' }), { why: 'view' }, 'view wins over cross-site');
-    assert.deepEqual(await why({ 'x-devteam-level': 'view', 'x-devteam-relay': '1' }), { why: 'view' }, 'view wins over relay');
+    assert.deepEqual(await why({ 'x-devteam-level': 'view', 'x-devteam-relay': '1' }), { why: 'relay' }, 'the global relay guard comes first');
+    assert.deepEqual((await req(fake, 'GET', '/api/term/nope', { headers: { 'x-devteam-relay': '1' } })).json, { why: 'relay' }, 'before routing');
+    assert.equal((await withHost(fake, '/api/term/supervisor/screen', `[::1]:${fake.port}`)).status, 200, '[::1] is a loopback host');
     const hv = await withHost(fake, '/api/term/supervisor/screen', 'evil.test', { 'x-devteam-level': 'view' });
     assert.deepEqual(hv.json, { why: 'host' }, 'host wins over view');
     const h = await withHost(fake, '/api/term/supervisor/screen', 'evil.test');
