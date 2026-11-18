@@ -6588,6 +6588,26 @@ function askPlainChecks({ q, context, kind, cls, secrets, reasons, confidence, r
   // only when low confidence is the whole reason: a question asked for another reason too stands on that
   if (reasons.length && reasons.every((r) => r === 'low-confidence') && confidence != null && confidence >= 0.7) die(`--reasons low-confidence with --confidence ${confidence}: at 0.7 or more you are sure enough. Decide it yourself if it is yours (constitution.md §1), or give the real reason`);
 }
+function asksGoalApproval({ goal, kind, question, choices, options, recommendation, def }) {
+  // A yes that would approve a draft goal goes through goal decide, which takes only a goal-approval
+  // answer: an approval asked as another kind wastes the owner's yes. These kinds name a draft goal
+  // for reasons of their own (defining it, a door in its design, something only the owner can do).
+  if (['goal-approval', 'goal-definition', 'one-way-door', 'owner-action'].includes(kind)) return false;
+  const g = goal ? logGet(goal) : null;
+  if (g?.type !== 'goal' || (g.status ?? 'draft') !== 'draft') return false;
+  const lit = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const title = lit(String(g.title ?? '').trim()).replace(/\s+/g, '\\s+');
+  const aim = `(?:${title ? `${title}|` : ''}goal|design|approach|plan)(?!\\w)`;
+  const text = String(question ?? '');
+  // approval words aimed at the goal: "Approve <title>?", "Do you approve the design?"
+  if (new RegExp(`\\b(?:approve|approval\\s+of|sign\\s+off\\s+on|green-?light)\\s+(?:(?:the|this|its|your|our)\\s+)?${aim}`, 'i').test(text)) return true;
+  // a bare Approve answer, on a question that names the goal or its design (a sub-decision of the
+  // design with an Approve choice is the owner's to settle before the approval, so it stays askable)
+  if (!new RegExp(`\\b(?:${title ? `${title}|` : ''}goal|design(?:ed)?|approach|plan)(?!\\w)`, 'i').test(text)) return false;
+  const bare = new RegExp(`^\\s*approv(?:e|ed|al)(?:\\s+(?:it|this|the\\s+${aim}))?\\s*[.!]?\\s*$`, 'i');
+  const labels = Array.isArray(choices) ? choices.map((c) => c?.label) : [];
+  return [...labels, ...[].concat(options ?? []), recommendation, def].some((a) => typeof a === 'string' && bare.test(a));
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
@@ -6600,6 +6620,7 @@ function askLine({ thread } = {}) {
   // (a review, an owner-action with secrets) has rules of its own a silent change would drop.
   const kind = flagStr('kind') ?? (cls === 'one-way-door' ? 'one-way-door' : 'owner-decision');
   if (cls === 'one-way-door' && kind !== 'one-way-door') die(`a question in class one-way-door is a one-way door: ask it --kind one-way-door, not --kind ${kind}`);
+  if (asksGoalApproval({ goal: flagStr('goal'), kind, question: q, choices: jsonFlag('choices'), options: asList(flags.options), recommendation: flagStr('recommendation'), def: flagStr('default') })) die(`this asks the owner to approve ${flagStr('goal')} (a draft goal), but goal decide uses only a goal-approval answer, so a yes to a ${kind} question is wasted: ask it with ask --kind goal-approval --goal ${flagStr('goal')} --links '<the design>' (planning.md §1). If it decides one part of the design instead, ask that part in its own words, with choices that say what each does`);
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const L = ladder();
   if (kind === 'goal-approval') {
