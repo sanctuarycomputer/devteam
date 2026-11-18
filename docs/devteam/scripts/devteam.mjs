@@ -10414,6 +10414,7 @@ function cmdCorrect() {
     if (flags['from-turn'] !== undefined && flags['from-chat'] !== undefined) die('correct: --from-turn or --from-chat, not both');
     for (const k of ['severity', 'impact', 'reason', 'retro']) if (flags[k] !== undefined) die(`correct --${flags['from-turn'] !== undefined ? 'from-turn' : 'from-chat'}: --${k} isn't taken; the reason is the owner's words (--said), and the rest is the owner's own correct`);
     if (!flagStr('said')?.trim()) die('correct --from-turn or --from-chat needs --said "<the owner\'s words>"');
+    if (flags['from-chat'] !== undefined && flags.at !== undefined) die('correct --at goes with --from-turn: which match of a repeated clause');
   } else for (const k of ['said', 'at']) if (flags[k] !== undefined) die(`correct --${k} goes with --from-turn or --from-chat`);
   const by = heard ? 'owner' : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);

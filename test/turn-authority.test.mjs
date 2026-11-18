@@ -284,6 +284,13 @@ test('turn authority', async (t) => {
       F.sup(['correct', A2, '--from-turn', UA2, '--said', 'Undo that']);
       assert.deepEqual([set(A2).type, set(A2).corrected], ['act', { reason: 'Undo that', said: 'Undo that', said_at: [0, 9], turn: UA2 }]);
       ok();
+      // an act's thread corrects only the decision that act carried out, and a standalone act's only itself (task-4 T4-1)
+      const D5 = call('decision');
+      const { U: UA5 } = on(`act:${A}`, 'Wrong call.');
+      refused(['correct', D5, '--from-turn', UA5, '--said', 'Wrong call.'], new RegExp(`that thread is about act:${A}, not ${D5}`));
+      const { U: UA6 } = on(`act:${A2}`, 'Wrong call.');
+      refused(['correct', D5, '--from-turn', UA6, '--said', 'Wrong call.'], new RegExp(`that thread is about act:${A2}, not ${D5}`));
+      refused(['correct', D5, '--from-chat', '--said', 'Wrong call.', '--at', '0'], /--at goes with --from-turn/);
       const X = call('act');
       F.sup(['correct', X, '--from-chat', '--said', '  never again  ']);
       assert.deepEqual([set(X).type, set(X).channel, set(X).corrected], ['act', 'chat', { reason: 'never again', said: 'never again' }]);
@@ -298,6 +305,13 @@ test('turn authority', async (t) => {
       assert.deepEqual([row.who, row.under.repaired], ['owner', null]);
       refused(['correct', D3, '--from-chat', '--said', 'again'], /already corrected/);
       F.sup(['repair', D3, '--how', 'undo']);
+      // the owner's own correct after a retro is taken too; a second retro is refused (task-4 T4-2)
+      const D6 = call('decision');
+      F.sup(['correct', D6, '--retro', '--reason', 'r']);
+      refused(['correct', D6, '--retro', '--reason', 'again'], /already corrected/);
+      F.owner(['correct', D6, '--reason', 'it was worse']);
+      assert.deepEqual([set(D6).by, set(D6).corrected.reason], ['owner', 'it was worse']);
+      refused(['correct', D6, '--from-chat', '--said', 'and again'], /already corrected/);
       // A18: from chat
       const D4 = call('decision');
       F.sup(['correct', D4, '--from-chat', '--said', 'wrong call, roll it back']);
