@@ -633,7 +633,8 @@ export async function startPresenceFake({ hub = false, ownerName = 'Owner', serv
     },
     // §11, computed when read.
     present() {
-      const ps = peopleList();
+      // §11: only people with a connection whose last here said visible
+      const ps = peopleList().filter((p) => p.conns.some((x) => x.visible));
       return {
         present: ps.slice(0, LIMITS.present).map(({ id: pid, name: pname, level: plevel }) => ({ id: pid, name: pname, level: plevel })),
         present_more: Math.max(0, ps.length - LIMITS.present),
