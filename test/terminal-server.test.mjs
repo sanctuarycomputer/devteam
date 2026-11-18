@@ -16,10 +16,12 @@ const fnSrc = (name) => { const i = DT_SRC.indexOf(`function ${name}(`); assert.
 const constSrc = (name) => { const i = DT_SRC.indexOf(`\nconst ${name} = `); assert.ok(i >= 0, name); return DT_SRC.slice(i + 1, DT_SRC.indexOf('\n', i + 1) + 1); };
 
 // supervisorPaneIn alone, its tmux scripted: list-panes answers `listed`
+// (its list-panes arguments kept on the function as .asked)
 const paneIn = (listed) => {
-  const c = vm.createContext({ path, realPath: (p) => p, tmuxServerPid: () => '1', sh: (cmd, args) => (args[0] === 'list-panes' ? listed : null) });
+  const asked = [];
+  const c = vm.createContext({ path, realPath: (p) => p, tmuxServerPid: () => '1', sh: (cmd, args) => { if (args[0] !== 'list-panes') return null; asked.push([...args]); return listed; } });
   vm.runInContext(`${constSrc('SUPERVISOR_NOT_WINDOW')}${constSrc('AGENT_PANE_CMD')}${constSrc('SHELLS')}${fnSrc('supervisorPaneIn')}\nglobalThis.supervisorPaneIn = supervisorPaneIn;`, c);
-  return c.supervisorPaneIn;
+  return Object.assign(c.supervisorPaneIn, { asked });
 };
 
 test('terminal A6: supervisorPaneIn skips a tagged pane', () => {
@@ -30,6 +32,9 @@ test('terminal A6: supervisorPaneIn skips a tagged pane', () => {
   assert.equal(tagged('/r', '%3', null), '%3', 'unless it is the noted pane');
   const untagged = paneIn('%3\tmain\t/r\tnode\t\n');
   assert.equal(untagged('/r', null, null), '%3', 'an untagged agent pane at the root still is');
+  // the tag is the format's last field: a format without it reads every pane as untagged
+  assert.ok(tagged.asked.length > 0);
+  for (const a of tagged.asked) assert.ok(a[a.indexOf('-F') + 1].endsWith('\t#{@devteam-shell}'), `list-panes -F ${a[a.indexOf('-F') + 1]}`);
 });
 
 // ---- the fixture ----
@@ -190,9 +195,120 @@ test('terminal fixture: a stand-in pane is marked, takes send-keys bytes, and th
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /server exited unexpectedly/);
   assert.equal(T.oneCallReads(), 1);
+  fs.rmSync(path.join(T.F.base, 'tmux-fail.json'));
+  // a hold keyed on a two-command call holds that call
+  write(path.join(T.F.base, 'tmux-delay.json'), JSON.stringify({ 'display+capture-pane': 150 }));
+  assert.equal(spawnSync(T.wrapper, ['display', '-p', '-t', s.pane, 'x', ';', 'capture-pane', '-p', '-t', s.pane], { env: T.dashEnv() }).status, 0);
+  const [, read] = T.callSpans('display+capture-pane');
+  assert.ok(read.end - read.start >= 150, 'a held one-call read is held');
+  assert.equal(T.oneCallReads(), 2);
+  // a history read is its own pair, the other way round
+  assert.equal(spawnSync(T.wrapper, ['capture-pane', '-p', '-S', '-3', '-t', s.pane, ';', 'display', '-p', '-t', s.pane, '#{history_size}'], { env: T.dashEnv() }).status, 0);
+  assert.equal(T.historyReads(), 1);
+  assert.equal(T.oneCallReads(), 2, 'and not a one-call read');
+  // -S and -L take a value, which is never a subcommand (no server answers on either: nothing is started)
+  T.clearCalls();
+  spawnSync(T.wrapper, ['-S', path.join(T.F.base, 'no-server.sock'), 'list-sessions'], { env: T.dashEnv() });
+  spawnSync(T.wrapper, ['-L', 'dt-no-server', 'list-sessions', ';', 'list-sessions'], { env: T.dashEnv() });
+  assert.deepEqual(T.callLog().map((c) => c.cmds), [['list-sessions'], ['list-sessions', 'list-sessions']]);
   const { port } = await T.dashboard();
   const r = await T.req(port, 'GET', '/', { headers: SAME });
   assert.equal(r.status, 200, 'a real dashboard answers');
   await s.exit();
   s.kill();
+});
+
+// ---- the routes' guards (terminal@1 §2 to §4) ----
+const JSON_TYPE = /^application\/json\b/;
+// a refusal with a why: 403, JSON, exactly { why } (a GET's) or { error, why } (a POST's), never cached
+const refusedWhy = (r, why, what, post = false) => {
+  assert.equal(r.status, 403, `${what}: ${r.status} ${r.text}`);
+  assert.match(r.headers['content-type'] ?? '', JSON_TYPE, what);
+  assert.equal(r.headers['cache-control'], 'no-store', what);
+  if (post) assert.deepEqual(r.json, { error: 'the terminal answers only on this page', why }, what);
+  else assert.equal(r.text, JSON.stringify({ why }), what);
+};
+const errorAnswer = (r, status, what) => {
+  assert.equal(r.status, status, `${what}: ${r.status} ${r.text}`);
+  assert.match(r.headers['content-type'] ?? '', JSON_TYPE, what);
+  assert.equal(r.headers['cache-control'], 'no-store', what);
+  assert.equal(typeof r.json?.error, 'string', what);
+  assert.equal(r.json.why, undefined, what);
+};
+// the terminal's own reads of a pane (the dashboard's other readers capture alone)
+const termReads = (T) => T.callLog().filter((c) => c.cmds.includes('capture-pane') && c.cmds.length > 1).length;
+
+test('terminal A5b: screen and history are refused with their why before any pane is read; routing is exact', async () => {
+  const T = termFixture('term-a5b');
+  after(() => T.done());
+  T.standIn({ lines: ['A5b stand-in'] });
+  const { dash, port } = await T.dashboard();
+  T.clearCalls();
+  const reads = ['/api/term/supervisor/screen', '/api/term/shell/screen', '/api/term/supervisor/history?before=0&count=1', '/api/term/shell/history?before=1&count=5'];
+  for (const p of reads) {
+    refusedWhy(await T.req(port, 'GET', p, { headers: { 'sec-fetch-site': 'cross-site' } }), 'cross-site', `${p} cross-site`);
+    refusedWhy(await T.req(port, 'GET', p, { headers: { ...SAME, 'x-devteam-relay': '1' } }), 'relay', `${p} relay`);
+    refusedWhy(await T.req(port, 'GET', p, { headers: { ...SAME, 'x-devteam-level': 'view' } }), 'view', `${p} view`);
+    refusedWhy(await T.req(port, 'GET', p, { headers: { ...SAME, host: `evil.test:${port}` } }), 'host', `${p} host`);
+    // host before relay, relay before view (§3 step 1, 3)
+    refusedWhy(await T.req(port, 'GET', p, { headers: { 'x-devteam-relay': '1', 'x-devteam-level': 'view', host: `evil.test:${port}` } }), 'host', `${p} host first`);
+    refusedWhy(await T.req(port, 'GET', p, { headers: { 'x-devteam-relay': '1', 'x-devteam-level': 'view' } }), 'relay', `${p} relay before view`);
+  }
+  // a POST's global refusal carries its error words too, even on a path that isn't a route
+  refusedWhy(await T.post(port, '/api/term/supervisor/keys', {}, { 'sec-fetch-site': 'same-origin', 'x-devteam-relay': '1' }), 'relay', 'a relayed post', true);
+  refusedWhy(await T.req(port, 'POST', '/api/term/nowhere', { headers: { host: `evil.test:${port}` } }), 'host', 'a post on another host', true);
+  refusedWhy(await T.req(port, 'GET', '/api/term/nowhere', { headers: { ...SAME, 'x-devteam-relay': '1' } }), 'relay', 'an unknown path, relayed');
+  // routing (§4): unknown paths 404, the wrong method 405, each { error }
+  errorAnswer(await T.req(port, 'GET', '/api/term/x', { headers: SAME }), 404, '/api/term/x');
+  errorAnswer(await T.req(port, 'GET', '/api/term/', { headers: SAME }), 404, '/api/term/');
+  errorAnswer(await T.req(port, 'GET', '/api/term/other/screen', { headers: SAME }), 404, 'another which');
+  errorAnswer(await T.post(port, '/api/term/supervisor/open', {}, SAME), 404, 'supervisor/open');
+  errorAnswer(await T.req(port, 'GET', '/api/term/supervisor/open', { headers: SAME }), 404, 'GET supervisor/open');
+  errorAnswer(await T.req(port, 'GET', '/api/term/supervisor/keys', { headers: SAME }), 405, 'GET keys');
+  errorAnswer(await T.req(port, 'GET', '/api/term/shell/open', { headers: SAME }), 405, 'GET shell/open');
+  errorAnswer(await T.post(port, '/api/term/supervisor/screen', {}, SAME), 405, 'POST screen');
+  errorAnswer(await T.post(port, '/api/term/shell/history', {}, SAME), 405, 'POST history');
+  errorAnswer(await T.post(port, '/api/term/token', {}, SAME), 405, 'POST token');
+  // the routing happens before view: a View request to an unknown path is a 404 (§3 step 2)
+  errorAnswer(await T.req(port, 'GET', '/api/term/x', { headers: { ...SAME, 'x-devteam-level': 'view' } }), 404, 'view on an unknown path');
+  await dash.stop();
+  // a dashboard on another address: not-loopback, after view
+  const wide = await T.dashboard(['--host', '0.0.0.0']);
+  const wideHost = { host: `0.0.0.0:${wide.port}` };
+  for (const p of reads) {
+    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, ...wideHost } }), 'not-loopback', `${p} on 0.0.0.0`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, host: `127.0.0.1:${wide.port}` } }), 'not-loopback', `${p} on 0.0.0.0, by 127.0.0.1`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { 'sec-fetch-site': 'cross-site', ...wideHost } }), 'not-loopback', `${p} on 0.0.0.0, not-loopback before cross-site`);
+    refusedWhy(await T.req(wide.port, 'GET', p, { headers: { ...SAME, 'x-devteam-level': 'view', ...wideHost } }), 'view', `${p} on 0.0.0.0, view first`);
+  }
+  refusedWhy(await T.req(wide.port, 'GET', '/api/term/token', { headers: { ...SAME, ...wideHost } }), 'not-loopback', 'token on 0.0.0.0');
+  refusedWhy(await T.post(wide.port, '/api/term/shell/open', {}, { ...SAME, ...wideHost, origin: `http://0.0.0.0:${wide.port}` }), 'not-loopback', 'open on 0.0.0.0', true);
+  assert.equal(termReads(T), 0, 'no refused read reached the pane');
+  assert.equal(T.oneCallReads() + T.historyReads(), 0);
+});
+
+test('terminal A5: the token only to a same-origin read, and the same one each time', async () => {
+  const T = termFixture('term-a5t');
+  after(() => T.done());
+  const { port } = await T.dashboard();
+  refusedWhy(await T.req(port, 'GET', '/api/term/token'), 'cross-site', 'a token read without Sec-Fetch-Site');
+  refusedWhy(await T.req(port, 'GET', '/api/term/token', { headers: { 'sec-fetch-site': 'cross-site' } }), 'cross-site', 'a cross-site token read');
+  refusedWhy(await T.req(port, 'GET', '/api/term/token', { headers: { 'sec-fetch-site': 'same-site' } }), 'cross-site', 'a same-site token read');
+  refusedWhy(await T.req(port, 'GET', '/api/term/token', { headers: { 'sec-fetch-site': 'none' } }), 'cross-site', 'a typed-in token read');
+  // a View request with a cross-site header reads view: the page hides its tabs (§3 step 3)
+  refusedWhy(await T.req(port, 'GET', '/api/term/token', { headers: { 'sec-fetch-site': 'cross-site', 'x-devteam-level': 'view' } }), 'view', 'view before cross-site');
+  const a = await T.req(port, 'GET', '/api/term/token', { headers: SAME });
+  assert.equal(a.status, 200, a.text);
+  assert.match(a.headers['content-type'] ?? '', JSON_TYPE);
+  assert.equal(a.headers['cache-control'], 'no-store');
+  assert.deepEqual(Object.keys(a.json), ['token']);
+  assert.match(a.json.token, /^[0-9a-f]{64}$/);
+  const b = await T.req(port, 'GET', '/api/term/token', { headers: SAME });
+  assert.equal(b.json.token, a.json.token, 'one token for the server\'s life');
+  // the third loopback name (§2)
+  const six = await T.req(port, 'GET', '/api/term/token', { headers: { ...SAME, host: `[::1]:${port}` } });
+  assert.equal(six.status, 200, six.text);
+  assert.equal(six.json.token, a.json.token);
+  const local = await T.req(port, 'GET', '/api/term/token', { headers: { ...SAME, host: `localhost:${port}` } });
+  assert.equal(local.json.token, a.json.token);
 });

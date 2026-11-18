@@ -16651,6 +16651,127 @@ function kitHandOver() {
   }
   return { how: 'stay', why: 'no while loop runs it and it is not its own tmux pane' };
 }
+/* term-server start */
+// The dashboard's terminal (terminal@1, test/contracts/terminal.md): the supervisor's pane and the
+// project's Shell, read and typed into over /api/term/*. Sizes in bytes, times in ms.
+const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, CACHE_MS: 100, SETTLE_MS: 50, TMUX_MS: 30000 };
+// What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
+const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
+const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste' };
+// The /api/term/* routes, for cmdDashboard: `port` a getter (the dashboard re-picks its port when the
+// first is taken), `host` its bind address, `log` its own output (a refusal's reason, never a body).
+function termRoutes({ port, host, log }) {
+  // tests only (P6): a longer cache, so a test can hold a read inside it
+  const cacheMs = Number(process.env.DEVTEAM_TERM_CACHE_MS) || TERM.CACHE_MS;
+  // read once, at the start: tmuxSession() may spawn synchronously, which a request never waits on
+  const session = tmuxSession();
+  const loopback = TERM_LOOPBACK.has(host);
+  // the token's own input, so it is never a pane-answer token; valid until the server restarts
+  const termSecret = crypto.randomBytes(32);
+  const termToken = () => crypto.createHmac('sha256', termSecret).update('devteam-term-token-v1').digest('hex');
+  const tokenOk = (t) => { if (typeof t !== 'string') return false; const a = Buffer.from(t), b = Buffer.from(termToken()); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+  // every terminal route's gateway nonces: each once, pruned after twice the window
+  const nonces = new Map();
+  const json = (res, status, obj, extra = {}) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...extra }); res.end(JSON.stringify(obj)); };
+  function route(pathname) {
+    if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
+    if (pathname === '/api/term/shell/open') return { name: 'open', method: 'POST', which: 'shell' };
+    const m = /^\/api\/term\/(supervisor|shell)\/(screen|history|keys)$/.exec(pathname);
+    return m ? { name: m[2], method: m[2] === 'keys' ? 'POST' : 'GET', which: m[1] } : null;
+  }
+  // §3 step 3: view, not-loopback, cross-site, the first that applies
+  function whyOf(req, r) {
+    if (req.headers['x-devteam-level'] === 'view') return 'view';
+    if (!loopback) return 'not-loopback';
+    const site = req.headers['sec-fetch-site'];
+    if (r.name === 'token') return site === 'same-origin' ? null : 'cross-site';
+    if (r.method === 'GET') return site === undefined || site === 'same-origin' ? null : 'cross-site';
+    return site === 'same-origin' && req.headers.origin === `http://${req.headers.host}` ? null : 'cross-site';
+  }
+  // Up to CAP kept; a body over it is read to its end (so the page reads the 413), one over 4 × CAP cut off.
+  const readBody = (req) => new Promise((resolve) => {
+    const chunks = [];
+    let n = 0;
+    req.on('data', (c) => {
+      n += c.length;
+      if (n > 4 * TERM.CAP) { chunks.length = 0; req.destroy(); return resolve(null); }
+      if (n <= TERM.CAP) chunks.push(c); else chunks.length = 0;
+    });
+    req.on('end', () => resolve(n > TERM.CAP ? { over: true } : { body: Buffer.concat(chunks) }));
+    req.on('error', () => resolve(null));
+  });
+  const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
+  const PAGE = /^[A-Za-z0-9_-]{16,64}$/;
+  const shapeOk = {
+    keys(b, which) {
+      const ks = Object.keys(b).sort().join(',');
+      if (ks !== 'data,page,pane,seq,token,which' && ks !== 'page,pane,paste,seq,token,which') return false;
+      if (b.which !== which || typeof b.pane !== 'string' || !/^%\d+$/.test(b.pane)) return false;
+      if (typeof b.page !== 'string' || !PAGE.test(b.page) || !Number.isSafeInteger(b.seq) || b.seq < 1) return false;
+      if ('data' in b) return typeof b.data === 'string' && /^(?:[0-9a-fA-F]{2})+$/.test(b.data);
+      return typeof b.paste === 'string' && b.paste.length > 0;
+    },
+    open(b) {
+      const ks = Object.keys(b).sort().join(',');
+      return ks === 'cols,page,rows,token,which' && b.which === 'shell' && typeof b.page === 'string' && PAGE.test(b.page)
+        && Number.isInteger(b.cols) && b.cols >= 20 && b.cols <= 500 && Number.isInteger(b.rows) && b.rows >= 5 && b.rows <= 200;
+    },
+  };
+  // §3 step 10, on a box only: the gateway's proof, bound to this route, its which and this port
+  function proofWhy(req, r, body) {
+    const gw = (k) => { const v = req.headers[`x-devteam-gateway-${k}`]; return typeof v === 'string' ? v : null; };
+    if (!(gw('ts') && gw('nonce') && gw('sig'))) return 'it carries no signature from the gateway';
+    const proof = { port: port(), ts: gw('ts'), nonce: gw('nonce'), sig: gw('sig'), body: body.toString('base64') };
+    const why = dashboardProofProblem(proof, termSigned(r.name === 'open' ? 'devteam-term-open-v1' : 'devteam-term-keys-v1', r.which)) ?? (nonces.has(proof.nonce) ? 'its signature was used already' : null);
+    if (why) return why;
+    const now = Date.now();
+    for (const [n, at] of nonces) if (now - at > 2 * OPERATOR_PROOF_MS) nonces.delete(n);
+    nonces.set(proof.nonce, now);
+    return null;
+  }
+  async function serve(req, res, u) {
+    const at = u.pathname.slice('/api/term/'.length);
+    // a refusal: its reason to the dashboard's output, never a body
+    const no = (status, obj, reason) => { log(`refused /api/term/${at}: ${reason ?? obj.why ?? obj.error}`); if (!req.complete) req.resume(); return json(res, status, obj); };
+    const r = route(u.pathname);
+    if (!r) return no(404, { error: 'not found' });
+    if (req.method !== r.method) return no(405, { error: 'not this method' });
+    const why = whyOf(req, r);
+    if (why) return no(403, r.method === 'GET' ? { why } : { error: TERM_WORDS.page, why });
+    if (r.name === 'token') return json(res, 200, { token: termToken() });
+    if (r.name === 'history') {
+      // the shape (§7); before's top, history_size, is the read's (T3)
+      const before = u.searchParams.get('before'), count = u.searchParams.get('count');
+      if (!/^\d+$/.test(before ?? '') || !/^\d+$/.test(count ?? '') || Number(count) < 1 || Number(count) > TERM.HISTORY_MAX) return no(400, { error: 'missing or invalid before or count' });
+    }
+    if (r.method === 'GET') return json(res, 501, { error: 'not yet' });
+    // the two POSTs, §3 steps 4 to 10
+    if (!jsonType(req.headers['content-type'])) return no(403, { error: TERM_WORDS.page }, 'not application/json');
+    const got = await readBody(req);
+    if (got === null) return void log(`refused /api/term/${at}: a body far over the cap, cut off`);
+    if (got.over) return no(413, { error: TERM_WORDS.big }, 'a body over the cap');
+    let b;
+    try { b = JSON.parse(got.body.toString('utf8')); } catch { return no(400, { error: TERM_WORDS.shape }, 'not JSON'); }
+    if (b === null || typeof b !== 'object' || Array.isArray(b)) return no(400, { error: TERM_WORDS.shape }, 'not a JSON object');
+    if (!tokenOk(b.token)) return no(403, { error: TERM_WORDS.token }, 'a missing or wrong token');
+    if (!shapeOk[r.name](b, r.which)) return no(400, { error: TERM_WORDS.shape }, 'not the route\'s shape');
+    if (r.name === 'keys' && 'data' in b && b.data.length / 2 > TERM.DATA_MAX) return no(413, { error: TERM_WORDS.big }, 'data over its cap');
+    if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
+    if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
+    return json(res, 501, { error: 'not yet' });
+  }
+  return {
+    // any throw answers 500 and never ends the dashboard (S15)
+    async handle(req, res, u) {
+      try { await serve(req, res, u); } catch (e) {
+        log(`/api/term/ failed: ${e?.message ?? e}`);
+        if (!res.headersSent) json(res, 500, { error: String(e?.message ?? e) }); else res.destroy();
+      }
+    },
+  };
+}
+/* term-server end */
 async function cmdDashboard() {
   // the kit as this process loaded it, printed first, before any wait (kit-288): a sync landing
   // while it starts is then a change it sees
@@ -16661,6 +16782,8 @@ async function cmdDashboard() {
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   processLog(log, 'dashboard');
+  // the terminal's routes (terminal@1): the port as a getter, since it is re-picked when taken
+  const term = termRoutes({ port: () => port, host, log });
   const page = path.join(kitDir, 'dashboard', 'index.html');
   // The page's policy, at / and at /view/: its frames are its own pages and, where a preview's lens
   // is shown, exactly the origins that serve it (stageFrames, previewStage); only it and the hub frame it.
@@ -17182,10 +17305,15 @@ async function cmdDashboard() {
     req.once('close', () => clearTimeout(bodyTimer));
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
-    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    // the terminal's routes read these two refusals as JSON, with their why (terminal@1 §2)
+    const isTerm = req.url.startsWith('/api/term/');
+    const termNo = (why) => { log(`refused ${req.url.split('?')[0]}: ${why}`); req.resume(); return send(res, 403, 'application/json', JSON.stringify(req.method === 'POST' ? { error: 'the terminal answers only on this page', why } : { why })); };
+    if (!okHost) return isTerm ? termNo('host') : send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
     // a request a preview's relay forwarded (it sends localhost as Host and Origin, which the owner checks accept): never the owner's
-    if (req.headers[RELAY_MARK] !== undefined) return send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    if (req.headers[RELAY_MARK] !== undefined) return isTerm ? termNo('relay') : send(res, 403, 'text/plain; charset=utf-8', 'not through a preview relay');
+    // the terminal: right after the global guards, before any other route
+    if (isTerm) return await term.handle(req, res, new URL(req.url, 'http://x'));
     // a file dropped on the page: before every other route, and before a byte of its body is read
     if (req.method === 'POST' && (req.url === '/upload' || req.url.startsWith('/upload?'))) {
       clearTimeout(bodyTimer);
