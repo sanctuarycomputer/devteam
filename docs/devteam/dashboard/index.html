@@ -2182,6 +2182,8 @@ function actView(a) {
 
 // ---- questions: the choices as one list, the recommended one marked in place ----
 const norm = (x) => String(x ?? '').trim().toLowerCase();
+// a goal approval's choices, as the verdicts goal decide takes: the press sends one of these, nothing else
+const GOAL_VERDICTS = { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' };
 function choicesOf(q) {
   let list = (q.choices || []).length ? q.choices.map((c) => ({ ...c })) : (q.options || []).map((label) => ({ label }));
   if (q.kind === 'goal-approval') list = [
@@ -2195,11 +2197,15 @@ function choicesOf(q) {
   if (isOa(q)) return doneCant.map((c) => ({ ...c, rec: false }));
   if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = doneCant;
   // a goal's approval takes only Approve, Refine or Let go (goal decide): a recommendation in other
-  // words ("Yes") marks Approve rather than adding a choice the press can't send
-  const rec = q.kind === 'goal-approval' && /^(yes|approve[ds]?|go ahead)\b/i.test(String(q.recommendation ?? '').trim()) ? 'Approve' : q.recommendation;
+  // words ("Yes") marks Approve rather than adding a choice the press can't send; only words that say
+  // just yes do ("Yes, but refine the measure" marks nothing)
+  const rec = q.kind === 'goal-approval' && /^(yes|approve[ds]?|go ahead)[\s.!]*$/i.test(String(q.recommendation ?? '').trim()) ? 'Approve' : q.recommendation;
   if (rec && !list.some((c) => norm(c.label) === norm(rec)) && q.kind !== 'goal-approval') list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
+// A goal approval's recommendation that marks none of the three verdicts ("Refine the measure"): said
+// in words, as an owner-action's suggestion is, never a choice the press couldn't send.
+const goalSuggest = (q, list) => (q.kind === 'goal-approval' && String(q.recommendation ?? '').trim() && !list.some((c) => c.rec) ? `<p class="meta" data-goal-suggest>Suggested: ${esc(q.recommendation)}</p>` : '');
 // An open owner-action without secrets: the card the owner acts from. An answered one (its drawer)
 // keeps the list as asked, so the record shows what the owner saw.
 const isOa = (q) => !!q && q.kind === 'owner-action' && !(q.secrets || []).length && q.status === 'open';
@@ -2411,7 +2417,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
-      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
+      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
@@ -5697,7 +5703,13 @@ function overlaid(raw) {
 const redrawNow = () => { if (RAW) drawOrHold(HELD ?? RAW, true); };
 const savingNote = () => { const el = $('saving'); if (el) el.hidden = SAVING === 0; };
 addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } });
-function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError }) {
+// The servers' (the dashboard's, the hub's, the gateway's) terse refusal of a body they couldn't
+// read says nothing the owner can act on: it is said in plain words, the press's own (plain) if it
+// has some. Any other refusal is the server's own words.
+const TERSE_REFUSAL = /^(missing or invalid fields\b|bad json$)/;
+const PLAIN_REFUSAL = 'the server didn\'t take what this page sent, and nothing was recorded. Reload the page and try again.';
+const GOAL_REFUSAL = 'the server didn\'t take this approval as sent, and nothing was recorded. Reload the page and press Approve, Refine or Let go again.';
+function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError, plain }) {
   SAVING++;
   savingNote();
   const ov = overlay ? { ...overlay, confirmedAt: 0 } : null;
@@ -5711,7 +5723,7 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk, onError
       const { action, body } = build();
       const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
       try { out = await r.json(); } catch { out = null; }
-      if (!r.ok || !out) error = [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
+      if (!r.ok || !out) error = TERSE_REFUSAL.test(out?.error ?? '') ? plain || PLAIN_REFUSAL : [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
     } catch (e) { error = `could not send: ${e.message || e}`; }
     if (error) {
       // what the server did before it refused (a partly posted set of secrets) shows on the next read
@@ -5782,7 +5794,7 @@ function holdOverlay(id, mode) {
 // An answer, at once: the card says so, and the server is told. The answer names the question as
 // this page showed it; one changed since is refused, and the card comes back, saying why until the
 // owner dismisses it (REFUSED). stays: false keeps the caller's own one-off error line (a review's).
-function answerPress(id, card, errId, text, build, { stays = true } = {}) {
+function answerPress(id, card, errId, text, build, { stays = true, plain } = {}) {
   const f = cardFields(id, card);
   return press(`q:${id}`, {
     build,
@@ -5792,6 +5804,7 @@ function answerPress(id, card, errId, text, build, { stays = true } = {}) {
     onOk: () => { REFUSED.delete(id); delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
     ...(stays ? { onError: (e) => REFUSED.set(id, { reason: e, n: ++REFUSALS }) } : {}),
     errId,
+    plain,
   });
 }
 const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
@@ -8471,7 +8484,7 @@ document.addEventListener('click', async (ev) => {
       if (open.length) { NOT_DONE.set(id, open); oaPaint(); return; }
     }
     if (NOT_DONE.delete(id)) oaPaint();
-    if (goalId && !['Approve', 'Refine', 'Let go'].includes(picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
+    if (goalId && !Object.hasOwn(GOAL_VERDICTS, picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = card?.querySelector('input[data-auto]:checked')?.value;
     const asRule = card?.querySelector('input[data-rulebox]')?.checked;
@@ -8481,8 +8494,8 @@ document.addEventListener('click', async (ev) => {
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
-      ? { action: 'goal-decide', body: { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined } }
-      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }));
+      ? { action: 'goal-decide', body: { id: goalId, verdict: GOAL_VERDICTS[picked], notes: note || undefined } }
+      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }), goalId ? { plain: GOAL_REFUSAL } : {});
     return;
   }
   // Keep it / Retire it on the Inbox's lesson card (a peek's Retire it starts a thread: kit-88 spec §2.3)
