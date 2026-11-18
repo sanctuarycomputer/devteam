@@ -14683,10 +14683,16 @@ function claimRestart(name, budget, now = Date.now()) {
   } catch { return null; }
 }
 // `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
-// needs both markers, and TMUX stays so the child talks to this tmux server
+// needs both markers, and TMUX stays so the child talks to this tmux server. Its worktree_setup is
+// given DEVTEAM_SETUP_DEADLINE, 5 s before the child's own SIGKILL, or the one this process was
+// given if that is still ahead and earlier (one handed down is never moved later; a past one is ignored).
 function relaunchChild(launch, flag, budget) {
   const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  const now = Date.now();
+  const own = process.env.DEVTEAM_SETUP_DEADLINE ? Number(process.env.DEVTEAM_SETUP_DEADLINE) : NaN;
+  const mine = now + budget - 5000;
+  env.DEVTEAM_SETUP_DEADLINE = String(Number.isFinite(own) && own > now ? Math.min(own, mine) : mine);
   return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 // A session cswap's switch stopped while it waited on its limit: Claude Code says "Automatic continue
@@ -14720,7 +14726,8 @@ function loginChangedStop(target, name, budget, ours) {
   return ok ? 'continued' : 'failed';
 }
 // Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
-// 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
+// 'gave-up' (stopped again, past the cap), 'slot-held' (its setup found no slot: left running, no
+// attempt spent), or null when there is nothing to do. A running Claude Code
 // session keeps the limit it hit even after the machine's login moves to an account with room (typing
 // "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
 // would, in a fresh process on the active account, continuing the same conversation. makeSession
@@ -14734,9 +14741,11 @@ function restartPane(name, launch, budget) {
   if (login !== false) return login;
   if (!paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
   const now = Date.now();
-  const verdict = claimRestart(name, budget);
+  const verdict = claimRestart(name, budget, now);
   if (verdict !== 'go') return verdict;
   const r = relaunchChild(launch, '--replace-agent', budget);
+  // no setup slot came free before the deadline: nothing was done, so the attempt is given back
+  if (r.status === setupSlots.SLOT_WAIT) { releaseRestart(name, now); return 'slot-held'; }
   const ok = r.status === 0;
   const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: name, detail: ok ? 'a session stopped at a usage limit was restarted on the active account, which has room' : `a session stopped at a usage limit could not be restarted: ${why}`, detector: 'pane', source_key: `limit-restarted ${name} ${now}` });
@@ -14821,14 +14830,16 @@ function hasWorktreeSetup(name, [role]) {
   const s = (t ? repoOfTicket(t) : repo('home')).settings;
   return !!s.worktree_setup && setupMarker.needed(path.join(mainRoot, '.worktrees', name), s);
 }
-// Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
+// Bring one back in a new window: 'relaunched', 'failed', 'gave-up', 'slot-held' (its setup found no
+// slot before the deadline: the attempt given back, tried next tick), or null when not due. --if-gone
 // refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
 function relaunchGone(name, launch, budget) {
   const now = Date.now();
-  const verdict = claimRestart(name, budget);
+  const verdict = claimRestart(name, budget, now);
   if (verdict !== 'go') return verdict;
   const r = relaunchChild(launch, '--if-gone', budget);
   if (r.status === IF_GONE_LEFT) return 'left';
+  if (r.status === setupSlots.SLOT_WAIT) { releaseRestart(name, now); return 'slot-held'; }
   const ok = r.status === 0;
   const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
   appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: name, detail: ok ? 'a session whose window was gone after the machine stopped was relaunched' : `a session whose window was gone could not be relaunched: ${why}`, detector: 'pane', source_key: `session-relaunched ${name} ${now}` });
@@ -16771,6 +16782,8 @@ function cmdAccountsTick() {
   const bin = findCswap();
   const before = accountsState();
   const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [], relaunched: [] };
+  // sessions whose resume found no setup slot (restartPane or relaunchGone): no attempt, tried next tick
+  state.slot_held = 0;
   let switched = false;
   let supervisorRestarted = false;
   let supervisorRefused = null;
@@ -16830,6 +16843,7 @@ function cmdAccountsTick() {
           if (!launch || held(name)) continue;
           const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
+          else if (did === 'slot-held') state.slot_held += 1;
           else if (did) tries += 1;
           if (did === 'restarted' || did === 'continued') state.resumed.push(name);
           if (did === 'continued') continued.add(name);
@@ -16860,12 +16874,14 @@ function cmdAccountsTick() {
       if (full) said = full;
       const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
+      else if (did === 'slot-held') state.slot_held += 1;
       else if (did) tries += 1;
       else if (could) state.memory_held += 1;
       if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
     }
     if (state.memory_held && state.memory_held !== before?.memory_held) out(`${plural(state.memory_held, 'gone session')} wait${state.memory_held === 1 ? 's' : ''} for room to relaunch: ${said.words}`);
   }
+  if (state.slot_held && state.slot_held !== before?.slot_held) out(`${plural(state.slot_held, 'gone session')} wait${state.slot_held === 1 ? 's' : ''} for a setup slot`);
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
   if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;

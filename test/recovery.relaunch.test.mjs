@@ -2,12 +2,13 @@
 // while the machine's memory is at its ceiling): the guards, the order, the race, the caps.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { hasTmux, json, until, write } from './lib/kit.mjs';
-import { findings, fixture, OFF, sleepMs, STUB_SHELL } from './lib/recovery-fixture.mjs';
+import { findings, fixture, HOME, MENU, OFF, sleepMs, STUB_SHELL } from './lib/recovery-fixture.mjs';
 
 // The machine's memory as a test sets it: at or over the 80% ceiling (no relaunch), or under it.
 const memory = (F, availGb) => { const f = path.join(F.base, `meminfo-${availGb}`); write(f, `MemTotal:       8388608 kB\nMemFree:         262144 kB\nMemAvailable:   ${Math.round(availGb * 1048576)} kB\n`); return { ...OFF, DEVTEAM_MEMINFO: f, DEVTEAM_CGROUP: path.join(F.base, 'no-cgroup') }; };
@@ -345,4 +346,183 @@ test('with a worktree_setup, a later relaunch in a tick starts only with the ful
     F.tick(UNDER(F));
     assert.deepEqual(F.state().relaunched, ['plan-p91']);
   } finally { F.done(); }
+});
+
+// kit-596: relaunches carry the setup deadline, and a relaunch that finds no setup slot costs no
+// attempt. The slots are the fixture's shared HOME's (~/.devteam/setup-slots), set up and removed by
+// each test. A test that waits sets DEVTEAM_SETUP_DEADLINE a few seconds ahead, afresh on each tick.
+const SLOTS = path.join(HOME, '.devteam', 'setup-slots');
+const clearSlots = () => { if (path.dirname(path.dirname(SLOTS)) === HOME && path.basename(SLOTS) === 'setup-slots') fs.rmSync(SLOTS, { recursive: true, force: true }); };
+const deadlineIn = (ms) => ({ DEVTEAM_SETUP_DEADLINE: String(Date.now() + ms) });
+// the fleet's committed worktree_setup
+const withSetup = (F, cmd) => {
+  const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"worktree_setup": ${JSON.stringify(cmd)},\n  "project":`));
+  execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
+};
+// a process's start time as the kit reads it: field 22 of /proc/<pid>/stat, or ps lstart off Linux
+function startOf(pid) {
+  try { const t = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return t.slice(t.lastIndexOf(')') + 2).split(' ')[19]; } catch {}
+  return (spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '').trim() || null;
+}
+// slot n held by a live process (a sleep this test starts), its holder written temp-then-rename
+async function holdSlot(n) {
+  const c = spawn('sleep', ['290'], { stdio: 'ignore' });
+  const exited = new Promise((r) => c.once('exit', r));
+  const start = await until(() => startOf(c.pid), 'the holder started');
+  fs.mkdirSync(SLOTS, { recursive: true });
+  const tmp = path.join(SLOTS, `.test-${process.pid}-${n}`);
+  fs.mkdirSync(tmp);
+  fs.writeFileSync(path.join(tmp, 'holder.json'), JSON.stringify({ id: `test-${process.pid}-${n}`, pid: c.pid, start, at: new Date().toISOString() }));
+  fs.renameSync(tmp, path.join(SLOTS, String(n)));
+  // killed and reaped: a zombie still reads as alive
+  return async () => { if (c.exitCode === null && c.signalCode === null) { c.kill('SIGKILL'); await exited; } };
+}
+const observations = (F) => json(F.run(['log', '--type', 'observation', '--json']).stdout);
+const restarts = (F) => (fs.existsSync(F.restartsFile) ? json(fs.readFileSync(F.restartsFile, 'utf8')) : {});
+
+test('5a: a relaunch hands its setup a deadline 5 s inside its own 100 s', { skip: !hasTmux }, async () => {
+  const F = fixture('deadline');
+  clearSlots();
+  try {
+    const log = path.join(F.base, 'deadline.log');
+    withSetup(F, `echo "$DEVTEAM_SETUP_DEADLINE $(${process.execPath} -e 'console.log(Date.now())')" >> ${log}`);
+    F.worker('demo-101-dl');
+    const start = Date.now();
+    assert.match(F.tick(UNDER(F)), /relaunched demo-101-dl/);
+    const [deadline, clock] = fs.readFileSync(log, 'utf8').trim().split(' ').map(Number);
+    assert.ok(Number.isFinite(deadline) && Number.isFinite(clock), fs.readFileSync(log, 'utf8'));
+    assert.ok(start + 95000 <= deadline, `the deadline ${deadline} is at least the tick's start ${start} + 95 s`);
+    assert.ok(deadline <= clock + 95000, `the deadline ${deadline} is no later than the setup's clock ${clock} + 95 s`);
+  } finally { clearSlots(); F.done(); }
+});
+
+test('5a\': a relaunch that starts the tmux server leaves no deadline in it; a deadline already past is not handed down', { skip: !hasTmux }, async () => {
+  const F = fixture('deadline-reboot');
+  clearSlots();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-recovery-'));
+  const env = (extra = {}) => ({ ...UNDER(F), TMUX_TMPDIR: dir, ...extra });
+  try {
+    // the stand-in agent says what deadline its window's environment holds
+    const envLog = path.join(F.base, 'agent-env.log');
+    write(path.join(F.base, 'relaunch.cjs'), `const fs = require('fs'); fs.appendFileSync(${JSON.stringify(envLog)}, (process.env.DEVTEAM_SETUP_DEADLINE ?? 'none') + '\\n'); fs.appendFileSync(${JSON.stringify(path.join(F.base, 'launched.log'))}, require('path').basename(process.cwd()) + '\\n'); setInterval(() => {}, 1000);`);
+    withSetup(F, 'true');
+    F.worker('demo-102-boot');
+    assert.match(F.tick(env()), /relaunched demo-102-boot/);
+    await until(() => F.relaunched().length === 1, 'resumed');
+    const shown = spawnSync('tmux', ['show-environment', '-g', 'DEVTEAM_SETUP_DEADLINE'], { encoding: 'utf8', env: { ...process.env, TMUX_TMPDIR: dir } });
+    assert.ok(shown.status !== 0 || /^-DEVTEAM_SETUP_DEADLINE$/m.test(shown.stdout) || shown.stdout.trim() === '', `the server's environment has no deadline: ${shown.stdout}`);
+    assert.deepEqual(fs.readFileSync(envLog, 'utf8').trim().split('\n'), ['none'], 'the window has no deadline');
+    // a tick whose own deadline is already past: ignored, so the setup runs and the session comes back
+    F.worker('demo-103-past');
+    const out = F.tick(env({ DEVTEAM_SETUP_DEADLINE: String(Date.now() - 60000) }));
+    assert.match(out, /relaunched demo-103-past/);
+    assert.doesNotMatch(out, /could not relaunch/);
+  } finally {
+    spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: dir } });
+    fs.rmSync(dir, { recursive: true, force: true });
+    clearSlots();
+    F.done();
+  }
+});
+
+test('5b: a gone session whose resume finds no setup slot waits, spending no attempt, and comes back once one frees', { skip: !hasTmux }, async () => {
+  const F = fixture('slotwait');
+  clearSlots();
+  let free = async () => {};
+  try {
+    withSetup(F, 'true');
+    F.worker('demo-104-slot');
+    free = await holdSlot(0);
+    for (let i = 0; i < 4; i++) {
+      const out = F.tick({ ...UNDER(F), DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(2000) });
+      if (i === 0) assert.match(out, /^1 gone session waits for a setup slot$/m);
+      else assert.doesNotMatch(out, /setup slot/, 'said when the number changes, not every tick');
+      assert.doesNotMatch(out, /relaunched|could not/);
+      const st = F.state();
+      assert.equal(st.slot_held, 1);
+      assert.equal(st.memory_held, 0);
+      assert.deepEqual(st.restart_gave_up, []);
+      assert.deepEqual(st.relaunched, []);
+      assert.ok(!restarts(F)['demo-104-slot'], `no attempt in the record: ${JSON.stringify(restarts(F))}`);
+    }
+    assert.ok(!observations(F).some((o) => o.kind === 'session-relaunched' && /could not/.test(o.detail)), 'no failure logged');
+    assert.ok(!findings(F).some((f) => f.kind === 'restart-gave-up'));
+    await free();
+    const out = F.tick({ ...UNDER(F), DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(20000) });
+    assert.match(out, /relaunched demo-104-slot/);
+    assert.equal(F.state().slot_held, 0);
+    assert.equal(restarts(F)['demo-104-slot'].length, 1);
+    await until(() => F.relaunched().length === 1, 'resumed');
+  } finally { await free(); clearSlots(); F.done(); }
+});
+
+test('5c: a pane stopped at a limit whose resume finds no setup slot is left running, its attempt given back', { skip: !hasTmux }, async () => {
+  const F = fixture('slotlimit');
+  clearSlots();
+  let free = async () => {};
+  try {
+    withSetup(F, 'true');
+    F.worker('demo-105-limit');
+    const pane = F.agent('demo-105-limit', MENU);
+    await until(() => pane.shows().includes('Esc to cancel'), 'the menu on screen');
+    const pid = Number(spawnSync('tmux', ['display-message', '-p', '-t', `=${F.session}:demo-105-limit`, '#{pane_pid}'], { encoding: 'utf8' }).stdout.trim());
+    assert.ok(pid > 1);
+    const env = () => ({ ...UNDER(F), DEVTEAM_CSWAP: F.cswap, DEVTEAM_SETUP_SLOTS: '1', ...deadlineIn(2000) });
+    assert.equal(F.tick(env()), '', 'the first tick: the account has not settled');
+    free = await holdSlot(0);
+    const out = F.tick(env());
+    assert.match(out, /^1 gone session waits for a setup slot$/m);
+    assert.doesNotMatch(out, /restarted|could not/);
+    const st = F.state();
+    assert.equal(st.slot_held, 1);
+    assert.deepEqual(st.resumed, []);
+    assert.deepEqual(st.restart_gave_up, []);
+    assert.ok(!restarts(F)['demo-105-limit'], `the attempt given back: ${JSON.stringify(restarts(F))}`);
+    assert.doesNotThrow(() => process.kill(pid, 0), 'the pane\'s process is still alive');
+    assert.equal(Number(spawnSync('tmux', ['display-message', '-p', '-t', `=${F.session}:demo-105-limit`, '#{pane_pid}'], { encoding: 'utf8' }).stdout.trim()), pid, 'not replaced');
+    assert.match(pane.shows(), /Esc to cancel/);
+    assert.equal(pane.keys(), '');
+    assert.ok(!observations(F).some((o) => o.kind === 'limit-restarted'), 'nothing logged');
+  } finally { await free(); clearSlots(); F.done(); }
+});
+
+test('5d: a setup killed at the deadline is a failed attempt, and leaves no process behind', { skip: !hasTmux }, async () => {
+  const F = fixture('slotdeadline');
+  clearSlots();
+  const left = () => (spawnSync('pgrep', ['-f', 'sleep 71'], { encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean);
+  try {
+    withSetup(F, 'sleep 71 & sleep 71');
+    F.worker('demo-106-late');
+    const out = F.tick({ ...UNDER(F), ...deadlineIn(2000) });
+    assert.match(out, /could not relaunch demo-106-late/);
+    assert.doesNotMatch(out, /setup slot/);
+    assert.equal(F.state().slot_held, 0);
+    assert.equal(restarts(F)['demo-106-late']?.length, 1, 'one attempt counted');
+    assert.ok(observations(F).some((o) => o.kind === 'session-relaunched' && /could not/.test(o.detail)));
+    await until(() => left().length === 0, 'no sleep 71 left');
+  } finally { clearSlots(); F.done(); }
+});
+
+test('5f: a later relaunch whose worktree\'s setup marker matches comes back in the same tick', { skip: !hasTmux }, async () => {
+  const F = fixture('slotmarker');
+  clearSlots();
+  try {
+    withSetup(F, 'sleep 12');
+    F.worker('demo-107-plain');
+    F.worker('demo-108-marked');
+    // a real checkout of its own, whose setup marker matches 'sleep 12' and its (no) lockfiles
+    const wt = path.join(F.root, '.worktrees', 'demo-108-marked');
+    execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'ticket/demo-108-marked', wt], { cwd: F.root });
+    const LOCKS = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Gemfile.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'go.sum', 'composer.lock'];
+    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+    const files = {};
+    const dirs = ['', ...fs.readdirSync(wt, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name)];
+    for (const d of dirs) for (const l of LOCKS) { const f = path.join(wt, d, l); if (fs.existsSync(f) && fs.lstatSync(f).isFile()) files[d ? `${d}/${l}` : l] = sha(fs.readFileSync(f)); }
+    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt, encoding: 'utf8' }).trim();
+    write(path.join(gitDir, 'devteam-setup'), `${JSON.stringify({ v: 1, setup: sha('sleep 12'), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) })}\n`);
+    F.tick(UNDER(F));
+    assert.deepEqual(F.state().relaunched, ['demo-107-plain', 'demo-108-marked'], 'both in one tick');
+    await until(() => F.relaunched().length === 2, 'both resumed');
+  } finally { clearSlots(); F.done(); }
 });
