@@ -300,11 +300,11 @@ test("a worker or planner the kit launched, stopped by a login change, is sent o
   const F = fixture('login-panes');
   try {
     // a bare stop under the banner: limitStop alone would read it as a limit stop and relaunch
-    const w = F.worker('kit-9-w', stop(''));
+    const w = F.worker('demo-09-login', stop(''));
     const p = F.planner('p', stop());
     const wrapped = F.planner('wrap', [MENU[0], '⎿  Automatic continue stopped · your login changed or ended · send a prompt', '   to continue', RULE, '❯ ', RULE]);
     const enter = F.planner('enter', stop('⎿  ', `❯ ${PROMPT}`));
-    const nw = F.worker('kit-9-n', stop(), { launched: false });
+    const nw = F.worker('demo-10-unlaunched', stop(), { launched: false });
     const np = F.planner('n', stop(), { launched: false });
     const seen = F.planner('seen', [...stop().slice(0, 2), `> ${PROMPT}`, '⏺ Carrying on.', RULE, '❯ ', RULE]);
     const later = F.planner('later', [...stop().slice(0, 2), '⏺ Done with that.', RULE, '❯ ', RULE]);
@@ -320,7 +320,7 @@ test("a worker or planner the kit launched, stopped by a login change, is sent o
       await new Promise((r) => setTimeout(r, 300));
     }
     for (const [x, k] of want) await until(() => x.keys() === k, `keys ${JSON.stringify(k)}`);
-    assert.deepEqual(resumed.sort(), ['kit-9-w', 'plan-enter', 'plan-p', 'plan-wrap']);
+    assert.deepEqual(resumed.sort(), ['demo-09-login', 'plan-enter', 'plan-p', 'plan-wrap']);
     F.tick();
     F.tick();
     for (const [x, k] of want) assert.equal(x.keys(), k, 'once per stop');
