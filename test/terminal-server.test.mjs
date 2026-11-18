@@ -1234,3 +1234,97 @@ test('terminal A7c: posts one at a time in arrival order, each seq taken once; a
   assert.equal(spawnSync('tmux', ['delete-buffer', '-b', left[0]], { env: T.env }).status, 0);
   s.kill();
 });
+
+// ---- nothing typed is logged; agent HTML stays sandboxed (terminal@1 not-logged, S14) ----
+const filesUnder = (dir) => { const out = []; const walk = (d) => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.isFile()) out.push(p); } }; walk(dir); return out; };
+// every place the marker could be: the marker, its hex (both cases) and its UTF-8 bytes
+const leaks = (T, dash, marker) => {
+  const needles = [marker, hex(marker), hex(marker).toUpperCase(), Buffer.from(marker, 'utf8').toString('latin1')];
+  const bad = [];
+  const holds = (buf) => needles.some((n) => buf.includes(Buffer.from(n, 'latin1')));
+  if (holds(Buffer.from(dash.out(), 'utf8'))) bad.push('the dashboard output');
+  for (const d of ['docs/devteam/run', 'docs/devteam/project/log']) for (const f of filesUnder(path.join(T.root, d))) if (holds(fs.readFileSync(f))) bad.push(f);
+  return bad;
+};
+
+test('terminal not logged: a typed or pasted marker, sent, refused or failed, is in no log, no file and no output', async () => {
+  const T = termFixture('term-nolog');
+  after(() => T.done());
+  const marker = `kit612-marker-${crypto.randomBytes(8).toString('hex')}`;
+  const s = T.standIn({ lines: ['not-logged stand-in'] });
+  const { dash, port } = await T.dashboard();
+  await screenUntil(T, port, (j) => j.state === 'live' && j.pane === s.pane, 'live');
+  const tok = await tokenOf(T, port);
+  const o = await openShellAt(T, port, tok, 80, 24);
+  assert.equal(o.status, 200, o.text);
+  const shell = o.json.pane;
+  let seq = 0, shellSeq = 0;
+  const sup = (more, extra) => keysTo(T, port, 'supervisor', keysBody(tok, s.pane, ++seq, more), extra);
+  const sh = (more) => keysTo(T, port, 'shell', keysBody(tok, shell, ++shellSeq, more, 'shell'));
+  // typed (as data) and pasted, on both tabs
+  for (const r of [await sup({ data: hex(marker) }), await sup({ paste: marker }), await sh({ data: hex(marker) }), await sh({ paste: marker })]) { assert.equal(r.status, 200, r.text); assert.equal(r.json.taken, true); }
+  assert.ok(String(await s.received()).includes(marker), 'the marker was typed on the supervisor');
+  // refused: a wrong token, and a body of another shape, each carrying it
+  refusedWith(await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, ++seq, { data: hex(marker) }), token: 'f'.repeat(64) }), 403, W.token, 'a wrong token');
+  refusedWith(await keysTo(T, port, 'supervisor', { ...keysBody(tok, s.pane, ++seq, { data: hex(marker) }), extra: marker }), 400, W.shape, 'a body of the wrong shape');
+  // failed: a send-keys, a paste-buffer and a load-buffer that fail
+  const fail = path.join(T.F.base, 'tmux-fail.json');
+  for (const [key, more, tab] of [['send-keys', { data: hex(marker) }, sup], ['paste-buffer', { paste: marker }, sup], ['load-buffer', { paste: marker }, sup], ['send-keys', { data: hex(marker) }, sh], ['paste-buffer', { paste: marker }, sh]]) {
+    write(fail, JSON.stringify({ [key]: `server exited unexpectedly ${key}` }));
+    const r = await tab(more);
+    fs.rmSync(fail);
+    assert.equal(r.status, 500, `${key}: ${r.text}`);
+  }
+  await pause(300);
+  assert.deepEqual(leaks(T, dash, marker), [], 'the marker, its hex and its bytes are nowhere');
+  assert.ok(fs.existsSync(path.join(T.root, 'docs/devteam/run/dashboard.log')) || dash.out().length > 0, 'there was output to search');
+  // the check can fail: the marker written to run/ by hand is found
+  const planted = path.join(T.root, 'docs/devteam/run/planted');
+  write(planted, `${marker}\n`);
+  assert.deepEqual(leaks(T, dash, marker), [planted], 'a planted marker is seen');
+  fs.rmSync(planted);
+  s.kill();
+});
+
+// a header's directives, split on ; and trimmed
+const directives = (csp) => String(csp ?? '').split(';').map((d) => d.trim()).filter(Boolean);
+const assertSandboxed = (r, what) => {
+  assert.equal(r.status, 200, `${what}: ${r.status} ${r.text.slice(0, 200)}`);
+  const sb = directives(r.headers['content-security-policy']).filter((d) => d.split(/\s+/)[0].toLowerCase() === 'sandbox');
+  assert.equal(sb.length, 1, `${what}: one sandbox directive in ${r.headers['content-security-policy']}`);
+  assert.ok(!sb[0].split(/\s+/).slice(1).includes('allow-same-origin'), `${what}: ${sb[0]} lifts the origin`);
+};
+
+test('terminal sandbox: artifacts, repo files, review pages and dropped files are served in a sandbox without allow-same-origin', async () => {
+  const T = termFixture('term-sbx');
+  after(() => T.done());
+  const git = (args) => spawnSync('git', args, { cwd: T.root, encoding: 'utf8' });
+  const art = 'docs/devteam/project/artifacts/sbx';
+  write(path.join(T.root, art, 'index.html'), '<!doctype html><title>x</title><p>agent page</p>\n');
+  write(path.join(T.root, art, 'pic.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>\n');
+  write(path.join(T.root, 'a.html'), '<!doctype html><script>1</script>\n');
+  write(path.join(T.root, 'a.svg'), '<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>\n');
+  write(path.join(T.root, 'a.xml'), '<?xml version="1.0"?><a/>\n');
+  for (const a of [['add', '-A'], ['commit', '-qm', 'sandbox fixtures'], ['push', '-q', 'origin', 'main']]) { const g = git(a); assert.equal(g.status, 0, `${a.join(' ')}: ${g.stderr}`); }
+  const { port } = await T.dashboard([], { HOME: fs.mkdtempSync(path.join(T.F.base, 'home-')) });
+  const frame = { ...SAME, 'sec-fetch-dest': 'iframe' };
+  const get = (p, headers) => T.req(port, 'GET', p, { headers });
+  for (const h of [frame, SAME, {}]) {
+    assertSandboxed(await get(`/artifact/main/sbx/index.html`, h), `artifact page ${JSON.stringify(h)}`);
+    assertSandboxed(await get(`/artifact/main/sbx/`, h), `artifact root ${JSON.stringify(h)}`);
+    assertSandboxed(await get(`/artifact/main/sbx/pic.svg`, h), `artifact svg ${JSON.stringify(h)}`);
+  }
+  for (const f of ['a.html', 'a.svg', 'a.xml']) assertSandboxed(await get(`/api/file?path=${f}`, SAME), `/api/file ${f}`);
+  assertSandboxed(await get('/review/preview/?path=a.html', frame), 'review page');
+  // dropped as the page drops them: a post with its own Origin, then read back as the page would
+  for (const name of ['drop.html', 'drop.svg']) {
+    const body = name.endsWith('html') ? '<script>1</script>' : '<svg xmlns="http://www.w3.org/2000/svg"/>';
+    const up = await T.req(port, 'POST', `/upload?name=${name}`, { headers: { origin: `http://127.0.0.1:${port}`, ...SAME, 'content-length': String(Buffer.byteLength(body)) }, body });
+    assert.equal(up.status, 200, `upload ${name}: ${up.text}`);
+    const [, folder, file] = /\/([^/]+)\/([^/]+)$/.exec(up.json.path);
+    for (const h of [frame, SAME]) assertSandboxed(await get(`/upload/${folder}/${file}`, h), `/upload ${name} ${JSON.stringify(h)}`);
+  }
+  // the check can fail: no header, and a lifted one, are each refused by it
+  assert.throws(() => assertSandboxed({ status: 200, text: '', headers: {} }, 'none'));
+  assert.throws(() => assertSandboxed({ status: 200, text: '', headers: { 'content-security-policy': "default-src 'none'; sandbox allow-scripts allow-same-origin" } }, 'lifted'));
+});
