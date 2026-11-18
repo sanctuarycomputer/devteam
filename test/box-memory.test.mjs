@@ -60,6 +60,9 @@ test('check 2: each refusal starts with the path of the field it names', () => {
     ['at with an offset', (r) => { r.at = '2026-11-17T00:00:00+00:00'; }, 'at'],
     ['at with no Z', (r) => { r.at = '2026-11-17T00:00:00'; }, 'at'],
     ['at a number', (r) => { r.at = 1763337600000; }, 'at'],
+    ['at month 13', (r) => { r.at = '2026-13-01T00:00:00Z'; }, 'at'],
+    ['at February 30', (r) => { r.at = '2026-02-30T00:00:00Z'; }, 'at'],
+    ['at hour 24', (r) => { r.at = '2026-11-17T24:00:00Z'; }, 'at'],
     ['no working_set', (r) => { delete r.working_set; }, 'working_set'],
     ['working_set -1', (r) => { r.working_set = -1; }, 'working_set'],
     ['working_set 1.5', (r) => { r.working_set = 1.5; }, 'working_set'],
@@ -77,6 +80,8 @@ test('check 2: each refusal starts with the path of the field it names', () => {
     ['kinds an array', (r) => { r.kinds = []; }, 'kinds'],
     ['sessions -1', (r) => { r.sessions = -1; }, 'sessions'],
     ['sessions 1.5', (r) => { r.sessions = 1.5; }, 'sessions'],
+    ['devteam a string', (r) => { r.devteam = 'x'; }, 'devteam'],
+    ['devteam an array', (r) => { r.devteam = [{ n: 1, rss: 1 }]; }, 'devteam'],
     ['devteam "Not A Command"', (r) => { r.devteam = { 'Not A Command': { n: 1, rss: 1 } }; }, 'devteam["Not A Command"]'],
     ['devteam.hello with x', (r) => { r.devteam.hello.x = 1; }, 'devteam.hello.x'],
     ['devteam.hello with no rss', (r) => { delete r.devteam.hello.rss; }, 'devteam.hello.rss'],
@@ -89,6 +94,8 @@ test('check 2: each refusal starts with the path of the field it names', () => {
     ['a project sessions -1', (r) => { r.projects['devteam-dev'].sessions = -1; }, 'projects.devteam-dev.sessions'],
     ['a project with another key', (r) => { r.projects['devteam-dev'].kinds = {}; }, 'projects.devteam-dev.kinds'],
     ['a project not an object', (r) => { r.projects['devteam-dev'] = 5; }, 'projects.devteam-dev'],
+    ['projects a number', (r) => { r.projects = 5; }, 'projects'],
+    ['projects an array', (r) => { r.projects = [{ rss: 1 }]; }, 'projects'],
     ['a project named ""', (r) => { r.projects[''] = { rss: 1 }; }, 'projects[""]'],
     ['projects["my.app"].rss -1', (r) => { r.projects['my.app'] = { rss: -1 }; }, 'projects["my.app"].rss'],
     ['ceiling 1.2', (r) => { r.ceiling = 1.2; }, 'ceiling'],
@@ -110,6 +117,26 @@ test('check 2: each refusal starts with the path of the field it names', () => {
     const got = memoryReadingProblem(input);
     assert.equal(typeof got, 'string', `${name} is refused`);
     assert.ok(got.startsWith('reading '), `${name}: "${got}" starts with "reading "`);
+  }
+});
+
+test('check 2: a value JSON cannot print is refused with words, never a throw', () => {
+  const { memoryReadingProblem } = fns();
+  const loop = []; loop.push(loop);
+  const self = { n: 1.5 }; self.self = self;
+  const bare = Object.create(null);
+  for (const [name, change, want] of [
+    ['a BigInt working_set', (r) => { r.working_set = 10n; }, 'working_set'],
+    ['a BigInt max', (r) => { r.max = 1n; }, 'max'],
+    ['a circular kinds entry', (r) => { r.kinds.agent = loop; }, 'kinds.agent'],
+    ['a circular object as kinds', (r) => { r.kinds = self; }, 'kinds.n'],
+    ['a prototype-less project entry', (r) => { r.projects['devteam-dev'] = bare; }, 'projects.devteam-dev.rss'],
+    ['a prototype-less devteam value', (r) => { r.projects['devteam-dev'].devteam = { hello: bare }; }, 'projects.devteam-dev.devteam.hello'],
+  ]) {
+    const r = reading(); change(r);
+    let got; assert.doesNotThrow(() => { got = memoryReadingProblem(r); }, name);
+    assert.equal(typeof got, 'string', `${name} is refused`);
+    assert.ok(got.startsWith(`${want} `), `${name}: "${got}" starts with "${want} "`);
   }
 });
 

@@ -16020,7 +16020,18 @@ const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray
 // A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
 // so a name with a dot can't read as two fields.
 const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
-const memoryShown = (v) => { const s = JSON.stringify(v) ?? String(v); return s.length > 60 ? `${s.slice(0, 57)}...` : s; };
+// A value as the words show it, never a throw (a writer's own object can hold a BigInt or a cycle).
+const memoryShown = (v) => {
+  let s;
+  try { s = JSON.stringify(v) ?? String(v); } catch { try { s = String(v); } catch { s = 'an unprintable value'; } }
+  return s.length > 60 ? `${s.slice(0, 57)}...` : s;
+};
+// A real UTC time in the one form: 2026-02-30 or 24:00 doesn't come back as itself, so it is refused.
+const memoryAtOk = (at) => {
+  if (typeof at !== 'string' || !MEMORY_AT.test(at)) return false;
+  const t = new Date(at);
+  return Number.isFinite(t.getTime()) && t.toISOString().slice(0, 19) === at.slice(0, 19);
+};
 const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
 // A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
 const memoryCountsProblem = (p, e) => {
@@ -16083,7 +16094,7 @@ function memoryReadingProblem(line) {
   }
   if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
   if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
-  if (typeof r.at !== 'string' || !MEMORY_AT.test(r.at) || !Number.isFinite(Date.parse(r.at))) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!memoryAtOk(r.at)) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
   if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
   const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
   if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
