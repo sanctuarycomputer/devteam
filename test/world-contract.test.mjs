@@ -171,6 +171,42 @@ test('dashboard-data.json is both documents\' dashboard blocks, each valid, and 
   assert.equal(d.self.parts[0].name, 'The app');
 });
 
+// Each refusal is a file in invalid/, listed in cases.json with the text its one error holds, so
+// kit-139 runs the self-* cases and kit-135 the exterior-* ones and they refuse the same.
+test('each invalid/ case is refused with exactly its one error', () => {
+  const cases = json('invalid/cases.json');
+  const files = fs.readdirSync(path.join(dir, 'invalid')).filter((f) => f !== 'cases.json').sort();
+  assert.deepEqual(cases.map((c) => c.file).sort(), files, 'cases.json lists every file in invalid/, and only those');
+  assert.equal(new Set(cases.map((c) => c.file)).size, cases.length, 'no case listed twice');
+  for (const { file, expect } of cases) {
+    const m = /^(self|exterior)-[a-z0-9-]+\.md$/.exec(file);
+    assert.ok(m, `${file}: named self-*.md or exterior-*.md`);
+    const errs = (m[1] === 'self' ? checkSelf : checkExterior)(read(`invalid/${file}`));
+    assert.equal(errs.length, 1, `${file}: one error, got ${JSON.stringify(errs)}`);
+    assert.ok(errs[0].includes(expect), `${file}: "${errs[0]}" names "${expect}"`);
+  }
+});
+
+test('each long-* case\'s long field is exactly 201 characters, one past the limit', () => {
+  const where = {
+    'self-long-what.md': (b) => b.what, 'self-long-makes.md': (b) => b.makes, 'self-long-controls.md': (b) => b.controls[0],
+    'self-long-not.md': (b) => b.not[0], 'self-long-part-what.md': (b) => b.parts[0].what,
+    'exterior-long-matters.md': (b) => b.entities[0].matters, 'exterior-long-signal-what.md': (b) => b.entities[0].signals[0].what,
+  };
+  const longs = json('invalid/cases.json').map((c) => c.file).filter((f) => /-long-/.test(f));
+  assert.deepEqual(longs.sort(), Object.keys(where).sort());
+  for (const [f, get] of Object.entries(where)) assert.equal(get(blockOf(`invalid/${f}`, f.split('-')[0])).length, 201, f);
+});
+
+test('the refusals include every case the ticket\'s done-when lists', () => {
+  const files = json('invalid/cases.json').map((c) => c.file);
+  for (const f of ['self-no-block.md', 'self-two-blocks.md', 'self-not-json.md', 'self-no-parts.md', 'exterior-no-block.md', 'exterior-two-blocks.md',
+    'exterior-not-json.md', 'exterior-self-block.md', 'exterior-unnamed.md', 'exterior-person.md', 'exterior-bad-relation.md', 'exterior-other-no-word.md',
+    'exterior-other-two-words.md', 'self-bad-id.md', 'exterior-bad-id.md', 'exterior-bad-signal-id.md', 'self-shared-id.md', 'exterior-shared-id.md',
+    'exterior-shared-signal-id.md', 'exterior-weight-high.md', 'exterior-weight-low.md', 'exterior-value-high.md', 'exterior-value-low.md',
+    'exterior-no-quote.md', 'exterior-signal-sensor.md', 'exterior-signal-pages.md']) assert.ok(files.includes(f), f);
+});
+
 test('dashboard-empty.json is the absent form: null under each key', () => {
   assert.deepEqual(json('dashboard-empty.json'), { self: null, exterior: null });
 });
