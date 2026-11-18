@@ -54,6 +54,33 @@
 // The cases are in test/fixtures/project-hosts.json, which the gateway's, the hub's and the
 // dashboard's tests read.
 // end project-hosts@1
+// people@1: who is on a box, in the gateway's state.json beside today's fields
+// Today's fields keep their meaning, the owner's: `passkeys` (the owner's passkeys), `sessions` (the
+// owner's sessions; each new one also names the passkey it was opened with as `method`), `pushSubs`
+// (the owner's devices), `claimHash`/`claimExpires`. "Claimed" stays `passkeys` not empty. So a gateway
+// older than this one, which reads only these, lets in the owner alone; it keeps the fields below
+// (it writes { ...load(), … }), unread, until a newer gateway returns.
+// people: [{ id, name, role, level, methods, pushSubs, added_at, last_seen, notices, rev }]
+//   id `p-` + 12 of [a-z2-7]; role 'owner' | 'admin' | 'member', exactly one owner; level 'full' |
+//   'view', an admin always full. The owner's row is named "Owner" when made (on the claim, or on
+//   the first start over a claimed box); its `methods` hold only the owner's non-passkey methods and
+//   its `pushSubs` stay [], since theirs are the top-level fields. `rev` starts at 1 and goes up on
+//   every change to the row's name, role, level or methods (not last_seen, nor a method's last_used).
+//   notices: [{ kind, at, … }]; kind 'people-reset' carries sessions_ended, invites_deleted and
+//   methods_deleted (below).
+// A method: { id, type, key, label, added_at, last_used, data }. id `m-` + 12 of [a-z2-7]. A passkey
+//   is type 'passkey', key its credential id (base64url), data { userId, jwk, alg, signCount, rp }.
+//   (type, key) is unique on the box, the owner's top-level passkeys counted as ('passkey', id).
+// peopleSessions: [{ hash, person, method, at, expires }], everyone's but the owner's, each live only
+//   while its person's row exists; dropped when expired, as `sessions` are.
+// invites: [{ hash, person, expires }].
+// peopleStamp: b64u(sha256("devteam-people-stamp-v1\n" + the owner's passkey ids, sorted, joined by
+//   "\n")), written with every change this gateway makes to `passkeys`. On start, a stamp that isn't
+//   that of `passkeys` means an older gateway reset the owner (a reclaim, a passkey removed or added):
+//   every peopleSessions entry and invite goes, and every method in the owner's row with the owner's
+//   sessions opened with one, in one write that adds a 'people-reset' notice to the owner's row.
+// A new method type adds values of `type` and its `data`; any other change bumps the version.
+// end people@1
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
