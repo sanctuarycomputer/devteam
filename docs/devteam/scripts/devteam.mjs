@@ -3085,6 +3085,93 @@ function prefixOwners(entry, components, devteamLine) {
   return [...new Set(probes.flatMap((p) => ownersOf(p, components, devteamLine)))];
 }
 /* coverage end */
+/* parts start */
+// Parts of a file, read by line (spec: what a part is). A touches entry may name one: path#name, or
+// path#+name for a part the ticket adds; only files settings.split_files lists split this way.
+const PART_NAME = /^\+?[A-Za-z0-9_$.-]+$/;
+const touchPath = (entry) => { const i = entry.indexOf('#'); return i === -1 ? entry : entry.slice(0, i); };
+const touchPart = (entry) => { const i = entry.indexOf('#'); if (i === -1) return null; const p = entry.slice(i + 1); return { name: p.replace(/^\+/, ''), added: p.startsWith('+') }; };
+const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\/|-->)\s*$/;
+const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
+const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
+const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
+// { places: Map name -> [{from, to}] (1-based, inclusive), leaves: [{key, name, from, to}] } where
+// leaves partition the file: each declaration's or heading's own lines, and the rest by region.
+function fileParts(text, file) {
+  const lines = text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const n = lines.length;
+  const places = new Map();
+  const add = (name, from, to) => { if (!places.has(name)) places.set(name, []); places.get(name).push({ from, to }); };
+  const owner = new Array(n + 1).fill(null); // line -> own leaf key (declaration or heading), else null
+  const count = new Map();
+  const own = (name, from, to) => { const k = (count.get(name) ?? 0) + 1; count.set(name, k); const key = `d:${name}#${k}`; for (let i = from; i <= to; i++) owner[i] = key; return key; };
+  // regions
+  const open = new Map();
+  const regions = [];
+  for (let i = 1; i <= n; i++) {
+    const m = lines[i - 1].match(PART_MARK);
+    if (!m) continue;
+    if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
+    else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
+  }
+  const isMark = (i) => PART_MARK.test(lines[i - 1]);
+  // only a marker at column 0 ends a declaration; an indented one sits inside a body
+  const isMark0 = (i) => isMark(i) && !/^\s/.test(lines[i - 1]);
+  if (/\.md$/i.test(file)) {
+    const heads = [];
+    let fence = null;
+    for (let i = 1; i <= n; i++) {
+      const l = lines[i - 1];
+      const f = l.match(/^\s{0,3}(`{3,}|~{3,})/);
+      if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
+      if (fence) continue;
+      const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
+    }
+    for (let j = 0; j < heads.length; j++) {
+      const h = heads[j];
+      let to = n;
+      for (let k = j + 1; k < heads.length; k++) if (heads[k].level <= h.level) { to = heads[k].i - 1; break; }
+      add(h.name, h.i, to);
+      const ownTo = j + 1 < heads.length ? heads[j + 1].i - 1 : n;
+      own(h.name, h.i, ownTo);
+    }
+  } else {
+    const html = /\.html?$/i.test(file);
+    const decls = [];
+    for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
+    // a declaration starts at the comment lines directly above it
+    for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
+    for (let j = 0; j < decls.length; j++) {
+      const d = decls[j];
+      const stop = j + 1 < decls.length ? Math.max(decls[j + 1].from, d.i + 1) : n + 1;
+      let to = d.i;
+      while (to + 1 < stop && !isMark0(to + 1) && !(html && lines[to].startsWith('<'))) to++;
+      const from = Math.max(d.from, j ? decls[j - 1].i + 1 : 1);
+      add(d.name, from, to);
+      own(d.name, from, to);
+    }
+  }
+  // the rest: lines no declaration or heading owns, by innermost region
+  const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
+  for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
+  return { places, regions, owner, lines, n };
+}
+// The leaf keys a named part covers in these parts: every leaf with a line inside one of its places.
+function partLeaves(P, name) {
+  const s = new Set();
+  for (const pl of P.places.get(name) ?? []) for (let i = pl.from; i <= pl.to; i++) s.add(P.owner[i]);
+  return s;
+}
+// Each leaf's text, trailing blank lines dropped.
+function leafTexts(P) {
+  const m = new Map();
+  for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; m.set(k, m.has(k) ? `${m.get(k)}\n${P.lines[i - 1]}` : P.lines[i - 1]); }
+  for (const [k, v] of m) m.set(k, v.replace(/(?:\n[ \t]*)+$/, ''));
+  return m;
+}
+/* parts end */
 
 // Live state of a ticket's worker: its last phase line, and its last line of any kind.
 function workerState(id) {
