@@ -33,7 +33,7 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
     assert.match(okIn(old, [...add, '--approved', qid], SUP), /links\.docs is already that in settings\.md here/, 'a second apply is a no-op (the entry is in the raw block, not yet on main)');
     assert.equal(JSON.parse(/```json devteam\s*\n([\s\S]*?)\n```/.exec(fs.readFileSync(F.settingsFile, 'utf8'))[1]).links.docs.remote, 'usbclub/docs');
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.approved_by === qid);
-    assert.deepEqual([act.class, act.refs], ['governance-edit', ['chore-registry', 'link:docs']]);
+    assert.deepEqual([act.class, act.refs], ['governance-edit', ['link:docs']]);
     // and the registry chore lands with that one answer
     const wt = path.join(old, '.worktrees', 'chore-registry');
     g(['worktree', 'add', '-q', '-b', 'chore-registry', wt, 'origin/main'], old);

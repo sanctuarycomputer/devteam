@@ -701,10 +701,31 @@ function keyOf(it) {
 }
 // Each dashboard is on its own address: on the machine, its own port on 127.0.0.1. On a cloud box
 // behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
-// still an origin of its own), and adds the box's terminal as the first tab.
-let box = null; // { terminal, instance, push, image } when the gateway answers box.json
+// still an origin of its own: the port's on box: 1, the project's name's on box: 2), and adds the
+// box's terminal as the first tab.
+let box = null; // { v, terminal, instance (v 1) or project (v 2), push, image, previews, passkeys } when the gateway answers box.json
 let hubSeen = null; // the last list instances.json gave, or null when it gave none (the box line)
-const urlOf = (x) => (box ? box.instance.replace('{port}', String(Number(x.port))) : `http://127.0.0.1:${Number(x.port)}/`);
+// A project's address, or null when it has none: on box: 2 a name that can't be a host, or that two
+// listed projects share, gets none (the gateway serves no dashboard there). urlOf.why says which.
+const urlOf = Object.assign((x) => (!box ? `http://127.0.0.1:${Number(x.port)}/` : box.v === 1 ? box.instance.replace('{port}', String(Number(x.port))) : urlOf.why(x) ? null : box.project.replace('{project}', x.name)), {
+  // project-hosts@1's label rule (cloud/gateway.mjs), copied: this page is standalone
+  why(x) {
+    if (box?.v !== 2) return null;
+    const n = x.name;
+    if (typeof n !== 'string' || !/^(?!\d+$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(n)) return typeof n === 'string' && /^\d+$/.test(n) ? 'all-digits' : 'not-a-label';
+    if (['term', 'public', 'www'].includes(n)) return 'reserved';
+    // the gateway counts only listed projects: a gone one shares nothing
+    if ([...items.values()].some((o) => o.x.root !== x.root && !o.goneAt && o.x.name === n)) return 'shared';
+    return null;
+  },
+  // each reason, short (a card's error) and in full (the tab's panel)
+  words: {
+    'not-a-label': ['its name isn\'t a host name', () => 'only lowercase letters, digits and dashes, 1–63 long, not starting or ending with a dash'],
+    'all-digits': ['its name is all digits', () => 'an all-digit name is a port\'s shape on a box'],
+    reserved: ['its name is reserved', () => '<code>term</code>, <code>public</code> and <code>www</code> are the box\'s own'],
+    shared: ['its name is shared', (n) => `two projects on this box are named ${escHtml(n)}, so neither has a host`],
+  },
+});
 const TERM = '\u0000terminal';
 let term = null; // { tab, frame }
 const OVERVIEW = '\u0000overview';
@@ -777,8 +798,41 @@ function select(root) {
 }
 // A project's dashboard in its frame, made once and kept; hidden until its tab is chosen. The
 // Overview's fleet controls use it too: the dashboard does the owner action, on its own origin.
+// A project with no address on this box gets a panel instead, saying why and how to fix it; one
+// whose frame the hub's policy refused (frameRefused) gets one saying to reload in a moment.
+// it.addr is the address the frame was made for: draw compares it with the project's address now.
 function frameFor(it) {
+  if (!it.frame && !urlOf(it.x)) {
+    const [short, full] = urlOf.words[urlOf.why(it.x)];
+    it.frame = el('section', 'page');
+    it.frame.setAttribute('role', 'tabpanel');
+    it.frame.setAttribute('aria-label', String(it.x.name));
+    it.frame.hidden = selected !== it.x.root;
+    const why = el('p');
+    why.innerHTML = `This project has no address on this box: ${short} (${full(it.x.name)}).`;
+    const fix = el('p');
+    fix.innerHTML = 'To fix it, set <code>project</code> in that project\'s <code>docs/devteam/project/settings.md</code> to a name that can be a host, and restart its dashboard.';
+    for (const p of [why, fix]) p.style.maxWidth = 'var(--measure)';
+    it.frame.append(el('h2', '', it.x.name), why, fix);
+    it.addr = null;
+    it.loaded = Promise.resolve();
+    framesEl.append(it.frame);
+  }
+  // the address kept: draw sees no change, and doesn't make a frame this page's policy would refuse again
+  if (!it.frame && it.refused) {
+    it.frame = el('section', 'page');
+    it.frame.setAttribute('role', 'tabpanel');
+    it.frame.setAttribute('aria-label', String(it.x.name));
+    it.frame.hidden = selected !== it.x.root;
+    const say = el('p', '', 'The hub doesn\'t know this project yet: the box hasn\'t caught up with it. Reload this page in a moment.');
+    say.style.maxWidth = 'var(--measure)';
+    it.frame.append(el('h2', '', it.x.name), say);
+    it.addr = urlOf(it.x);
+    it.loaded = Promise.resolve();
+    framesEl.append(it.frame);
+  }
   if (!it.frame) {
+    it.addr = urlOf(it.x);
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
     it.frame.className = 'no-shell';
@@ -789,11 +843,57 @@ function frameFor(it) {
     it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
     it.frame.setAttribute('allow', 'clipboard-write; fullscreen');
     it.loaded = new Promise((resolve) => it.frame.addEventListener('load', resolve, { once: true }));
+    // a frame that loaded was let in: its origin may make the hub reload again, once, if refused later.
+    // A refused frame fires load too (its error page), after the violation: this page's seen says so.
+    const f = it.frame;
+    f.addEventListener('load', () => { let origin; try { origin = new URL(f.src).origin; } catch { return; } setTimeout(() => { if (!frameRefused.seen.has(origin)) frameRefused.drop(origin); }, 300); });
     it.frame.src = urlOf(it.x);
     framesEl.append(it.frame);
   }
   return it.frame;
 }
+// A project frame the hub's own Content-Security-Policy refused (box: 2: the gateway's frame-src names
+// each project's host as it knew them when it served this page, fixed until a reload). The selected
+// tab's reloads the page once per host (sessionStorage, across the reload; the hash is kept), and if
+// still refused says the hub doesn't know the project yet. A hidden one (a fleetAsk) never reloads:
+// its ask ends with that error.
+function frameRefused(ev) {
+  if (box?.v !== 2 || !['frame-src', 'child-src', 'default-src'].includes(ev.effectiveDirective)) return;
+  let origin;
+  try { origin = new URL(ev.blockedURI).origin; } catch { return; }
+  const it = [...items.values()].find((o) => { try { return Boolean(o.addr) && new URL(o.addr).origin === origin; } catch { return false; } });
+  if (!it) return;
+  frameRefused.seen.add(origin);
+  frameRefused.wake.get(it.x.root)?.();
+  if (selected !== it.x.root) return;
+  if (frameRefused.mark(origin)) return void location.reload();
+  it.refused = true;
+  it.frame?.remove();
+  it.frame = null;
+  it.loaded = null;
+  frameFor(it);
+  showOnly(selected);
+}
+// this page's refused origins; root -> the waiting fleetAsk's wake; the list kept across a reload
+frameRefused.seen = new Set();
+frameRefused.wake = new Map();
+// true only when the origin is newly kept, read back: a storage that can't keep it never reloads
+frameRefused.mark = (origin) => {
+  const read = () => { const l = JSON.parse(sessionStorage.getItem('devteam-hub-refused') ?? '[]'); return Array.isArray(l) ? l : []; };
+  try {
+    const l = read();
+    if (l.includes(origin)) return false;
+    sessionStorage.setItem('devteam-hub-refused', JSON.stringify([...l, origin]));
+    return read().includes(origin);
+  } catch { return false; }
+};
+frameRefused.drop = (origin) => {
+  try {
+    const l = JSON.parse(sessionStorage.getItem('devteam-hub-refused') ?? '[]');
+    if (Array.isArray(l) && l.includes(origin)) sessionStorage.setItem('devteam-hub-refused', JSON.stringify(l.filter((o) => o !== origin)));
+  } catch {}
+};
+window.addEventListener('securitypolicyviolation', frameRefused);
 // ----- Run, Drain and Park from the Overview ------------------------------------------------------
 // The hub can't post an owner action: it asks the project's own dashboard, in its frame, which
 // posts it as a click there would (index.html, "The hub's Overview"). The answer comes back by
@@ -812,23 +912,47 @@ window.addEventListener('message', (ev) => {
   w.resolve({ ok: m.ok === true, error: typeof m.error === 'string' ? m.error : null });
 });
 async function fleetAsk(it, mode, all = false) {
+  // a project with no address has no dashboard to ask: said at once, and no frame made
+  const none = () => (urlOf(it.x) ? null : { ok: false, error: `${it.x.name} has no address on this box: ${urlOf.words[urlOf.why(it.x)][0]}` });
+  if (none()) return none();
+  // nor has one this page's policy refused: a new frame would only be refused again
+  const unknown = { ok: false, error: 'the hub doesn\'t know this project yet; reload this page in a moment' };
+  if (it.refused) return unknown;
+  const root = it.x.root;
+  let wake;
+  const refused = new Promise((r) => { wake = () => r(unknown); });
+  frameRefused.wake.set(root, wake);
   // a frame made only to ask is dropped once it has answered, unless its tab was chosen meanwhile:
   // a dashboard reads its data every 10 s for as long as it is open, seen or not
   const made = !it.frame;
   const frame = frameFor(it);
-  await Promise.race([it.loaded, new Promise((r) => setTimeout(r, 15000))]);
-  const origin = new URL(urlOf(it.x)).origin;
-  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24);
-  const answer = new Promise((resolve) => fleetWait.set(nonce, { resolve, origin, win: frame.contentWindow }));
-  // asked again until it answers (a dashboard still starting its script); it does it once per nonce
-  const send = () => { try { frame.contentWindow.postMessage({ devteam: 'hub-fleet', mode, nonce, all }, origin); } catch {} };
-  send();
-  const again = setInterval(send, 1500);
-  const r = await Promise.race([answer, new Promise((r_) => setTimeout(() => r_({ ok: false, error: 'its dashboard didn\'t answer (an older kit can\'t be parked from here)' }), 20000))]);
-  clearInterval(again);
-  fleetWait.delete(nonce);
-  if (made && it.frame === frame && selected !== it.x.root) { frame.remove(); it.frame = null; it.loaded = null; }
-  return r;
+  let done = false;
+  let again = null;
+  let nonce = null;
+  const ask = async () => {
+    await Promise.race([it.loaded, new Promise((r) => setTimeout(r, 15000))]);
+    if (done) return unknown;
+    // a draw in the wait can have made the name shared
+    if (none()) return none();
+    const origin = new URL(urlOf(it.x)).origin;
+    nonce = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(36).padStart(2, '0')).join('').slice(0, 24);
+    const answer = new Promise((resolve) => fleetWait.set(nonce, { resolve, origin, win: frame.contentWindow }));
+    // asked again until it answers (a dashboard still starting its script); it does it once per nonce
+    const send = () => { try { frame.contentWindow.postMessage({ devteam: 'hub-fleet', mode, nonce, all }, origin); } catch {} };
+    send();
+    again = setInterval(send, 1500);
+    return Promise.race([answer, new Promise((r_) => setTimeout(() => r_({ ok: false, error: 'its dashboard didn\'t answer (an older kit can\'t be parked from here)' }), 20000))]);
+  };
+  try {
+    // refused, before or after its load: the error at once, whatever is selected
+    return await Promise.race([refused, ask()]);
+  } finally {
+    done = true;
+    clearInterval(again);
+    if (nonce) fleetWait.delete(nonce);
+    if (frameRefused.wake.get(root) === wake) frameRefused.wake.delete(root);
+    if (made && it.frame === frame && selected !== it.x.root) { frame.remove(); it.frame = null; it.loaded = null; }
+  }
 }
 async function setFleet(roots, mode) {
   const words = { park: 'Parking…', drain: 'Draining…', run: 'Resuming…' };
@@ -968,11 +1092,13 @@ function countsEl(x, stat = false) {
   c.setAttribute('aria-label', [q ? plural(q, 'open question') : '', th ? th.title : ''].filter(Boolean).join(', '));
   return c;
 }
-// that project's dashboard, at a place in it: its frame pointed there, its tab chosen
+// that project's dashboard, at a place in it: its frame pointed there, its tab chosen (a project
+// with no address shows its panel)
 function openAt(root, hash) {
   const it = items.get(root);
   if (!it) return;
-  frameFor(it).src = `${urlOf(it.x)}${hash}`;
+  const f = frameFor(it);
+  if (f instanceof HTMLIFrameElement) f.src = `${urlOf(it.x)}${hash}`;
   select(root);
 }
 // a card's ⋯: its root and port, and two ways to open its dashboard
@@ -993,13 +1119,15 @@ function cardMenu(btn, it) {
   m.dataset.root = it.x.root;
   m.setAttribute('role', 'menu');
   const mi = el('div', 'mi');
-  for (const [k, v] of [['root', it.x.root], ['port', Number(it.x.port)]]) { const d = el('div'); d.append(el('span', '', k), el('b', '', v)); mi.append(d); }
+  // on box: 2 a project is its host, not its port; with no host, nothing to open in a new tab
+  const url = urlOf(it.x);
+  for (const [k, v] of [['root', it.x.root], box?.v === 2 ? ['host', url ? new URL(url).host : 'none'] : ['port', Number(it.x.port)]]) { const d = el('div'); d.append(el('span', '', k), el('b', '', v)); mi.append(d); }
   const open = el('button', '', 'Open its dashboard');
   open.onclick = () => { closeMenu(); select(it.x.root); };
-  const tab = el('button', '', 'Open in a new tab');
-  tab.onclick = () => { closeMenu(); window.open(urlOf(it.x), '_blank', 'noopener'); };
-  for (const b of [open, tab]) { b.type = 'button'; b.setAttribute('role', 'menuitem'); }
-  m.append(mi, open, tab);
+  const tab = url ? el('button', '', 'Open in a new tab') : null;
+  if (tab) tab.onclick = () => { closeMenu(); window.open(url, '_blank', 'noopener'); };
+  for (const b of [open, tab].filter(Boolean)) { b.type = 'button'; b.setAttribute('role', 'menuitem'); }
+  m.append(mi, ...[open, tab].filter(Boolean));
   document.body.append(m);
   menuPop = m;
   const r = btn.getBoundingClientRect();
@@ -2014,11 +2142,9 @@ async function draw() {
       it = { x, tab, frame: null, goneAt: null };
       items.set(x.root, it);
     }
-    const moved = it.frame && Number(it.x.port) !== Number(x.port);
     const before = lastInbox.get(x.root);
     it.x = x;
     it.goneAt = null;
-    if (moved) it.frame.src = urlOf(x);
     // an instance that turns up later with items already waiting counts them as new; one that was
     // there when the page opened (still starting) takes its first count as the baseline
     if (firstDraw) openedWith.add(x.root);
@@ -2034,6 +2160,18 @@ async function draw() {
       items.delete(root);
       if (selected === root) selected = null;
     }
+  }
+  // An address that changed since its frame was made: a port that moved (the frame follows it, once),
+  // or a name that became shared or stopped being shared (a frame becomes a panel, or back).
+  for (const [root, it] of items) {
+    if (!it.frame) continue;
+    const url = urlOf(it.x);
+    if (url === it.addr) continue;
+    if (url && it.addr && it.frame instanceof HTMLIFrameElement) { it.frame.src = url; it.addr = url; continue; }
+    it.frame.remove();
+    it.frame = null;
+    it.loaded = null;
+    if (selected === root) { frameFor(it); showOnly(selected); }
   }
   // tabs in the hub's order (by root)
   for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
@@ -2096,9 +2234,12 @@ async function findBox() {
     const r = await fetch('box.json', { cache: 'no-store' });
     const b = r.ok ? await r.json() : null;
     // https, or a local gateway on http://*.localhost (a laptop testing the box chain end to end)
-    const secure = (u) => { try { const x = new URL(u.replace('{port}', '1')); return x.protocol === 'https:' || (location.protocol === 'http:' && x.protocol === 'http:' && x.hostname.endsWith('.localhost')); } catch { return false; } };
-    if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
-    box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null, image: b.image, previews: null, passkeys: null };
+    const secure = (u) => { try { const x = new URL(u.replace('{port}', '1').replace('{project}', 'a')); return x.protocol === 'https:' || (location.protocol === 'http:' && x.protocol === 'http:' && x.hostname.endsWith('.localhost')); } catch { return false; } };
+    // box: 1 names each dashboard by its port ({port}), box: 2 by its project's name ({project})
+    const tpl = (k, hole) => typeof b?.[k] === 'string' && b[k].includes(hole) && secure(b[k]);
+    const v = b?.box === 1 && tpl('instance', '{port}') ? 1 : b?.box === 2 && tpl('project', '{project}') ? 2 : 0;
+    if (!v || typeof b.terminal !== 'string' || !secure(b.terminal)) return;
+    box = { v, terminal: b.terminal, instance: v === 1 ? b.instance : null, project: v === 2 ? b.project : null, push: typeof b.push === 'string' ? b.push : null, image: b.image, previews: null, passkeys: null };
     // the box's links, shown in Settings (Serving, Signing in)
     if (typeof b.previews === 'string' && secure(b.previews)) box.previews = b.previews;
     // signing in and passkeys are on the gateway's own name, never in the hub's
