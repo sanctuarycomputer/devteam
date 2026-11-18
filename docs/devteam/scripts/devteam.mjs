@@ -18921,13 +18921,42 @@ async function cmdDashboard() {
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
-  let dataRun = null;
+  // And at most one start every 3 s, whatever the pages ask (live presence, kit-633): a build is
+  // served while it runs, and once finished while it is young (3 s since it finished, so the 10 s poll
+  // gets previews, settings and git at most about 3 s old) and current (dataEpoch, which the log's
+  // changes and every POST action move, is what it was when the build *started*: a change during a
+  // build makes it stale when it ends). A read that finds none waits for the next build, which starts
+  // once the running one has ended and 3 s have passed since the last start; every read waiting then
+  // shares it. A failed build is never kept.
+  const DATA_EVERY_MS = 3000;
+  let dataEpoch = 0;
+  let build = null;
+  let nextBuild = null;
+  let lastStart = -Infinity;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
-    dataRun = null;
-    if (!err && stdout) lastData = stdout;
-    resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
-  })));
+  const startBuild = () => {
+    lastStart = Date.now();
+    const b = { epoch: dataEpoch, finished: null, r: null };
+    b.done = new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+      if (!err && stdout) lastData = stdout;
+      b.r = { ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') };
+      b.finished = Date.now();
+      resolve(b.r);
+    }));
+    build = b;
+    return b.done;
+  };
+  const usable = (b) => !!b && b.epoch === dataEpoch && (b.finished === null || (b.r.ok && Date.now() - b.finished < DATA_EVERY_MS));
+  const dashboardData = () => {
+    if (usable(build)) return build.done;
+    nextBuild ??= (async () => {
+      if (build && build.finished === null) await build.done;
+      await new Promise((w) => setTimeout(w, Math.max(0, lastStart + DATA_EVERY_MS - Date.now())));
+      nextBuild = null;
+      return startBuild();
+    })();
+    return nextBuild;
+  };
   // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
   // and the dock. dashboard-data is a slow child, and readLog() can't serve here: its cache is cleared
   // only by appendLog, which this process never calls, and it reads main's log through git. So this
@@ -19060,7 +19089,6 @@ async function cmdDashboard() {
   const presence = presenceRelay({ okHost: (h) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${host}:${port}`].includes(h ?? ''), ownerCwd: mainRoot, draining: () => draining });
   // the log changed (presenceChanged): every page that said here is told (changed, at most each 500
   // ms), and the kept /api/data build is stale (dataEpoch)
-  let dataEpoch = 0;
   const logWatch = presenceChanged(liveLogDir(), () => { dataEpoch += 1; presence.changed(); });
   every(logWatch.tick, 1000);
   const server = http.createServer(async (req, res) => {
@@ -19103,6 +19131,8 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      // the log looked at now, so a change the watch hasn't delivered yet makes the kept build stale
+      logWatch.look();
       // A run slower than DATA_WAIT_MS, with data to fall back on, answers with that, marked stale:
       // the run goes on and the next read has it, but no page waits minutes on a stuck child.
       let waited;
@@ -19373,6 +19403,10 @@ async function cmdDashboard() {
     const isOwnerSetting = name === 'owner-setting';
     const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
     if (!action && !isSecret && !isReview && !isPane && !isOwnerSetting) return send(res, 404, 'text/plain', 'not found');
+    // an owner action, answered however it ends: the kept /api/data build is stale from its answer's
+    // head on, before a byte of it reaches the page, so the page's next read waits for a new build
+    const head = res.writeHead;
+    res.writeHead = function (...a) { dataEpoch += 1; return head.apply(this, a); };
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
     // A browser always sends both on a fetch POST; a secret or a review is accepted only with both

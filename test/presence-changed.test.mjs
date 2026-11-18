@@ -223,3 +223,140 @@ test('presence A12: the 1-second look without fs.watch', { timeout: 240000 }, as
   }
   await closeEvery();
 });
+
+// ---- A13 and A14: /api/data on S, where only the 1-second look and each GET's own look see a change ----
+
+// A GET of /api/data: its status, body, the headers the page reads, and when its answer had arrived.
+async function data(X) {
+  const r = await fetch(`${X.url}/api/data`);
+  const body = await r.text();
+  return { status: r.status, body, page: r.headers.get('x-devteam-page'), stale: r.headers.get('x-devteam-stale'), at: Date.now() };
+}
+// One of the dashboard's own POST actions, as its page sends it.
+async function post(X, name, body) {
+  const r = await fetch(`${X.url}/api/${name}`, { method: 'POST', headers: { origin: X.url, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  await r.text();
+  return { status: r.status, at: Date.now() };
+}
+const good = (r, what) => { assert.equal(r.status, 200, `${what}: 200`); assert.equal(r.stale, null, `${what}: its own build, not the last good data`); assert.ok(r.page, `${what}: says its page version`); };
+// waits until the last build ended at least `ms` ago (so it is no longer young)
+async function aged(X, ms = 3500) {
+  const b = builds(X).at(-1);
+  await until(() => b.end !== null || builds(X).at(-1).end, 'the last build to end', 60000);
+  const end = builds(X).at(-1).end;
+  await sleep(Math.max(0, end + ms - Date.now()));
+}
+const GAP = 2700; // the spec's 3000 less room for one child's spawn to lag another's
+
+test('presence A13: one build, shared, young and fresh', { timeout: 300000 }, async () => {
+  const S = await dash('s');
+  setSleep(S, 0);
+  assert.equal(builds(S).length, 0, 'no build yet');
+
+  // (a) ten GETs at once: one build
+  const ten = await Promise.all(Array.from({ length: 10 }, () => data(S)));
+  ten.forEach((r, i) => good(r, `GET ${i + 1} of 10`));
+  assert.equal(builds(S).length, 1, 'ten GETs at once start one build');
+  assert.equal(new Set(ten.map((r) => r.body)).size, 1, 'and share it');
+
+  // (b) young and fresh: served from it
+  const s0 = sig(S);
+  const b = await data(S);
+  good(b, '(b)');
+  assert.equal(sig(S), s0, 'nothing wrote run/log between');
+  assert.ok(b.at - builds(S)[0].end < 3000, `(b) asked within 3 s of the build (${b.at - builds(S)[0].end} ms)`);
+  assert.equal(builds(S).length, 1, 'a GET within 3 s of a fresh build is served from it');
+  assert.equal(b.body, ten[0].body, 'the same data');
+
+  // (c) an append during a build: a GET after it waits for the next build
+  await aged(S);
+  setSleep(S, 2000);
+  let n = builds(S).length;
+  const g1 = data(S);
+  const B = await started(S, n);
+  assert.equal(builds(S)[n].end, null, 'B is running');
+  const tApp = append(S);
+  const g2 = data(S);
+  const [r1, r2] = await Promise.all([g1, g2]);
+  good(r1, '(c) the GET that started B');
+  good(r2, '(c) the GET after the append');
+  const [Bd, B2] = [builds(S)[n], builds(S)[n + 1]];
+  assert.ok(B2, 'the GET after the append started a new build');
+  assert.ok(B2.start >= tApp, 'the new build started after the append');
+  assert.ok(B2.start >= Bd.end, 'one build at a time');
+  assert.ok(B2.start - B.start >= GAP, `builds start at least 3 s apart (${B2.start - B.start} ms)`);
+  assert.ok(r2.at >= B2.end, 'the GET after the append was answered by the new build');
+  assert.ok(r1.at < B2.end, 'the GET that started B was answered by B');
+
+  // (d) an append after a build, while it is young: the next GET waits for a new build
+  setSleep(S, 0);
+  n = builds(S).length;
+  const tApp2 = append(S);
+  const r3 = await data(S);
+  good(r3, '(d)');
+  assert.ok(tApp2 - B2.end < 3000, '(d) appended while the last build was young');
+  const B3 = builds(S)[n];
+  assert.ok(B3, 'an append after a young build: a new build');
+  assert.ok(B3.start >= tApp2, 'started after the append');
+  assert.ok(B3.start - B2.start >= GAP, `at least 3 s after the last start (${B3.start - B2.start} ms)`);
+  assert.ok(r3.at >= B3.end, 'answered by it');
+
+  // (e) a POST action (the ACTIONS table) during a build: the next GET waits for a new build
+  await aged(S);
+  setSleep(S, 6000);
+  n = builds(S).length;
+  const g4 = data(S);
+  const C = await started(S, n);
+  setSleep(S, 1000);
+  const s1 = sig(S);
+  const p = await post(S, 'preview-stop', { name: 'zqx-none' });
+  assert.ok(p.status === 200 || p.status === 400, `preview-stop was answered (${p.status})`);
+  assert.equal(builds(S)[n].end, null, 'C is still running when the POST is answered');
+  assert.equal(sig(S), s1, 'the POST wrote nothing to run/log');
+  const r5 = await data(S);
+  const r4 = await g4;
+  good(r4, "(e) C's own GET");
+  good(r5, '(e) the GET after the POST');
+  const [Cd, C2] = [builds(S)[n], builds(S)[n + 1]];
+  assert.ok(C2, 'the GET after the POST started a new build');
+  assert.ok(C2.start >= Cd.end, 'after C ended');
+  assert.ok(r5.at >= C2.end, 'the GET after the POST was answered by the new build');
+  assert.ok(r4.at < C2.end, "C's own GET was answered by C");
+
+  // (f) a POST through another branch (owner-setting, refused before any child), after a young build
+  setSleep(S, 0);
+  n = builds(S).length;
+  const s2 = sig(S);
+  const q = await post(S, 'owner-setting', { key: 'zq8', value: 1 });
+  assert.equal(q.status, 400, 'owner-setting refuses an unknown key');
+  assert.equal(sig(S), s2, 'the POST wrote nothing to run/log');
+  assert.ok(q.at - C2.end < 3000, '(f) posted while the last build was young');
+  const r6 = await data(S);
+  good(r6, '(f)');
+  const D = builds(S)[n];
+  assert.ok(D, 'a POST answered: the next GET gets a new build');
+  assert.ok(D.start >= q.at - 50, 'started after the POST was answered');
+  assert.ok(r6.at >= D.end, 'answered by it');
+});
+
+test('presence A14: at most four builds in 10 s', { timeout: 120000 }, async () => {
+  const S = await dash('s');
+  setSleep(S, 0);
+  await aged(S);
+  const n = builds(S).length;
+  const t0 = Date.now();
+  const gets = [];
+  const poll = () => { for (let i = 0; i < 5; i++) gets.push(data(S)); };
+  poll();
+  const pollers = setInterval(poll, 1000);
+  const appends = setInterval(() => append(S), 100);
+  await sleep(Math.max(0, t0 + 10000 - Date.now()));
+  clearInterval(pollers);
+  clearInterval(appends);
+  const all = await Promise.all(gets);
+  all.forEach((r, i) => good(r, `GET ${i + 1}`));
+  assert.ok(all.length >= 45, `five clients each once a second (${all.length} GETs)`);
+  const inWindow = builds(S).slice(n).filter((x) => x.start >= t0 && x.start <= t0 + 10000);
+  assert.ok(inWindow.length <= 4, `at most four builds in 10 s (${inWindow.length})`);
+  assert.ok(inWindow.length >= 2, `the data keeps up with the log (${inWindow.length} builds)`);
+});
