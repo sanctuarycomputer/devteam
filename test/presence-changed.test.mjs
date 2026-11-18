@@ -192,7 +192,9 @@ test('presence A12: changed within 1 s, at most every 500 ms', { timeout: 240000
     const ts = changedAt(c, marks[k]);
     const gaps = ts.slice(1).map((t, i) => t - ts[i]);
     assert.ok(gaps.every((g) => g >= 400), `client ${k + 1}: changed at most every 500 ms (gaps ${gaps.join(', ')})`);
-    assert.ok(ts.length >= 4 && ts.length <= 8, `client ${k + 1}: ${ts.length} changed in 3 s of growth (4 to 8)`);
+    // at least 5: the watch gives about 7 (one at once, then each 500 ms, and the last); the 1-second
+    // look alone gives about 4, so a watch whose events reach nothing is red here
+    assert.ok(ts.length >= 5 && ts.length <= 8, `client ${k + 1}: ${ts.length} changed in 3 s of growth (5 to 8)`);
     assert.ok(ts.some((t) => t > last && t <= last + 1000), `client ${k + 1}: a changed within 1 s after the last append`);
   }
 
