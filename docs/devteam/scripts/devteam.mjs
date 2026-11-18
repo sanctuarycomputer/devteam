@@ -2355,7 +2355,9 @@ const isTidyAct = (a) => a.class === 'worker-slots' && String(a.what ?? '').star
 const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner' && !isTidyAct(a))];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
-  return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
+  // a repair answers the correction before it: one newer than the latest repair is unrepaired
+  const r = a.updates.filter((x) => x.repaired !== undefined).pop();
+  return u ? { ...u.corrected, by: u.by, at: u.at, channel: u.channel ?? null, repaired: r && r.at >= u.at ? a.repaired ?? null : null } : null;
 };
 // How much a goal matters to the project, 1 to 4: the supervisor's judgment against
 // project/strategy.md (a goal-impact decision whose first ref is the goal; the latest one), or the
@@ -10403,8 +10405,17 @@ function tldrGap(text) {
 // act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro)');
-  const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro; the supervisor records the owner\'s words with --from-turn <u-id> --said "<whole clauses>" [--at <n>] or --from-chat --said "<words>")');
+  // the owner's correction, said in a thread or in the supervisor's session: the supervisor records it,
+  // the line is the owner's, and the reason is the owner's words, nothing else
+  const heard = flags['from-turn'] !== undefined || flags['from-chat'] !== undefined;
+  if (heard) {
+    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('correct --from-turn or --from-chat: the supervisor records what the owner said; in your own terminal, correct directly');
+    if (flags['from-turn'] !== undefined && flags['from-chat'] !== undefined) die('correct: --from-turn or --from-chat, not both');
+    for (const k of ['severity', 'impact', 'reason', 'retro']) if (flags[k] !== undefined) die(`correct --${flags['from-turn'] !== undefined ? 'from-turn' : 'from-chat'}: --${k} isn't taken; the reason is the owner's words (--said), and the rest is the owner's own correct`);
+    if (!flagStr('said')?.trim()) die('correct --from-turn or --from-chat needs --said "<the owner\'s words>"');
+  } else for (const k of ['said', 'at']) if (flags[k] !== undefined) die(`correct --${k} goes with --from-turn or --from-chat`);
+  const by = heard ? 'owner' : flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
@@ -10417,11 +10428,31 @@ function cmdCorrect() {
     if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
     if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
   }
-  if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
-  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
+  // the supervisor's retro alone doesn't stand in the owner's way: the owner corrects it after (spec §5)
+  const prior = correctionOf(act);
+  if (prior && impact === undefined && !(by === 'owner' && writerClass(prior.by) === 'supervisor' && !act.updates.some((x) => x.corrected !== undefined && writerClass(x.by) === 'owner'))) die(`${actId} is already corrected`);
+  let corrected;
+  if (flags['from-turn'] !== undefined) {
+    const uid = flagStr('from-turn');
+    if (!TURN_ID.test(uid ?? '')) die("correct --from-turn <u-id>: the owner's turn whose words correct it");
+    const u = logGet(uid);
+    if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
+    if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words correct a call`);
+    const ref = logGet(u.thread)?.subject?.ref ?? null;
+    const via = ref?.startsWith('act:') ? logGet(ref.slice(4)) : null;
+    if (ref !== `${act.type}:${actId}` && !(via?.type === 'act' && via.decision === actId)) die(`--from-turn ${uid}: that thread is about ${ref ?? 'nothing in particular'}, not ${actId}; the owner's words correct the record the thread is on`);
+    const c = turnClause(u.text, flagStr('said'), clauseAt());
+    if (c.why) die(`--said: ${c.why}`);
+    const clash = turnBindings(readLog().lines, uid).find((b) => spansOverlap(b.span, c.said_at));
+    if (clash) die(clash.span ? `--said: those words overlap what already ${clash.kind === 'answer' ? 'settled' : 'corrected'} ${clash.id} (offsets ${clash.span[0]} to ${clash.span[1]}); one span settles one thing` : `--from-turn ${uid}: that turn already settled ${clash.id} whole; it takes no more`);
+    corrected = { reason: c.said, said: c.said, said_at: c.said_at, turn: uid };
+  } else if (heard) corrected = { reason: flagStr('said').trim(), said: flagStr('said').trim() };
+  else corrected = { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact };
+  appendLog({ type: act.type, op: 'set', id: actId, ...(heard ? { channel: flags['from-turn'] !== undefined ? 'thread' : 'chat' } : {}), corrected }, by);
   if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
-  if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
+  // the supervisor wrote it from the owner's words: nobody to tell
+  if (by === 'owner' && !heard) nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
 }
 // The supervisor records how it repaired a corrected act.

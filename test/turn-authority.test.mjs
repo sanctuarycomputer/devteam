@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { testDir, threadsFixture } from './lib/kit.mjs';
+import { testDir, threadsFixture, hasTmux, until } from './lib/kit.mjs';
 
 const FAKE = JSON.parse(fs.readFileSync(path.join(testDir, 'fixtures', 'turn-authority', 'lines.json'), 'utf8'));
 
@@ -213,6 +213,84 @@ test('turn authority', async (t) => {
           assert.deepEqual([after.status, after.hash], ['answered', before.hash], id);
         } finally { F.restoreLog(snap); }
       }
+    });
+
+    await t.test('correct --from-turn and --from-chat: the owner\'s correction, recorded by the supervisor from their words (A14-A18)', async () => {
+      let n = 0;
+      // a call of the supervisor's, written as the kit would (its id given: hand mints none for a decision)
+      const call = (type, more = {}) => { const id = `${type === 'decision' ? 'd' : 'a'}-20261118-0000000${String(++n).padStart(2, '0')}-supervisor`; F.hand('supervisor', { id, type, class: 'release-scope', what: `call ${n}`, ...(type === 'decision' ? { authority: 'rung', rung: 2 } : {}), ...more }, 3600000 - n); return id; };
+      const on = (ref, words) => { const T = F.owner(['thread', 'new', '--title', ref, '--subject', JSON.stringify({ kind: 'item', ref }), '--', words]).split('\n')[0]; return { T, U: show(T).turns[0].id }; };
+      const set = (id) => raw(id).filter((l) => l.op === 'set' && l.corrected).pop();
+      const ok = () => { const r = logCheck(); assert.equal(r.status, 0, r.said); };
+      const rung = (cls) => JSON.parse(F.owner(['trust', '--json'])).find((r) => r.class === cls)?.rung;
+      // A14: a decision corrected from a clause of a turn in its thread
+      const D = call('decision');
+      const words = 'That was the wrong call: the PR needed review. Do better.';
+      const { T, U } = on(`decision:${D}`, words);
+      const P = hasTmux ? F.standIn() : null;
+      const said = F.sup(['correct', D, '--from-turn', U, '--said', 'That was the wrong call: the PR needed review.'], P ? { DEVTEAM_SUPERVISOR: P.target } : {});
+      assert.match(said, /release-scope drops to rung 1/);
+      const l = set(D);
+      assert.deepEqual([l.type, l.by, l.channel, l.corrected], ['decision', 'owner', 'thread', { reason: 'That was the wrong call: the PR needed review.', said: 'That was the wrong call: the PR needed review.', said_at: [0, 46], turn: U }]);
+      ok();
+      assert.equal(rung('release-scope'), 1);
+      if (P) {
+        // a later owner turn reaches the pane: anything the correction typed would be there before it
+        const W = say(T, 'ping');
+        F.owner(['thread', 'say', T, '--', 'pong'], { DEVTEAM_SUPERVISOR: P.target });
+        await until(() => P.typed().includes('pong'), 'the owner turn after it, in the pane');
+        assert.doesNotMatch(P.typed(), /correction/, `the supervisor wrote it; no pane is nudged (${W})`);
+      }
+      // A16: the refusals, each leaving the log as it was
+      const D9 = call('decision');
+      refused(['correct', D9, '--from-turn', U, '--said', 'Do better.'], new RegExp(`that thread is about decision:${D}, not ${D9}`));
+      refused(['correct', D, '--from-turn', U, '--said', 'Do better.'], /already corrected/);
+      const { T: T9, U: U9 } = on(`decision:${D9}`, 'Wrong. Ship it. Wait.');
+      const S9 = F.sup(['thread', 'reply', T9, 'Noted.']);
+      refused(['correct', D9, '--from-turn', S9, '--said', 'Noted.'], /that turn is the supervisor's/);
+      refused(['correct', D9, '--from-turn', U9, '--said', 'Ship'], /part of a clause/);
+      for (const extra of [['--severity', '2'], ['--impact', '2'], ['--reason', 'x'], ['--retro'], ['--from-chat']]) refused(['correct', D9, '--from-turn', U9, '--said', 'Wrong.', ...extra], new RegExp(`--${extra[0].slice(2) === 'from-chat' ? 'from-turn or --from-chat' : extra[0].slice(2)}`));
+      refused(['correct', D9, '--from-chat', '--said', 'Wrong.', '--reason', 'x'], /--reason/);
+      refused(['correct', D9, '--from-turn', U9, '--said', 'Wrong.'], /supervisor records/, {});
+      refused(['correct', D9, '--from-turn', U9], /--said/);
+      // a clause already bound by an answer on the same turn
+      const Qa = askAbout(T9, U9, 'Ship it now?');
+      F.sup(answer(Qa, U9, 'Ship it.'));
+      refused(['correct', D9, '--from-turn', U9, '--said', 'Ship it.'], /overlap what already settled/);
+      F.sup(['correct', D9, '--from-turn', U9, '--said', 'Wrong.']);
+      assert.deepEqual(set(D9).corrected.said_at, [0, 6]);
+      // A15: the act that carried a decision out; a standalone act from a turn, and another from chat
+      const D2 = call('decision');
+      const A = call('act', { decision: D2 });
+      const { U: UA } = on(`act:${A}`, 'That act came from a bad call.');
+      F.sup(['correct', D2, '--from-turn', UA, '--said', 'That act came from a bad call.']);
+      assert.equal(set(D2).type, 'decision');
+      refused(['correct', A, '--from-turn', UA, '--said', 'That act came from a bad call.'], new RegExp(`carried out ${D2}`));
+      ok();
+      const A2 = call('act');
+      const { U: UA2 } = on(`act:${A2}`, 'Undo that.');
+      F.sup(['correct', A2, '--from-turn', UA2, '--said', 'Undo that']);
+      assert.deepEqual([set(A2).type, set(A2).corrected], ['act', { reason: 'Undo that', said: 'Undo that', said_at: [0, 9], turn: UA2 }]);
+      ok();
+      const X = call('act');
+      F.sup(['correct', X, '--from-chat', '--said', '  never again  ']);
+      assert.deepEqual([set(X).type, set(X).channel, set(X).corrected], ['act', 'chat', { reason: 'never again', said: 'never again' }]);
+      ok();
+      // A17: after the supervisor's retro and its repair, the owner's correction is taken, and clears the repair
+      const D3 = call('decision');
+      F.sup(['correct', D3, '--retro', '--reason', 'r']);
+      F.sup(['repair', D3, '--how', 'none']);
+      const { U: U3 } = on(`decision:${D3}`, 'It was worse than that.');
+      F.sup(['correct', D3, '--from-turn', U3, '--said', 'It was worse than that.']);
+      const row = JSON.parse(F.owner(['decisions', '--json', '--corrected'])).find((r) => r.id === D3 && r.kind === 'correction');
+      assert.deepEqual([row.who, row.under.repaired], ['owner', null]);
+      refused(['correct', D3, '--from-chat', '--said', 'again'], /already corrected/);
+      F.sup(['repair', D3, '--how', 'undo']);
+      // A18: from chat
+      const D4 = call('decision');
+      F.sup(['correct', D4, '--from-chat', '--said', 'wrong call, roll it back']);
+      assert.deepEqual([set(D4).by, set(D4).channel, set(D4).corrected], ['owner', 'chat', { reason: 'wrong call, roll it back', said: 'wrong call, roll it back' }]);
+      ok();
     });
   } finally { F.done(); }
 });
