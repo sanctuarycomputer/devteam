@@ -1,7 +1,0 @@
-<tmp> OK
-<tmp> OK
-1.7.7
-installed by downloading from release page
-built with go1.23.4 compiler for linux/amd64
-version: 0.10.0
-actionlint exit: 0
