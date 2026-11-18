@@ -213,3 +213,93 @@ test('the shape is a constant in devteam.mjs, with no new schema file', () => {
   assert.match(SRC, /\nfunction recurringEntryProblems\(name, entry\) \{/);
   assert.deepEqual(fs.readdirSync(path.join(kit, 'schema')).filter((f) => f.startsWith('recurring')), []);
 });
+
+// ===== C2, C3: the run records, the reopen line, recurring-edit =====
+const SCHEMA = JSON.parse(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
+const OBS = SCHEMA.$defs.types.observation;
+// One hand-written observation line, as its writer's kit would append it: ids from a clock that
+// moves a millisecond per line, so no two repeat; an owner's line says where it was typed (cli); a
+// ticket session writes its own file, <ticket-id>.jsonl.
+let clock = Date.parse('2026-11-16T09:00:00.000Z');
+function logLine(dir, writer, body) {
+  const at = new Date((clock += 1)).toISOString();
+  const d = at.replace(/[-:TZ.]/g, '');
+  const file = ['supervisor', 'owner'].includes(writer) ? `${writer}-${at.slice(0, 7)}` : writer;
+  const line = { v: 1, id: `o-${d.slice(0, 8)}-${d.slice(8, 17)}-${writer}`, type: 'observation', op: 'new', at, by: writer, ...(writer === 'owner' ? { channel: 'cli' } : {}), ...body };
+  const f = path.join(dir, 'docs/devteam/run/log', `${file}.jsonl`);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.appendFileSync(f, `${JSON.stringify(line)}\n`);
+}
+const logCheck = (dir) => cli(dir, ['log-check']);
+const SLOT = '2026-11-16T09:00:00Z';
+const runLine = (status, run = {}) => ({
+  kind: 'recurring-run', subject: 'recurring:ci-main', source: 'recurring', detector: 'recurring', detail: `ci-main: ${status}`,
+  run: { status, slot: SLOT, ...(['pass', 'fail', 'error'].includes(status) ? { sha: 'a'.repeat(40), seconds: 12.5, exit: status === 'pass' ? 0 : 1, value: null, excerpt: 'tests 3, pass 3' } : { ref: 'chore-recurring-tidy-branches-20261116' }), ...run },
+});
+
+test('a recurring-run line of each status passes log-check, an unknown one does not', () => {
+  const dir = project('recur-log');
+  for (const s of ['pass', 'fail', 'error', 'started', 'nothing', 'abandoned']) logLine(dir, 'supervisor', runLine(s));
+  logLine(dir, 'supervisor', runLine('fail', { value: 7, exit: 0 }));
+  // the schema doesn't say who counts (C2: the readers take only the supervisor's detector lines),
+  // so a ticket session's line is valid too, and kit-163 may not lean on the schema to refuse it
+  logLine(dir, 'kit-01-probe', runLine('pass'));
+  const ok = logCheck(dir);
+  assert.equal(ok.status, 0, ok.out);
+  assert.doesNotMatch(ok.out, /observation\.run/, 'run is a field this kit knows');
+
+  const bad = project('recur-log-bad');
+  logLine(bad, 'supervisor', runLine('skipped'));
+  logLine(bad, 'supervisor', { ...runLine('pass'), run: { status: 'pass' } });
+  logLine(bad, 'supervisor', runLine('pass', { sha: 'main' }));
+  logLine(bad, 'supervisor', runLine('pass', { excerpt: 'x'.repeat(201) }));
+  logLine(bad, 'supervisor', runLine('pass', { output: 'everything it printed' }));
+  const r = logCheck(bad);
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /run\.status must be one of pass, fail, error, started, nothing, abandoned/);
+  assert.match(r.out, /run\.slot is required/);
+  assert.match(r.out, /run\.sha "main" does not match/);
+  assert.match(r.out, /run\.excerpt must be at most 200 characters/);
+  assert.match(r.out, /run\.output is not a field here/);
+});
+
+test('the owner\'s reopen line passes, and only the owner\'s counts', () => {
+  const dir = project('recur-reopen');
+  logLine(dir, 'owner', { kind: 'recurring-reopen', subject: 'recurring:ci-main', source: 'owner', detail: 'reopened ci-main' });
+  const r = logCheck(dir);
+  assert.equal(r.status, 0, r.out);
+  const kinds = OBS.properties.kind.description;
+  assert.match(kinds, /recurring-reopen/);
+  assert.match(kinds, /counts only when the owner wrote it/);
+  assert.match(kinds, /lifts only declines made before it/);
+  for (const k of ['recurring-run', 'recurring-failed', 'recurring-recovered']) assert.match(kinds, new RegExp(k));
+  assert.match(OBS.properties.run.description, /detector "recurring"/);
+  assert.match(OBS.properties.run.description, /one result per slot/i);
+});
+
+test('question.change names a recurring-edit change', () => {
+  const change = SCHEMA.$defs.types.question.properties.change;
+  assert.match(change.description, /recurring-edit/);
+  assert.match(change.description, /\{ "<name>": <entry> \| null/);
+  assert.equal(change.properties.recurring.type, 'object');
+  assert.match(change.properties.recurring.description, /RECURRING_ENTRY_SHAPE/);
+  const stages = SCHEMA['x-ooda'].stages.observation.kind;
+  assert.equal(stages['recurring-run'], 'measurement');
+  assert.equal(stages['recurring-reopen'], 'decide');
+});
+
+test('recurring-edit is owner-only, on no ladder and in no standing rule', () => {
+  const text = fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8');
+  const L = JSON.parse(BLOCK.exec(text)[1]);
+  assert.ok(L.owner_only.includes('recurring-edit'), 'owner_only');
+  assert.ok(!Object.keys(L.classes).includes('recurring-edit'), 'not on the ladder');
+  assert.ok(!L.constitutional.includes('recurring-edit'), 'not the supervisor\'s own');
+  assert.ok(!(L.owner_rules ?? []).includes('recurring-edit'), 'no standing rule approves it');
+  const s2 = text.slice(text.indexOf('\n## 2.'), text.indexOf('\n## 3.')).replace(BLOCK, '');
+  const said = s2.split(/(?<=\.)\s/).find((x) => x.includes('`recurring-edit`')) ?? '';
+  assert.match(said, /adding, changing or removing/);
+  assert.match(said, /owner_only/);
+  const words = /\n {2}'recurring-edit': '([^']+)',\n/.exec(SRC.slice(SRC.indexOf('const CLASS_WORDS = Object.freeze({')))?.[1];
+  assert.ok(words, 'CLASS_WORDS names recurring-edit');
+  assert.doesNotMatch(words, /recurring-edit|owner_only/, 'its words carry no class id');
+});
