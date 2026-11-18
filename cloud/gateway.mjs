@@ -42,7 +42,8 @@
 // checked before the store, so a page stored under one never answers on a project's host, and
 // Publish refuses those names. The path decides first, in this order. A reserved segment is never a
 // published page: it is checked as on today's names (`healthz` is the gateway's own answer, a `c`
-// link keeps its own check, every other one needs the session) and goes to the project's port. A
+// link keeps its own check, every other one needs the session) and, but for `healthz`, goes to the
+// project's port. A
 // published page of that name is then served to anyone. Anything else needs the session and goes to
 // the project's port, for a name only one listed project has.
 // Gone, and not redirected: <port>.<box> (all-digit labels) and public.<box>, both 421.
