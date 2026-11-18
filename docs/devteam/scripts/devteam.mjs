@@ -2924,14 +2924,14 @@ function findCycle(ts) {
   for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
   return null;
 }
-// Longest dependency chain, weighted S = 1, M = 2.
-function criticalPath(ts) {
+// Longest dependency chain, weighted S = 1, M = 2 (or by w: () => 1 counts tickets).
+function criticalPath(ts, w = weight) {
   const best = new Map();
   const longest = (id) => {
     if (best.has(id)) return best.get(id);
     let top = { len: 0, path: [] };
     for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
-    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    const res = { len: top.len + w(ts.get(id)), path: [...top.path, id] };
     best.set(id, res);
     return res;
   };
@@ -3878,6 +3878,39 @@ function deriveStatus() {
   });
 }
 
+// A mostly serial graph (D4, D11): the longest chain of unmerged tickets is SERIAL_DEPTH or more
+// deep and at least SERIAL_RATIO times the ready width (unmerged tickets whose dependencies have
+// all merged). Every check passes on such a graph, yet only one or two tickets can ever run. When
+// most of the chain's links join tickets that share nothing but a whole-file touch of a file
+// split_files lists, the dependency only serializes: naming parts (path#name) lets them run at once.
+const SERIAL_DEPTH = 8, SERIAL_RATIO = 4;
+function serialGraphWarning(live, s = loadSettings()) {
+  const U = new Map(live.map((t) => [t.id, t]));
+  if (U.size < SERIAL_DEPTH) return null;
+  const chain = criticalPath(U, () => 1).path;
+  const depth = chain.length;
+  const width = live.filter((t) => !(t.depends_on ?? []).some((d) => U.has(d))).length;
+  if (depth < SERIAL_DEPTH || depth < SERIAL_RATIO * width) return null;
+  const msg = `the unmerged ticket graph is mostly serial: its longest dependency chain is ${depth} tickets deep (${chain[0]} … ${chain[depth - 1]}) while ${width} of ${U.size} are ready (no unmerged dependency) (D4, D11)`;
+  // a link that only serializes: every footprint the two share is a whole-file touch of a split file
+  const wholeSplit = (a, b) => {
+    const repo = repoOfTicketLink(a);
+    if (repo !== repoOfTicketLink(b)) return null;
+    const files = new Set();
+    for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) {
+      if (!touchesOverlap(ga, gb, repo, s)) continue;
+      const pa = trimSlash(touchPath(ga)), pb = trimSlash(touchPath(gb));
+      if (pa !== pb || hasWild(pa) || !isSplitFile(pa, s) || (touchPart(ga) && touchPart(gb))) return null;
+      files.add(pa);
+    }
+    return files.size ? [...files] : null;
+  };
+  const links = [];
+  for (let i = 1; i < depth; i++) { const f = wholeSplit(U.get(chain[i - 1]), U.get(chain[i])); if (f) links.push(`${chain[i]} on ${chain[i - 1]} (${f.join(', ')})`); }
+  if (links.length * 2 <= depth - 1) return `${msg}; find dependencies a contract ticket or a split could break`;
+  return `${msg}; ${links.length} of its ${depth - 1} links only serialize whole-file touches of a file split_files lists, e.g. ${links.slice(0, 2).join('; ')}: name the parts each changes (path#name) and drop the dependencies that only serialize`;
+}
+
 const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
@@ -4063,6 +4096,8 @@ function cmdValidate() {
       if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (touchesOverlap(ga, gb, repoOfTicketLink(a))) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
+    const w = serialGraphWarning(live);
+    if (w) warnings.push(scope ? `${w}; not ${scope}'s to fix` : w);
   }
 
   // The registry and the lines. Labels-only components and an empty registry print nothing.

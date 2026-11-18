@@ -360,3 +360,30 @@ test('planning.md, worker.md, supervisor.md and the schema say the same about pa
   const find = (o) => (o && typeof o === 'object' ? (o.touches?.description ?? Object.values(o).map(find).find(Boolean)) : undefined);
   assert.match(find(schema), /path#name names one part/);
 });
+
+test('validate: a mostly serial graph warns, and names the links that only serialize whole-file touches of a split file', () => {
+  const F = partsProject('parts-serial', [DT]);
+  try {
+    const serial = () => F.validate().split('\n').filter((l) => l.includes('mostly serial'));
+    const ids = Array.from({ length: 9 }, (_, i) => `app-${String(i + 41)}-step`);
+    ids.forEach((id, i) => F.ticket(id, [DT], { depends_on: i ? [ids[i - 1]] : [] }));
+    let w = serial();
+    assert.equal(w.length, 1, w.join(' | '));
+    assert.match(w[0], /^warning: the unmerged ticket graph is mostly serial: its longest dependency chain is 9 tickets deep \(app-41-step … app-49-step\)/);
+    assert.match(w[0], /8 of its 8 links only serialize whole-file touches of a file split_files lists, e\.g\. app-42-step on app-41-step \(docs\/devteam\/scripts\/devteam\.mjs\); app-43-step on app-42-step/);
+    assert.match(w[0], /name the parts each changes \(path#name\) and drop the dependencies that only serialize/);
+    assert.doesNotMatch(F.validate(), /^error: .*mostly serial/m, 'a warning, never an error');
+    // the same chain over a file split_files doesn't list: still serial, with no parts hint
+    for (const id of ids) F.touches(id, ['app/shared.txt']);
+    w = serial();
+    assert.equal(w.length, 1);
+    assert.doesNotMatch(w[0], /split_files/);
+    assert.match(w[0], /find dependencies a contract ticket or a split could break/);
+    // named parts and no serializing dependencies: wide, so no warning
+    ids.forEach((id) => F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ touches: [`${DT}#+part${id.replace(/-/g, '')}`], depends_on: [] })], SUP));
+    assert.deepEqual(serial(), []);
+    // a short chain is not serial
+    ids.slice(1, 5).forEach((id, i) => F.ok(F.old, ['ticket', 'set', id, '--json', JSON.stringify({ depends_on: [ids[i]] })], SUP));
+    assert.deepEqual(serial(), []);
+  } finally { F.done(); }
+});
