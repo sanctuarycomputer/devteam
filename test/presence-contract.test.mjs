@@ -280,6 +280,12 @@ async function until(fn, what, ms = 2000) {
     await new Promise((r) => setTimeout(r, 2));
   }
 }
+// `c`'s close code, failing the test when no close comes within `ms` (node:test has no default timeout).
+async function closedWithin(c, ms = 2000) {
+  let timer;
+  const late = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`not closed within ${ms} ms`)), ms); });
+  try { return await Promise.race([c.closed, late]); } finally { clearTimeout(timer); }
+}
 // Until the fake has read `n` messages (data messages and control frames) from `c`.
 const read = (fake, c, n, what = 'read') => until(() => (stat(fake, c)?.messages ?? -1) >= n, `${what}: ${n} messages`);
 
@@ -413,7 +419,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
 
       const closer = await openPresence(fake.url);
       closer.frame(Buffer.from([0x03, 0xe8]), { opcode: 8 });
-      assert.equal(await closer.closed, 1000, 'a close is answered with a close');
+      assert.equal(await closedWithin(closer), 1000, 'a close is answered with a close');
 
       const protocol = [
         ['an unmasked frame', (c) => c.frame(body, { mask: false })],
@@ -428,7 +434,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       for (const [label, act] of protocol) {
         const c = await openPresence(fake.url);
         act(c);
-        assert.equal(await c.closed, 1002, label);
+        assert.equal(await closedWithin(c), 1002, label);
       }
     });
   });
@@ -466,6 +472,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       const A2 = await openPresence(fake.url, { headers: P('p-a') }); // A′: A's person, another browser tab
       const D = await openPresence(fake.url, { headers: P('p-d', 'Di') });
       const E = await openPresence(fake.url, { headers: P('p-e', 'Ed') });
+      const N = await openPresence(fake.url, { headers: P('p-n', 'Ny') }); // says here only after the acts
       const all = [A, B, C, A2, D, E];
       A.send(hereMsg()); B.send(hereMsg()); C.send(hereMsg({ tab: 'other' })); A2.send(hereMsg());
       D.send(hereMsg({}, false)); E.send(hereMsg({ page: 'sentinel' }));
@@ -493,14 +500,19 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       A.send({ t: 'move', a: null });
       assert.deepEqual(await B.next((m) => m.t === 'move'), { t: 'move', id: 'p-a', conn: A.you.conn, a: null }, 'a: null reaches B, and the bad moves before it never did');
       await read(fake, A, 1 + 6); await read(fake, C, 2); await read(fake, D, 2); await read(fake, B, 2);
+      N.send({ t: 'move', a: { k: 'kit-1', x: 0.5, y: 0.5 } }); // before its here: dropped (B's two moves above stay its only)
+      await read(fake, N, 1, 'N');
+      N.send(hereMsg()); // on A's spot, but only now: every move above came while N had said no here
+      await read(fake, N, 2, 'N');
 
-      const ends = await sentinel(fake, E, [A, B, C, A2, D]);
+      const ends = await sentinel(fake, E, [A, B, C, A2, D, N]);
       const moves = (c, i) => kinds(between(c, mark.get(c), ends[i]), 'move');
       assert.deepEqual(moves(A, 0), [fromB], 'A gets only B\'s move, never its own');
       assert.deepEqual(moves(B, 1).map((m) => m.a), [{ k: 'kit-1', x: 0.5, y: 0.25 }, null], 'B gets the good two only');
       assert.deepEqual(moves(C, 2), [], 'C (another tab) gets no move');
       assert.deepEqual(moves(A2, 3), [fromB], "A′ never gets its own person's moves");
       assert.deepEqual(moves(D, 4), [], 'D (hidden) gets no move');
+      assert.deepEqual(between(N, 1, ends[5]), [], 'a connection that had not said here got no move (nothing between welcome and its first people)');
     });
   });
 
@@ -544,15 +556,12 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       for (const [label, act] of limits) {
         const c = await openPresence(fake.url);
         act(c);
-        assert.equal(await c.closed, 1008, label);
+        assert.equal(await closedWithin(c), 1008, label);
       }
       // A header declaring 2^40 bytes, with no payload ever sent, is closed on the header alone.
       const big = await openPresence(fake.url);
       big.raw(Buffer.from([0x81, 0xff, 0, 0, 0x01, 0, 0, 0, 0, 0, 1, 2, 3, 4]));
-      let timer;
-      const code = await Promise.race([big.closed, new Promise((r) => { timer = setTimeout(() => r('not closed in 2 s'), 2000); })]);
-      clearTimeout(timer);
-      assert.equal(code, 1008, 'a 2^40 header is closed within 2 s, before any payload');
+      assert.equal(await closedWithin(big), 1008, 'a 2^40 header is closed within 2 s, before any payload');
       big.destroy();
       assert.equal(stat(fake, ok).here, true, 'the 2048-byte one is still open');
     });
@@ -599,7 +608,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
         await fake.tick(1000);
         if (sec < LIMITS.overSeconds) assert.ok(stat(fake, G), `still open after ${sec} seconds over`);
       }
-      assert.equal(await G.closed, 1008, 'ten seconds of 31 close');
+      assert.equal(await closedWithin(G), 1008, 'ten seconds of 31 close');
       assert.ok(stat(fake, A), 'A, over in single seconds only, stays open');
     });
   });
@@ -610,7 +619,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       const ninth = await openPresence(fake.url, { headers: P('p-n') });
       assert.equal(ninth.status, 101, 'accepted');
       assert.equal(ninth.you, undefined, 'no welcome');
-      assert.equal(await ninth.closed, 1008);
+      assert.equal(await closedWithin(ninth), 1008);
       assert.ok((await openPresence(fake.url, { headers: P('p-m') })).you, 'another person is still welcome');
     });
   });
@@ -632,7 +641,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       const over = await openPresence(fake.url, { headers: P('p-201') });
       assert.equal(over.status, 101);
       assert.equal(over.you, undefined, 'the 201st gets no welcome');
-      assert.equal(await over.closed, 1008);
+      assert.equal(await closedWithin(over), 1008);
       assert.equal(fake.stats().length, LIMITS.perServer);
     });
   });
@@ -691,7 +700,7 @@ test('presence A2: the fake relays as the contract says', async (t) => {
         assert.equal(stat(fake, Pn).unanswered, i);
       }
       await fake.tick(LIMITS.pingMs);
-      assert.equal(await Pn.closed, 1001, 'closed after the third tick(20000)');
+      assert.equal(await closedWithin(Pn), 1001, 'closed after the third tick(20000)');
       await Q.next((m) => m.t === 'ping');
       assert.ok(stat(fake, Q), 'the one that pongs is still open');
     });
@@ -707,13 +716,16 @@ test('presence A2: the fake relays as the contract says', async (t) => {
       const first = await Promise.all([X, Y, Z].map((c) => c.next((m) => m.t === 'people')));
       for (const p of first) assert.deepEqual(p.people.map((x) => x.id), ['p-x', 'p-y', 'p-z'], "the first people lists all three, in here's order");
       const marks = [X, Y].map((c, i) => c.messages.indexOf(first[i]) + 1);
-      X.send(hereMsg({ tab: 'moved' }));
+      X.send(hereMsg({ tab: 't0' })); // identical to X's last here: changes nothing, so no people
       await read(fake, X, 2);
+      await fake.tick(LIMITS.peopleMs);
+      Y.send(hereMsg({ tab: 'moved' })); // the sentinel, from another client
+      await read(fake, Y, 2);
       await fake.tick(LIMITS.peopleMs);
       for (const [i, c] of [X, Y].entries()) {
         const p = await c.next((m) => m.t === 'people');
-        assert.equal(p.people[0].conns[0].at.tab, 'moved', 'the next people is the change: exactly one before it');
-        assert.deepEqual(between(c, marks[i], p), []);
+        assert.equal(p.people[1].conns[0].at.tab, 'moved', "the first people after the repeat is the sentinel's: the repeat sent none");
+        assert.deepEqual(between(c, marks[i], p), [], 'exactly one people per window, none for the repeat');
       }
       Z.destroy(); // no close frame
       await until(() => !fake.stats().some((s) => s.id === 'p-z'), 'Z gone');

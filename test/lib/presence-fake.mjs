@@ -438,18 +438,27 @@ export async function startPresenceFake({ hub = false, ownerName = 'Owner', serv
     }
     return [...by.values()];
   }
+  // A window's message to every connection that has said here: building it throws only into those
+  // connections (each closed 1011), and each write is wrapped so a throw closes only its connection.
+  function broadcast(build) {
+    const to = hereConns();
+    let f;
+    try { f = build(); } catch { for (const c of to) kill(c, 1011); return; }
+    for (const c of to) safe(c, () => write(c, f));
+  }
   function flushPeople() {
     peopleCancel = null;
-    const f = textFrame({ t: 'people', people: peopleList() });
-    for (const c of hereConns()) write(c, f);
+    broadcast(() => textFrame({ t: 'people', people: peopleList() }));
   }
   // §6: the first change opens a 250 ms window; one people at its end carries all of them.
   const peopleChanged = () => { if (!peopleCancel) peopleCancel = clk.after(LIMITS.peopleMs, flushPeople); };
-  function sendChanged() { const f = textFrame({ t: 'changed' }); for (const c of hereConns()) write(c, f); }
+  const sendChanged = () => broadcast(() => textFrame({ t: 'changed' }));
   function changedWindow() {
     chg.open = true;
     clk.after(LIMITS.changedMs, () => {
-      if (chg.pending) { chg.pending = false; sendChanged(); changedWindow(); } else chg.open = false;
+      try {
+        if (chg.pending) { chg.pending = false; sendChanged(); changedWindow(); } else chg.open = false;
+      } catch { chg.open = false; chg.pending = false; }
     });
   }
 
