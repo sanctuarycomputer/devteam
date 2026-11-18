@@ -16,10 +16,10 @@ const BAR_H = "getComputedStyle(document.documentElement).getPropertyValue('--ba
 // The element the stage's frame shows at id, in the window's coordinates: the frame's box (and its border) plus
 // the rect the page inside last said (the page's own word, the frame's origin being opaque to the test).
 const CENTRE = (id) => `(() => { const m = window.__own.filter((m) => m.own === 'at' && m.rects && m.rects[${J(id)}] && m.rects[${J(id)}].w > 0).pop(); if (!m) return null; const f = tsFrame(), r = f.getBoundingClientRect(), e = m.rects[${J(id)}]; return { x: r.left + f.clientLeft + e.x + e.w / 2, y: r.top + f.clientTop + e.y + e.h / 2 }; })()`;
-const near = (a, b, d) => Math.abs(a.x - b.x) <= d && Math.abs(a.y - b.y) <= d;
+const near = (a, b, d) => Math.hypot(a.x - b.x, a.y - b.y) <= d;
 
 test("the viewer's box, its narrowing for the panel, and the frames that fill a stage", { skip: SKIP, timeout: 900000 }, async (t) => {
-  const { TA, AV_A, PV, visit, sub } = await harness(t, 'artifact-viewer-box');
+  const { TA, TR, AV_A, PV, visit, sub } = await harness(t, 'artifact-viewer-box');
 
   await sub('DW5: the modal sits under the page bar, 16px from the sides and bottom; 8px under 600px', async () => {
     const V = await visit('#library');
@@ -28,7 +28,6 @@ test("the viewer's box, its narrowing for the panel, and the frames that fill a 
     for (const [w, h, box] of [[1280, 800, '49px/16px/16px/16px'], [700, 800, '49px/16px/16px/16px'], [500, 800, '8px/8px/8px/8px']]) {
       await V.size(w, h);
       await V.soon(`${BOX} === ${J(box)}`, `the box at ${w}x${h} is ${box}`).catch(async (e) => { assert.equal(await V.p.ev(BOX), box, `the box at ${w}x${h} (top/right/bottom/left): ${e.message}`); });
-      assert.equal(await V.p.ev(BOX), box, `the box at ${w}x${h} (top/right/bottom/left)`);
     }
     await V.size(1280, 800);
     assert.equal(await V.p.ev(`${BOX}.split('/')[0] === ${BAR_H}`), true, 'top is --bar-h');
@@ -59,32 +58,37 @@ test("the viewer's box, its narrowing for the panel, and the frames that fill a 
     assert.equal(fr.right, 1280 - 396 - 1, "the frame's right edge follows the viewer's (inside its 1px border)");
     assert.equal(fr.left, 16 + 1, "the frame's left edge: the viewer's border inside 16px");
 
-    // a thread placed beforehand on #pin-me: its pin within 40px of the element's centre
-    const pinSel = `#av-pins [data-tl-pin="${TA}"]`;
-    await V.soon(`(() => { const e = document.querySelector(${J(pinSel)}); return !!e && e.getBoundingClientRect().width > 0; })()`, "setup: TA's pin drawn on the stage");
+    // threads placed beforehand: each pin within 40px of its element's centre, all measured in the narrowed frame.
+    // #pin-right is placed from the frame's right edge, so it moved 380px left when the panel opened: a pin drawn
+    // from a rect the page said before the narrowing misses it. (#pin-me, from the left edge, didn't move.)
     const where = (id) => V.soon(`!!${CENTRE(id)}`, `setup: the page on the stage says where #${id} is`).then(() => p.ev(CENTRE(id)));
-    const pinMe = await where('pin-me');
-    const pin = await p.ev(`(() => { const r = document.querySelector(${J(pinSel)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
-    assert.ok(near(pin, pinMe, 40), `TA's pin ${J(pin)} is within 40px of #pin-me's centre ${J(pinMe)}`);
+    for (const [th, name, id] of [[TA, 'TA', 'pin-me'], [TR, 'TR', 'pin-right']]) {
+      const pinSel = `#av-pins [data-tl-pin="${th}"]`;
+      await V.soon(`(() => { const e = document.querySelector(${J(pinSel)}); return !!e && e.getBoundingClientRect().width > 0; })()`, `setup: ${name}'s pin drawn on the stage`);
+      const at = await where(id);
+      const pin = await p.ev(`(() => { const r = document.querySelector(${J(pinSel)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+      assert.ok(near(pin, at, 40), `${name}'s pin ${J(pin)} is within 40px of #${id}'s centre ${J(at)}`);
+    }
 
-    // a real Shift+click on #other (the frame has the keyboard first, as dashboard.test.mjs does it)
+    // a real Shift+click on #other-right (placed from the frame's right edge; the frame has the keyboard first,
+    // as dashboard.test.mjs does it)
     const blank = await p.ev(`(() => { const r = tsFrame().getBoundingClientRect(); return { x: r.left + 600, y: r.top + 150 }; })()`);
     await p.move(blank.x, blank.y);
     await p.clickAt(blank.x, blank.y);
     await V.soon("document.activeElement === document.getElementById('av-frame')", 'the frame has the keyboard');
-    const other = await where('other');
+    const other = await where('other-right');
     await p.hold('Shift', true);
     try {
       await V.soon("!document.getElementById('av-over').hidden", 'the overlay raised by Shift');
       await p.move(other.x, other.y, 8);
-      await V.soon("TS.hit?.anchor?.selector === '#other'", "the lens's answer for the hover is #other");
+      await V.soon("TS.hit?.anchor?.selector === '#other-right'", "the lens's answer for the hover is #other-right");
       await p.clickAt(other.x, other.y, 8);
     } finally { await p.hold('Shift', false); }
-    await V.soon("TL.draft?.subject?.anchor?.selector === '#other'", "a draft on #other: TL.draft.subject.anchor.selector");
+    await V.soon("TL.draft?.subject?.anchor?.selector === '#other-right'", "a draft on #other-right: TL.draft.subject.anchor.selector");
     // the draft's pin: where the dashboard puts it (tsRect, the frame's box and the point in it)
     const draft = await p.ev('(() => { const r = tsRect(TL.draft.subject); return r && { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }; })()');
     assert.ok(draft, "the draft's subject has a pin on the stage");
-    assert.ok(near(draft, other, 40), `the draft's pin ${J(draft)} is within 40px of #other's centre ${J(other)}`);
+    assert.ok(near(draft, other, 40), `the draft's pin ${J(draft)} is within 40px of #other-right's centre ${J(other)}`);
   });
 
   await sub("DW7: the viewer tab's frame fills its stage; the drawer's frame stays at 70vh", async () => {

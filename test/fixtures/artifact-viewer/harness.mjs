@@ -135,7 +135,7 @@ async function app() {
 }
 
 // The whole setup for a test file's one parent test t: the fixture project (named fixture), its threads
-// (T with no subject, for the panel; TA on viewer-a's #pin-me), the ticket TK for a peek, the app behind a
+// (T with no subject, for the panel; TA on viewer-a's #pin-me; TR on its right-anchored #pin-right), the ticket TK for a peek, the app behind a
 // preview named name, the dashboard, Chrome, and the preview's relay opened once (plan-1 P1-2). Returns the
 // heads and visit(hash) (a case's tab) and sub(name, fn) (a case).
 export async function harness(t, fixture) {
@@ -147,6 +147,8 @@ export async function harness(t, fixture) {
   const T = idOf(F.owner(['thread', 'new', 'Where do we start?']));
   F.sup(['thread', 'reply', T, 'Here, I think.']);
   const TA = idOf(F.owner(['thread', 'new', 'This button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-me', tag: 'button', text: 'Pin me', point: { x: 60, y: 20 } } })]));
+  // TR: one on viewer-a's #pin-right, placed from the frame's right edge (DW6: a stale rect misses it)
+  const TR = idOf(F.owner(['thread', 'new', 'That button', '--subject', J({ kind: 'artifact', slug: 'viewer-a', at: 'main', path: 'index.html', anchor: { selector: '#pin-right', tag: 'button', text: 'Pin me right', point: { x: 60, y: 20 } } })]));
   const TK = 'ch-01-tidy-docs';
   F.sup(['ticket', 'add', TK, '--json', J({ title: 'Tidy the docs', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['docs/**'], done_when: ['the docs check passes in CI'], notes: 'n' })]);
   const A = await app();
@@ -326,5 +328,5 @@ export async function harness(t, fixture) {
     await V.soon("TS.kind === 'preview' && TS.ready && TS.route === '/'", 'setup: the preview shown through its relay once the page names it');
   }
 
-  return { F, T, TA, TK, name, AV_A, AV_B, PV, LIB_T, PROG_T, visit, sub };
+  return { F, T, TA, TR, TK, name, AV_A, AV_B, PV, LIB_T, PROG_T, visit, sub };
 }
