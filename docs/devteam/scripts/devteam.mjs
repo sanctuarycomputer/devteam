@@ -16004,6 +16004,130 @@ function memoryFull(s = loadSettings()) {
   if (!m || m.inUse < ceiling * m.max) return null;
   return { ...m, ceiling, words: `the machine's memory is at ${GiB(m.inUse)} of ${GiB(m.max)} GB (${Math.round((m.inUse * 100) / m.max)}%${cacheWords(m)}), at or over its ${Math.round(ceiling * 100)}% ceiling` };
 }
+/* box-memory start */
+// The memory reading's names, here so its check reads nothing outside this region (a test runs it
+// alone). The ceiling's bounds are memoryCeilingProblem's; the test holds the two equal.
+const MEMORY_KINDS = ['agent', 'browser', 'install', 'devteam', 'node', 'other'];
+const MEMORY_SOURCES = ['cgroup', 'meminfo', 'os'];
+const MEMORY_READING_KEYS = ['v', 'at', 'working_set', 'max', 'ceiling', 'source', 'partial', 'sessions', 'kinds', 'devteam', 'projects'];
+const MEMORY_PROJECT_KEYS = ['rss', 'sessions', 'devteam'];
+const MEMORY_CEILING_MIN = 0.5, MEMORY_CEILING_MAX = 0.95;
+const MEMORY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/;
+const MEMORY_SUBCOMMAND = /^[a-z][a-z0-9-]*$/;
+const isBytes = (v) => Number.isSafeInteger(v) && v >= 0;
+const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
+const memoryIsMap = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+// A field's path: a key that isn't [A-Za-z0-9_-]+ is quoted in brackets (projects["my.app"].rss),
+// so a name with a dot can't read as two fields.
+const memoryPath = (base, key) => (/^[A-Za-z0-9_-]+$/.test(key) ? (base ? `${base}.${key}` : key) : `${base}[${JSON.stringify(key)}]`);
+const memoryShown = (v) => { const s = JSON.stringify(v) ?? String(v); return s.length > 60 ? `${s.slice(0, 57)}...` : s; };
+const memoryIs = (p, v, should) => `${p} is ${v === undefined ? 'missing' : memoryShown(v)}: it should be ${should}`;
+// A kinds or devteam entry, { n, rss }: null, or the words for its first bad field.
+const memoryCountsProblem = (p, e) => {
+  if (!memoryIsMap(e)) return memoryIs(p, e, '{ n, rss }, a count of processes and their integer bytes');
+  if (!isCount(e.n)) return memoryIs(`${p}.n`, e.n, 'a count of processes, an integer, 0 or more');
+  if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+  const other = Object.keys(e).find((k) => k !== 'n' && k !== 'rss');
+  return other === undefined ? null : `${memoryPath(p, other)} is not a field of ${p}: it holds only n and rss`;
+};
+// machine-memory@1, the memory reading: one JSON object a line in
+// ~/.devteam/machine-<hub port>/memory.jsonl, written once a minute by the machine's hub.
+//   `v`            required, `v: 1` (the line's "v":1): the contract's version; any other value is refused
+//   `at`           required, ISO 8601 UTC, YYYY-MM-DDTHH:MM:SS(.sss)Z: when the reading was taken
+//   `working_set`  required, integer bytes, 0 or more: in use as machineMemory() counts it for the
+//                  gate (cgroup working set, /proc/meminfo, or os.totalmem() - os.freemem())
+//   `max`          integer bytes, more than 0: the cap the gate reads
+//   `ceiling`      a number from 0.5 to 0.95: the lowest machine_memory_ceiling among the known
+//                  instances (default 0.8)
+//   `source`       "cgroup", "meminfo" or "os": where `working_set` and `max` came from
+//   `partial`      true: the tick ran past its 2-second budget and wrote what it had
+//   `sessions`     an integer, 0 or more: agent processes (claude, codex, opencode) whose cwd is
+//                  inside <root>/.worktrees/<name> of a known root; a supervisor in its root is not one
+//   `kinds`        { <kind>: { `n`, `rss` } }: every process by its executable's kind; `n` an integer,
+//                  0 or more, `rss` integer bytes, 0 or more
+//   `devteam`      { <subcommand>: { `n`, `rss` } }: the `devteam` kind split by subcommand, machine-wide
+//   `projects`     { <instance name>: { `rss`, `sessions`?, `devteam`? } }: by the known root holding
+//                  the process's cwd; its `devteam` is { <subcommand>: integer bytes }
+// Only `v`, `at` and `working_set` are required. The six kinds: `agent` (claude, codex, opencode),
+// `browser` (chrome, chromium, headless_shell), `install` (npm, pnpm, yarn, bundle, pip, uv, or node
+// running one of their scripts, with an install subcommand), `devteam` (node whose script ends in
+// devteam.mjs), `node` (any other node), `other` (everything else). The kind comes from cmdline's
+// argv[0] basename (its first word), never comm (node 24 names its main thread MainThread; npm
+// retitles itself "npm ci"). A subcommand is the word after the script, kept only if it is a CLI
+// command name. Nothing else of a command line, no environment and no file content is ever kept.
+// Sizes are integer bytes (RSS is statm's resident pages times the page size). A field the machine
+// can't read is left out, never zero: on a machine with no /proc (macOS) a line has `working_set`,
+// `max`, "source":"os" and no `sessions`, `kinds` or `projects`. A new field, or a change to one, is
+// machine-memory@2.
+// A line the check refuses (one torn by a hub killed mid-append, a "v":2 line from a newer
+// recorder, anything else memoryReadingProblem has words for) is skipped by every reader, never
+// fatal: the hub's /memory.json serves only passing lines, `machine memory` and `metrics` read past
+// it and say how many lines they skipped, and the Overview draws the readings it was given. A writer
+// starts each line on a fresh line (a torn tail is ended with a newline before the next append), so
+// one torn line spoils only itself.
+// /memory.json, served by the hub with /instances.json's same-origin check (and on a box through
+// the gateway): `{"v":1,"readings":[<reading>, …]}`, oldest first.
+//   `?since=<n>h|<n>d`  the window, default 24 hours, at most 8 days; thinned to one reading per
+//                       5 minutes for readings older than 6 hours, and one per 30 minutes older than 3 days
+//   `?after=<at>`       only readings newer than at, unthinned, for an at up to 6 hours back; an
+//                       older one is answered 400 (the Overview then asks since=24h again)
+//   `?thin=0`           no thinning, for a loopback request whose window is 24 hours or less
+// memoryReadingProblem(line) takes a line's text or a parsed value: null when it is a valid
+// machine-memory@1 reading, else one sentence starting with the first bad field's path and a space
+// (reading, when the line isn't a JSON object). Shape only: it doesn't add up kinds, compare
+// working_set with max, or look a subcommand up in COMMANDS.
+function memoryReadingProblem(line) {
+  let r = line;
+  if (typeof line === 'string') {
+    try { r = JSON.parse(line); } catch { return 'reading is not JSON (a torn line, or no reading at all): it should be one JSON object, a machine-memory@1 reading'; }
+  }
+  if (!memoryIsMap(r)) return memoryIs('reading', r, 'one JSON object, a machine-memory@1 reading');
+  if (r.v !== 1) return memoryIs('v', r.v, "1, this contract's version; a line of any other version is skipped");
+  if (typeof r.at !== 'string' || !MEMORY_AT.test(r.at) || !Number.isFinite(Date.parse(r.at))) return memoryIs('at', r.at, 'the time of the reading in UTC, YYYY-MM-DDTHH:MM:SSZ, with or without milliseconds');
+  if (!isBytes(r.working_set)) return memoryIs('working_set', r.working_set, 'integer bytes, 0 or more');
+  const other = Object.keys(r).find((k) => !MEMORY_READING_KEYS.includes(k));
+  if (other !== undefined) return `${memoryPath('', other)} is not a field of machine-memory@1: a reading holds only ${MEMORY_READING_KEYS.join(', ')} (a new field is machine-memory@2)`;
+  if (r.max !== undefined && !(isBytes(r.max) && r.max > 0)) return memoryIs('max', r.max, 'integer bytes, more than 0, or left out');
+  if (r.ceiling !== undefined && !(typeof r.ceiling === 'number' && r.ceiling >= MEMORY_CEILING_MIN && r.ceiling <= MEMORY_CEILING_MAX)) return memoryIs('ceiling', r.ceiling, `a number from ${MEMORY_CEILING_MIN} to ${MEMORY_CEILING_MAX}, or left out`);
+  if (r.source !== undefined && !MEMORY_SOURCES.includes(r.source)) return memoryIs('source', r.source, `one of ${MEMORY_SOURCES.join(', ')}, or left out`);
+  if (r.partial !== undefined && r.partial !== true) return memoryIs('partial', r.partial, 'true, or left out');
+  if (r.sessions !== undefined && !isCount(r.sessions)) return memoryIs('sessions', r.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+  if (r.kinds !== undefined) {
+    if (!memoryIsMap(r.kinds)) return memoryIs('kinds', r.kinds, '{ <kind>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.kinds)) {
+      if (!MEMORY_KINDS.includes(k)) return `${memoryPath('kinds', k)} is not a kind: it should be one of ${MEMORY_KINDS.join(', ')}`;
+      const p = memoryCountsProblem(memoryPath('kinds', k), e); if (p) return p;
+    }
+  }
+  if (r.devteam !== undefined) {
+    if (!memoryIsMap(r.devteam)) return memoryIs('devteam', r.devteam, '{ <subcommand>: { n, rss } }, or left out');
+    for (const [k, e] of Object.entries(r.devteam)) {
+      if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath('devteam', k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+      const p = memoryCountsProblem(memoryPath('devteam', k), e); if (p) return p;
+    }
+  }
+  if (r.projects !== undefined) {
+    if (!memoryIsMap(r.projects)) return memoryIs('projects', r.projects, '{ <instance name>: { rss, sessions?, devteam? } }, or left out');
+    for (const [name, e] of Object.entries(r.projects)) {
+      const p = memoryPath('projects', name);
+      if (name === '') return `${p} is an empty name: a project is keyed by its instance's name`;
+      if (!memoryIsMap(e)) return memoryIs(p, e, '{ rss, sessions?, devteam? }');
+      if (!isBytes(e.rss)) return memoryIs(`${p}.rss`, e.rss, 'integer bytes, 0 or more');
+      if (e.sessions !== undefined && !isCount(e.sessions)) return memoryIs(`${p}.sessions`, e.sessions, 'a count of agent sessions, an integer, 0 or more, or left out');
+      if (e.devteam !== undefined) {
+        if (!memoryIsMap(e.devteam)) return memoryIs(`${p}.devteam`, e.devteam, '{ <subcommand>: integer bytes }, or left out');
+        for (const [k, b] of Object.entries(e.devteam)) {
+          if (!MEMORY_SUBCOMMAND.test(k)) return `${memoryPath(`${p}.devteam`, k)} is not a command name: it should be a devteam subcommand, lowercase letters, digits and dashes`;
+          if (!isBytes(b)) return memoryIs(memoryPath(`${p}.devteam`, k), b, 'integer bytes, 0 or more');
+        }
+      }
+      const extra = Object.keys(e).find((k) => !MEMORY_PROJECT_KEYS.includes(k));
+      if (extra !== undefined) return `${memoryPath(p, extra)} is not a field of ${p}: it holds only ${MEMORY_PROJECT_KEYS.join(', ')}`;
+    }
+  }
+  return null;
+}
+/* box-memory end */
 // The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
 // /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
 function machineLine(last) {
