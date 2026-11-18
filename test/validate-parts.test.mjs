@@ -53,7 +53,7 @@ test('parts: declarations, their comments, regions and the rest of a .mjs file',
   assert.deepEqual(range(P, 'c'), [{ from: 13, to: 14 }]);
   assert.deepEqual(range(P, 'd'), [{ from: 15, to: 15 }], 'ends before the end marker');
   assert.deepEqual(range(P, 'tpl'), [{ from: 17, to: 19 }]);
-  assert.deepEqual([...partLeaves(P, 'r')].sort(), ['d:c#1', 'd:d#1', 'r:r'], 'a region covers what it holds and its own rest');
+  assert.deepEqual([...partLeaves(P, 'r')].sort(), ['d:r/c#1', 'd:r/d#1', 'r:r'], 'a region covers what it holds and its own rest, keyed under its name');
   assert.deepEqual([...partLeaves(P, 'a')], ['d:a#1']);
   const L = leafTexts(P);
   assert.equal(L.get('r:'), "import fs from 'node:fs';", "the file's rest, trailing blanks dropped");
@@ -78,7 +78,8 @@ test('parts: .md headings by slug, holding their sub-headings; fences and duplic
   assert.deepEqual(range(P, 'supervisor'), [{ from: 1, to: 13 }]);
   assert.equal(P.places.has('not-a-heading'), false, 'a # inside a fence is no heading');
   assert.deepEqual(range(P, 'monitoring'), [{ from: 5, to: 9 }, { from: 12, to: 13 }], 'a duplicate name names both places');
-  assert.deepEqual([...partLeaves(P, '3-the-tick')].sort(), ['d:3-the-tick#1', 'd:monitoring#1']);
+  assert.deepEqual([...partLeaves(P, '3-the-tick')].sort(), ['d:supervisor/3-the-tick#1', 'd:supervisor/3-the-tick/monitoring#1'], 'keyed by the headings above');
+  assert.ok(P.owner.includes('d:supervisor/4-fixing-drift/monitoring#1'), 'a duplicate heading has its own path');
 });
 
 test('parts: indented markers, markers whose name has a space, _ in a slug, a region in a .md file', () => {
@@ -105,7 +106,7 @@ test('parts: indented markers, markers whose name has a space, _ in a slug, a re
   const md = ['# Top', '## The snake_case rule', 'a', '<!-- r start -->', 'b', '<!-- r end -->', '## Next', 'c'].join('\n');
   const M = fileParts(md, 'x.md');
   assert.ok(M.places.has('the-snake_case-rule'), '_ survives in a slug');
-  assert.deepEqual([...partLeaves(M, 'r')], ['d:the-snake_case-rule#1'], "a region in a heading's section covers that heading's leaf");
+  assert.deepEqual([...partLeaves(M, 'r')], ['d:top/the-snake_case-rule#1'], "a region in a heading's section covers that heading's leaf");
 });
 
 test('parts: no space after function is no declaration; a repeated start, a start with no end, CRLF', () => {
@@ -129,7 +130,7 @@ test('the gate judges a leaf the base has by the base: a part widened at the hea
   // demoting ## 4 under ## 3, then editing it: 4-fixing-drift was not the ticket's at the base
   assert.deepEqual(partsChanged(md, md.replace('## 4. Fixing drift\nc', '### 4. Fixing drift\nc edited'), 'x.md', named('3-the-tick')), ['d:4-fixing-drift#1']);
   // a new heading above Monitoring, then Monitoring edited
-  assert.deepEqual(partsChanged(md, md.replace('### Monitoring\nb', '## New\n### Monitoring\nb edited'), 'x.md', named('+new')), ['d:monitoring#1']);
+  assert.deepEqual(partsChanged(md, md.replace('### Monitoring\nb', '## New\n### Monitoring\nb edited'), 'x.md', named('+new')), ['d:3-the-tick/monitoring#1']);
   // a sub-heading added under a named heading is the heading's
   assert.deepEqual(partsChanged(md, md.replace('### Monitoring', '### Added\nn\n### Monitoring'), 'x.md', named('3-the-tick')), []);
   const js = ['/* r start */', 'function a() {}', '/* r end */', 'function b() {}'].join('\n');
@@ -137,6 +138,16 @@ test('the gate judges a leaf the base has by the base: a part widened at the hea
   assert.deepEqual(partsChanged(js, ['/* r start */', 'function a() {}', 'function b() { edited }', '/* r end */'].join('\n'), 'x.mjs', named('r')), ['d:b#1']);
   // a region added around b by +name
   assert.deepEqual(partsChanged(js, js.replace('function b() {}', '/* s start */\nfunction b() { edited }\n/* s end */'), 'x.mjs', named('+s')), ['d:b#1']);
+  // a same-named heading added in a section the ticket didn't name: it is that section's, not the
+  // named one's, however the names count (final-1 F1)
+  const dup = ['## 4. Fixing drift', 'x', '## 9. Improvement', 'y', '### Artifacts', 'z'].join('\n');
+  assert.deepEqual(partsChanged(dup, dup.replace('x\n', 'x\n### Artifacts\nnew\n'), 'x.md', named('9-improvement')), ['d:4-fixing-drift/artifacts#1']);
+  // deleting the named section's own sub-heading when a later section has one of the same name
+  const notes = ['## A', 'a', '### Notes', 'n1', '## B', 'b', '### Notes', 'n2'].join('\n');
+  assert.deepEqual(partsChanged(notes, notes.replace('### Notes\nn1\n', ''), 'x.md', named('a')), [], 'not refused for a name B also has');
+  // +name of a name the base has covers no new place of it either (final-1 F2)
+  const one = ['function cmdReady() {}', 'function other() {}'].join('\n');
+  assert.deepEqual(partsChanged(one, `${one}\nfunction cmdReady() { again }`, 'x.mjs', named('+cmdReady')), ['d:cmdReady#2']);
   // a function added inside a named region is the region's
   assert.deepEqual(partsChanged(js, js.replace('function a() {}', 'function a() {}\nfunction c() {}'), 'x.mjs', named('r')), []);
 });
@@ -234,6 +245,7 @@ test('D4 and ready: different parts of one split file run together; the same par
     // split_files lists nothing: every file is whole again, and different parts are D4
     F.split([]);
     assert.equal(F.d4('app-01-ready', 'app-02-other').length, 1, 'an unlisted file is touched whole');
+    assert.match(F.validate(), /error: app-02-other: touches "docs\/devteam\/scripts\/devteam\.mjs#cmdValidate": docs\/devteam\/scripts\/devteam\.mjs is not in settings\.split_files/, 'and its part entries are refused');
   } finally { F.done(); }
 });
 
@@ -311,7 +323,7 @@ test('the merge gate: a change to a part the ticket did not name is refused', ()
     const underMon = swap('### Monitoring\n', '### Monitoring\n\nEdited.\n');
     const underDrift = swap('## 4. Fixing drift\n', '## 4. Fixing drift\n\nEdited.\n');
     assert.equal(run('app-51-tick', [`${SUPMD}#3-the-tick`], [[SUPMD, underMon]]), '', 'a sub-heading is its heading\'s');
-    assert.match(run('app-52-drift', [`${SUPMD}#3-the-tick`], [[SUPMD, underDrift]]), /changes parts of docs\/devteam\/process\/supervisor\.md the ticket doesn't name: 4-fixing-drift/);
+    assert.match(run('app-52-drift', [`${SUPMD}#3-the-tick`], [[SUPMD, underDrift]]), /changes parts of docs\/devteam\/process\/supervisor\.md the ticket doesn't name: supervisor\/4-fixing-drift/);
     // split_files comes from main: listing a file on the branch doesn't split it
     const SET = 'docs/devteam/project/settings.md';
     const listed = (t) => { const m = t.match(/```json devteam\s*\n([\s\S]*?)\n```/); const j = JSON.parse(m[1]); j.split_files = [...j.split_files, 'docs/devteam/process/worker.md']; return t.replace(m[1], () => JSON.stringify(j, null, 2)); };
@@ -342,6 +354,8 @@ test('planning.md, worker.md, supervisor.md and the schema say the same about pa
     assert.match(d, /merge conflict in a part another ticket named/, `${name}: a conflict goes back to the worker`);
   }
   assert.match(worker, /one you find you must change is a `design-change`/);
+  assert.match(worker, /merge conflict in a part another ticket named is yours to resolve/, 'the worker resolves it');
+  assert.match(supervisor, /merge conflict in a part another ticket named goes back to that worker/, 'the supervisor sends it back');
   const schema = json(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
   const find = (o) => (o && typeof o === 'object' ? (o.touches?.description ?? Object.values(o).map(find).find(Boolean)) : undefined);
   assert.match(find(schema), /path#name names one part/);

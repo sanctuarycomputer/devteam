@@ -3100,8 +3100,11 @@ const PART_MARK = /^\s*(?:\/\*|<!--)\s*([A-Za-z0-9_$.-]+)\s+(start|end)\s*(?:\*\
 const PART_DECL = /^(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function(?:\s*\*\s*|\s+)([A-Za-z_$][\w$]*)|(?:const|let|var|class)\s+([A-Za-z_$][\w$]*))/;
 const PART_COMMENT = /^(?:\/\/|\/\*| ?\*)/;
 const headingSlug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}_ -]/gu, '').replace(/ /g, '-');
-// { places: Map name -> [{from, to}] (1-based, inclusive), leaves: [{key, name, from, to}] } where
-// leaves partition the file: each declaration's or heading's own lines, and the rest by region.
+// { places: Map name -> [{from, to}] (1-based, inclusive), owner: line -> leaf key, lines, n }. The
+// leaves partition the file: each declaration's or heading's own lines, and the rest by region. A
+// leaf is keyed by its path (a heading's ancestor headings; a declaration's enclosing regions), its
+// name and its count among places with that path and name, so a same-named place added elsewhere
+// never renumbers it: d:<path/>name#k, r:<region> for a region's rest, r: for the file's.
 function fileParts(text, file) {
   const lines = text.split('\n');
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
@@ -3110,7 +3113,7 @@ function fileParts(text, file) {
   const add = (name, from, to) => { if (!places.has(name)) places.set(name, []); places.get(name).push({ from, to }); };
   const owner = new Array(n + 1).fill(null); // line -> own leaf key (declaration or heading), else null
   const count = new Map();
-  const own = (name, from, to) => { const k = (count.get(name) ?? 0) + 1; count.set(name, k); const key = `d:${name}#${k}`; for (let i = from; i <= to; i++) owner[i] = key; return key; };
+  const own = (path, name, from, to) => { const id = `${path.length ? `${path.join('/')}/` : ''}${name}`; const k = (count.get(id) ?? 0) + 1; count.set(id, k); const key = `d:${id}#${k}`; for (let i = from; i <= to; i++) owner[i] = key; return key; };
   // regions
   const open = new Map();
   const regions = [];
@@ -3134,13 +3137,16 @@ function fileParts(text, file) {
       const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
       if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
     }
+    const above = [];
     for (let j = 0; j < heads.length; j++) {
       const h = heads[j];
+      while (above.length && above[above.length - 1].level >= h.level) above.pop();
       let to = n;
       for (let k = j + 1; k < heads.length; k++) if (heads[k].level <= h.level) { to = heads[k].i - 1; break; }
       add(h.name, h.i, to);
       const ownTo = j + 1 < heads.length ? heads[j + 1].i - 1 : n;
-      own(h.name, h.i, ownTo);
+      own(above.map((a) => a.name), h.name, h.i, ownTo);
+      above.push(h);
     }
   } else {
     const html = /\.html?$/i.test(file);
@@ -3155,7 +3161,7 @@ function fileParts(text, file) {
       while (to + 1 < stop && !isMark0(to + 1) && !(html && lines[to].startsWith('<'))) to++;
       const from = Math.max(d.from, j ? decls[j - 1].i + 1 : 1);
       add(d.name, from, to);
-      own(d.name, from, to);
+      own(regions.filter((r) => r.from < d.i && d.i < r.to).sort((a, b) => a.from - b.from).map((r) => r.name), d.name, from, to);
     }
   }
   // the rest: lines no declaration or heading owns, by innermost region
@@ -3929,7 +3935,7 @@ function cmdValidate() {
         const added = () => [...(validateClosures ??= closures(ts)).get(id) ?? []].some((d) => { const o = ts.get(d); return o && isActive(o) && !mergeShaFor(d) && (o.touches ?? []).some((e) => { const y = touchPart(e); return y?.added && y.name === x.name && trimSlash(touchPath(e)) === f; }); });
         if (!P) err(id, `touches "${entry}": ${f} is not on main; a ticket that creates a file names it whole`);
         else if (x.added && P.places.has(x.name)) err(id, `touches "${entry}": ${f} already has a part ${x.name} at main; name it without +`);
-        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let or class, a Markdown heading's slug, or a /* name start */ … /* name end */ region); one this ticket adds is #+${x.name}`);
+        else if (!x.added && !P.places.has(x.name) && !added()) err(id, `touches "${entry}": ${f} has no part ${x.name} at main (a part is a top-level function, const, let, var or class, a Markdown heading's slug, or a /* name start */ … /* name end */ region); one this ticket adds is #+${x.name}`);
       }
     }
     for (const d of t.depends_on ?? []) {
