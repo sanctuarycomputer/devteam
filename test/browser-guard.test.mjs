@@ -1,0 +1,585 @@
+// The browser's egress guard (browser@1; design supervisors-can-use-a-browser-with-the-o, §1): a
+// loopback forward proxy that refuses every destination on this machine's own network, so the
+// supervisor's Chrome can never load a dashboard and press an owner button. Each test starts the
+// guard as its own process (`devteam.mjs browser-guard`) and asks it through a raw socket, spelling
+// every request head itself.
+//
+// The machine is faked by a stub the test writes into its own temp dir and preloads with
+// `node --require`: it patches os.networkInterfaces, dns.lookup and net.connect on the module
+// objects the kit's default imports share, so the guard carries no test hook of its own. The stub
+// never lets the guard reach the real network: a dial goes to the test's own servers or fails.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { schema, validate, refusalOf } from './fixtures/browser/check.mjs';
+import { startSites } from './lib/sites.mjs';
+import { PORTS } from './lib/ports.mjs';
+
+// GUARD_TEST_KIT points the file at a scratch copy of the kit (the final review's range mutation):
+// the script inside a copy of the whole docs/devteam tree (it reads ../schema), in a folder that is
+// no git checkout (`git archive HEAD docs/devteam | tar -x -C <dir>`, then edit the copy).
+const KIT = process.env.GUARD_TEST_KIT || fileURLToPath(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-guard-'));
+const children = new Set();
+after(() => {
+  for (const c of children) try { c.kill(); } catch {}
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+const STUB = String.raw`
+const fs = require('fs'), os = require('os'), dns = require('dns'), net = require('net');
+const E = process.env;
+const rec = (o) => { if (E.GUARD_STUB_RECORD) fs.appendFileSync(E.GUARD_STUB_RECORD, JSON.stringify(o) + '\n'); };
+if (E.GUARD_STUB_IFACES_FILE) os.networkInterfaces = () => JSON.parse(fs.readFileSync(E.GUARD_STUB_IFACES_FILE, 'utf8'));
+else if (E.GUARD_STUB_IFACES) os.networkInterfaces = () => JSON.parse(E.GUARD_STUB_IFACES);
+const DNS = JSON.parse(E.GUARD_STUB_DNS || '{}');
+const seen = {};
+const realLookup = dns.lookup;
+dns.lookup = function (name, opts, cb) {
+  // every name the test doesn't fake goes to the real lookup with the caller's own arguments
+  if (!Object.prototype.hasOwnProperty.call(DNS, name)) return realLookup.apply(this, arguments);
+  if (typeof opts === 'function') { cb = opts; opts = {}; }
+  rec({ lookup: name });
+  const list = DNS[name];
+  seen[name] = (seen[name] ?? -1) + 1;
+  const a = list[Math.min(seen[name], list.length - 1)];
+  const delay = JSON.parse(E.GUARD_STUB_DNS_DELAY || '{}')[name] || 0;
+  setTimeout(() => {
+    const nf = () => { const e = new Error('getaddrinfo ENOTFOUND ' + name); e.code = 'ENOTFOUND'; return e; };
+    if (a === 'ENOTFOUND') return cb(nf());
+    if (opts && opts.all) return cb(null, a);
+    if (!a.length) return cb(nf());
+    cb(null, a[0].address, a[0].family);
+  }, delay);
+};
+const DIAL = JSON.parse(E.GUARD_STUB_DIAL || '{}');
+const OK = new Set(String(E.GUARD_STUB_LOOPBACK_OK || '').split(',').filter(Boolean).map(Number));
+const realConnect = net.connect;
+const refused = (host, port) => {
+  const s = new net.Socket();
+  process.nextTick(() => { const e = new Error('connect ECONNREFUSED ' + host + ':' + port); e.code = 'ECONNREFUSED'; s.destroy(e); });
+  return s;
+};
+net.connect = function (...args) {
+  const o = args[0] !== null && typeof args[0] === 'object' ? args[0] : { port: args[0], host: args[1] };
+  const host = o.host, port = Number(o.port);
+  if (!net.isIP(String(host))) throw new Error('stub: dial of a name ' + host);
+  rec({ dial: host, port });
+  const d = DIAL[host];
+  if (d === 'ECONNREFUSED') return refused(host, port);
+  if (d) { const i = d.lastIndexOf(':'); return realConnect.call(net, { host: d.slice(0, i), port: Number(d.slice(i + 1)) }); }
+  if ((/^127\./.test(host) || host === '::1') && OK.has(port)) return realConnect.call(net, { host, port });
+  return refused(host, port);
+};
+`;
+const STUB_PATH = path.join(TMP, 'stub.cjs');
+fs.writeFileSync(STUB_PATH, STUB);
+
+let runs = 0;
+// The guard on its own, as browser serve will start it: { port, record(), stop() }.
+async function startGuard({ env = {}, stub = false } = {}) {
+  const dir = path.join(TMP, `run-${++runs}`);
+  fs.mkdirSync(dir);
+  const recordFile = path.join(dir, 'record.jsonl');
+  const childEnv = { PATH: process.env.PATH, HOME: dir, DEVTEAM_PROJECT: dir, ...(stub ? { GUARD_STUB_RECORD: recordFile } : {}), ...env };
+  const child = spawn(process.execPath, [...(stub ? ['--require', STUB_PATH] : []), KIT, 'browser-guard'], { cwd: dir, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.add(child);
+  let errText = '';
+  child.stderr.on('data', (d) => { errText += d; });
+  const port = await new Promise((resolve, reject) => {
+    let outText = '';
+    const t = setTimeout(() => reject(new Error(`the guard didn't start in 10 s: ${errText}`)), 10000);
+    child.stdout.on('data', (d) => {
+      outText += d;
+      const nl = outText.indexOf('\n');
+      if (nl < 0) return;
+      clearTimeout(t);
+      try {
+        const line = JSON.parse(outText.slice(0, nl));
+        assert.equal(line.browser, 1);
+        assert.ok(Number.isInteger(line.port) && line.port > 0, `a port: ${outText}`);
+        resolve(line.port);
+      } catch (e) { reject(e); }
+    });
+    child.once('exit', (code) => { clearTimeout(t); reject(new Error(`the guard exited ${code}: ${errText}`)); });
+  });
+  const record = () => { try { return fs.readFileSync(recordFile, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+  const stop = () => new Promise((resolve) => {
+    if (child.exitCode !== null) return resolve();
+    child.once('exit', () => resolve());
+    child.kill();
+  });
+  return { port, child, record, stop, stderr: () => errText };
+}
+
+function dechunk(body) {
+  let out = Buffer.alloc(0);
+  let rest = body;
+  for (;;) {
+    const i = rest.indexOf('\r\n');
+    if (i < 0) break;
+    const n = parseInt(rest.subarray(0, i).toString('latin1'), 16);
+    if (!n) break;
+    out = Buffer.concat([out, rest.subarray(i + 2, i + 2 + n)]);
+    rest = rest.subarray(i + 2 + n + 2);
+  }
+  return out;
+}
+// status, headers (names lowercased, repeats joined with ", "), body (dechunked); for a tunnel's
+// 200, what came through it as inner.
+function parse(buf, tunnelled) {
+  const i = buf.indexOf('\r\n\r\n');
+  if (i < 0) return { status: 0, headers: {}, body: buf.toString('utf8'), head: buf.toString('latin1') };
+  const head = buf.subarray(0, i).toString('latin1');
+  const [line, ...rest] = head.split('\r\n');
+  const headers = {};
+  for (const h of rest) {
+    const c = h.indexOf(':');
+    const k = h.slice(0, c).trim().toLowerCase();
+    const v = h.slice(c + 1).trim();
+    headers[k] = k in headers ? `${headers[k]}, ${v}` : v;
+  }
+  const status = Number(line.split(' ')[1]);
+  let body = buf.subarray(i + 4);
+  if (tunnelled && status === 200) return { status, headers, head, body: '', inner: parse(body, false) };
+  if (/chunked/i.test(headers['transfer-encoding'] ?? '')) body = dechunk(body);
+  return { status, headers, head, body: body.toString('utf8') };
+}
+// One raw request to the guard, read until the socket ends (5 s at most). then: a request head
+// written into the tunnel once a CONNECT's 200 arrives.
+function ask(port, raw, { then } = {}) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect(port, '127.0.0.1');
+    let buf = Buffer.alloc(0);
+    let sent = false;
+    const done = () => { clearTimeout(t); resolve(parse(buf, !!then)); };
+    const t = setTimeout(() => { s.destroy(); reject(new Error(`no answer in 5 s to ${raw.split('\r\n')[0]}: ${buf.toString('latin1').slice(0, 200)}`)); }, 5000);
+    s.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (then && !sent && buf.indexOf('\r\n\r\n') >= 0 && /^HTTP\/1\.1 200 /.test(buf.toString('latin1', 0, 13))) { sent = true; s.write(then); }
+    });
+    s.on('error', (e) => { if (buf.length) done(); else { clearTimeout(t); reject(e); } });
+    s.on('end', done);
+    s.write(raw);
+  });
+}
+const headLines = (h) => Object.entries(h).map(([k, v]) => `${k}: ${v}\r\n`).join('');
+function hostOf(target) { try { return new URL(target).host; } catch { return 'x.test'; } }
+const get = (port, target, headers = {}) => ask(port, `GET ${target} HTTP/1.1\r\n${headLines({ Host: hostOf(target), Connection: 'close', ...headers })}\r\n`);
+const connect = (port, authority, then) => ask(port, `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\nConnection: close\r\n\r\n`, { then });
+const inner = (host, p = '/account') => `GET ${p} HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`;
+
+// The refusal object of an answer, checked against browser@1 and the page's own headers.
+function refusal(r) {
+  assert.equal(r.headers['content-type'], 'text/html; charset=utf-8', r.head);
+  assert.equal(r.headers.connection, 'close', r.head);
+  const o = refusalOf(r.body);
+  assert.ok(o, `no #devteam-refusal in: ${r.body.slice(0, 300)}`);
+  assert.deepEqual(validate('refusal', o), []);
+  return o;
+}
+// An IP literal as the guard reports it: what WHATWG URL makes of it, without brackets.
+const norm = (host) => new URL(`http://${host}/`).hostname.replace(/^\[|\]$/g, '');
+const normAddr = (a) => (a.includes(':') ? norm(`[${a.split('%')[0]}]`) : norm(a));
+const ownAddrs = () => new Set(Object.values(os.networkInterfaces()).flat().map((e) => normAddr(e.address)));
+const LO_ONLY = JSON.stringify({ lo: [{ address: '127.0.0.1', family: 'IPv4' }, { address: '::1', family: 'IPv6' }] });
+
+// ---- Task 1: the decision, the refusal and the command ----
+
+const A1_ADDRESSES = {
+  '127.0.0.1': '127.0.0.0/8', '127.1': '127.0.0.0/8', 2130706433: '127.0.0.0/8', '0x7f.1': '127.0.0.0/8',
+  '[::]': '::/128', '[::1]': '::1/128', '[::ffff:127.0.0.1]': '::ffff:0:0/96', '[64:ff9b::7f00:1]': '64:ff9b::/96',
+  '0.0.0.0': '0.0.0.0/8', '10.1.2.3': '10.0.0.0/8', '100.64.0.1': '100.64.0.0/10', '172.16.0.1': '172.16.0.0/12',
+  '192.0.0.1': '192.0.0.0/24', '192.168.1.1': '192.168.0.0/16', '198.18.0.1': '198.18.0.0/15', '169.254.169.254': '169.254.0.0/16',
+  '224.0.0.1': '224.0.0.0/4', '[fe80::1]': 'fe80::/10', '[fd00::1]': 'fc00::/7', '[2002:7f00:1::1]': '2002::/16',
+  '[2001:0:4136:e378:8000:63bf:3fff:fdd2]': '2001::/32',
+};
+const HOSTNAME = os.hostname().toLowerCase();
+const A1_NAMES = {
+  localhost: 'own-name', 'a.localhost': 'own-name', [HOSTNAME]: 'own-name',
+  'LOCALHOST.': 'own-name', 'A.LOCALHOST.': 'own-name', [`${HOSTNAME.toUpperCase()}.`]: 'own-name',
+  'box.example.test': 'gateway', 'x.box.example.test': 'gateway', 'box.example.test.': 'gateway', 'X.Box.Example.Test.': 'gateway',
+};
+
+test('A1: every listed host is refused, by GET and by CONNECT, with its rule', async () => {
+  const g = await startGuard({ env: { DEVTEAM_PUBLIC_URL: 'https://box.example.test' } });
+  try {
+    const own = ownAddrs();
+    for (const [host, range] of Object.entries(A1_ADDRESSES)) {
+      const address = norm(host);
+      for (const [how, r, asked] of [['GET', await get(g.port, `http://${host}/`), host], ['CONNECT', await connect(g.port, `${host}:443`), `${host}:443`]]) {
+        assert.equal(r.status, 403, `${how} ${host}: ${r.head}`);
+        const o = refusal(r);
+        assert.equal(o.host, asked, `${how} ${host}`);
+        assert.equal(o.address, address, `${how} ${host}`);
+        if (own.has(address)) assert.equal(o.rule, 'own-interface', `${how} ${host}`);
+        else assert.deepEqual([o.rule, o.range], ['special-purpose', range], `${how} ${host}`);
+      }
+    }
+    for (const [host, rule] of Object.entries(A1_NAMES)) {
+      for (const [how, r, asked] of [['GET', await get(g.port, `http://${host}/`), host], ['CONNECT', await connect(g.port, `${host}:443`), `${host}:443`]]) {
+        assert.equal(r.status, 403, `${how} ${host}: ${r.head}`);
+        const o = refusal(r);
+        assert.equal(o.rule, rule, `${how} ${host}`);
+        assert.equal(o.host, asked, `${how} ${host}`);
+        assert.ok(!('address' in o) && !('range' in o), `${how} ${host}: a name rule names no address`);
+      }
+    }
+  } finally { await g.stop(); }
+});
+
+// One address inside each refused range of the contract and inside no narrower one.
+const SAMPLES = {
+  '127.0.0.0/8': '127.9.9.9', '0.0.0.0/8': '0.1.2.3', '10.0.0.0/8': '10.9.9.9', '172.16.0.0/12': '172.20.1.1',
+  '192.168.0.0/16': '192.168.9.9', '169.254.0.0/16': '169.254.9.9', '100.64.0.0/10': '100.100.1.1', '192.0.0.0/24': '192.0.0.9',
+  '198.18.0.0/15': '198.19.1.1', '224.0.0.0/4': '230.1.1.1', '::/128': '::', '::1/128': '::1', 'fc00::/7': 'fd12::1',
+  'fe80::/10': 'fe80::9', '64:ff9b::/96': '64:ff9b::808:808', '::ffff:0:0/96': '::ffff:8.8.8.8', '192.0.2.0/24': '192.0.2.9',
+  '192.31.196.0/24': '192.31.196.9', '192.52.193.0/24': '192.52.193.9', '192.88.99.0/24': '192.88.99.9',
+  '192.175.48.0/24': '192.175.48.9', '198.51.100.0/24': '198.51.100.9', '203.0.113.0/24': '203.0.113.9',
+  '240.0.0.0/4': '250.1.1.1', '255.255.255.255/32': '255.255.255.255', '64:ff9b:1::/48': '64:ff9b:1::9', '100::/64': '100::9',
+  '2001::/23': '2001:100::1', '2001::/32': '2001:0:1::1', '2001:db8::/32': '2001:db8::9', '2002::/16': '2002:808:808::1',
+  '2620:4f:8000::/48': '2620:4f:8000::9', '3fff::/20': '3fff::9', '5f00::/16': '5f00::9', 'ff00::/8': 'ff02::1',
+  '::/3': '1000::1', '4000::/2': '4000::1', '8000::/1': '8000::1',
+};
+
+test('A2: one sample per contract range is refused with exactly that range', async () => {
+  assert.deepEqual(Object.keys(SAMPLES).sort(), [...schema.$defs.shapes.refusal.properties.range.enum].sort(), 'a sample for every range the contract names, and no other');
+  const g = await startGuard({ stub: true, env: { GUARD_STUB_IFACES: '{}' } });
+  try {
+    for (const [range, sample] of Object.entries(SAMPLES)) {
+      const host = sample.includes(':') ? `[${sample}]` : sample;
+      const r = await get(g.port, `http://${host}/`);
+      assert.equal(r.status, 403, `${sample}: ${r.head}`);
+      const o = refusal(r);
+      assert.deepEqual([o.rule, o.range, o.address], ['special-purpose', range, norm(host)], sample);
+    }
+  } finally { await g.stop(); }
+});
+
+test('A3: an own public address is refused by own-interface, read on every request', async () => {
+  const ifaces = { lo: [{ address: '127.0.0.1', family: 'IPv4' }], eth0: [{ address: '203.0.113.7', family: 'IPv4' }] };
+  const g = await startGuard({ stub: true, env: { GUARD_STUB_IFACES: JSON.stringify(ifaces) } });
+  try {
+    for (const r of [await get(g.port, 'http://203.0.113.7/'), await connect(g.port, '203.0.113.7:443')]) {
+      assert.equal(r.status, 403, r.head);
+      const o = refusal(r);
+      assert.deepEqual([o.rule, o.address], ['own-interface', '203.0.113.7']);
+    }
+  } finally { await g.stop(); }
+  // read per request: the same guard sees the address arrive
+  const file = path.join(TMP, 'ifaces.json');
+  fs.writeFileSync(file, LO_ONLY);
+  const h = await startGuard({ stub: true, env: { GUARD_STUB_IFACES_FILE: file } });
+  try {
+    assert.equal(refusal(await get(h.port, 'http://203.0.113.7/')).rule, 'special-purpose');
+    fs.writeFileSync(file, JSON.stringify(ifaces));
+    assert.equal(refusal(await get(h.port, 'http://203.0.113.7/')).rule, 'own-interface');
+  } finally { await h.stop(); }
+});
+
+test('A5: a request that is not a proxy request gets 400', async () => {
+  const g = await startGuard();
+  try {
+    const heads = [
+      'GET / HTTP/1.1\r\nHost: x.test\r\nConnection: close\r\n\r\n',
+      'GET https://example.test/ HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n',
+      'CONNECT example.test HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n',
+      'CONNECT user@example.test:443 HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n',
+      'CONNECT 10.0.0.1\\x:443 HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n',
+    ];
+    for (const raw of heads) {
+      const r = await ask(g.port, raw);
+      assert.equal(r.status, 400, `${raw.split('\r\n')[0]}: ${r.head}`);
+      assert.equal(refusal(r).rule, 'not-a-proxy-request', raw.split('\r\n')[0]);
+    }
+  } finally { await g.stop(); }
+});
+
+test('a host the contract can\'t carry is named in its allowed characters', async () => {
+  const g = await startGuard();
+  const long = `${Array(5).fill('x'.repeat(60)).join('.')}.localhost`;
+  try {
+    for (const [host, named] of [['a_b.localhost', 'a_b.localhost'], ['a!b.localhost', 'a-b.localhost'], ['a$b.localhost', 'a-b.localhost'], [long, long.slice(0, 255)]]) {
+      for (const r of [await get(g.port, `http://${host}/`), await connect(g.port, `${host}:443`)]) {
+        assert.equal(r.status, 403, `${host.slice(0, 40)}: ${r.head}`);
+        const o = refusal(r);
+        assert.equal(o.rule, 'own-name');
+        assert.ok(o.host.startsWith(named.slice(0, 200)), `${o.host.slice(0, 40)} for ${host.slice(0, 40)}`);
+      }
+    }
+  } finally { await g.stop(); }
+});
+
+test('rule order: a name rule is reported before an address rule, own-name before gateway', async () => {
+  const g = await startGuard({ env: { DEVTEAM_PUBLIC_URL: 'http://10.9.9.9' } });
+  try { assert.equal(refusal(await get(g.port, 'http://10.9.9.9/')).rule, 'gateway'); } finally { await g.stop(); }
+  const h = await startGuard({ env: { DEVTEAM_PUBLIC_URL: 'https://box.localhost' } });
+  try { assert.equal(refusal(await get(h.port, 'http://x.box.localhost/')).rule, 'own-name'); } finally { await h.stop(); }
+});
+
+test('CONNECT authorities that reach the guard but are not <host>:<port> get 400', async () => {
+  const g = await startGuard();
+  try {
+    for (const a of ['a/b:443', 'a?b:443', 'a#b:443', '[::1:443', 'a:b:443', 'a:0', 'a:65536', ':443']) {
+      const r = await connect(g.port, a);
+      assert.equal(r.status, 400, `${a}: ${r.head}`);
+      assert.equal(refusal(r).rule, 'not-a-proxy-request', a);
+    }
+  } finally { await g.stop(); }
+});
+
+test('a fault inside the decision is a 502, and the guard stays up', async () => {
+  const g = await startGuard({ stub: true, env: { GUARD_STUB_IFACES_FILE: path.join(TMP, 'no-such-ifaces.json') } });
+  try {
+    for (const r of [await get(g.port, 'http://8.8.8.8/'), await connect(g.port, '8.8.8.8:443')]) assert.equal(r.status, 502, r.head);
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    assert.equal(refusal(await get(g.port, 'http://localhost/')).rule, 'own-name');
+  } finally { await g.stop(); }
+});
+
+test('the command prints its port and stays up', async () => {
+  const g = await startGuard();
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    assert.equal((await get(g.port, 'http://127.0.0.1/')).status, 403);
+  } finally { await g.stop(); }
+});
+
+// ---- Task 2: resolve once, dial what was checked, the test exception ----
+
+const PUBLIC = '93.184.216.34';
+const one = (address, family = 4) => [{ address, family }];
+const stubEnv = ({ dns = {}, dial = {}, loopbackOk = [], ifaces = LO_ONLY } = {}) => ({
+  GUARD_STUB_IFACES: ifaces, GUARD_STUB_DNS: JSON.stringify(dns), GUARD_STUB_DIAL: JSON.stringify(dial), GUARD_STUB_LOOPBACK_OK: loopbackOk.join(','),
+});
+const dials = (g) => g.record().filter((e) => 'dial' in e);
+
+test('A4: a name is resolved once and the checked address is dialled', async () => {
+  const site = await startSites();
+  const dial = { [PUBLIC]: `127.0.0.1:${site.port}` };
+  const rebind = { 'rebind.test': [one(PUBLIC), one('127.0.0.1')], 'mixed.test': [[...one(PUBLIC), ...one('10.0.0.1')]] };
+  try {
+    // GET: one lookup, one dial of the address it checked; the name's next answer (loopback) is refused
+    let g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+    try {
+      const r = await get(g.port, 'http://rebind.test/account');
+      assert.equal(r.status, 200, r.head);
+      assert.match(r.body, /Not signed in/);
+      assert.deepEqual(g.record(), [{ lookup: 'rebind.test' }, { dial: PUBLIC, port: 80 }]);
+      const again = await get(g.port, 'http://rebind.test/account');
+      assert.equal(again.status, 403, again.head);
+      assert.equal(refusal(again).address, '127.0.0.1');
+      assert.equal(dials(g).length, 1, 'nothing dialled for the refused answer');
+    } finally { await g.stop(); }
+    // CONNECT, on 443 and on 80 (a ws: page names its default port)
+    for (const p of [443, 80]) {
+      g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+      try {
+        const r = await connect(g.port, `rebind.test:${p}`, inner('rebind.test'));
+        assert.equal(r.status, 200, `CONNECT :${p}: ${r.head}`);
+        assert.equal(r.inner.status, 200, r.inner.head);
+        assert.match(r.inner.body, /Not signed in/);
+        assert.deepEqual(g.record(), [{ lookup: 'rebind.test' }, { dial: PUBLIC, port: p }]);
+      } finally { await g.stop(); }
+    }
+    // any refused address refuses the name, and nothing is dialled
+    g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+    try {
+      const r = await get(g.port, 'http://mixed.test/');
+      assert.equal(r.status, 403, r.head);
+      assert.deepEqual([refusal(r).rule, refusal(r).address], ['special-purpose', '10.0.0.1']);
+      assert.deepEqual(dials(g), []);
+    } finally { await g.stop(); }
+    // fail closed: an answer the guard can't read, or none, is never dialled
+    const cases = [
+      [one('::ffff:127.0.0.1', 6), 403, { address: '::ffff:7f00:1', range: '::ffff:0:0/96' }],
+      [one('::127.0.0.1', 6), 403, { address: '::7f00:1', range: '::/3' }],
+      [[...one(PUBLIC), ...one('::ffff:10.0.0.1', 6)], 403, { address: '::ffff:a00:1', range: '::ffff:0:0/96' }],
+      [[], 502, null],
+      [one('not-an-ip'), 403, { address: 'not-an-ip' }],
+    ];
+    for (const [answer, status, want] of cases) {
+      g = await startGuard({ stub: true, env: stubEnv({ dns: { 'odd.test': [answer] }, dial }) });
+      try {
+        const r = await get(g.port, 'http://odd.test/');
+        assert.equal(r.status, status, `${JSON.stringify(answer)}: ${r.head}`);
+        if (want) {
+          const o = refusal(r);
+          assert.equal(o.rule, 'special-purpose');
+          assert.equal(o.address, want.address);
+          assert.equal(o.range, want.range);
+        }
+        assert.deepEqual(dials(g), [], JSON.stringify(answer));
+      } finally { await g.stop(); }
+    }
+  } finally { await site.close(); }
+});
+
+test('A6: the test exception: loopback ports the test lists, never an owner control', async () => {
+  const site = await startSites();
+  const ports = { DEVTEAM_HUB_PORT: PORTS + 10, DEVTEAM_PORT_BASE: PORTS + 20, DEVTEAM_TTYD_PORT: PORTS + 50, PORT: PORTS + 51 };
+  const base = { ...Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, String(v)])), DEVTEAM_PUBLIC_URL: 'https://box.example.test' };
+  const allow = String(site.port);
+  const target = `http://127.0.0.1:${site.port}/account`;
+  try {
+    // (a) DEVTEAM_TEST set and the site's port listed: GET and CONNECT reach the site
+    let g = await startGuard({ env: { ...base, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: allow } });
+    try {
+      const r = await get(g.port, target);
+      assert.equal(r.status, 200, r.head);
+      assert.match(r.body, /Not signed in/);
+      const c = await connect(g.port, `127.0.0.1:${site.port}`, inner(`127.0.0.1:${site.port}`));
+      assert.equal(c.status, 200, c.head);
+      assert.equal(c.inner.status, 200, c.inner.head);
+    } finally { await g.stop(); }
+    // (b) no DEVTEAM_TEST, (b2) an empty one, (c) the port not listed: refused
+    for (const env of [{ DEVTEAM_TEST_BROWSER_ALLOW: allow }, { DEVTEAM_TEST: '', DEVTEAM_TEST_BROWSER_ALLOW: allow }, { DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: String(site.port + 1) }]) {
+      g = await startGuard({ env: { ...base, ...env } });
+      try {
+        for (const r of [await get(g.port, target), await connect(g.port, `127.0.0.1:${site.port}`)]) {
+          assert.equal(r.status, 403, `${JSON.stringify(env)}: ${r.head}`);
+          refusal(r);
+        }
+      } finally { await g.stop(); }
+    }
+    // (d) never an owner control, listed or not, and nothing of them is dialled
+    const never = [4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, ports.DEVTEAM_HUB_PORT,
+      ...Array.from({ length: 25 }, (_, i) => ports.DEVTEAM_PORT_BASE + i), ports.DEVTEAM_TTYD_PORT, ports.PORT];
+    g = await startGuard({ stub: true, env: { ...base, ...stubEnv({ loopbackOk: [site.port] }), DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: [site.port, ...never].join(',') } });
+    try {
+      assert.equal((await get(g.port, target)).status, 200, 'the site itself still passes under the stub');
+      for (const p of never) {
+        const r = await get(g.port, `http://127.0.0.1:${p}/`);
+        assert.equal(r.status, 403, `port ${p}: ${r.head}`);
+        refusal(r);
+      }
+      assert.deepEqual(dials(g).map((d) => d.port), [site.port], 'only the site was dialled');
+    } finally { await g.stop(); }
+    // (e) a name rule still applies; (f) loopback only: no other address passes on a listed port
+    g = await startGuard({ stub: true, env: { ...base, ...stubEnv({ dns: { 'rebind.test': [[...one('127.0.0.1'), ...one('10.0.0.1')]] }, loopbackOk: [site.port] }), DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: allow } });
+    try {
+      assert.equal(refusal(await get(g.port, `http://localhost:${site.port}/`)).rule, 'own-name');
+      // rebind.test's 127.0.0.1 is the faked machine's own, so own-interface (checked over every address first) reports it
+      for (const [host, rule, address] of [['10.1.2.3', 'special-purpose', '10.1.2.3'], ['[::ffff:127.0.0.1]', 'special-purpose', '::ffff:7f00:1'], ['rebind.test', 'own-interface', '127.0.0.1']]) {
+        const r = await get(g.port, `http://${host}:${site.port}/`);
+        assert.equal(r.status, 403, `${host}: ${r.head}`);
+        assert.deepEqual([refusal(r).rule, refusal(r).address], [rule, address], host);
+      }
+      assert.deepEqual(dials(g), []);
+    } finally { await g.stop(); }
+  } finally { await site.close(); }
+});
+
+test('A9: other answers, headers that stop at the guard, and a guard that stays up', async () => {
+  const site = await startSites();
+  let seen = null;
+  const echo = http.createServer((req, res) => {
+    seen = req.headers;
+    res.writeHead(200, { 'content-type': 'application/json', Connection: 'x-drop', 'Keep-Alive': 'timeout=7, max=3', 'X-Drop': '1', 'X-Keep': '1' });
+    res.end(JSON.stringify(req.headers));
+  });
+  await new Promise((r) => echo.listen(0, '127.0.0.1', r));
+  const E = echo.address().port;
+  const dns = { 'up.test': [one(PUBLIC)], 'echo.test': [one('93.184.216.35')], 'refused.test': [one('93.184.216.36')], 'nowhere.test': ['ENOTFOUND'] };
+  const dial = { [PUBLIC]: `127.0.0.1:${site.port}`, '93.184.216.35': `127.0.0.1:${E}`, '93.184.216.36': 'ECONNREFUSED' };
+  const g = await startGuard({ stub: true, env: stubEnv({ dns, dial }) });
+  try {
+    const up = await ask(g.port, 'GET http://up.test/ HTTP/1.1\r\nHost: up.test\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\r\n');
+    assert.equal(up.status, 501, up.head);
+    assert.equal((await get(g.port, 'http://nowhere.test/')).status, 502);
+    assert.equal((await get(g.port, 'http://refused.test/')).status, 502);
+    assert.equal((await connect(g.port, 'refused.test:443')).status, 502);
+    // hop-by-hop headers stop at the guard, both ways; Host is the URL's
+    const r = await get(g.port, `http://echo.test:${E}/`, { Host: 'wrong.test', Connection: 'close, x-req-drop', 'X-Req-Drop': '1', 'Proxy-Authorization': 'Basic eA==', 'Proxy-Connection': 'keep-alive', 'X-Req-Keep': '1' });
+    assert.equal(r.status, 200, r.head);
+    assert.equal(seen.host, `echo.test:${E}`);
+    assert.equal(seen['x-req-keep'], '1');
+    for (const h of ['x-req-drop', 'proxy-authorization', 'proxy-connection']) assert.ok(!(h in seen), `${h} reached the site`);
+    assert.equal(r.headers['x-keep'], '1');
+    assert.ok(!('x-drop' in r.headers), 'x-drop came back');
+    assert.notEqual(r.headers['keep-alive'], 'timeout=7, max=3', "the site's keep-alive came back");
+    assert.ok(!/x-drop/i.test(r.headers.connection ?? ''), "the site's connection came back");
+    // a tunnel the client resets mid-stream, then a CONNECT head cut off by a reset
+    await new Promise((resolve) => {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.on('data', () => { s.write('GET /account HTTP/1.1\r\nHo'); setTimeout(() => { s.resetAndDestroy?.() ?? s.destroy(); resolve(); }, 50); });
+      s.write('CONNECT up.test:443 HTTP/1.1\r\nHost: up.test:443\r\n\r\n');
+    });
+    await new Promise((resolve) => {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.write('CONNECT rebind', () => setTimeout(() => { s.resetAndDestroy?.() ?? s.destroy(); resolve(); }, 50));
+    });
+    await new Promise((r2) => setTimeout(r2, 200));
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    const after = await get(g.port, 'http://up.test/account');
+    assert.equal(after.status, 200, after.head);
+  } finally {
+    await g.stop();
+    await site.close();
+    await new Promise((r2) => echo.close(r2));
+  }
+});
+
+test('a site\'s odd answer, a client that leaves early, a chunked body, an origin-form Upgrade', async () => {
+  // raw sites that send status lines Node reads but won't write back
+  const raw = (line) => net.createServer((s) => { s.on('error', () => {}); s.once('data', () => s.end(`HTTP/1.1 ${line}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok`)); });
+  const odd1 = raw('200 O\x01K');
+  const odd2 = raw('099 Odd');
+  // a site that counts the connections still open to it
+  let open = 0;
+  let opened = 0;
+  const counter = net.createServer((s) => { opened++; open++; s.on('error', () => {}); s.on('close', () => { open--; }); });
+  // a site that answers with the body it received
+  const echo = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (d) => { body += d; });
+    req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ te: req.headers['transfer-encoding'] ?? null, body })); });
+  });
+  for (const s of [odd1, odd2, counter, echo]) await new Promise((r) => s.listen(0, '127.0.0.1', r));
+  const at = (s) => `127.0.0.1:${s.address().port}`;
+  const dns = { 'odd1.test': [one('93.184.216.37')], 'odd2.test': [one('93.184.216.38')], 'slow.test': [one('93.184.216.39')], 'echo.test': [one('93.184.216.40')] };
+  const dial = { '93.184.216.37': at(odd1), '93.184.216.38': at(odd2), '93.184.216.39': at(counter), '93.184.216.40': at(echo) };
+  const g = await startGuard({ stub: true, env: { ...stubEnv({ dns, dial }), GUARD_STUB_DNS_DELAY: JSON.stringify({ 'slow.test': 300 }) } });
+  try {
+    // a status line it can't pass on is the site's fault: an answer, never a crash
+    const r1 = await get(g.port, 'http://odd1.test/');
+    assert.ok([200, 502].includes(r1.status), r1.head);
+    assert.ok(!/\x01/.test(r1.head), 'the control character never reaches the client');
+    assert.equal((await get(g.port, 'http://odd2.test/')).status, 502);
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    // a client that leaves while the name resolves: the socket dialled for it is closed
+    for (let i = 0; i < 3; i++) {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.write('GET http://slow.test/ HTTP/1.1\r\nHost: slow.test\r\n\r\n', () => setTimeout(() => s.destroy(), 50));
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(opened, 3, 'each request was dialled once its name resolved');
+    assert.equal(open, 0, 'no dialled socket left open for a client that left');
+    // a chunked body goes out framed
+    const c = await ask(g.port, `GET http://echo.test/ HTTP/1.1\r\nHost: echo.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n`);
+    assert.equal(c.status, 200, c.head);
+    assert.deepEqual(JSON.parse(c.body), { te: 'chunked', body: 'hello' });
+    // a length the client's Connection names still frames the body (R2-1)
+    const l = await ask(g.port, `GET http://echo.test/ HTTP/1.1\r\nHost: echo.test\r\nContent-Length: 5\r\nConnection: close, content-length\r\n\r\nhello`);
+    assert.equal(l.status, 200, l.head);
+    assert.deepEqual(JSON.parse(l.body), { te: null, body: 'hello' });
+    // an Upgrade that isn't a proxy request is a 400, like any other
+    const u = await ask(g.port, 'GET / HTTP/1.1\r\nHost: x.test\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\r\n');
+    assert.equal(u.status, 400, u.head);
+    assert.equal(refusal(u).rule, 'not-a-proxy-request');
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+  } finally {
+    await g.stop();
+    for (const s of [odd1, odd2, counter, echo]) await new Promise((r) => { s.close(() => r()); s.closeAllConnections?.(); });
+  }
+});

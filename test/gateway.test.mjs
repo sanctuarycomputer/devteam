@@ -534,7 +534,7 @@ test('what an agent serves on an instance\'s name doesn\'t outlive its server: n
 
 test('the hub on a laptop is unchanged: no box.json, instances on their own loopback ports', () => {
   const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
-  assert.match(hub, /const urlOf = \(x\) => \(box \? box\.instance\.replace\('\{port\}', String\(Number\(x\.port\)\)\) : `http:\/\/127\.0\.0\.1:\$\{Number\(x\.port\)\}\/`\);/);
+  assert.match(hub, /const urlOf = Object\.assign\(\(x\) => \(!box \? `http:\/\/127\.0\.0\.1:\$\{Number\(x\.port\)\}\/` : box\.v === 1 \? box\.instance\.replace\('\{port\}', String\(Number\(x\.port\)\)\) : /);
 });
 
 test('on https: the cookie is Secure and SameSite=None for every name, and HSTS is sent', async () => {
