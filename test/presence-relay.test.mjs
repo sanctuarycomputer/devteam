@@ -465,3 +465,55 @@ test('presence A35: the dashboard reads every length form and fragments, and clo
   await sizes(url);
   await alive(url, port, by, '/api/data');
 }));
+
+// ---- the hub: the same relay on the hub's own server (hub: true, its own Host check) ----
+
+async function hubUp() {
+  const d = await dashboard();
+  await until(async () => { try { return (await get(HUB_PORT, '/instances.json', { ms: 5000 })).status === 200; } catch { return false; } }, 'the hub listening', 60000);
+  return { ...d, hubUrl: `http://127.0.0.1:${HUB_PORT}` };
+}
+
+test('presence A4: the hub answers /presence the same way for its own pages, and sends no changed', check(async () => {
+  const { hubUrl, url: dashUrl, runDir } = await hubUp();
+  const A = await open(hubUrl, { headers: P('zq7-a') });
+  assert.equal(A.status, 101);
+  assert.deepEqual(shapeErrors('welcome', A.messages[0]), []);
+  const B = await open(hubUrl, { headers: P('zq7-b', 'zq7 Bo') });
+  const C = await open(hubUrl, { headers: P('zq7-c', 'zq7 Cy') });
+  const E = await open(hubUrl, { headers: P('zq7-e', 'zq7 Ed') });
+  const atC = { page: 'zq7-hub-other' };
+  const atE = { page: 'zq7-sentinel' };
+  A.send(hereMsg()); B.send(hereMsg()); C.send(hereMsg(atC)); E.send(hereMsg(atE));
+  const firsts = await Promise.all([A, B, C, E].map((c) => c.next(peopleWith(4), 5000)));
+  assert.deepEqual(shapeErrors('people', firsts[0]), []);
+  const mark = new Map([A, B, C].map((c) => [c, c.messages.length]));
+  B.send({ t: 'move', a: { k: 'zq7-row', x: 0.25, y: 0.75 } });
+  const fromB = { t: 'move', id: 'zq7-b', conn: B.you.conn, a: { k: 'zq7-row', x: 0.25, y: 0.75 } };
+  assert.deepEqual(await A.next((m) => m.t === 'move'), fromB, "B's move reaches A on the hub");
+  await sentinel(B, {}, [A, B, C]);
+
+  // the guards, on the hub's own Host check; a dashboard's origin is not the hub's
+  await refusals(hubUrl, HUB_PORT, { ownOrigin: dashUrl });
+
+  // the log grows: the hub sends no changed (it can only fail once kit-633 sends changed on a dashboard)
+  const logDir = path.join(runDir, 'log');
+  fs.mkdirSync(logDir, { recursive: true });
+  const file = fs.readdirSync(logDir).find((f) => f.endsWith('.jsonl')) ?? 'supervisor.jsonl';
+  fs.appendFileSync(path.join(logDir, file), `${JSON.stringify({ v: 1, ts: new Date().toISOString(), type: 'note', by: 'test', text: 'a line' })}\n`);
+  await new Promise((r) => setTimeout(r, 1500));
+  const ends = await sentinel(E, atE, [A, B, C]);
+  for (const [i, c] of [A, B, C].entries()) {
+    assert.deepEqual(kinds(between(c, mark.get(c), ends[i]), 'changed'), [], 'the hub sends no changed');
+  }
+  assert.deepEqual(kinds(between(B, mark.get(B), ends[1]), 'move'), [], 'B never gets its own move');
+  assert.deepEqual(kinds(between(C, mark.get(C), ends[2]), 'move'), [], 'C (another hub page) gets no move');
+}));
+
+test('presence A35: the hub reads every length form and fragments, and closes 1002 and 1008 as the contract says', check(async () => {
+  const { hubUrl } = await hubUp();
+  const by = await bystander(hubUrl);
+  await frames(hubUrl);
+  await sizes(hubUrl);
+  await alive(hubUrl, HUB_PORT, by, '/instances.json');
+}));

@@ -14484,12 +14484,16 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
   let current = null;
   let again = null;
   let stopped = false;
-  const handle = { close() { stopped = true; clearTimeout(again); current?.close(); current?.closeIdleConnections?.(); current = null; } };
+  // live presence on the hub's own pages (presence@1): its people, never a changed
+  const presence = presenceRelay({ hub: true, okHost: ownHost, ownerCwd: actionCwd });
+  const handle = { close() { stopped = true; clearTimeout(again); presence.closeAll(1001); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
     if (stopped) return;
     const hub = trackRequests(http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
+      // /presence is a socket: a plain request gets its guard's status (presence@1 §2), before the redirect
+      if (req.url === '/presence' || req.url.startsWith('/presence?')) return presence.refuse(req, res);
       // One address: the hub listens on 127.0.0.1 only, and dashboards let only that origin frame
       // them, so localhost (which may mean ::1, held by something else) is sent there.
       if (req.headers.host !== `127.0.0.1:${HUB_PORT}`) { res.writeHead(302, { location: `http://127.0.0.1:${HUB_PORT}${req.url.startsWith('/') ? req.url : '/'}`, 'cache-control': 'no-store' }); return res.end(); }
@@ -14518,6 +14522,7 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
       return send(404, 'text/plain; charset=utf-8', 'not found');
     }));
     current = hub;
+    hub.on('upgrade', (req, socket, head) => presence.upgrade(req, socket, head));
     hub.once('error', async (e) => {
       if (current === hub) current = null;
       if (stopped) return;
