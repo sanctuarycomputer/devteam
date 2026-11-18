@@ -589,18 +589,6 @@
   },
   {
    "v": 1,
-   "id": "q-20260110-102900000-supervisor",
-   "at": "2026-01-10T10:45:00.000Z",
-   "by": "owner",
-   "channel": "thread",
-   "type": "question",
-   "answer": "Yes",
-   "said": "Ship it. Wait for CI? Tell the team.",
-   "turn": "u-20260110-103000000-owner",
-   "op": "set"
-  },
-  {
-   "v": 1,
    "id": "d-20260110-105000000-supervisor",
    "at": "2026-01-10T10:50:00.000Z",
    "by": "supervisor",
@@ -816,6 +804,18 @@
    ],
    "answer_seen": "u-20260110-103000000-owner",
    "op": "set"
+  },
+  {
+   "v": 1,
+   "id": "q-20260110-102900000-supervisor",
+   "at": "2026-01-10T11:10:00.000Z",
+   "by": "owner",
+   "channel": "thread",
+   "type": "question",
+   "answer": "Yes",
+   "said": "Ship it. Wait for CI? Tell the team.",
+   "turn": "u-20260110-103000000-owner",
+   "op": "set"
   }
  ],
  "unbound": [
@@ -836,10 +836,6 @@
    "why": "supervisor's"
   },
   {
-   "subject": "q-20260110-102900000-supervisor",
-   "why": "clause binding"
-  },
-  {
    "subject": "q-20260110-110100000-supervisor",
    "why": "about another turn"
   },
@@ -850,6 +846,10 @@
   {
    "subject": "q-20260110-110500000-supervisor",
    "why": "answer_seen"
+  },
+  {
+   "subject": "q-20260110-102900000-supervisor",
+   "why": "clause binding"
   },
   {
    "subject": "q-20260110-101400000-supervisor",
@@ -1006,6 +1006,132 @@
     "seen": "u-20260110-100001000-owner"
    },
    "why": "seen goes with about_turn"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-120008000-supervisor",
+    "op": "new",
+    "type": "question",
+    "at": "2026-01-10T12:00:08.000Z",
+    "by": "supervisor",
+    "kind": "owner-decision",
+    "question": "x?",
+    "about_turn": "u-20260110-100001000-owner",
+    "seen": "u-20260110-100001000-owner"
+   },
+   "why": "about_turn is on a question asked in a thread"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-120009000-supervisor",
+    "op": "new",
+    "type": "question",
+    "at": "2026-01-10T12:00:09.000Z",
+    "by": "supervisor",
+    "kind": "owner-decision",
+    "question": "x?",
+    "thread": "t-20260110-101020000-owner",
+    "about_turn": "u-20260110-101200000-owner",
+    "seen": "u-20260110-101200000-owner",
+    "owner_said": "x",
+    "owner_said_turn": "u-20260110-101200000-owner",
+    "owner_said_at": [
+     4,
+     2
+    ]
+   },
+   "why": "owner_said_at is \\[start, end\\] with start before end"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "q-20260110-100100000-supervisor",
+    "op": "set",
+    "type": "question",
+    "at": "2026-01-10T12:00:10.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "answer": "Yes",
+    "said_at": [
+     0,
+     23
+    ],
+    "answer_seen": "u-20260110-100001000-owner"
+   },
+   "why": "said_at and answer_seen go together"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105000000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:11.000Z",
+    "by": "owner",
+    "channel": "chat",
+    "corrected": {
+     "reason": "a",
+     "said": "a",
+     "turn": "u-20260110-100001000-owner"
+    }
+   },
+   "why": "a correction recorded from chat has no turn or said_at"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105000000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:12.000Z",
+    "by": "owner",
+    "channel": "chat",
+    "corrected": {
+     "reason": "a",
+     "said": "a",
+     "severity": 2
+    }
+   },
+   "why": "carries no severity or impact"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105300000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:13.000Z",
+    "by": "owner",
+    "channel": "thread",
+    "corrected": {
+     "reason": "Bad call.",
+     "said": "Bad call.",
+     "said_at": [
+      9,
+      0
+     ],
+     "turn": "u-20260110-105400001-owner"
+    }
+   },
+   "why": "corrected.said_at is \\[start, end\\] with start before end"
+  },
+  {
+   "line": {
+    "v": 1,
+    "id": "d-20260110-105300000-supervisor",
+    "op": "set",
+    "type": "decision",
+    "at": "2026-01-10T12:00:14.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "corrected": {
+     "reason": "Bad call.",
+     "said": "Bad call."
+    }
+   },
+   "why": "on the owner's correction recorded from a thread or chat only"
   }
  ]
 }
