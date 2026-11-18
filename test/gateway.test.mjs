@@ -3020,3 +3020,55 @@ test('only boxImage reads DEVTEAM_KIT_RELEASE and DEVTEAM_BOX_TOOLS in gateway.m
   const serve = src.slice(src.indexOf("if (cmd === 'serve')"), src.indexOf("else if (cmd === 'reclaim')"));
   assert.match(serve, /image: \$\{boxImage\(env\)\?\.release \?\? 'none'\}/, 'the start line goes through it too');
 });
+
+// kit-287: on a box the owner's goal approval reaches the dashboard through the gateway's plain proxy
+// (it is no signed post), body and all: the press is recorded once, a body the server can't take
+// comes back as the server said it, and pressing again after it's recorded records nothing more.
+test("a goal's approval pressed through the gateway is recorded once", { timeout: 240000 }, async () => {
+  const gw = await gateway('goal-approve', { env: cleared() });
+  const base = fs.mkdtempSync(path.join(tmp, 'goal-approve-'));
+  const A = bareProject(base, 'alpha');
+  const home = path.join(base, 'home');
+  const noTmux = path.join(base, 'tmux');
+  fs.mkdirSync(home);
+  fs.mkdirSync(noTmux);
+  const keyFile = path.join(base, 'thread-key.pub');
+  fs.writeFileSync(keyFile, gw.g.threadPublicKey());
+  // a box as its dashboard sees one, its own HOME, and a tmux with no server
+  const env = { ...cleared(), HOME: home, TMUX_TMPDIR: noTmux, DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_GATEWAY_THREAD_KEY: keyFile };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const dt = (args) => { const r = spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: A, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  const G1 = dt(['goal', 'add', '--title', 'Admins pay alone', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', '--priority', '1']).split('\n')[0].trim();
+  dt(['goal', 'reading', G1, '--run']);
+  dt(['goal', 'set', G1, '--milestones', JSON.stringify([{ title: 'Most admins pay alone', target: 80, preconditions: [1], tickets: 2 }])]);
+  const Q = dt(['ask', '--kind', 'goal-approval', '--goal', G1, '--question', 'Approve the design?', '--recommendation', 'Yes', '--links', JSON.stringify([{ title: 'The design', path: 'docs/devteam/project/designs/x.md' }])]).split('\n')[0].trim();
+  const asked = () => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === Q);
+  const d = spawn(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'dashboard'], { cwd: A, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  d.stdout.on('data', (b) => { out += b; });
+  d.stderr.on('data', (b) => { out += b; });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    // the port the dashboard took, as it says it, never assumed
+    const on = Number(await until(() => /dashboard on http:\/\/127\.0\.0\.1:(\d+)/.exec(out)?.[1], `the dashboard (${out})`));
+    const goalDecide = (body) => gw.req('POST', '/api/goal-decide', { on, body, headers: { 'sec-fetch-site': 'same-origin' } });
+    // a verdict the server doesn't take: its refusal, as it said it, and nothing recorded
+    const bad = await goalDecide({ id: G1, verdict: 'yes' });
+    assert.equal(bad.status, 400, bad.body);
+    assert.equal(bad.json.error, 'missing or invalid fields');
+    assert.equal(asked().status, 'open');
+    // the page's own press: recorded, the question answered Approve and the goal ready
+    const ok = await goalDecide({ id: G1, verdict: 'approve' });
+    assert.equal(ok.status, 200, ok.body);
+    assert.equal(ok.json.ok, true, ok.body);
+    assert.deepEqual([asked().status, asked().answer], ['answered', 'Approve']);
+    const goal = JSON.parse(dt(['goal', 'list', '--json'])).find((g) => g.id === G1);
+    assert.equal(goal.status, 'ready');
+    // pressed again: refused (nothing is up for approval), and still one decision and one answer
+    const again = await goalDecide({ id: G1, verdict: 'approve' });
+    assert.equal(again.status, 400, again.body);
+    const lines = fs.readdirSync(path.join(A, 'docs/devteam/run/log')).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(A, 'docs/devteam/run/log', f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+    assert.equal(lines.filter((l) => l.type === 'goal' && l.op === 'set' && l.id === G1 && l.decision?.verdict === 'approve').length, 1, 'one decision');
+    assert.equal(lines.filter((l) => l.type === 'question' && l.op === 'set' && l.id === Q && l.answer !== undefined).length, 1, 'one answer');
+  } finally { d.kill(); await new Promise((r) => { if (d.exitCode !== null || d.signalCode !== null) return r(); d.once('exit', r); }); await gw.close(); }
+});
