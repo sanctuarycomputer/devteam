@@ -24,14 +24,14 @@ Every route refuses a request whose `Host` the dashboard's `okHost` rejects (why
 ## 3. Guards
 
 - **The read guard.** `GET /api/term/token` needs `Sec-Fetch-Site: same-origin`, and the header must be present; without it, or with any other value, the token route refuses with why `cross-site`. A GET carries no `Origin`, so this is the strict test for a read. Screen and history are refused (why `cross-site`) when `Sec-Fetch-Site` is present and isn't `same-origin`; without the header they answer, since nothing can be typed without the token.
-- **Strict same-origin** for both POSTs: `Sec-Fetch-Site: same-origin` and `Origin` equal to `http://<Host>`, both present (why `cross-site` otherwise), and `Content-Type` `application/json` (403 otherwise).
-- **The token.** The token route returns `{ token }`: HMAC-SHA256, keyed by a random secret made when the server starts, over the fixed string `devteam-term-token-v1`, as hex. Its input is its own, so it is never a valid pane-answer token. It is valid until the server restarts. Every POST carries it in its body.
+- **Strict same-origin** for both POSTs: `Sec-Fetch-Site: same-origin` and `Origin` equal to `http://<Host>`, both present (why `cross-site` otherwise), and `Content-Type` `application/json` (403 otherwise): the media type exactly `application/json`, compared without case, parameters such as `; charset=utf-8` allowed.
+- **The token.** The token route returns `{ token }`: HMAC-SHA256, keyed by a random secret made when the server starts, over the fixed string `devteam-term-token-v1`, as hex. Its input is its own, so it is never a valid pane-answer token. It is valid until the server restarts. Every POST carries it in its body, and the server compares it in constant time (`crypto.timingSafeEqual`, as `paneTokenOk` does).
 - **The gateway's proof** (on a box only). The headers `x-devteam-gateway-ts` (13-digit epoch ms, within `OPERATOR_PROOF_MS` of now), `x-devteam-gateway-nonce` (22 to 64 of `[A-Za-z0-9_-]`) and `x-devteam-gateway-sig` (base64url), checked as `dashboardProofProblem` checks a pane answer's. The signature is Ed25519 over a message bound to its route:
   - keys: `devteam-term-keys-v1\n<port>\n<which>\n<ts>\n<nonce>\n<sha256 hex of the body>`;
   - shell open: `devteam-term-open-v1\n<port>\nshell\n<ts>\n<nonce>\n<sha256 hex of the body>`.
 
   So a signature for one route, or one `which`, never verifies for another, nor for a pane answer or an owner setting. All terminal routes share one nonce map. A nonce is recorded only after its signature verifies, is accepted once, and is pruned after twice the window.
-- **The gateway's own order.** The gateway checks, in this order: its sign-in (which tells it the person's level), the View deny (§4), the body cap (413), then signs. `<which>` in the signed message is the path's own segment. The View deny matches the path as the dashboard routes it: parsed as a URL, percent-decoded, dot segments resolved and repeated slashes folded, any path that then starts `/api/term/`. The dashboard's own `x-devteam-level` check is the backstop. So on a box an oversized cross-site post may read 413 where a laptop reads 403; nothing is typed either way.
+- **The gateway's own order.** The gateway signs the two POSTs only for a request to that instance's own dashboard host, with `<port>` that instance's dashboard port, never on a preview host or the Terminal host. It checks, in this order: its sign-in (which tells it the person's level), the View deny (§4), the body cap (413), then signs. `<which>` in the signed message is the path's own segment. The View deny matches the path as the dashboard routes it: parsed as a URL, percent-decoded, dot segments resolved and repeated slashes folded, any path that then starts `/api/term/`. The dashboard's own `x-devteam-level` check is the backstop. So on a box an oversized cross-site post may read 413 where a laptop reads 403; nothing is typed either way.
 - **Body caps.** The server and the gateway both cap each POST body (keys and shell open) at 100 KB (102400 bytes) and answer over it with 413, `application/json`, `{ error }` in plain words. The server reads a body a little over the cap to its end before it answers, so the page reads the 413; one more than four times over is cut off.
 - **Order of checks.** Each request is checked in this order, and the first check that fails decides the answer:
   1. `host`, then `relay`: the global guards, for any path under `/api/term/`, known or not;
@@ -111,7 +111,7 @@ Line 0 is the oldest line in the scrollback, and `history_size` is the first vis
 - `page` is a random id made per page load, 16 to 64 of `[A-Za-z0-9_-]`.
 - `seq` is a positive safe integer.
 - `data` is hex bytes (even length, not empty), at most 4096 decoded, typed with `send-keys -t <pane> -H`.
-- `paste` is text, not empty, at most 64 KB (65536 bytes) as UTF-8, typed as one buffer: `load-buffer -b devteam-term-<pid>-<n>`, then `paste-buffer -p -d -b` that name. tmux brackets it only when the program asked. A paste is never split, and never merged with keys.
+- `paste` is text, not empty, at most 64 KB (65536 bytes) as UTF-8, typed as one buffer: `load-buffer -b devteam-term-<pid>-<n> -`, reading the text from stdin (never a file), then `paste-buffer -p -d -b` that name. A paste whose `paste-buffer` fails or times out deletes its buffer (`delete-buffer -b` that name), so the text never stays in the tmux server. tmux brackets it only when the program asked. A paste is never split, and never merged with keys.
 - The body cap (100 KB) binds first: the page measures the JSON it would send and refuses a paste over it itself, saying it is too large, so a paste of many quotes or control characters is refused whole, never half sent. Before any multi-line paste, in either tab, the page asks "Paste N lines?".
 
 **Order and duplicates.**
@@ -187,11 +187,11 @@ An older kit on the same machine takes no lock; until a project adopts this cont
 
 ## 12. Not logged
 
-Keys and pastes are never logged, and never written to any file. The routes write no log line, owner answer or act. A refusal's reason may be printed to the dashboard's own output, but never a body, `data` or `paste`.
+Keys and pastes are never logged, and never written to any file. Every `/api/term/*` answer (304 included) carries `cache-control: no-store`, so no screen, history or token goes into a browser's cache. The routes write no log line, owner answer or act. A refusal's reason may be printed to the dashboard's own output, but never a body, `data` or `paste`.
 
 ## 13. What this doesn't defend against
 
-On a laptop, any program on the machine can type as the owner without forging anything: it can send `Sec-Fetch-Site` and `Origin` itself, read the token, and post keys, or drive a browser at the dashboard. An agent with `tmux send-keys` can already type into any pane anyway, and a supervisor's own browser is kept off loopback by the supervisor-browser egress guard. On a box, a post without the gateway's signature is refused, so an agent's `curl` can't use the routes; nothing defends against an agent forging that signature. Agents are trusted not to do any of this.
+On a laptop, any program on the machine can type as the owner without forging anything: it can send `Sec-Fetch-Site` and `Origin` itself, read the token, and post keys, or drive a browser at the dashboard. An agent with `tmux send-keys` can already type into any pane anyway, and a supervisor's own browser is kept off loopback by the supervisor-browser egress guard. On a box, a post without the gateway's signature is refused, so an agent's `curl` can't use the routes; nothing defends against an agent forging that signature. Reads need no proof: on a box any local process can read every project's screens and history, and fetch the token, from its dashboard on loopback; an agent can already `capture-pane` on the shared tmux server, so this adds no reach. Agents are trusted not to do any of this.
 
 ## 14. The fake
 

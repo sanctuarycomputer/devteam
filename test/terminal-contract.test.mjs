@@ -122,6 +122,9 @@ test('terminal A1: the fake answers every route, echoes, orders, brackets, 304, 
     assert.deepEqual(Object.keys(s0.modes).sort(), ['app_cursor', 'app_keypad']);
     // etag: 304 on the quoted header byte for byte; a weak etag or a list is a 200
     const tag = (await screenOf(fake, 'supervisor')).headers.get('etag');
+    for (const r2 of [await req(fake, 'GET', '/api/term/token'), await screenOf(fake, 'supervisor'), await screenOf(fake, 'supervisor', { 'if-none-match': tag }), await req(fake, 'GET', '/api/term/supervisor/history?before=0&count=1'), await req(fake, 'GET', '/api/term/token', { headers: { 'sec-fetch-site': null } })]) {
+      assert.equal(r2.headers.get('cache-control'), 'no-store', `no-store on a ${r2.status}`);
+    }
     assert.equal(tag, `"${s0.etag}"`);
     assert.equal((await screenOf(fake, 'supervisor', { 'if-none-match': tag })).status, 304);
     assert.equal((await screenOf(fake, 'supervisor', { 'if-none-match': `W/${tag}` })).status, 200);
@@ -317,6 +320,12 @@ test('terminal A3: refusals type nothing', async () => {
     // every POST guard, each typing nothing
     await none('POST cross-site with a right Origin', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'sec-fetch-site': 'cross-site' }), 403, 'cross-site');
     await none('POST without Sec-Fetch-Site', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'sec-fetch-site': null }), 403, 'cross-site');
+    await none('POST same-site with a right Origin', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'sec-fetch-site': 'same-site' }), 403, 'cross-site');
+    await none('a wrong token', keys(fake, 'supervisor', { seq: 5, data: '00', token: 'f'.repeat(64) }), 403);
+    await none('application/jsonx', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'content-type': 'application/jsonx' }), 403);
+    n = typed();
+    assert.equal((await keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'content-type': 'application/json; charset=utf-8' })).json.taken, true, 'a charset parameter is allowed');
+    assert.equal(typed(), n + 1);
     await none('a wrong Origin', keys(fake, 'supervisor', { seq: 5, data: '00' }, { origin: 'http://evil.test' }), 403, 'cross-site');
     await none('View on a POST', keys(fake, 'supervisor', { seq: 5, data: '00' }, { 'x-devteam-level': 'view' }), 403, 'view');
     fake.set({ refuse: 'cross-site' });

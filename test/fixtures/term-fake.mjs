@@ -80,7 +80,10 @@ export async function startTermFake(opts = {}) {
     }
   }
 
-  const sendJson = (res, status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+  const NO_STORE = { 'cache-control': 'no-store' };
+  const sendJson = (res, status, obj) => { res.writeHead(status, { 'content-type': 'application/json', ...NO_STORE }); res.end(JSON.stringify(obj)); };
+  const tokenOk = (got) => { if (typeof got !== 'string') return false; const a = Buffer.from(got), b = Buffer.from(token); return a.length === b.length && crypto.timingSafeEqual(a, b); };
+  const jsonType = (ct) => String(ct ?? '').split(';')[0].trim().toLowerCase() === 'application/json';
   const readBody = (req) => new Promise((resolve) => {
     const chunks = [];
     let n = 0;
@@ -158,7 +161,7 @@ export async function startTermFake(opts = {}) {
       res.writeHead(404, { 'content-type': 'text/plain' });
       return res.end('not found');
     }
-    if (o.gatewayView) { req.resume(); res.writeHead(403, { 'content-type': 'application/json' }); return res.end('{"why":"view"}'); }
+    if (o.gatewayView) { req.resume(); res.writeHead(403, { 'content-type': 'application/json', ...NO_STORE }); return res.end('{"why":"view"}'); }
     const global = globalWhy(req);
     if (global) { req.resume(); return sendJson(res, 403, req.method === 'POST' ? { error: 'the terminal answers only on this page', why: global } : { why: global }); }
     const body = req.method === 'POST' ? await readBody(req) : Buffer.alloc(0);
@@ -171,8 +174,8 @@ export async function startTermFake(opts = {}) {
     if (r.name === 'token') return sendJson(res, 200, { token });
     if (r.name === 'screen') {
       const s = screenOf(r.which);
-      if (req.headers['if-none-match'] === `"${s.etag}"`) { res.writeHead(304, { etag: `"${s.etag}"` }); return res.end(); }
-      res.writeHead(200, { 'content-type': 'application/json', etag: `"${s.etag}"` });
+      if (req.headers['if-none-match'] === `"${s.etag}"`) { res.writeHead(304, { etag: `"${s.etag}"`, ...NO_STORE }); return res.end(); }
+      res.writeHead(200, { 'content-type': 'application/json', etag: `"${s.etag}"`, ...NO_STORE });
       return res.end(JSON.stringify(s));
     }
     if (r.name === 'history') {
@@ -186,12 +189,12 @@ export async function startTermFake(opts = {}) {
       return sendJson(res, 200, { v: 1, which: r.which, pane: s.pane, before: n, history_size: s.history_size, lines });
     }
     // the two POSTs
-    if (!(req.headers['content-type'] ?? '').startsWith('application/json')) return sendJson(res, 403, { error: 'the terminal answers only on this page' });
+    if (!jsonType(req.headers['content-type'])) return sendJson(res, 403, { error: 'the terminal answers only on this page' });
     if (body.length > CAP) return sendJson(res, 413, { error: 'that is too large to send' });
     let b;
     try { b = JSON.parse(body.toString('utf8')); } catch { return sendJson(res, 400, { error: 'that was not understood' }); }
     if (b === null || typeof b !== 'object' || Array.isArray(b)) return sendJson(res, 400, { error: 'that was not understood' });
-    if (typeof b.token !== 'string' || b.token !== token) return sendJson(res, 403, { error: 'reload the page to type here' });
+    if (!tokenOk(b.token)) return sendJson(res, 403, { error: 'reload the page to type here' });
     if (!shapeOk[r.name](b, r.which)) return sendJson(res, 400, { error: 'that was not understood' });
     if (r.name === 'keys' && 'data' in b && b.data.length / 2 > DATA_MAX) return sendJson(res, 413, { error: 'that is too large to send' });
     if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > PASTE_MAX) return sendJson(res, 413, { error: 'that is too large to paste' });
