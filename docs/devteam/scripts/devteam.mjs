@@ -22469,14 +22469,77 @@ function guardNameRule(name) {
   if (gw && (name === gw || name.endsWith(`.${gw}`))) return 'gateway';
   return null;
 }
+// The ports no test exception ever opens: the hub, the dashboards' block, ttyd and the gateway, at
+// their defaults and wherever the environment moved them.
+function guardNeverPorts() {
+  const own = process.env.DEVTEAM_PUBLIC_URL && Number(process.env.PORT) > 0 ? [Number(process.env.PORT)] : [];
+  return new Set([4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, HUB_PORT, ...PORT_RANGE, TTYD_PORT, ...own]);
+}
+// The tests' one way out (DEVTEAM_TEST set and non-empty): a loopback port DEVTEAM_TEST_BROWSER_ALLOW
+// lists, for the fixture site, when every address is loopback (127.0.0.0/8, or ::1 exactly).
+function guardAllowed(port, addrs) {
+  if (!process.env.DEVTEAM_TEST) return false;
+  const listed = String(process.env.DEVTEAM_TEST_BROWSER_ALLOW ?? '').split(',').map((s) => s.trim()).filter((s) => /^\d{1,5}$/.test(s)).map(Number);
+  if (!listed.includes(port) || guardNeverPorts().has(port)) return false;
+  return addrs.length > 0 && addrs.every((a) => (a.v === 4 && a.n >> 24n === 127n) || (a.v === 6 && a.n === 1n));
+}
+// A socket to the address it checked (never a name: no second lookup), connected, or an error.
+function guardDial(address, port) {
+  return new Promise((resolve, reject) => {
+    let s;
+    try { s = net.connect({ host: address, port }); } catch (e) { return reject(e); }
+    const timer = setTimeout(() => { s.destroy(); reject(Object.assign(new Error('connect timed out'), { code: 'ETIMEDOUT' })); }, 30000);
+    const failed = (e) => { clearTimeout(timer); reject(e); };
+    s.once('error', failed);
+    s.once('connect', () => { clearTimeout(timer); s.off('error', failed); s.on('error', () => {}); resolve(s); });
+  });
+}
+// Headers that end at the guard, either way: the hop-by-hop ones and those Connection names.
+const GUARD_HOP = ['connection', 'proxy-connection', 'keep-alive', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer', 'upgrade', 'transfer-encoding'];
+function guardEndToEnd(headers) {
+  const drop = new Set([...GUARD_HOP, ...String(headers.connection ?? '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)]);
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => !drop.has(k.toLowerCase())));
+}
+// A plain request, sent on the socket it dialled (createConnection, no agent: with agent: false Node
+// would ignore it and dial the host itself), its answer streamed back.
+function guardForward(req, res, t, sock, fail) {
+  const up = http.request({ host: sock.remoteAddress, port: t.port, method: req.method, path: t.path, headers: { ...guardEndToEnd(req.headers), host: t.hostHeader }, createConnection: () => sock });
+  up.on('response', (ur) => {
+    res.writeHead(ur.statusCode, ur.statusMessage, guardEndToEnd(ur.headers));
+    ur.on('error', () => res.destroy());
+    ur.pipe(res);
+  });
+  up.on('error', (e) => { if (res.headersSent) res.destroy(); else fail(e?.code ?? 'the site closed the connection'); });
+  res.on('close', () => { if (!res.writableFinished) up.destroy(); });
+  req.pipe(up);
+}
+// A CONNECT tunnel on the socket it dialled.
+function guardTunnel(client, head, sock) {
+  if (client.destroyed) return void sock.destroy();
+  client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  if (head?.length) sock.write(head);
+  for (const [a, b] of [[client, sock], [sock, client]]) { a.on('error', () => b.destroy()); a.on('close', () => b.destroy()); a.pipe(b); }
+}
 // { refuse: { rule, address?, range? } }, { fail: why } (a 502) or { address } to dial. lookup is
 // dns.lookup, called once for a name.
 async function guardDecide(t, lookup) {
   const named = guardNameRule(t.name);
   if (named) return { refuse: { rule: named } };
   const literal = guardAddr(t.name);
-  if (!literal) return { fail: 'names are not resolved yet' };
-  const addrs = [literal];
+  let addrs = literal ? [literal] : null;
+  if (!addrs) {
+    let list;
+    try { list = await new Promise((resolve, reject) => lookup(t.name, { all: true, verbatim: true }, (e, l) => (e ? reject(e) : resolve(l)))); } catch (e) { return { fail: `no address for it (${e?.code ?? 'lookup failed'})` }; }
+    // before any rule or the test exception: none, or one it can't read, never reaches a dial
+    if (!Array.isArray(list) || !list.length) return { fail: 'no address for it' };
+    addrs = [];
+    for (const x of list) {
+      const a = guardAddr(x?.address);
+      if (!a) return { refuse: { rule: 'special-purpose', address: String(x?.address) } };
+      addrs.push(a);
+    }
+  }
+  if (guardAllowed(t.port, addrs)) return { address: addrs[0].text };
   for (const a of addrs) if (guardOwn(a)) return { refuse: { rule: 'own-interface', address: a.text } };
   for (const a of addrs) { const range = guardRange(a); if (range) return { refuse: { rule: 'special-purpose', address: a.text, range } }; }
   return { address: addrs[0].text };
@@ -22539,11 +22602,19 @@ async function startBrowserGuard({ port = 0 } = {}) {
   server.on('request', (req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
-    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), (t, address, fail) => fail('not dialled yet')).catch(() => res.destroy());
+    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), async (t, address, fail) => guardForward(req, res, t, await guardDial(address, t.port), fail)).catch(() => res.destroy());
   });
-  server.on('connect', (req, sock) => {
+  server.on('connect', (req, sock, head) => {
     sock.on('error', () => {});
-    serve('CONNECT', req.url, (status, body, type) => guardSocketAnswer(sock, status, body, type), (t, address, fail) => fail('not dialled yet')).catch(() => sock.destroy());
+    // once the tunnel is open, a fault closes it: no answer is ever written into it
+    let open = false;
+    const answer = (status, body, type) => (open ? sock.destroy() : guardSocketAnswer(sock, status, body, type));
+    serve('CONNECT', req.url, answer, async (t, address) => { const up = await guardDial(address, t.port); open = true; guardTunnel(sock, head, up); }).catch(() => sock.destroy());
+  });
+  // Chrome tunnels ws: and wss: through CONNECT, so an Upgrade in absolute form is none of its own
+  server.on('upgrade', (req, sock) => {
+    sock.on('error', () => {});
+    guardSocketAnswer(sock, 501, "The supervisor's browser proxy tunnels WebSockets through CONNECT; it doesn't upgrade a request.\n", 'text/plain; charset=utf-8');
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
   return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };

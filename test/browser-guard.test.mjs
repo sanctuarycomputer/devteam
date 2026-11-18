@@ -21,7 +21,9 @@ import { schema, validate, refusalOf } from './fixtures/browser/check.mjs';
 import { startSites } from './lib/sites.mjs';
 import { PORTS } from './lib/ports.mjs';
 
-// GUARD_TEST_KIT points the file at a scratch copy of the kit (the final review's range mutation).
+// GUARD_TEST_KIT points the file at a scratch copy of the kit (the final review's range mutation):
+// the script inside a copy of the whole docs/devteam tree (it reads ../schema), in a folder that is
+// no git checkout (`git archive HEAD docs/devteam | tar -x -C <dir>`, then edit the copy).
 const KIT = process.env.GUARD_TEST_KIT || fileURLToPath(new URL('../docs/devteam/scripts/devteam.mjs', import.meta.url));
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-guard-'));
 const children = new Set();
@@ -347,4 +349,181 @@ test('the command prints its port and stays up', async () => {
     assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
     assert.equal((await get(g.port, 'http://127.0.0.1/')).status, 403);
   } finally { await g.stop(); }
+});
+
+// ---- Task 2: resolve once, dial what was checked, the test exception ----
+
+const PUBLIC = '93.184.216.34';
+const one = (address, family = 4) => [{ address, family }];
+const stubEnv = ({ dns = {}, dial = {}, loopbackOk = [], ifaces = LO_ONLY } = {}) => ({
+  GUARD_STUB_IFACES: ifaces, GUARD_STUB_DNS: JSON.stringify(dns), GUARD_STUB_DIAL: JSON.stringify(dial), GUARD_STUB_LOOPBACK_OK: loopbackOk.join(','),
+});
+const dials = (g) => g.record().filter((e) => 'dial' in e);
+
+test('A4: a name is resolved once and the checked address is dialled', async () => {
+  const site = await startSites();
+  const dial = { [PUBLIC]: `127.0.0.1:${site.port}` };
+  const rebind = { 'rebind.test': [one(PUBLIC), one('127.0.0.1')], 'mixed.test': [[...one(PUBLIC), ...one('10.0.0.1')]] };
+  try {
+    // GET: one lookup, one dial of the address it checked; the name's next answer (loopback) is refused
+    let g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+    try {
+      const r = await get(g.port, 'http://rebind.test/account');
+      assert.equal(r.status, 200, r.head);
+      assert.match(r.body, /Not signed in/);
+      assert.deepEqual(g.record(), [{ lookup: 'rebind.test' }, { dial: PUBLIC, port: 80 }]);
+      const again = await get(g.port, 'http://rebind.test/account');
+      assert.equal(again.status, 403, again.head);
+      assert.equal(refusal(again).address, '127.0.0.1');
+      assert.equal(dials(g).length, 1, 'nothing dialled for the refused answer');
+    } finally { await g.stop(); }
+    // CONNECT, on 443 and on 80 (a ws: page names its default port)
+    for (const p of [443, 80]) {
+      g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+      try {
+        const r = await connect(g.port, `rebind.test:${p}`, inner('rebind.test'));
+        assert.equal(r.status, 200, `CONNECT :${p}: ${r.head}`);
+        assert.equal(r.inner.status, 200, r.inner.head);
+        assert.match(r.inner.body, /Not signed in/);
+        assert.deepEqual(g.record(), [{ lookup: 'rebind.test' }, { dial: PUBLIC, port: p }]);
+      } finally { await g.stop(); }
+    }
+    // any refused address refuses the name, and nothing is dialled
+    g = await startGuard({ stub: true, env: stubEnv({ dns: rebind, dial }) });
+    try {
+      const r = await get(g.port, 'http://mixed.test/');
+      assert.equal(r.status, 403, r.head);
+      assert.deepEqual([refusal(r).rule, refusal(r).address], ['special-purpose', '10.0.0.1']);
+      assert.deepEqual(dials(g), []);
+    } finally { await g.stop(); }
+    // fail closed: an answer the guard can't read, or none, is never dialled
+    const cases = [
+      [one('::ffff:127.0.0.1', 6), 403, { address: '::ffff:7f00:1', range: '::ffff:0:0/96' }],
+      [one('::127.0.0.1', 6), 403, { address: '::7f00:1', range: '::/3' }],
+      [[...one(PUBLIC), ...one('::ffff:10.0.0.1', 6)], 403, { address: '::ffff:a00:1', range: '::ffff:0:0/96' }],
+      [[], 502, null],
+      [one('not-an-ip'), 403, { address: 'not-an-ip' }],
+    ];
+    for (const [answer, status, want] of cases) {
+      g = await startGuard({ stub: true, env: stubEnv({ dns: { 'odd.test': [answer] }, dial }) });
+      try {
+        const r = await get(g.port, 'http://odd.test/');
+        assert.equal(r.status, status, `${JSON.stringify(answer)}: ${r.head}`);
+        if (want) {
+          const o = refusal(r);
+          assert.equal(o.rule, 'special-purpose');
+          assert.equal(o.address, want.address);
+          assert.equal(o.range, want.range);
+        }
+        assert.deepEqual(dials(g), [], JSON.stringify(answer));
+      } finally { await g.stop(); }
+    }
+  } finally { await site.close(); }
+});
+
+test('A6: the test exception: loopback ports the test lists, never an owner control', async () => {
+  const site = await startSites();
+  const ports = { DEVTEAM_HUB_PORT: PORTS + 10, DEVTEAM_PORT_BASE: PORTS + 20, DEVTEAM_TTYD_PORT: PORTS + 50, PORT: PORTS + 51 };
+  const base = { ...Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, String(v)])), DEVTEAM_PUBLIC_URL: 'https://box.example.test' };
+  const allow = String(site.port);
+  const target = `http://127.0.0.1:${site.port}/account`;
+  try {
+    // (a) DEVTEAM_TEST set and the site's port listed: GET and CONNECT reach the site
+    let g = await startGuard({ env: { ...base, DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: allow } });
+    try {
+      const r = await get(g.port, target);
+      assert.equal(r.status, 200, r.head);
+      assert.match(r.body, /Not signed in/);
+      const c = await connect(g.port, `127.0.0.1:${site.port}`, inner(`127.0.0.1:${site.port}`));
+      assert.equal(c.status, 200, c.head);
+      assert.equal(c.inner.status, 200, c.inner.head);
+    } finally { await g.stop(); }
+    // (b) no DEVTEAM_TEST, (b2) an empty one, (c) the port not listed: refused
+    for (const env of [{ DEVTEAM_TEST_BROWSER_ALLOW: allow }, { DEVTEAM_TEST: '', DEVTEAM_TEST_BROWSER_ALLOW: allow }, { DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: String(site.port + 1) }]) {
+      g = await startGuard({ env: { ...base, ...env } });
+      try {
+        for (const r of [await get(g.port, target), await connect(g.port, `127.0.0.1:${site.port}`)]) {
+          assert.equal(r.status, 403, `${JSON.stringify(env)}: ${r.head}`);
+          refusal(r);
+        }
+      } finally { await g.stop(); }
+    }
+    // (d) never an owner control, listed or not, and nothing of them is dialled
+    const never = [4320, ...Array.from({ length: 25 }, (_, i) => 4321 + i), 7681, 8080, ports.DEVTEAM_HUB_PORT,
+      ...Array.from({ length: 25 }, (_, i) => ports.DEVTEAM_PORT_BASE + i), ports.DEVTEAM_TTYD_PORT, ports.PORT];
+    g = await startGuard({ stub: true, env: { ...base, ...stubEnv({ loopbackOk: [site.port] }), DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: [site.port, ...never].join(',') } });
+    try {
+      assert.equal((await get(g.port, target)).status, 200, 'the site itself still passes under the stub');
+      for (const p of never) {
+        const r = await get(g.port, `http://127.0.0.1:${p}/`);
+        assert.equal(r.status, 403, `port ${p}: ${r.head}`);
+        refusal(r);
+      }
+      assert.deepEqual(dials(g).map((d) => d.port), [site.port], 'only the site was dialled');
+    } finally { await g.stop(); }
+    // (e) a name rule still applies; (f) loopback only: no other address passes on a listed port
+    g = await startGuard({ stub: true, env: { ...base, ...stubEnv({ dns: { 'rebind.test': [[...one('127.0.0.1'), ...one('10.0.0.1')]] }, loopbackOk: [site.port] }), DEVTEAM_TEST: '1', DEVTEAM_TEST_BROWSER_ALLOW: allow } });
+    try {
+      assert.equal(refusal(await get(g.port, `http://localhost:${site.port}/`)).rule, 'own-name');
+      // rebind.test's 127.0.0.1 is the faked machine's own, so own-interface (checked over every address first) reports it
+      for (const [host, rule, address] of [['10.1.2.3', 'special-purpose', '10.1.2.3'], ['[::ffff:127.0.0.1]', 'special-purpose', '::ffff:7f00:1'], ['rebind.test', 'own-interface', '127.0.0.1']]) {
+        const r = await get(g.port, `http://${host}:${site.port}/`);
+        assert.equal(r.status, 403, `${host}: ${r.head}`);
+        assert.deepEqual([refusal(r).rule, refusal(r).address], [rule, address], host);
+      }
+      assert.deepEqual(dials(g), []);
+    } finally { await g.stop(); }
+  } finally { await site.close(); }
+});
+
+test('A9: other answers, headers that stop at the guard, and a guard that stays up', async () => {
+  const site = await startSites();
+  let seen = null;
+  const echo = http.createServer((req, res) => {
+    seen = req.headers;
+    res.writeHead(200, { 'content-type': 'application/json', Connection: 'x-drop', 'Keep-Alive': 'timeout=7, max=3', 'X-Drop': '1', 'X-Keep': '1' });
+    res.end(JSON.stringify(req.headers));
+  });
+  await new Promise((r) => echo.listen(0, '127.0.0.1', r));
+  const E = echo.address().port;
+  const dns = { 'up.test': [one(PUBLIC)], 'echo.test': [one('93.184.216.35')], 'refused.test': [one('93.184.216.36')], 'nowhere.test': ['ENOTFOUND'] };
+  const dial = { [PUBLIC]: `127.0.0.1:${site.port}`, '93.184.216.35': `127.0.0.1:${E}`, '93.184.216.36': 'ECONNREFUSED' };
+  const g = await startGuard({ stub: true, env: stubEnv({ dns, dial }) });
+  try {
+    const up = await ask(g.port, 'GET http://up.test/ HTTP/1.1\r\nHost: up.test\r\nConnection: Upgrade, close\r\nUpgrade: websocket\r\n\r\n');
+    assert.equal(up.status, 501, up.head);
+    assert.equal((await get(g.port, 'http://nowhere.test/')).status, 502);
+    assert.equal((await get(g.port, 'http://refused.test/')).status, 502);
+    assert.equal((await connect(g.port, 'refused.test:443')).status, 502);
+    // hop-by-hop headers stop at the guard, both ways; Host is the URL's
+    const r = await get(g.port, `http://echo.test:${E}/`, { Host: 'wrong.test', Connection: 'close, x-req-drop', 'X-Req-Drop': '1', 'Proxy-Authorization': 'Basic eA==', 'Proxy-Connection': 'keep-alive', 'X-Req-Keep': '1' });
+    assert.equal(r.status, 200, r.head);
+    assert.equal(seen.host, `echo.test:${E}`);
+    assert.equal(seen['x-req-keep'], '1');
+    for (const h of ['x-req-drop', 'proxy-authorization', 'proxy-connection']) assert.ok(!(h in seen), `${h} reached the site`);
+    assert.equal(r.headers['x-keep'], '1');
+    assert.ok(!('x-drop' in r.headers), 'x-drop came back');
+    assert.notEqual(r.headers['keep-alive'], 'timeout=7, max=3', "the site's keep-alive came back");
+    assert.ok(!/x-drop/i.test(r.headers.connection ?? ''), "the site's connection came back");
+    // a tunnel the client resets mid-stream, then a CONNECT head cut off by a reset
+    await new Promise((resolve) => {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.on('data', () => { s.write('GET /account HTTP/1.1\r\nHo'); setTimeout(() => { s.resetAndDestroy?.() ?? s.destroy(); resolve(); }, 50); });
+      s.write('CONNECT up.test:443 HTTP/1.1\r\nHost: up.test:443\r\n\r\n');
+    });
+    await new Promise((resolve) => {
+      const s = net.connect(g.port, '127.0.0.1');
+      s.on('error', () => {});
+      s.write('CONNECT rebind', () => setTimeout(() => { s.resetAndDestroy?.() ?? s.destroy(); resolve(); }, 50));
+    });
+    await new Promise((r2) => setTimeout(r2, 200));
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    const after = await get(g.port, 'http://up.test/account');
+    assert.equal(after.status, 200, after.head);
+  } finally {
+    await g.stop();
+    await site.close();
+    await new Promise((r2) => echo.close(r2));
+  }
 });
