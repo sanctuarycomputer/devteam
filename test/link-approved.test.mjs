@@ -275,6 +275,9 @@ test('binding lines are the kit\'s: typed or quoted they are refused, and --link
       [...base, '--question', 'Change it?', '--context', 'links.console.gates: main has 1; would be 2'],
       [...base, '--question', 'Change it?', '--context', HEADER],
       [...base, '--question', 'links.console: main has null; would be {}'],
+      [...base, '--question', 'Change it?', '--context', 'Why: x\\nlinks.console.records: main has null; would be "home"'],
+      [...base, '--question', 'Change it?', '--context', 'links.console: main has {"kind":"repo"}\r; would be {"kind":"repo","records":"home"}'],
+      [...base, '--question', 'Change it?', '--context', 'Why: x\rlinks.console.records: main has null; would be "home"'],
     ]) assert.equal(T.run(args).status, 1, args.join(' '));
     const strat = T.run(['ask', '--class', 'strategy-change', '--question', 'x?', '--link-change', '{"link":"console","field":"records","value":"home"}']);
     assert.equal(strat.status, 1);
@@ -413,5 +416,37 @@ test("the owner's no covers nothing: link set asks again rather than citing it (
     const out = T.ok(['link', 'set', 'console', 'records', 'home']);
     assert.equal(T.questionCount(), n + 1, out);
     assert.ok(!out.includes(qid), out);
+  } finally { T.done(); }
+});
+
+test('link land carries an approved add, removal and field removal, each landing under its answer (task-4 T4-1)', () => {
+  const T = setup('one-yes-land-entries');
+  try {
+    const entry = { kind: 'repo', remote: 'usbclub/docs', title: 'Docs site' };
+    const qa = ownWords(T, { link: 'docs', entry });
+    T.yes(qa);
+    T.ok(['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site', '--approved', qa]);
+    const wa = chore(T, 'add');
+    assert.deepEqual(choreLinks(wa).docs, entry);
+    wouldMerge(dry(T, 'add', qa), 'add');
+    // a removal (companion's component goes first, on main and here)
+    T.onMain((j) => { delete j.components.companion; });
+    T.edit((j) => { delete j.components.companion; });
+    const qr = ownWords(T, { link: 'companion', entry: null });
+    T.yes(qr);
+    T.ok(['link', 'rm', 'companion', '--approved', qr]);
+    const wr = chore(T, 'rm');
+    assert.equal(choreLinks(wr).companion, undefined);
+    wouldMerge(dry(T, 'rm', qr), 'rm');
+    // a field removal: console's entry without its gates, asked whole, written here by hand
+    const { gates, ...noGates } = T.links().console;
+    assert.ok(gates);
+    const qf = ownWords(T, { link: 'console', entry: noGates });
+    assert.deepEqual(T.section(T.question(qf).context), [`links.console.gates: main has ${JSON.stringify(gates)}; would be null`]);
+    T.yes(qf);
+    T.edit((j) => { delete j.links.console.gates; });
+    const wf = chore(T, 'nogates');
+    assert.ok(!Object.hasOwn(choreLinks(wf).console, 'gates'), 'the field is removed, not set to null');
+    wouldMerge(dry(T, 'nogates', qf), 'nogates');
   } finally { T.done(); }
 });

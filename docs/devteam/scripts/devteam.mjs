@@ -6905,8 +6905,10 @@ function askLine({ thread } = {}) {
   // A repo link change asked in the supervisor's own words (--link-change): the kit writes the lines
   // the owner's answer binds by (linkAnswerCovers), from main's settings, and nobody else may: a
   // binding line typed or quoted in the question's own words is refused, so it never approves by accident.
-  const typed = `${q}\n${flagStr('context') ?? ''}`;
-  if (typed.includes(linkAnswerCovers.HEADER) || /^links\.[a-z0-9-]+(\.[a-z_]+)?: main has .*; would be /m.test(typed)) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
+  // checked as stored (ownerText turns a typed \n into a line), line by line, on any line break, and
+  // broadly: whatever the binder could read as a line (linkAnswerCovers.lines) is refused
+  const typed = `${q}\n${context ?? ''}`.split(/\r\n|\r|\n/);
+  if (typed.some((l) => l.includes(linkAnswerCovers.HEADER) || (/^\s*links\./.test(l) && /main\s+has/.test(l)))) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
   if (flagStr('change') !== undefined && ['governance-edit', 'gate-change'].includes(cls)) die('--change belongs on a goal-change question; a repo link change is --link-change \'{"link":"<id>","field":"<field>","value":<value>}\' (or "entry" for an add or a removal)');
   const linkChange = jsonFlag('link-change');
   if (linkChange !== undefined) {
