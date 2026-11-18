@@ -13684,6 +13684,13 @@ const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);
 // A kept-alive connection outlives any client's idle reuse: Node's 5 s default closed sockets a
 // fetch client (Node 18's keeps them about 4 s) was just reusing, and that request failed.
 const keepAlive = (srv) => { srv.keepAliveTimeout = 65000; srv.headersTimeout = 66000; return srv; };
+// What a dashboard handing over to a new kit waits for (kit-288): every request its servers (its own
+// and the hub's) have not answered, and every child it started that acts (an owner action, still
+// typing its nudge after its reply; an accounts-tick run). Never cut off by the restart.
+const inFlight = new Set();
+const liveChildren = new Set();
+const trackRequests = (srv) => { srv.on('request', (req, res) => { inFlight.add(res); res.once('close', () => inFlight.delete(res)); }); return srv; };
+const trackChild = (child) => { if (child?.pid) { liveChildren.add(child); child.once('close', () => liveChildren.delete(child)); child.once('error', () => liveChildren.delete(child)); } return child; };
 const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);
 const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
 // Who answers on a port: a devteam dashboard's /api/hello, or null (closed, slow, or not devteam).
@@ -13744,7 +13751,7 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // older script) is answered from its exit.
 function runOwnerAction(args, { env, timeout = 0, input = null, log = () => {}, cwd = mainRoot } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    const child = trackChild(spawn(process.execPath, [fileURLToPath(import.meta.url), ...args], { cwd, env: { ...env, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] }));
     let so = '';
     let se = '';
     let rp = '';
@@ -13913,8 +13920,14 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
     });
   };
   let held = null;
+  // what a dashboard handing over to a new kit closes (kit-288): the hub it serves, or its next try
+  let current = null;
+  let again = null;
+  let stopped = false;
+  const handle = { close() { stopped = true; clearTimeout(again); current?.close(); current?.closeIdleConnections?.(); current = null; } };
   const tryListen = () => {
-    const hub = http.createServer(async (req, res) => {
+    if (stopped) return;
+    const hub = trackRequests(http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
       // One address: the hub listens on 127.0.0.1 only, and dashboards let only that origin frame
@@ -13943,8 +13956,11 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         return send(200, 'application/json', body, { etag: tag, 'cache-control': 'private, no-cache' });
       }
       return send(404, 'text/plain; charset=utf-8', 'not found');
-    });
+    }));
+    current = hub;
     hub.once('error', async (e) => {
+      if (current === hub) current = null;
+      if (stopped) return;
       if (standalone) {
         // said once for each state, never at each retry (a slow answer, unsure, changes nothing); the
         // timer keeps this process alive
@@ -13952,15 +13968,16 @@ function startHub(log, { kit = null, image = false, standalone = false } = {}) {
         if (now !== held && now === 'other') log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; retrying every ${retry / 1000} s`);
         else if (now !== held && now.startsWith('error ')) log(`hub: ${e.message}; retrying every ${retry / 1000} s`);
         if (now !== 'unsure') held = now;
-        return void setTimeout(tryListen, retry);
+        return void (again = setTimeout(tryListen, retry));
       }
       if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
-      if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
+      if ((await holder()) !== 'other') { if (!stopped) (again = setTimeout(tryListen, retry)).unref(); }
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
     keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
   };
   tryListen();
+  return handle;
 }
 
 // ===== account rotation: cswap (claude-swap), when it's installed =====
@@ -16643,6 +16660,12 @@ async function cmdDashboard() {
   const self = fileURLToPath(import.meta.url);
   // the kit as this process loaded it, before it serves anything (kit-288)
   const startPrint = kitPrint(self);
+  // Its timers, kept so a hand-over to a new kit stops each (nothing new starts while it drains) and
+  // a respawn that failed starts them again.
+  const timers = [];
+  const every = (f, ms) => { const t = { f, ms, id: setInterval(f, ms) }; t.id.unref(); timers.push(t); };
+  const stopTimers = () => { for (const t of timers) clearInterval(t.id); };
+  const startTimers = () => { for (const t of timers) { clearInterval(t.id); t.id = setInterval(t.f, t.ms); t.id.unref(); } };
   const ownerEnv = ownerActionEnv('dashboard');
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
@@ -16741,7 +16764,7 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  setInterval(refreshHello, 10000).unref();
+  every(refreshHello, 10000);
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, threads: hello?.threads ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), pulse: hello?.pulse ?? null, previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
@@ -16754,7 +16777,7 @@ async function cmdDashboard() {
     previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; relaysTidy(); });
   };
   runPreviewTick();
-  setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
+  every(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000));
   // ----- the laptop's preview relay (spec §7): a loopback listener per preview, opened when its viewer
   // is first asked for and closed with its record. It serves the lens on GET /.devteam/lens and
   // forwards everything else to the app as the box's gateway does (proxyPreview, downstreamHeaders):
@@ -17000,12 +17023,12 @@ async function cmdDashboard() {
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
     // its tick runs as the supervisor, so a session's dashboard says here that it isn't the project's own
     if (sessionRun() || hubRecordOff()) env.DEVTEAM_HUB_RECORD = 'off';
-    execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    trackChild(execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       accountsRunning = false;
       const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
       if (said && said !== accountsSaid) log(`accounts: ${said}`);
       accountsSaid = said;
-    });
+    }));
   };
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes (a page
   // with data already waits DATA_WAIT_MS for it, then has that data, marked stale): each
@@ -17143,7 +17166,10 @@ async function cmdDashboard() {
     return finish(await record({ option, label: opt.label, keys }, why), keys, why, ', and clear its input box if the digit is there');
   }
   const bodyMs = uploadLimits().bodyMs;
+  // set while it hands over to a new kit (kit-288): what it still answers closes its connection
+  let draining = false;
   const server = http.createServer(async (req, res) => {
+    if (draining) res.setHeader('connection', 'close');
     // Node's five minutes for a body, for all but an upload (UPLOAD_REQUEST_MS, and its stall timer)
     const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
     bodyTimer.unref();
@@ -17584,7 +17610,11 @@ async function cmdDashboard() {
   });
   keepAlive(server);
   server.requestTimeout = UPLOAD_REQUEST_MS;
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else startHub(log, { kit: ownKitVersion() }); setInterval(accountsTick, accountsEveryMs()).unref(); });
+  trackRequests(server);
+  // the hub, unless the box's image serves it; again after a respawn that failed
+  let hubHandle = null;
+  const startHubOnce = () => { if (imageHub() === HUB_PORT) log(`hub: left to the image (DEVTEAM_IMAGE_HUB=${HUB_PORT})`); else hubHandle = startHub(log, { kit: ownKitVersion() }); };
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHubOnce(); every(accountsTick, accountsEveryMs()); });
   // ----- the kit watch (kit-288): a dashboard runs the kit it serves. Its kit's files are printed
   // every DEVTEAM_KIT_WATCH_MS; a print unlike the start's and the same two polls running (a sync
   // writes its files over a few seconds) whose script parses is a new kit, and the dashboard hands
@@ -17599,14 +17629,40 @@ async function cmdDashboard() {
   const sayOnce = (key, msg) => { if (!said.has(key)) { said.add(key); log(msg); } };
   // the version on disk now, from the new script's own hello: this process's settings are cached
   const newKit = () => new Promise((resolve) => execFile(process.execPath, [self, 'hello', '--json'], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => { try { resolve((!err && JSON.parse(stdout).kit) || 'unknown'); } catch { resolve('unknown'); } }));
+  // The hand-over: nothing new starts (timers, the port, the hub, the relays), what is in flight is
+  // waited for (every request answered, every acting child gone: inFlight, liveChildren), and only
+  // then the new code starts: an exit for the loop around it, or its own pane respawned. A request
+  // may take as long as the server allows one (an upload); children have no limit of their own, so a
+  // hung one is waited for 5 minutes. A request answered meanwhile closes its connection.
+  const CHILDREN_WAIT_MS = 5 * 60000;
+  const drained = () => new Promise((resolve) => {
+    const since = Date.now();
+    const look = () => {
+      server.closeIdleConnections?.();
+      const waited = Date.now() - since;
+      if (!inFlight.size && !liveChildren.size) return resolve(true);
+      if ((inFlight.size && waited > UPLOAD_REQUEST_MS) || (!inFlight.size && waited > CHILDREN_WAIT_MS)) {
+        log(`handing over with ${inFlight.size} open requests and ${liveChildren.size} running commands still open`);
+        return resolve(false);
+      }
+      setTimeout(look, 100);
+    };
+    look();
+  });
   const restart = async (files, key) => {
     const how = kitHandOver();
     const to = await newKit();
     const changed = `kit files changed (${files.join(', ')}) from ${startKit ?? 'unknown'} to ${to}`;
-    if (how.how !== 'exit') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why ?? 'not its own tmux pane'})`);
+    if (how.how === 'stay' || how.how === 'respawn') return sayOnce(key, `${changed}: this dashboard runs older code than its files; restart it to run them (${how.why ?? 'not its own tmux pane'})`);
     restarting = true;
-    log(`restarting: ${changed}`);
-    server.close(() => process.exit(0));
+    draining = true;
+    log(`restarting: ${changed}; waiting for ${inFlight.size} open requests and ${liveChildren.size} running commands`);
+    stopTimers();
+    hubHandle?.close();
+    for (const name of [...relays.keys()]) relayClose(name);
+    server.close();
+    await drained();
+    process.exit(0);
   };
   const watchTick = () => {
     if (checking || restarting) return;
@@ -17624,7 +17680,7 @@ async function cmdDashboard() {
       restart(kitPrintDiff(startPrint, print), key).catch((e) => log(`kit watch: ${e?.stack ?? e}`)).finally(() => { checking = false; });
     });
   };
-  setInterval(watchTick, watchMs).unref();
+  every(watchTick, watchMs);
   server.listen(port, host);
 }
 

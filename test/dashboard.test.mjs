@@ -4616,3 +4616,158 @@ test('kit watch: a kit that does not parse is not started', { timeout: 180000 },
   kitB(F);
   await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the fixed kit started');
 });
+
+// A request to the dashboard as its own page sends it: its body written by the test, part by part.
+function kwPost(port, route, body) {
+  const buf = Buffer.from(JSON.stringify(body));
+  let resolveRes;
+  const answered = new Promise((r) => { resolveRes = r; });
+  const req = http.request({ host: '127.0.0.1', port, path: route, method: 'POST', headers: { host: `127.0.0.1:${port}`, 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}`, 'content-length': buf.length } }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => resolveRes({ status: res.statusCode, body: b }));
+  });
+  req.on('error', (e) => resolveRes({ status: 0, body: e.message }));
+  return { buf, req, answered };
+}
+
+test('kit watch: an answer in flight is answered before the restart', { timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwflight');
+  const port = await freePort();
+  const d = await loopedDashboard(F, port);
+  const first = d.starts()[0].pid;
+  const { buf, req, answered } = kwPost(port, '/api/thread-new', { title: 'kit watch', text: 'in flight' });
+  req.write(buf.subarray(0, 10));
+  await kwSleep(300);
+  kitB(F);
+  await until(() => /restarting: .*waiting for 1 open requests/.test(d.log()), 'the restart waiting on the request');
+  await kwSleep(2000);
+  assert.ok(kwAlive(first), 'the old dashboard waits for the request');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'and the new kit has not started');
+  req.end(buf.subarray(10));
+  const r = await answered;
+  assert.equal(r.status, 200, r.body);
+  assert.equal(JSON.parse(r.body).ok, true);
+  await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the answer');
+  const threads = JSON.parse(execFileSync(process.execPath, [F.dt, 'thread', 'list', '--json'], { cwd: F.root, env: F.env, encoding: 'utf8' }));
+  assert.ok(threads.some((x) => x.title === 'kit watch'), 'the thread the request made is there');
+});
+
+test('kit watch: a press whose command is still typing holds the restart', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const T = threadsFixture('kit-watch-press');
+  const later = cleanup(t);
+  later(() => T.done());
+  const env = { ...T.env({}), HOME: path.join(T.base, 'kwhome'), DEVTEAM_HUB_PORT: String(PORTS + 91), DEVTEAM_PORT_BASE: String(PORTS + 92), DEVTEAM_KIT_WATCH_MS: '200' };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_DASHBOARD_RESTART', 'TMUX', 'TMUX_PANE']) delete env[k];
+  fs.mkdirSync(env.HOME, { recursive: true });
+  const dt = path.join(T.old, 'docs/devteam/scripts/devteam.mjs');
+  const F = { base: T.base, root: T.old, dt, env, later, orig: fs.readFileSync(dt, 'utf8') };
+  const pane = T.standIn();
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.writeFileSync(path.join(T.old, 'docs/devteam/run', n), pane.target);
+  // tmux whose send-keys waits for the test's go: the answer's command is still typing after its reply
+  const bin = path.join(T.base, 'kwbin');
+  const go = path.join(T.base, 'kwgo');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\ncase " $* " in *" send-keys "*) i=0; while [ ! -e '${go}' ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done ;; esac\nPATH='${env.PATH}' exec tmux "$@"\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const d = await loopedDashboard(F, port, { PATH: `${bin}${path.delimiter}${env.PATH}` });
+  const first = d.starts()[0].pid;
+  const q = T.sup(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]']);
+  const { buf, req, answered } = kwPost(port, '/api/answer', { id: q, answer: 'Yes' });
+  req.end(buf);
+  const r = await answered;
+  assert.equal(r.status, 200, r.body);
+  kitB(F);
+  await until(() => /restarting: .*waiting for 0 open requests and 1 running commands/.test(d.log()), 'the restart waiting on the command');
+  await kwSleep(2000);
+  assert.ok(kwAlive(first), 'the old dashboard waits for the command');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')), 'and the new kit has not started');
+  fs.writeFileSync(go, '');
+  await until(() => pane.typed().includes('[devteam answer'), 'the nudge typed');
+  assert.ok(!d.starts().some((s) => s.line.includes('started (kit B)')) || kwAlive(first) === false, 'the nudge landed before the old process left');
+  await until(() => d.starts().some((s) => s.line.includes('started (kit B)')), 'the new kit started after the nudge');
+});
+
+// tmux, in the test lib's own server only (its TMUX_TMPDIR shim): never the box's, never kill-server.
+const kwTmux = (args) => { const r = spawnSync('tmux', args, { encoding: 'utf8', env: process.env, timeout: 20000 }); return { status: r.status, out: (r.stdout ?? '').trim(), err: (r.stderr ?? '').trim() }; };
+const kwSq = (s) => `'${String(s).replace(/'/g, "'\\''")}'`;
+// a pane's command starts with the fixture's whole environment, so a pane's dashboard never touches
+// the real ~/.devteam, hub or tmux
+const kwInPane = (env, cmd) => `env ${Object.entries(env).filter(([k]) => /^(HOME|PATH|CLAUDE_CONFIG_DIR|CODEX_HOME|TMUX_TMPDIR|DEVTEAM_[A-Z0-9_]+)$/.test(k)).map(([k, v]) => kwSq(`${k}=${v}`)).join(' ')} ${cmd}`;
+function kwSession(F, prefix) {
+  const s = `${prefix}-${crypto.randomBytes(3).toString('hex')}`;
+  F.later(() => { kwTmux(['kill-session', '-t', `=${s}`]); });
+  return s;
+}
+const kwPanePid = (target) => Number(kwTmux(['display-message', '-p', '-t', target, '#{pane_pid}']).out);
+
+test('kit watch: a dashboard that is its own tmux pane respawns it', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwpane');
+  const [P1, P2] = [await freePort(), await freePort()];
+  const s = kwSession(F, 'kw');
+  const run = (p) => `${kwSq(process.execPath)} ${kwSq(F.dt)} dashboard --port ${p}`;
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane(F.env, run(P1))]).status, 0);
+  assert.equal(kwTmux(['new-window', '-d', '-t', `=${s}:`, '-n', 'b', '-c', F.root, `${kwInPane(F.env, run(P2))}; true`]).status, 0);
+  const log = kwLogOf(F.root);
+  const starts = kwStartsOf(log);
+  await until(async () => (await kwHello(P1))?.kit && (await kwHello(P2))?.kit, 'both pane dashboards with their kit');
+  const startOf = (p, b = false) => starts().find((x) => x.line.includes(`started ${b ? '(kit B) ' : ''}on http://127.0.0.1:${p}`));
+  const [a0, b0] = [kwPanePid(`=${s}:a`), kwPanePid(`=${s}:b`)];
+  assert.equal(a0, startOf(P1).pid, "window a's pane process is the dashboard itself");
+  assert.notEqual(b0, startOf(P2).pid, "window b's is the shell that runs it");
+  kitB(F);
+  await until(() => startOf(P1, true) && startOf(P2, true), 'both panes started the new kit');
+  await until(async () => (await kwHello(P1)) && (await kwHello(P2)), 'both addresses answer again');
+  assert.notEqual(kwPanePid(`=${s}:a`), a0, 'pane a was respawned');
+  assert.notEqual(kwPanePid(`=${s}:b`), b0, 'pane b was respawned');
+});
+
+test('kit watch: a failed respawn listens again on the old code', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  const F = kwFixture(t, 'kwnorespawn');
+  const bin = path.join(F.base, 'kwbin');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\ncase " $* " in *" respawn-pane "*) echo 'respawn refused by the test' >&2; exit 1 ;; esac\nPATH=${kwSq(F.env.PATH)} exec tmux "$@"\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const s = kwSession(F, 'kwn');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', '-c', F.root, kwInPane({ ...F.env, PATH: `${bin}${path.delimiter}${F.env.PATH}` }, `${kwSq(process.execPath)} ${kwSq(F.dt)} dashboard --port ${port}`)]).status, 0);
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the pane dashboard with its kit');
+  const first = kwStartsOf(log)()[0].pid;
+  kitB(F);
+  await until(() => /could not respawn/.test(log()), 'the failed respawn said');
+  await until(async () => !!(await kwHello(port)), 'the address answers again');
+  assert.ok(kwAlive(first), 'from the first process');
+  assert.ok(!/started \(kit B\)/.test(log()), 'on the old code');
+  fs.appendFileSync(path.join(F.root, 'docs/devteam/dashboard/index.html'), '<!-- c -->\n');
+  await until(() => kwCount(log(), /restarting: kit files changed/) === 2, 'a new change noticed again: its timers came back');
+});
+
+test('kit watch: a plain dashboard, or one told off, stays and says so', { skip: hasTmux ? false : 'no tmux', timeout: 180000 }, async (t) => {
+  // (a) no loop, and the TMUX_PANE it inherited is a pane whose process is something else
+  const F = kwFixture(t, 'kwstay');
+  const s = kwSession(F, 'kws');
+  assert.equal(kwTmux(['new-session', '-d', '-s', s, '-n', 'a', 'sleep 600']).status, 0);
+  const paneId = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{pane_id}']).out;
+  const sock = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{socket_path}']).out;
+  const spid = kwTmux(['display-message', '-p', '-t', `=${s}:a`, '#{pid}']).out;
+  const p0 = kwPanePid(`=${s}:a`);
+  const { dash, port } = await dashboardOnFreePort(F.root, { ...F.env, TMUX: `${sock},${spid},0`, TMUX_PANE: paneId });
+  F.later(() => dash.stop());
+  const log = kwLogOf(F.root);
+  await until(async () => (await kwHello(port))?.kit, 'the plain dashboard with its kit');
+  kitB(F);
+  await until(() => /runs older code than its files/.test(log()), 'the stale code said');
+  await kwSleep(2000);
+  assert.equal(kwCount(log(), /runs older code than its files/), 1, 'said once');
+  assert.ok(kwAlive(dash.p.pid) && (await kwHello(port)), 'it stays up');
+  assert.equal(kwPanePid(`=${s}:a`), p0, 'and never respawned the pane it inherited');
+  // (b) under a loop, told off
+  const G = kwFixture(t, 'kwoff');
+  const gp = await freePort();
+  const d = await loopedDashboard(G, gp, { DEVTEAM_DASHBOARD_RESTART: 'off' });
+  const first = d.starts()[0].pid;
+  kitB(G);
+  await until(() => /runs older code than its files \(DEVTEAM_DASHBOARD_RESTART=off\)/.test(d.log()), 'the stale code said, off');
+  await kwSleep(1000);
+  assert.ok(kwAlive(first) && !d.starts().some((x) => x.line.includes('started (kit B)')), 'it stays on its code');
+});
