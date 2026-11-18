@@ -877,6 +877,110 @@ function linkOwnerChanges(a = {}, b = {}) {
   }
   return out;
 }
+// The owner-kind link changes from links map a to b, with their values: one per changed field of an
+// entry of an owner's kind on both sides with the same kind (a field no one's class guards, like a
+// repo link's path, left out), and one for the whole entry on an add, a removal or a kind flip
+// (field null, from/to the entries or null). An owner's answer approves these one by one
+// (linkAnswerCovers), so a field the owner already said yes to is never asked about again, and
+// another field landing on main spends nothing.
+function linkFieldChanges(a = {}, b = {}) {
+  const out = [];
+  for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
+    const x = ownEntry(a, id) ?? null, y = ownEntry(b, id) ?? null;
+    if (!ownersKind(x) && !ownersKind(y)) continue;
+    if (!x || !y || x.kind !== y.kind) { if (canonical(x) !== canonical(y)) out.push({ id, field: null, from: x, to: y }); continue; }
+    for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
+      if (canonical(x[f] ?? null) !== canonical(y[f] ?? null) && LINK_KINDS[x.kind].ownerClass(f)) out.push({ id, field: f, from: x[f] ?? null, to: y[f] ?? null });
+    }
+  }
+  return out;
+}
+// The line a question shows the owner for one change, and binds by: a field line for a field, an
+// entry line for the whole entry.
+linkFieldChanges.key = (c) => `links.${c.id}${c.field === null ? '' : `.${c.field}`}`;
+linkFieldChanges.line = (c) => `${linkFieldChanges.key(c)}: main has ${canonical(c.from ?? null)}; would be ${canonical(c.to ?? null)}`;
+// Whether question qid approves change c ({ id, field, from, to }): the owner answered it, with its
+// recommendation, unchanged since; a line it binds by shows the change; and it was answered after
+// main last changed what it approves (so an old yes never undoes a revert on main). A question the
+// kit worded from now on binds only by the lines of its approves section (HEADER up to a blank
+// line); an older one by its entry lines, each approving every field it shows changing. Either
+// class of the owner's link questions covers: the owner read the exact line and said yes to it.
+function linkAnswerCovers(qid, c) {
+  const q = logGet(qid);
+  if (q?.type !== 'question') return false;
+  const v = questionView(q);
+  if (!linkAnswerCovers.yes(v)) return false;
+  if (linkAnswerCovers.why(qid)) return false;
+  const lines = linkAnswerCovers.lines(qid);
+  const shown = lines.includes(linkFieldChanges.line(c)) || (c.field !== null && lines.some((l) => {
+    const e = linkAnswerCovers.entryLine(l, c.id);
+    return !!e && isObj(e.from) && isObj(e.to) && e.from.kind === e.to.kind && canonical(e.from[c.field] ?? null) === canonical(c.from ?? null) && canonical(e.to[c.field] ?? null) === canonical(c.to ?? null);
+  }));
+  if (!shown) return false;
+  // the owner's later answer to the same line, if not a yes, takes this one back
+  if (questions().some((o) => o.id !== qid && o.status === 'answered' && o.answered_by === 'owner' && String(o.answered_at) > String(v.answered_at) && !linkAnswerCovers.yes(o) && linkAnswerCovers.lines(o.id).includes(linkFieldChanges.line(c)))) return false;
+  const at = c.field === null ? linkChangedOnMain(c.id) : linkAnswerCovers.fieldChangedAt(c.id, c.field);
+  return at === null || Date.parse(v.answered_at) >= at;
+}
+Object.assign(linkAnswerCovers, {
+  HEADER: 'This answer approves exactly these repo link changes, and no other:',
+  // the owner's own yes, as recommended: a question asked with recommendation yes, answered yes
+  // (a note after " — " aside), never a review, a secrets question, a default or another choice
+  yes: (v) => v.status === 'answered' && v.answered_by === 'owner' && !!v.matched && v.kind !== 'review' && !(v.secrets ?? []).length && ['governance-edit', 'gate-change'].includes(v.class) && String(v.answer ?? '').split(' — ')[0].trim().toLowerCase() === 'yes',
+  // the lines of a context's approves section, or null when it has none
+  section: (context) => {
+    const ls = String(context ?? '').split('\n');
+    const i = ls.indexOf(linkAnswerCovers.HEADER);
+    if (i < 0) return null;
+    const end = ls.findIndex((l, k) => k > i && !l.trim());
+    return ls.slice(i + 1, end < 0 ? ls.length : end);
+  },
+  // the lines question qid binds by: its approves section, or (asked before it had one) its entry lines
+  lines: (qid) => {
+    const ctx = String(logGet(qid)?.context ?? '');
+    return linkAnswerCovers.section(ctx) ?? ctx.split('\n').filter((l) => /^links\.[a-z0-9-]+: main has /.test(l));
+  },
+  // an entry line's two entries for link id ({ from, to }), or null; the split is the one where both sides parse
+  entryLine: (l, id) => {
+    const pre = `links.${id}: main has `;
+    if (!l.startsWith(pre)) return null;
+    const body = l.slice(pre.length);
+    for (let i = body.indexOf('; would be '); i >= 0; i = body.indexOf('; would be ', i + 1)) {
+      try { return { from: JSON.parse(body.slice(0, i)), to: JSON.parse(body.slice(i + '; would be '.length)) }; } catch {}
+    }
+    return null;
+  },
+  // why question qid approves nothing it shows, whatever it shows: changed after the owner answered it
+  why: (qid) => {
+    const ups = logGet(qid)?.updates ?? [];
+    const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
+    return ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined) ? `${qid}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again` : null;
+  },
+  // when main's first-parent line last changed links.<id>.<field> (ms), over the commits linkChangedOnMain reads; null when none did
+  history: new Map(),
+  fieldChangedAt: (id, field) => {
+    const ref = mainRef();
+    const head = ref ? git(['rev-parse', ref]) : null;
+    const key = `${head}\0${id}\0${field}`;
+    if (linkAnswerCovers.history.has(key)) return linkAnswerCovers.history.get(key);
+    const rows = head ? (git(['log', '--first-parent', '-n', String(LINK_HISTORY_DEPTH), '--format=%H %ct', head, '--', `${projectRel}/settings.md`]) ?? '').split('\n').filter(Boolean) : [];
+    const valueAt = (rev) => {
+      if (!linkEntryAtCache.has(rev)) linkEntryAtCache.set(rev, settingsAt(rev, { orNull: true })?.links ?? {});
+      return canonical(ownEntry(linkEntryAtCache.get(rev), id)?.[field] ?? null);
+    };
+    let at = null;
+    for (const row of rows) {
+      const [sha, ct] = row.split(' ');
+      // a shallow clone's history ends here: what came before is unknown, so nothing is known to have changed
+      if (git(['rev-parse', '--verify', '--quiet', `${sha}^`]) === null) break;
+      if (valueAt(sha) !== valueAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
+    }
+    linkAnswerCovers.history.set(key, at);
+    return at;
+  },
+  // the newest answered question that covers change c, or null
+  any: (c) => questions().filter((q) => q.status === 'answered' && String(q.context ?? '').includes(`links.${c.id}`)).sort((a, b) => String(b.answered_at).localeCompare(String(a.answered_at))).find((q) => linkAnswerCovers(q.id, c))?.id ?? null,
+});
 let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
@@ -5177,19 +5281,24 @@ function remediationBindingFails(base, sha, approved) {
   for (const r of named) if (!changed.includes(r.name)) fails.push(`${approved} names remediations.${r.name}, which this PR doesn't change: ask again, naming only what it changes`);
   return fails;
 }
+// Each repo link change a merge lands (linkFieldChanges, main against the head) needs an owner's
+// answer whose question showed exactly that change (linkAnswerCovers): the --approved one, or an
+// earlier yes for a field it never asked again about; and the --approved answer must cover one of
+// them. A question changed after its answer approves nothing.
 function ownerLinkActFails(changed, sha, approved) {
   const keys = changed.filter((c) => c.key.startsWith('links.'));
   if (!keys.length) return [];
-  const q = logGet(approved);
-  const ups = q?.updates ?? [];
-  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
-  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
-  const shown = String(q?.context ?? '');
+  const why = linkAnswerCovers.why(approved);
+  if (why) return [why];
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
-  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
-  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+  const key = linkFieldChanges.key;
+  const cs = linkFieldChanges(onMain, lands);
+  const mine = cs.filter((c) => linkAnswerCovers(approved, c));
+  const bare = cs.filter((c) => !mine.includes(c) && !linkAnswerCovers.any(c)).map(key);
+  if (bare.length) return [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the changes its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question asks about every repo link change no answer covers yet), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`];
+  if (cs.length && !mine.length) return [`${approved} approves none of the repo link changes this lands (${cs.map(key).join(', ')}): cite an answer that approved one of them`];
+  return [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -5975,7 +6084,9 @@ function cmdMerge() {
       else if (!approved) fails.push(`changes owner settings: ${what}${gatesWhy}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        // a landing of repo link changes only: either class of the owner's link questions (each change is bound to the line its answer showed, ownerLinkActFails)
+        const linksOnly = changed.every((c) => c.key.startsWith('links.')) && ['governance-edit', 'gate-change'].includes(q.class);
+        if (!classes.includes(q.class) && !linksOnly) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
         fails.push(...ownerLinkActFails(changed, sha, approved));
         fails.push(...remediationBindingFails(base, sha, approved));
       }
@@ -6796,6 +6907,47 @@ function askLine({ thread } = {}) {
     });
     // what the owner reads in the Inbox says exactly what approving this lands
     context = [context, `Approving this lands: ${remediationEntries.map((e) => (e.sha ? `${e.name} (${e.script} at blob ${e.sha})` : `the removal of ${e.name}`)).join('; ')}`].filter(Boolean).join('\n\n');
+  }
+  // A repo link change asked in the supervisor's own words (--link-change): the kit writes the lines
+  // the owner's answer binds by (linkAnswerCovers), from main's settings, and nobody else may: a
+  // binding line typed or quoted in the question's own words is refused, so it never approves by accident.
+  // checked as stored (ownerText turns a typed \n into a line), line by line, on any line break, and
+  // broadly: whatever the binder could read as a line (linkAnswerCovers.lines) is refused
+  const typed = `${q}\n${context ?? ''}`.split(/\r\n|\r|\n/);
+  if (typed.some((l) => l.includes(linkAnswerCovers.HEADER) || (/^\s*links\./.test(l) && /main\s+has/.test(l)))) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
+  if (flagStr('change') !== undefined && ['governance-edit', 'gate-change'].includes(cls)) die('--change belongs on a goal-change question; a repo link change is --link-change \'{"link":"<id>","field":"<field>","value":<value>}\' (or "entry" for an add or a removal)');
+  const linkChange = jsonFlag('link-change');
+  if (linkChange !== undefined) {
+    if (!['governance-edit', 'gate-change'].includes(cls)) die('--link-change goes with --class governance-edit or gate-change: a repo link change is the owner\'s');
+    // its answer approves the change only as a yes: the question recommends yes and offers no other choice
+    if (recommendation.trim().toLowerCase() !== 'yes' || flags.choices !== undefined || flags.options !== undefined) die('--link-change asks yes or no: --recommendation yes, and no --choices or --options (only the owner\'s yes approves the change)');
+    const shape = '--link-change: each item is {"link":"<id>","field":"<field>","value":<value>} or {"link":"<id>","entry":{…} | null}';
+    const items = Array.isArray(linkChange) ? linkChange : [linkChange];
+    if (!items.length) die(shape);
+    const mainLinks = mainSettings(null)?.links ?? {};
+    const after = Object.assign(Object.create(null), structuredClone(mainLinks));
+    for (const it of items) {
+      if (!isObj(it) || typeof it.link !== 'string' || Object.hasOwn(it, 'entry') === (Object.hasOwn(it, 'field') || Object.hasOwn(it, 'value'))) die(shape);
+      const onMain = ownEntry(mainLinks, it.link);
+      if (Object.hasOwn(it, 'field')) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; ask about it whole: {"link":"${it.link}","entry":{…}}`);
+        if (!ownersKind(onMain)) die(`--link-change: ${it.link} is a ${onMain.kind} link, the supervisor's (link set)`);
+        if (!linkFields(onMain.kind).includes(it.field) || !LINK_KINDS[onMain.kind].ownerClass(it.field) || !Object.hasOwn(it, 'value')) die(`--link-change: "${it.field}" is not a field of a ${onMain.kind} link the owner approves, with its value`);
+        after[it.link] = { ...ownEntry(after, it.link), [it.field]: it.value };
+      } else if (it.entry === null) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; there is nothing to remove`);
+        delete after[it.link];
+      } else {
+        if (!isObj(it.entry) || !ownersKind(it.entry) && !ownersKind(onMain)) die('--link-change: an entry is a repo link\'s ({"kind":"repo",…})');
+        after[it.link] = it.entry;
+      }
+    }
+    const { errors } = registryProblems({ ...loadSettings(), links: after });
+    if (errors.length) die(`--link-change: not a valid registry:\n  - ${errors.join('\n  - ')}`);
+    const named = new Set(items.map((it) => it.link));
+    const changes = linkFieldChanges(mainLinks, after).filter((c) => named.has(c.id));
+    if (!changes.length) die('--link-change: main already has that; there is nothing to approve');
+    context = [context, [linkAnswerCovers.HEADER, ...changes.map(linkFieldChanges.line)].join('\n')].filter(Boolean).join('\n\n');
   }
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
@@ -22393,14 +22545,13 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
-// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
-// kind is left alone, to land with the owner's answer.
+// A link of an owner's kind is carried change by change (linkFieldChanges), each only as an owner's
+// answer approved it (linkAnswerCovers), onto the chore's entry: a field main changed since this
+// checkout's copy is never reverted, and one no answer covers is left alone, to land with the
+// owner's answer.
 // A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
 // one: when main's entry changed since the act was made, the act's parent state is gone, and the
 // entry is refused (the run exits 1, after carrying the others).
-// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
-const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -22419,7 +22570,18 @@ function linkLand(slugName) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
       if (ownersKind(h) || ownersKind(t)) {
-        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+        const cs = linkFieldChanges({ [id]: t }, { [id]: h });
+        const ok = cs.filter((c) => linkAnswerCovers.any(c));
+        owners.push(...cs.filter((c) => !ok.includes(c)).map(linkFieldChanges.key));
+        if (!ok.length) continue;
+        let e = t;
+        for (const c of ok) {
+          if (c.field === null) e = c.to ?? undefined;
+          else { e = { ...e }; if (c.to === null) delete e[c.field]; else e[c.field] = c.to; }
+        }
+        if (e === undefined) delete links[id]; else links[id] = e;
+        changed.push(`links.${id} (${t === undefined ? 'added' : e === undefined ? 'removed' : 'changed'})`);
+        continue;
       } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
         const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
         refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
@@ -22447,6 +22609,11 @@ function cmdLink() {
   if (sub === 'land') { supervisorOnly('link'); return linkLand(id ?? 'registry'); }
   // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
   const vals = [...given, ...(rest ?? [])];
+  // a flag of this command after the bare -- is part of the value there, never a flag: refused, so
+  // a value never swallows --approved (and asks again) nor is stored with it
+  const linkFlags = new Set(['approved', 'source', 'reason', ...Object.keys(LINK_KINDS).flatMap((k) => linkFields(k))]);
+  const swallowed = (rest ?? []).find((t) => /^--[a-z_]+(=|$)/.test(t) && linkFlags.has(t.slice(2).split('=')[0]));
+  if (swallowed) die(`${swallowed.split('=')[0]} after -- would be part of the value: put flags before -- (link set <id> <field> --approved <qid> -- <value>), or quote the value as one argument`);
   if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>   |   link land [<chore slug>]');
   supervisorOnly('link');
   if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
@@ -22500,11 +22667,12 @@ function cmdLink() {
 // The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
 // it: a repo link written by an earlier --approved run is here before it lands on main.
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
-// A link of an owner's kind: draft the change and ask a question in the class its
-// field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
-// exactly that change and log the act; the chore merge that lands it does so under the same answer.
-// Asking twice for the same draft reuses the open question; applying a draft already written is a
-// no-op. Nothing here names a kind: the table gives fields and classes.
+// A link of an owner's kind: draft the change and ask a question in the class its field takes
+// (gate-change for a gate field, else governance-edit) about the changes no owner's answer covers
+// yet, field by field; with --approved <qid>, an answer covering this change (link set's own, or the
+// supervisor's ask --link-change), apply it and log the acts; the chore merge lands it the same way.
+// Asking twice for the same changes reuses the open question; applying a change already written is
+// a no-op. Nothing here names a kind: the table gives fields and classes.
 function linkByOwner(sub, id, field, vals, kind) {
   const K = LINK_KINDS[kind];
   const raw = rawSettingsBlock().links ?? {};
@@ -22519,33 +22687,56 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
   if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
-  // The bundle the answer covers: every link of an owner's kind that settings.md here, with this
-  // change, would land differently from main, this one included. One answer may approve a bundle,
-  // so the question shows all of it; merge then lands exactly these entries under that answer.
+  // The bundle: every repo link change that settings.md here, with this one, would land against
+  // main, field by field (linkFieldChanges). A change some owner's answer already covers is never
+  // asked about again; the question asks only about the rest, and says it is the one question.
   const mainLinks = mainSettings(null)?.links ?? {};
   const after = Object.assign(Object.create(null), raw);
   if (next) after[id] = next; else delete after[id];
-  const bundleIds = [...new Set(linkOwnerChanges(mainLinks, after).filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)).map((c) => c.key.split('.')[1]))].sort();
-  if (!bundleIds.includes(id)) bundleIds.push(id);
+  const L = linkFieldChanges.line;
+  const changes = linkFieldChanges(mainLinks, after);
+  // this command's own change: the field it sets (or the entry, when the link is new or goes)
+  const own = changes.filter((c) => c.id === id && (sub !== 'set' || c.field === field || c.field === null));
+  const write = () => editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
+  // back to what main has: nothing of it lands, so there is nothing to approve
+  if (!own.length) { write(); return out(`links.${id}${sub === 'set' ? `.${field}` : ''} is back to main's in settings.md here: nothing of it lands, so no question`); }
+  const coveredBy = new Map(changes.map((c) => [L(c), linkAnswerCovers.any(c)]));
+  const bundleIds = [...new Set([id, ...changes.map((c) => c.id)])].sort();
   const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
-  const draft = JSON.stringify(bundle, null, 2);
-  const diff = bundleIds.map((l) => `links.${l}: main has ${canonical(ownEntry(mainLinks, l) ?? null)}; would be ${canonical(ownEntry(after, l) ?? null)}`).join('\n');
   const approved = flagStr('approved');
   // the command to run once answered: this one, every value quoted, plus --approved
-  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  // (before a bare --, so it stays a flag)
+  const again = (qid) => { const w = argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved'); const d = w.indexOf('--'); return `node docs/devteam/scripts/devteam.mjs link ${(d < 0 ? [...w.map(shq), '--approved', qid] : [...w.slice(0, d).map(shq), '--approved', qid, ...w.slice(d).map(shq)]).join(' ')}`; };
   if (!approved) {
-    const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
+    const toAsk = changes.filter((c) => !coveredBy.get(L(c)));
+    if (!toAsk.length) { const by = coveredBy.get(L(own[0])); return out(`${by} already approves this change (${own.map(L).join('; ')}); write it with: ${again(by)}`); }
+    const asking = toAsk.map(L);
+    const open = questions().find((q) => q.status === 'open' && ['governance-edit', 'gate-change'].includes(q.class) && canonical(linkAnswerCovers.section(q.context)) === canonical(asking));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const carried = changes.filter((c) => coveredBy.get(L(c)));
+    const diff = bundleIds.map((l) => L({ id: l, field: null, from: ownEntry(mainLinks, l) ?? null, to: ownEntry(after, l) ?? null })).join('\n');
+    const context = [
+      'This is the one question for this change: nothing else will ask the owner about it.',
+      [linkAnswerCovers.HEADER, ...asking].join('\n'),
+      carried.length ? ['Already approved, not asked again:', ...carried.map((c) => `- ${linkFieldChanges.key(c)} (${coveredBy.get(L(c))})`)].join('\n') : null,
+      `The whole settings diff waiting to land${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}`,
+      `The registry entries, as they would be in settings.md links:\n${JSON.stringify(bundle, null, 2)}`,
+    ].filter(Boolean).join('\n\n');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: toAsk.some((c) => own.includes(c)) ? `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?` : `Change ${toAsk.map(linkFieldChanges.key).join(', ')}, waiting in settings.md to land with ${id}?`, context, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
-  if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
-  if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
-  editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
-  // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
-  // (prior_hash), so merge binds each changed entry to this answer
-  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  if (!['governance-edit', 'gate-change'].includes(v.class)) die(`${approved} was asked in class ${v.class ?? '(none)'}, not governance-edit or gate-change`);
+  if (!own.every((c) => linkAnswerCovers(approved, c))) {
+    const named = linkAnswerCovers.lines(approved);
+    die(`${approved} asked about another change; ask again for this one: it named ${named.length ? named.join('; ') : 'no repo link change'}; this change is ${own.map(L).join('; ')}${linkAnswerCovers.why(approved) ? ` (${linkAnswerCovers.why(approved)})` : ''}`);
+  }
+  const missing = changes.filter((c) => !linkAnswerCovers(approved, c) && !coveredBy.get(L(c)));
+  if (missing.length) die(`not approved yet: ${missing.map(L).join('; ')}; run the command without --approved to ask about it (if main changed since, bring this checkout's settings.md up to date first)`);
+  write();
+  // one act per entry of the bundle, in the answer's class: the entry it lands (entry_hash) from
+  // the one main has (prior_hash), so merge binds each changed entry to this answer
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: v.class, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as approved, landing with ${id}`, refs: [`link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
