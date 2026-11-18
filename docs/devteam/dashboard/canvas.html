@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canvas</title>
+<!-- The canvas editor (kit-661): a canvas-doc@1 document read from GET /api/canvas/doc and drawn as
+     plain DOM. Its own HTML, CSS and one script; nothing from another origin. The document is data:
+     text goes in with textContent, every style value through a checker and one CSSOM property. -->
+<style>
+  /* the dashboard's tokens (devteam-ui tokens), with the system font stacks: this page loads no font */
+  :root {
+    color-scheme: light;
+    --bg: #fafafa; --surface: #ffffff; --raised: #ffffff; --hover: #f2f2f2; --well: #f2f2f2;
+    --fg: #171717; --fg-2: #666666; --muted: #8f8f8f; --line: #ebebeb; --line-2: #dcdcdc;
+    --blue: #0070f3; --blue-fg: #0068d6; --red: #ee0000; --red-fg: #cb2a2f; --amber: #f5a623; --amber-fg: #a35200; --green: #45a557; --green-fg: #297a3a;
+    --shadow: 0 1px 2px rgba(0,0,0,.04);
+    --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --serif: ui-serif, Georgia, Cambria, 'Times New Roman', serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    /* this page's own */
+    --stage: #ececec; --amber-bg: #fff4e5; --sel: #0070f3;
+    --bar-h: 49px; --left-w: 240px; --right-w: 300px;
+    /* running text: six of twelve columns at 1440 (the dashboard's devteam-layout measure) */
+    --measure: calc((1200px - 2 * 32px - 11 * 16px) / 2 + 5 * 16px);
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    color-scheme: dark;
+    --bg: #000000; --surface: #0a0a0a; --raised: #111111; --hover: #1a1a1a; --well: #111111;
+    --fg: #ededed; --fg-2: #a1a1a1; --muted: #7d7d7d; --line: #1f1f1f; --line-2: #2e2e2e;
+    --blue: #52a8ff; --blue-fg: #52a8ff; --red: #ff6166; --red-fg: #ff6166; --amber: #ffb224; --amber-fg: #ffb224; --green: #3cd58c; --green-fg: #62c073;
+    --shadow: none;
+    --stage: #161616; --amber-bg: #2a1d05; --sel: #52a8ff;
+  } }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; background: var(--bg); }
+  body { margin: 0; color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; overflow: hidden; }
+  [hidden] { display: none !important; }
+  button { font: inherit; font-size: 12px; font-weight: 500; height: 24px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); cursor: pointer; }
+  button:hover { background: var(--hover); }
+  select { font: inherit; font-size: 12px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; height: 28px; padding: 0 8px; min-width: 0; }
+
+  /* the bar */
+  .bar { height: var(--bar-h); display: flex; align-items: center; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--surface); position: relative; z-index: 5; }
+  .bar .back { color: var(--fg-2); text-decoration: none; white-space: nowrap; }
+  .bar .back:hover { color: var(--fg); }
+  .bar h1 { font-size: 14px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .bar .where { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .bar .grow { flex: 1; }
+  .chip { font-size: 11px; height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg-2); display: inline-flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .chip.public { color: var(--amber-fg); border-color: var(--amber-fg); background: var(--amber-bg); }
+
+  /* the three columns */
+  .work { position: absolute; top: var(--bar-h); left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: var(--left-w) minmax(0, 1fr) var(--right-w); }
+  .panel { background: var(--surface); border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
+  .panel.right { border-right: 0; border-left: 1px solid var(--line); }
+  .ptitle { font: 500 11px/1 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; padding: 14px 12px 8px; margin: 0; }
+  .pages a { display: block; padding: 5px 12px; color: var(--fg-2); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pages a:hover { background: var(--hover); }
+  .pages a[aria-current="page"] { color: var(--fg); background: var(--well); }
+  .layers { padding-bottom: 20px; }
+  .layer { display: flex; align-items: center; gap: 6px; height: 26px; padding-right: 8px; color: var(--fg-2); cursor: pointer; white-space: nowrap; font-size: 12px; }
+  .layer:hover { background: var(--hover); }
+  .layer[aria-selected="true"] { background: color-mix(in srgb, var(--sel) 14%, transparent); color: var(--fg); }
+  .layer .ic { width: 14px; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 10px; flex: none; }
+  .layer .nm { overflow: hidden; text-overflow: ellipsis; }
+  .props { padding: 0 12px 24px; }
+  .note { font-size: 12px; color: var(--fg-2); margin: 8px 0; max-width: var(--measure); }
+
+  /* the stage: the page surface is the one element zoom and pan move */
+  .stage { position: relative; background: var(--stage); overflow: hidden; min-width: 0; touch-action: none; }
+  #surface { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .zoom { position: absolute; right: 12px; top: 12px; display: flex; gap: 4px; align-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 3px; z-index: 3; }
+  .zoom .pct { font-size: 12px; width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+  .stage-top { position: absolute; left: 12px; top: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; z-index: 3; max-width: calc(100% - 24px); }
+  #pageSel, #narrowNote { display: none; }
+  #narrowNote { font-size: 12px; color: var(--fg-2); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin: 0; max-width: var(--measure); }
+  #msg { position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%); margin: 0; padding: 0 16px; width: max-content; max-width: min(var(--measure), 100%); color: var(--fg-2); text-align: center; z-index: 2; }
+  body[data-state="error"] #surface, body[data-state="error"] .zoom { display: none; }
+
+  /* the design being drawn keeps its own colours, light or dark */
+  .dnode.sel { outline: 2px solid var(--sel); }
+</style>
+</head>
+<body data-state="loading">
+<header class="bar">
+  <a class="back" href="/#library">&larr; Library</a>
+  <h1 id="title"></h1>
+  <span class="where">canvas</span>
+  <span class="grow"></span>
+  <span class="chip" id="repoChip" hidden></span>
+</header>
+<main class="work">
+  <aside class="panel left">
+    <h2 class="ptitle">Pages</h2>
+    <nav class="pages" id="pages" aria-label="Pages"></nav>
+    <h2 class="ptitle">Layers</h2>
+    <div class="layers" id="layers" role="tree" aria-label="Layers"></div>
+  </aside>
+  <section class="stage" id="stage" aria-label="Canvas">
+    <div id="surface"></div>
+    <div class="stage-top">
+      <select id="pageSel" aria-label="Page"></select>
+      <p id="narrowNote">Watching: editing needs a wider screen.</p>
+    </div>
+    <div class="zoom">
+      <button id="zoomOut" type="button" aria-label="Zoom out">&minus;</button>
+      <span class="pct" id="zoomPct">100%</span>
+      <button id="zoomIn" type="button" aria-label="Zoom in">+</button>
+      <button id="zoomFit" type="button">Fit</button>
+    </div>
+    <p id="msg" role="status" hidden></p>
+  </section>
+  <aside class="panel right">
+    <h2 class="ptitle">Properties</h2>
+    <div class="props" id="props"><p class="note">Select a layer to see what it is.</p></div>
+  </aside>
+</main>
+<script>
+'use strict';
+(() => {
+  const SLUG_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+  const TEXT = {
+    notAddress: "This isn't a canvas address.",
+    notOpen: "This canvas isn't open for editing.",
+    notLoaded: "This canvas couldn't be loaded.",
+    empty: 'This page is empty.',
+    noSelection: 'Select a layer to see what it is.',
+  };
+  const $ = (id) => document.getElementById(id);
+  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+  // What the page holds: the slug, the response's session and rev (kit-662 and kit-668 use them), the
+  // document, and the page shown.
+  const state = { slug: null, session: null, rev: null, doc: null, repo: null, pageId: null };
+
+  const setState = (s) => { document.body.dataset.state = s; };
+  function showMsg(text) {
+    const m = $('msg');
+    m.textContent = text;
+    m.hidden = false;
+  }
+  function hideMsg() {
+    const m = $('msg');
+    m.textContent = '';
+    m.hidden = true;
+  }
+  function fail(text) {
+    showMsg(text);
+    setState('error');
+  }
+
+  // The doc-response frame the page needs to walk the document; the server judges the rest.
+  function frameOk(b) {
+    return isObj(b) && isObj(b.doc) && Array.isArray(b.doc.pages) && b.doc.pages.length > 0
+      && b.doc.pages.every(isObj) && isObj(b.doc.nodes) && isObj(b.repo);
+  }
+
+  // The bar's chip: where every edit goes, and whether that place may be public (null counts as public).
+  function showRepo(repo) {
+    const name = typeof repo.name === 'string' && repo.name ? repo.name : null;
+    const where = name === null ? "this project's repo" : name;
+    const pub = name === null ? null : repo.public;
+    const how = pub === true ? 'public' : pub === false ? 'private' : 'may be public';
+    const chip = $('repoChip');
+    chip.textContent = `Saved to ${where} · ${how}`;
+    chip.title = `Every edit is committed and pushed to ${where}.`;
+    chip.classList.toggle('public', pub !== false);
+    chip.hidden = false;
+  }
+
+  const pages = () => state.doc.pages;
+  const pageById = (id) => pages().find((pg) => pg.id === id) || null;
+  const pageName = (pg) => (typeof pg.name === 'string' ? pg.name : '');
+
+  // The Pages list: one link per page, by name, in order.
+  function renderPages() {
+    const nav = $('pages');
+    const links = pages().map((pg) => {
+      const a = document.createElement('a');
+      const id = typeof pg.id === 'string' ? pg.id : '';
+      a.dataset.page = id;
+      a.href = `#page=${encodeURIComponent(id)}`;
+      a.textContent = pageName(pg);
+      return a;
+    });
+    nav.replaceChildren(...links);
+  }
+
+  // The images drawn on the page, loaded or failed: the page is ready once none is still loading.
+  function imagesSettled() {
+    const imgs = [...$('surface').querySelectorAll('img')].filter((img) => !img.complete);
+    return Promise.all(imgs.map((img) => new Promise((r) => {
+      img.addEventListener('load', r, { once: true });
+      img.addEventListener('error', r, { once: true });
+    })));
+  }
+
+  let shown = 0; // the count of showPage calls: a slower one finishing after a newer one doesn't mark it ready
+  function showPage(id) {
+    const pg = pageById(id) || pages()[0];
+    state.pageId = pg.id;
+    const n = ++shown;
+    for (const a of $('pages').querySelectorAll('a[data-page]')) {
+      if (a.dataset.page === pg.id) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+    }
+    const surface = $('surface');
+    surface.replaceChildren();
+    const kids = Array.isArray(pg.children) ? pg.children : [];
+    if (kids.length === 0) showMsg(TEXT.empty); else hideMsg();
+    setState('loading');
+    imagesSettled().then(() => { if (n === shown) setState('ready'); });
+  }
+
+  async function start() {
+    setState('loading');
+    const m = /^\/view\/canvas\/([^/]*)$/.exec(location.pathname);
+    const slug = m ? m[1] : '';
+    if (!SLUG_RE.test(slug)) return fail(TEXT.notAddress);
+    state.slug = slug;
+    $('title').textContent = slug;
+    document.title = `${slug} · canvas`;
+    let res;
+    try {
+      res = await fetch(`/api/canvas/doc?slug=${encodeURIComponent(slug)}`, { credentials: 'same-origin', cache: 'no-store' });
+    } catch {
+      return fail(TEXT.notLoaded);
+    }
+    if (res.status === 404) return fail(TEXT.notOpen);
+    const withStatus = `${TEXT.notLoaded} (${res.status})`;
+    if (res.status !== 200) return fail(withStatus);
+    let body;
+    try { body = await res.json(); } catch { return fail(withStatus); }
+    if (!frameOk(body)) return fail(withStatus);
+    state.session = own(body, 'session') ? body.session : null;
+    state.rev = own(body, 'rev') ? body.rev : null;
+    state.doc = body.doc;
+    state.repo = body.repo;
+    showRepo(body.repo);
+    renderPages();
+    showPage(pages()[0].id);
+  }
+
+  start().catch(() => fail(TEXT.notLoaded));
+})();
+</script>
+</body>
+</html>
