@@ -4221,7 +4221,8 @@ function peekHide({ now = false } = {}) {
   const cs = getComputedStyle(document.documentElement).getPropertyValue('--dur').trim();
   const dur = /ms$/.test(cs) ? parseFloat(cs) : parseFloat(cs) * 1000 || 0;
   if (now || d.hidden || !(dur > 0)) return hide();
-  const end = (e) => { if (e.target === d && e.propertyName === 'transform') hide(); };
+  // a leftover end or cancel from the slide in (a close during it, or in the frame it ended) is ignored while the slide out runs
+  const end = (e) => { if (e.target === d && e.propertyName === 'transform' && !d.getAnimations().some((a) => a.transitionProperty === 'transform')) hide(); };
   // a slide that never starts (nothing to move) ends at --dur; one that runs ends with its transitionend
   // (or its cancel), however long a loaded machine takes to draw it: once it runs, that timer is off.
   // Whether it runs is known now (getAnimations flushes the style that removing peek-open changed), not
