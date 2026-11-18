@@ -672,7 +672,8 @@ test('a hung file is killed with its tree, and a survivor is refused tmux', asyn
 
 test('an output pipe that closes stops the run and cleans up every running file', async (t) => {
   const { out, env, S } = hangEnv(t);
-  const run = runRunner(['--concurrency', '2', '--file-timeout', '20', fx('hang.mjs'), fx('slow.mjs')], { env, deadline: 45000 });
+  const timings = path.join(S, 'timings.json');
+  const run = runRunner(['--concurrency', '2', '--file-timeout', '20', '--timings', timings, fx('hang.mjs'), fx('slow.mjs')], { env, deadline: 45000 });
   // once the hung file is under way, our end of the runner's stdout goes; its next write hits EPIPE:
   // slow.mjs ending at about 6 s or, if it ended first, hang.mjs's timeout at 20 s
   assert.ok(await waitFor(path.join(out, 'pids.json'), 30000), 'the fixture started');
@@ -680,6 +681,7 @@ test('an output pipe that closes stops the run and cleans up every running file'
   run.child.stdout.destroy();
   const r = await run;
   assert.equal(r.code, 141, r.stderr);
+  assert.equal(fs.existsSync(timings), false, 'an interrupted run writes no timings');
   await allDead(readJson(path.join(out, 'pids.json')), S);
 });
 
@@ -693,6 +695,7 @@ for (const [sig, how, code] of [['SIGINT', 'the runner\'s group', 130], ['SIGTER
     const r = await run;
     assert.equal(r.code, code, r.stdout + r.stderr);
     assert.match(r.stdout, /^interrupted$/m);
+    assert.doesNotMatch(r.stdout, /^summary:/m, 'an interrupted run prints no summary');
     await allDead(readJson(path.join(out, 'pids.json')), S);
   });
 }
@@ -722,7 +725,8 @@ const TIMED_BODY = [
 const timedSource = (name, { chrome, waitMs }) => [...(chrome ? [CHROME_LINE] : []), `const NAME = ${JSON.stringify(name)}, WAIT_MS = ${waitMs};`, ...TIMED_BODY, ''].join('\n');
 const writeTimed = (dir, name, opts) => { const f = path.join(dir, `${name}.mjs`); fs.writeFileSync(f, timedSource(name, opts)); return f; };
 const windowOf = (out, name) => ({ start: readJson(path.join(out, `start-${name}.json`)).at, ...(({ at, saw }) => ({ end: at, saw }))(readJson(path.join(out, `end-${name}.json`))) });
-const overlap = (a, b) => a.start < b.end && b.start < a.end;
+// at or after, as the fixtures count it: two files can start and end in the same millisecond
+const overlap = (a, b) => a.start <= b.end && b.start <= a.end;
 const timedEnv = (t) => {
   const f = fixtureEnv(t);
   const dir = fresh('timed');
@@ -774,7 +778,8 @@ test('off CI, a rest file runs beside a chrome file while the next chrome file w
 test('an interrupt while a chrome file waits for the cap: it never starts', async (t) => {
   const { out, env, dir } = timedEnv(t);
   const files = [writeTimed(dir, 'a', { chrome: true, waitMs: 10000 }), writeTimed(dir, 'b', { chrome: true, waitMs: 1500 })];
-  const run = runRunner(['--concurrency', '2', ...files], { env, deadline: 45000 });
+  const timings = path.join(dir, 'timings.json');
+  const run = runRunner(['--concurrency', '2', '--timings', timings, ...files], { env, deadline: 45000 });
   assert.ok(await waitFor(path.join(out, 'start-a.json'), 20000), 'a started');
   assert.ok(run.alive(), 'the runner is still running');
   process.kill(run.child.pid, 'SIGINT');
@@ -782,6 +787,8 @@ test('an interrupt while a chrome file waits for the cap: it never starts', asyn
   assert.equal(r.code, 130, r.stdout + r.stderr);
   await sleep(1000);
   assert.equal(fs.existsSync(path.join(out, 'start-b.json')), false, 'b never started');
+  assert.doesNotMatch(r.stdout, /^summary:/m, 'an interrupted run prints no summary');
+  assert.equal(fs.existsSync(timings), false, 'and writes no timings');
 });
 
 // ---- the Chrome flags (kit-597) ----
