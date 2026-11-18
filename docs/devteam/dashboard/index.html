@@ -2203,6 +2203,9 @@ function choicesOf(q) {
   if (rec && !list.some((c) => norm(c.label) === norm(rec)) && q.kind !== 'goal-approval') list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
+// A goal approval's recommendation that marks none of the three verdicts ("Refine the measure"): said
+// in words, as an owner-action's suggestion is, never a choice the press couldn't send.
+const goalSuggest = (q, list) => (q.kind === 'goal-approval' && String(q.recommendation ?? '').trim() && !list.some((c) => c.rec) ? `<p class="meta" data-goal-suggest>Suggested: ${esc(q.recommendation)}</p>` : '');
 // An open owner-action without secrets: the card the owner acts from. An answered one (its drawer)
 // keeps the list as asked, so the record shows what the owner saw.
 const isOa = (q) => !!q && q.kind === 'owner-action' && !(q.secrets || []).length && q.status === 'open';
@@ -2414,7 +2417,7 @@ function questionCard(q, o, reasonText, copy = false) {
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${isOa(q) ? oaSuggest(q) + oaRows(q, pre) : ''}
       ${(q.secrets || []).length ? `${secretsForm(q)}
-      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
+      <textarea data-q="${esc(q.id)}" placeholder="Or reply instead: a note for the supervisor (another way to do it, a question). Nothing is posted.">${esc(drafts[q.id] || '')}</textarea>` : `${goalSuggest(q, list)}${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}

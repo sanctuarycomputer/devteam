@@ -4373,3 +4373,53 @@ test("a goal approval's choices are the three verdicts, each one the server take
   }
   assert.equal(ctx.goalDecide({ id: G, verdict: undefined }), null, 'and a label the map lacks is refused, as the owner saw');
 });
+
+// kit-287: a goal's approval from the phone, the way the owner presses it (390 px wide, the Inbox's
+// card): the recommended choice and Send record the approval once; a recommendation that names no
+// verdict is said in words; a refusal says plainly what went wrong, and Send works again.
+test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-goal-phone-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 84), DEVTEAM_PORT_BASE: String(PORTS + 85), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of Object.keys(env)) if (k.startsWith('DEVTEAM_') && !['DEVTEAM_HUB_PORT', 'DEVTEAM_PORT_BASE'].includes(k)) delete env[k];
+  for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'goal-phone');
+  const dt = (args, role = { DEVTEAM_ROLE: 'supervisor' }) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, `${args.join(' ')}: ${r.stderr}`); return r.stdout.trim(); };
+  // a goal defined in full, with a reading and milestones, and its design up for approval
+  const approval = (title, rec, priority) => {
+    const g = dt(['goal', 'add', '--title', title, '--outcome', `${title} holds`, '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)]).split('\n')[0].trim();
+    dt(['goal', 'reading', g, '--run']);
+    dt(['goal', 'set', g, '--milestones', JSON.stringify([{ title: 'Most admins pay alone', target: 80, preconditions: [1, 2], tickets: 2 }])]);
+    const q = dt(['ask', '--kind', 'goal-approval', '--goal', g, '--question', `Approve the ${title} design?`, '--recommendation', rec, '--links', JSON.stringify([{ title: 'The design', path: 'docs/devteam/project/designs/x.md' }])]).split('\n')[0].trim();
+    return { g, q };
+  };
+  const GY = approval('Admins pay alone', 'Yes', 1);
+  const GR = approval('Refunds without support', 'Refine the measure', 2);
+  // what the log holds for a goal's decision and its question's answer, as goal decide writes them
+  const logLines = () => fs.readdirSync(path.join(root, 'docs/devteam/run/log')).filter((f) => f.endsWith('.jsonl')).flatMap((f) => fs.readFileSync(path.join(root, 'docs/devteam/run/log', f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
+  const decided = (g, verdict) => logLines().filter((l) => l.type === 'goal' && l.op === 'set' && l.id === g && l.decision?.verdict === verdict).length;
+  const answers = (q) => logLines().filter((l) => l.type === 'question' && l.op === 'set' && l.id === q && l.answer !== undefined).length;
+  const asked = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
+  const { dash, port } = await dashboardOnFreePort(root, env);
+  later(() => dash.stop());
+  const chrome = await openChrome();
+  later(() => chrome.close());
+  const p = await chrome.newPage();
+  later(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+  const soon = soonIn(p, 30000, () => dash.out());
+  const card = (q) => `document.getElementById('q-${q}')`;
+  const still = async (f) => { await p.ev('window.__still()'); try { await f(); } finally { await p.ev('window.__stir()'); } };
+  await soon(`!!${card(GY.q)} && !!${card(GR.q)} && innerWidth === 390`, 'both approvals, on a phone');
+
+  await t.test('a recommendation that names no verdict is said as words', async () => {
+    const shown = async (q) => JSON.parse(await p.ev(`JSON.stringify((() => { const c = ${card(q)}; return { suggest: c.querySelector('[data-goal-suggest]')?.textContent ?? null, labels: [...c.querySelectorAll('input[data-pick]')].map((i) => i.value), rec: [...c.querySelectorAll('.choice.rec input')].map((i) => i.value) }; })())`));
+    assert.deepEqual(await shown(GR.q), { suggest: 'Suggested: Refine the measure', labels: ['Approve', 'Refine', 'Let go'], rec: [] }, 'the suggestion in words; no choice marked, none added');
+    assert.deepEqual(await shown(GY.q), { suggest: null, labels: ['Approve', 'Refine', 'Let go'], rec: ['Approve'] }, '"Yes" marks Approve, with no line of its own');
+  });
+});
