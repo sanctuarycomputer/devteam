@@ -428,6 +428,10 @@ try {
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
   /* a select is as wide as its longest option, unless its label can shrink too */
   .filters label { max-width: 100%; min-width: 0; } .filters select { min-width: 0; }
+  /* kit-91: the Board's and Progress's filters in the page bar */
+  .pagebar .extra select { min-width: 0; max-width: 220px; font-size: 12px; }
+  .pagebar .extra button[data-f="att"] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
+  .pagebar .extra button[data-f="att"][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
   .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
   @media (max-width: 860px) { .progress-layout { grid-template-columns: minmax(0, 1fr); } }
   .chart { position: relative; }
@@ -1035,11 +1039,7 @@ try {
 
   <section id="progress" class="no-shell" data-page="progress">
     <h2>Progress</h2>
-    <div class="filters">
-      <label>Show <select id="view"></select></label>
-      <label class="small"><input type="checkbox" id="left-only"> Only what's left</label>
-      <span id="forecast"></span>
-    </div>
+    <div class="small muted"><span id="forecast"></span></div>
     <div class="progress-layout">
       <div>
         <div class="card chart" id="burnup-card">
@@ -1059,7 +1059,7 @@ try {
   </section>
 
   <section id="board" class="no-shell" data-page="board">
-    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
+    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span></h2>
     <div id="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
@@ -1610,16 +1610,6 @@ let PAGE_VERSION = null;
 let PUBLIC = null;
 // Whether this box's gateway serves previews (x-devteam-previews, set only by the release that does).
 let PREVIEWS = false;
-let VIEW = 'all';
-try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
-let LEFT_ONLY = false;
-try { LEFT_ONLY = localStorage.getItem('devteam.left') === '1'; } catch {}
-const setView = (view, left) => {
-  VIEW = view;
-  if (left !== undefined) LEFT_ONLY = left;
-  try { localStorage.setItem('devteam.view', VIEW); localStorage.setItem('devteam.left', LEFT_ONLY ? '1' : '0'); } catch {}
-  if (DATA) renderProgress();
-};
 
 // Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
 const empty = (html) => `<p class="empty">${html}</p>`;
@@ -1830,7 +1820,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
-// Each is [value, label, group]; the board and the burn-up both follow the one chosen.
+// Each is [value, label, group]; Progress's Narrow offers them (narrowViews), its goal held by the Goal filter.
 function views(p) {
   const v = [['all', 'Everything', '']];
   for (const g of (DATA.ooda.goals || []).filter((x) => !['abandoned'].includes(x.status))) {
@@ -1845,7 +1835,6 @@ function views(p) {
   for (const [s, st] of Object.entries(p.stories)) v.push([`story:${s}`, `${s} ${String(st.text ?? '').slice(0, 60)}`, 'Stories']);
   return v;
 }
-const viewLabel = (view) => { const v = views(DATA.progress).find(([k]) => k === view); return v ? (v[2] ? `${v[2].replace(/s$/, '')}: ${v[1]}` : v[1]) : view; };
 function goalFeatures(gid) {
   const R = DATA.ooda.roadmap;
   return new Set([...(R.goals.find((x) => x.id === gid)?.features || []), ...Object.values(R.features).filter((f) => (f.goals || []).includes(gid)).map((f) => f.feature)]);
@@ -2047,10 +2036,6 @@ function ticketPills(t) {
   if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`]);
   return ps;
 }
-function board(items, crit) {
-  $('planners').innerHTML = plannerCards(DATA.planners || []);
-  $('board-cols').innerHTML = boardCols(items, crit);
-}
 // The board's columns and cards, for the Board and for a sidepeek's tickets (only: the columns that
 // have cards, so a few tickets don't sit in seven mostly empty columns).
 function boardCols(items, crit, { only = false, inert = false } = {}) {
@@ -2068,18 +2053,124 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
   }).join('');
 }
 
+// ---- the Board's and Progress's header filters (kit-91): in the page bar's .extra, each in the URL ----
+// A page head's state is its filters (dashboard-shell@1's STATE_KEYS): Board goal, feat, repo, att; Progress goal,
+// narrow, show. Each change is a history entry (setFilters assigns the hash), so Back restores the earlier filter.
+const FILTER_PAGES = ['board', 'progress'];
+const NARROW_GROUPS = ['Milestones', 'Features', 'Releases', 'Waves', 'Stories'];
+// the goals a filter can name: every goal not let go, by title
+const filterGoals = () => (DATA?.ooda?.goals || []).filter((g) => g.status !== 'abandoned').sort((a, b) => String(a.title ?? a.id).localeCompare(String(b.title ?? b.id)));
+// Narrow's views: today's views() less Everything and the goals; with a goal, the goal's own milestones and the
+// features, releases, waves and stories of the goal's tickets
+function narrowViews(p, goal) {
+  const own = (vs) => vs.filter(([, , g]) => NARROW_GROUPS.includes(g));
+  if (!goal) return own(views(p));
+  const ts = filterTickets(p, `goal:${goal}`);
+  const sub = { ...p, tickets: ts, features: p.features.filter((f) => ts.some((t) => t.feature === f)), stories: Object.fromEntries(Object.entries(p.stories).filter(([id]) => ts.some((t) => t.serves.includes(id)))) };
+  return own(views(sub)).filter(([k, , g]) => g !== 'Milestones' || k.startsWith(`milestone:${goal}:`));
+}
+// The page head in force: the hash's, or under a link (a peek) the head in its stamp.
+function pageHeadNow() {
+  const h = parseHead(location.hash, SHELL_ROUTES);
+  return h.link === undefined ? h : parseHead(typeof history.state?.page === 'string' ? history.state.page : '#overview', SHELL_ROUTES);
+}
+// A page's filters as the head in force has them (none when another page shows), with a goal naming no goal
+// a filter can pick, a Narrow outside the goal's views and a Show that isn't one dropped: the controls then show
+// All goals, Every view, Active, and nothing is filtered by them.
+function filtersNow(page) {
+  const h = pageHeadNow();
+  const f = {};
+  if (h.page === page) for (const k of STATE_KEYS[page] || []) if (h.state[k]) f[k] = h.state[k];
+  if (f.goal && !filterGoals().some((g) => g.id === f.goal)) delete f.goal;
+  if (page === 'progress') {
+    if (f.narrow && !(DATA && narrowViews(DATA.progress, f.goal).some(([k]) => k === f.narrow))) delete f.narrow;
+    if (f.show && !['complete', 'all'].includes(f.show)) delete f.show;
+  }
+  return f;
+}
+// A filter changed: the new state (a goal changed clears the feature and the narrow, which were the old goal's),
+// remembered (the shell's saveFilters: each page its own keys; a goal changed on Progress also drops the Board's
+// stored feature, so a later Board visit isn't emptied by it), then a new entry with the new head.
+function setFilters(page, patch) {
+  const h = pageHeadNow();
+  const state = { ...filtersNow(page) };
+  for (const k of STATE_KEYS['*']) if (h.page === page && h.state[k] !== undefined) state[k] = h.state[k];
+  const goalChanged = Object.hasOwn(patch, 'goal') && (patch.goal || undefined) !== state.goal;
+  for (const [k, v] of Object.entries(patch)) { if (v) state[k] = String(v); else delete state[k]; }
+  if (goalChanged) { delete state.feat; delete state.narrow; }
+  saveFilters(page, state);
+  if (page === 'progress' && goalChanged) saveFilters('board', { ...(storedFilters() || {}), goal: state.goal, feat: undefined });
+  location.hash = headFor({ page, state });
+}
+// The page's filters drawn into the page bar's .extra; emptied on every other page.
+function drawFilters(page) {
+  const el = document.querySelector('.pagebar .extra');
+  if (!el) return;
+  if (!DATA || !FILTER_PAGES.includes(page)) { el.innerHTML = ''; return; }
+  const f = filtersNow(page);
+  const opt = (v, label, cur) => `<option value="${esc(v)}"${(cur || '') === v ? ' selected' : ''}>${esc(label)}</option>`;
+  const sel = (k, label, inner) => `<select data-f="${k}" aria-label="${label}">${inner}</select>`;
+  const goal = sel('goal', 'Goal', opt('', 'All goals', f.goal) + filterGoals().map((g) => opt(g.id, g.title || g.id, f.goal)).join(''));
+  if (page === 'board') {
+    const p = DATA.progress;
+    const gf = f.goal ? goalFeatures(f.goal) : null;
+    // the features of the goal's tickets and planners (every one with no goal); a feature named outside them (a
+    // hand-made URL) is still offered, so the select shows what filters the cards
+    const feats = [...new Set([...p.tickets.filter((t) => !gf || gf.has(t.feature)), ...(DATA.planners || []).filter((x) => !f.goal || (x.goals || []).includes(f.goal))].map((x) => x.feature).filter(Boolean))];
+    if (f.feat && !feats.includes(f.feat)) feats.push(f.feat);
+    const repos = [...new Set(['home', ...p.tickets.map((t) => t.repo).filter(Boolean)])];
+    if (f.repo && !repos.includes(f.repo)) repos.push(f.repo);
+    el.innerHTML = goal
+      + sel('feat', 'Feature', opt('', 'All features', f.feat) + feats.map((x) => opt(x, featureTitle(x), f.feat)).join(''))
+      + sel('repo', 'Repo', opt('', 'All repos', f.repo) + repos.map((r) => opt(r, r, f.repo)).join(''))
+      + `<button type="button" class="ghost" data-f="att" aria-label="Needs attention" aria-pressed="${f.att ? 'true' : 'false'}"><i class="icon-circle-alert" aria-hidden="true"></i>Needs attention</button>`;
+    return;
+  }
+  const vs = narrowViews(DATA.progress, f.goal);
+  const narrow = opt('', 'Every view', f.narrow) + NARROW_GROUPS.map((g) => { const xs = vs.filter((v) => v[2] === g); return xs.length ? `<optgroup label="${esc(g)}">${xs.map(([k, label]) => opt(k, label, f.narrow)).join('')}</optgroup>` : ''; }).join('');
+  el.innerHTML = goal + sel('narrow', 'Narrow', narrow) + sel('show', 'Show', opt('', 'Active', f.show) + opt('complete', 'Complete', f.show) + opt('all', 'Everything', f.show));
+}
+// The page shown drawn again for its filters (a filter change, Back, Forward): at once, not at the next read,
+// focus kept on the control it was on.
+function drawFilterPage(page) {
+  if (!DATA || !FILTER_PAGES.includes(page)) return void drawFilters(page);
+  const m = focusMark();
+  drawFilters(page);
+  if (page === 'board') renderBoard(); else renderProgress();
+  focusBack(m);
+}
+// Board and Progress on a route (in routeHead, once the entry is stamped): a fresh entry whose head has none of
+// the page's remembered keys gets them written into its hash (the shell's rememberedFilters), and a head that isn't
+// its canonical self (a key of no page, or another page's: #progress?feat=x) is replaced by it; in place, the
+// stamp's page head with it, so a peek opened over it closes back to the filtered head.
+function filterHead(fresh) {
+  let p = parseHead(location.hash, SHELL_ROUTES);
+  if (p.link !== undefined || p.redirected || !FILTER_PAGES.includes(p.page)) return;
+  const r = fresh ? rememberedFilters(p.page, Object.keys(p.state), true) : null;
+  if (r) p = { page: p.page, state: { ...p.state, ...r } };
+  const head = headFor(p);
+  if (location.hash === head) return;
+  history.replaceState(withPage(history.state, head), '', head);
+  HERE = history.state;
+}
+
+// The Board: the tickets (joined with /api/data's ticket rows for held_by) and planners the header's filters keep.
+function renderBoard() {
+  const f = filtersNow('board');
+  const ctx = { goalFeatures: f.goal ? goalFeatures(f.goal) : null };
+  const rows = new Map((DATA.tickets || []).map((t) => [t.id, t]));
+  const items = DATA.progress.tickets.map((t) => ({ ...t, held_by: rows.get(t.id)?.held_by ?? null })).filter((t) => boardKeep(t, f, ctx));
+  $('planners').innerHTML = plannerCards((DATA.planners || []).filter((x) => boardKeep(x, f, ctx)));
+  $('board-cols').innerHTML = boardCols(items, new Set(DATA.critical_path));
+}
+// Progress: the burn-up over the goal's tickets, then the Narrow view's within them; the cards below over every
+// ticket for now (kit-91 T5 scopes them and applies Show).
 function renderProgress() {
   const p = DATA.progress, now = Date.parse(p.now);
-  const opts = views(p);
-  if (!opts.some(([k]) => k === VIEW)) VIEW = 'all';
-  const opt = ([k, label]) => `<option value="${esc(k)}" ${k === VIEW ? 'selected' : ''}>${esc(label)}</option>`;
-  const groups = [...new Set(opts.map((o) => o[2]))];
-  $('view').innerHTML = groups.map((g) => (g ? `<optgroup label="${esc(g)}">${opts.filter((o) => o[2] === g).map(opt).join('')}</optgroup>` : opts.filter((o) => !o[2]).map(opt).join(''))).join('');
-  const items = filterTickets(p, VIEW);
+  const f = filtersNow('progress');
+  let items = f.goal ? filterTickets(p, `goal:${f.goal}`) : p.tickets;
+  if (f.narrow) items = filterTickets({ ...p, tickets: items }, f.narrow);
   burnup(items, now);
-  $('left-only').checked = LEFT_ONLY;
-  board(LEFT_ONLY ? items.filter((t) => !isDone(t)) : items, new Set(DATA.critical_path));
-  $('board-scope').innerHTML = VIEW === 'all' && !LEFT_ONLY ? '' : `showing ${esc(LEFT_ONLY ? "what's left of " : '')}${esc(VIEW === 'all' ? 'everything' : viewLabel(VIEW))} · <a class="linkish" href="#board" data-view="all" data-left="0">show all</a>`;
   widgets(p, now);
   const all = forecast(p.tickets, now);
   $('n-progress').textContent = all.scope ? `${pct(all.done, all.scope)}%` : '';
@@ -5656,6 +5747,7 @@ function showHead(p, opts) {
   showPage(p.page, opts);
   if (p.page === 'loop') { showTab(LOOP_TABS.includes(p.state?.lt) ? p.state.lt : 'observe'); tlPins(); }
   if (p.page === 'goals') { GOALS_TAB = GOALS_TABS.includes(p.state?.gt) ? p.state.gt : 'active'; renderGoals(); }
+  drawFilterPage(p.page);
 }
 // A new entry (a hash assigned, a link followed) is stamped at once: the page under it, its depth, and
 // whether this visit pushed every entry down to that page; HERE becomes the entry on screen.
@@ -5694,6 +5786,7 @@ function routeHead({ fresh = false, carry = null } = {}) {
   stampEntry();
   if (carry) thCarry(carry);
   if (fresh) thRemember();
+  filterHead(fresh);
   const raw = location.hash.slice(1);
   const p = parseHead(location.hash, SHELL_ROUTES);
   // leaving a talk/ entry (a route to any other head) closes the card it opened
@@ -6278,7 +6371,9 @@ function render(d) {
   drawSettings();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
+  renderBoard();
   renderProgress();
+  drawFilters(PAGE_NOW);
 
   const fkey = (f) => `${f.kind} ${f.subject}`;
   $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
@@ -8342,17 +8437,15 @@ function inboxTitle(d) {
   $('inbox-btn-n').textContent = n || '';
 }
 
-document.addEventListener('click', (e) => {
-  const a = e.target.closest('[data-view]');
-  if (!a) return;
-  setView(a.dataset.view, a.dataset.left === undefined ? undefined : a.dataset.left === '1');
-});
-$('left-only').addEventListener('change', (e) => setView(VIEW, e.target.checked));
 $('reload-page').addEventListener('click', () => location.reload());
-$('view').addEventListener('change', (e) => {
-  VIEW = e.target.value;
-  try { localStorage.setItem('devteam.view', VIEW); } catch {}
-  if (DATA) renderProgress();
+// the header filters (kit-91): a select's pick, or the Needs attention toggle, through setFilters
+document.querySelector('.pagebar .extra').addEventListener('change', (e) => {
+  const k = e.target?.dataset?.f;
+  if (k && FILTER_PAGES.includes(PAGE_NOW)) setFilters(PAGE_NOW, { [k]: e.target.value });
+});
+document.querySelector('.pagebar .extra').addEventListener('click', (e) => {
+  const b = e.target.closest?.('button[data-f="att"]');
+  if (b && PAGE_NOW === 'board') setFilters('board', { att: b.getAttribute('aria-pressed') === 'true' ? '' : '1' });
 });
 
 document.addEventListener('click', async (ev) => {

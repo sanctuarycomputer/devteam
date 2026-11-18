@@ -821,20 +821,25 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     });
 
     await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
-      // its control is on Progress (one page at a time)
-      await p.ev(`location.hash = '#progress'`);
-      await soon(`getComputedStyle(document.querySelector('#progress')).display !== 'none'`, 'the Progress page');
-      await p.click('#left-only');
-      const q = 'After the checkbox?';
+      // its control is the Board's Needs attention toggle, in the page bar (one page at a time)
+      const att = '.pagebar .extra [data-f="att"]';
+      await p.ev(`location.hash = '#board'`);
+      await soon(`getComputedStyle(document.querySelector('#board')).display !== 'none' && !!document.querySelector('${att}')`, 'the Board page and its toggle');
+      await p.click(att);
+      await soon(`location.hash.includes('att=1') && document.activeElement?.matches?.('${att}')`, 'the toggle pressed, and focused');
+      const q = 'After the toggle?';
       ask(q);
-      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a checkbox focused');
-      await p.click('#left-only'); // leave the setting as it was
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a toggle focused');
+      await p.click(att); // leave the setting as it was
+      await soon(`!location.hash.includes('att=')`, 'the toggle off again');
       await p.ev(`document.activeElement.blur()`);
     });
 
     await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
-      await p.ev(`window.__o = $('view').options[0]`);
-      await p.click('#view');
+      // the Board's Goal select, in the page bar
+      const goal = '.pagebar .extra select[data-f="goal"]';
+      await p.ev(`window.__o = document.querySelector('${goal}').options[0]`);
+      await p.click(goal);
       await polls();
       assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
       await p.key('Escape');

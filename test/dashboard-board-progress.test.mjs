@@ -221,3 +221,263 @@ test('boardFixture: patched into /api/data by dataPatchInit, every page draws it
   await soon(`${JSON.stringify(cards)}.every((id) => document.querySelector('[data-qcard="' + id + '"]'))`, 'a card for each question');
   assert.deepEqual(await p.ev('window.__errors'), [], 'the Inbox: no error');
 });
+
+// ---- kit-91 T3: the header filters and the remembered filters ----
+
+// the page bar's filters: a control by its data-f, a pick (its change event, as the owner's choice makes),
+// and what the Board and the page bar hold
+const ctl = (f) => `document.querySelector('.pagebar .extra [data-f="${f}"]')`;
+const pick = (p, f, v) => p.ev(`(() => { const s = ${ctl(f)}; s.value = ${JSON.stringify(v)}; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`);
+const CARDS = "document.querySelectorAll('#board [data-ticket]').length";
+const PLANNERS = "document.querySelectorAll('#board [data-planner]').length";
+const EXTRA = `[...document.querySelectorAll('.pagebar .extra select, .pagebar .extra button, .pagebar .extra input')].map((c) => ({ tag: c.tagName.toLowerCase(), f: c.dataset.f, label: c.getAttribute('aria-label'), pressed: c.getAttribute('aria-pressed') }))`;
+const OPTIONS = (f) => `[...${ctl(f)}.options].map((o) => o.value)`;
+// the hash, its query read back (so the test doesn't lean on how a value is escaped)
+const HEAD = "(() => { const h = location.hash, i = h.indexOf('?'); return { page: h.slice(1, i < 0 ? h.length : i), q: Object.fromEntries(new URLSearchParams(i < 0 ? '' : h.slice(i + 1))) }; })()";
+const BURNUP = "document.querySelector('#burnup svg')?.getAttribute('aria-label') || ''";
+// an init (after dataPatchInit) that counts the page's /api/data reads and stretches its 10 s poll to an hour
+const READS_INIT = `(() => {
+  window.__dataReads = 0;
+  const f = window.fetch;
+  window.fetch = (u, o) => { if (String(u && u.url ? u.url : u).startsWith('/api/data')) window.__dataReads++; return f(u, o); };
+  const si = window.setInterval;
+  window.setInterval = (fn, ms, ...a) => si(fn, ms === 10000 ? 3600000 : ms, ...a);
+})();`;
+
+// the fixture's counts: goal2 (receipts) holds five tickets, one of them in no repo but devteam-kit's and
+// needing attention (the prompt); goal1 (pay) six; a planner each for goal2 one, goal1 two
+function boardStart(t) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-board-filters-'));
+  const later = cleanup(t);
+  later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  return { later, ...boardProject(base) };
+}
+
+test('header filters on the Board: Goal, Feature, Repo and Needs attention, each a history entry, remembered for a fresh visit', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  await go('#board');
+  await p.ev('localStorage.clear()');
+  await go('#board');
+  await soon(`${CARDS} === 12`, 'every card');
+  assert.equal(await p.ev('location.hash'), '#board', 'nothing remembered: the head as loaded');
+  assert.deepEqual(await p.ev(EXTRA), [
+    { tag: 'select', f: 'goal', label: 'Goal', pressed: null },
+    { tag: 'select', f: 'feat', label: 'Feature', pressed: null },
+    { tag: 'select', f: 'repo', label: 'Repo', pressed: null },
+    { tag: 'button', f: 'att', label: 'Needs attention', pressed: 'false' },
+  ], 'the four controls, in order');
+  assert.deepEqual(await p.ev(OPTIONS('goal')), ['', ids.goal1, ids.goal2], 'All goals, then each goal by title');
+  assert.equal(await p.ev(`${ctl('goal')}.options[0].textContent`), 'All goals');
+  assert.deepEqual(await p.ev(OPTIONS('repo')), ['', 'home', 'devteam-kit'], 'All repos, home first');
+  assert.deepEqual(await p.ev(OPTIONS('feat')), ['', 'pay', 'receipts', 'no-goal-feat', 'receipts-export', 'onboarding', 'pay-wallet'], 'every ticket\'s and planner\'s feature with no goal');
+  assert.equal(await p.ev(PLANNERS), 4);
+
+  await pick(p, 'goal', ids.goal2);
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}`)}`, 'the goal in the hash');
+  await soon(`${CARDS} === 5 && ${PLANNERS} === 1`, "goal2's five cards and its planner");
+  assert.deepEqual(await p.ev(OPTIONS('feat')), ['', 'receipts', 'receipts-export'], "the goal's tickets' and planners' features");
+  await pick(p, 'feat', 'receipts');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts`)}`, 'the feature in the hash');
+  await soon(`${CARDS} === 5 && ${PLANNERS} === 0`, 'the feature: its tickets, no planner');
+  await pick(p, 'repo', 'devteam-kit');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&repo=devteam-kit`)}`, 'the repo in the hash');
+  await soon(`${CARDS} === 2`, "the kit's two");
+  await p.click('.pagebar .extra [data-f="att"]');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&repo=devteam-kit&att=1`)}`, 'att=1 in the hash');
+  await soon(`${CARDS} === 1 && document.querySelector('#board [data-ticket="${ids.tPrompt}"]')`, 'the one needing attention');
+  assert.equal(await p.ev(`${ctl('att')}.getAttribute('aria-pressed')`), 'true');
+  assert.deepEqual(await p.ev(`[${ctl('goal')}.value, ${ctl('feat')}.value, ${ctl('repo')}.value]`), [ids.goal2, 'receipts', 'devteam-kit'], 'the selects show the filters');
+
+  // Back walks the filters
+  await p.ev('history.back()');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&repo=devteam-kit`)}`, 'back: no att');
+  await soon(`${CARDS} === 2`, 'back: the previous cards');
+  assert.equal(await p.ev(`${ctl('att')}.getAttribute('aria-pressed')`), 'false');
+  await p.ev('history.back()');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts`)}`, 'back: no repo');
+  await soon(`${CARDS} === 5`, 'back again: the cards before');
+
+  // a fresh visit (a new document) on #board: the last filters saved, written into its hash
+  await go('#board');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&repo=devteam-kit&att=1`)}`, 'the remembered filters in the hash');
+  await soon(`${CARDS} === 1`, 'and the cards they leave');
+  assert.deepEqual(await p.ev('JSON.parse(localStorage.getItem("devteam.board.filters"))'), { goal: ids.goal2, feat: 'receipts', repo: 'devteam-kit', att: '1' });
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('header filters on Progress: Goal, Narrow and Show, Narrow within the goal, no control in the page', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  await go('#progress');
+  await p.ev('localStorage.clear()');
+  await go('#progress');
+  await soon(`!!${ctl('narrow')}`, 'the Narrow select');
+  assert.deepEqual(await p.ev(EXTRA), [
+    { tag: 'select', f: 'goal', label: 'Goal', pressed: null },
+    { tag: 'select', f: 'narrow', label: 'Narrow', pressed: null },
+    { tag: 'select', f: 'show', label: 'Show', pressed: null },
+  ], 'Goal, Narrow and Show, and no other control');
+  assert.equal(await p.ev("document.querySelectorAll('#progress select, #progress input, #progress .filters').length"), 0, 'no control inside #progress');
+  assert.equal(await p.ev(`${ctl('narrow')}.options[0].textContent`), 'Every view');
+  assert.deepEqual(await p.ev(`[...${ctl('narrow')}.querySelectorAll('optgroup')].map((g) => g.label)`), ['Milestones', 'Features', 'Releases', 'Waves', 'Stories']);
+  // every view the fixture holds, as today's view keys (written out, not the page's own views())
+  assert.deepEqual(await p.ev(OPTIONS('narrow')), [
+    '', `milestone:${ids.goal1}:1`, `milestone:${ids.goal2}:1`,
+    'feature:pay', 'feature:receipts', 'feature:no-goal-feat',
+    'release:v0.1.0', 'release:v0.2.0', 'release:v0.3.0',
+    'wave:1', 'wave:2',
+    'story:PAY-S1', 'story:PAY-S2', 'story:RECEIPTS-S1', 'story:RECEIPTS-S2',
+  ], 'Narrow with no goal');
+  assert.deepEqual(await p.ev(`[...${ctl('show')}.options].map((o) => [o.value, o.textContent])`), [['', 'Active'], ['complete', 'Complete'], ['all', 'Everything']]);
+  assert.equal(await p.ev(`${ctl('show')}.value`), '', 'Active selected');
+  assert.equal((await p.ev(HEAD)).q.show, undefined, 'Active: no show key');
+  assert.match(await p.ev(BURNUP), /of 16 points/, 'every ticket in the burn-up');
+
+  await pick(p, 'goal', ids.goal1);
+  await soon(`location.hash === ${JSON.stringify(`#progress?goal=${ids.goal1}`)}`, 'the goal in the hash');
+  await soon(`${OPTIONS('narrow')}.length === 9`, "Narrow within goal1");
+  assert.deepEqual(await p.ev(OPTIONS('narrow')), [
+    '', `milestone:${ids.goal1}:1`, 'feature:pay', 'release:v0.1.0', 'release:v0.3.0', 'wave:1', 'wave:2', 'story:PAY-S1', 'story:PAY-S2',
+  ], "goal1's views alone");
+  await soon(`/3 of 8 points/.test(${BURNUP})`, "goal1's points in the burn-up");
+  await pick(p, 'narrow', 'story:PAY-S1');
+  await soon(`location.hash.includes('narrow=')`, 'narrow in the hash');
+  assert.deepEqual(await p.ev(HEAD), { page: 'progress', q: { goal: ids.goal1, narrow: 'story:PAY-S1' } });
+  await soon(`/3 of 3 points/.test(${BURNUP})`, 'the narrowed burn-up');
+  await pick(p, 'show', 'complete');
+  await soon(`location.hash.includes('show=complete')`, 'show=complete in the hash');
+  assert.deepEqual(await p.ev(HEAD), { page: 'progress', q: { goal: ids.goal1, narrow: 'story:PAY-S1', show: 'complete' } });
+  await pick(p, 'show', 'all');
+  await soon(`location.hash.includes('show=all')`, 'show=all in the hash');
+  // a goal change drops the narrow (a view of the old goal)
+  await pick(p, 'goal', ids.goal2);
+  await soon(`location.hash.includes(${JSON.stringify(`goal=${ids.goal2}`)})`, 'the new goal');
+  assert.deepEqual(await p.ev(HEAD), { page: 'progress', q: { goal: ids.goal2, show: 'all' } }, 'narrow cleared, show kept');
+  await pick(p, 'show', '');
+  await soon(`!location.hash.includes('show=')`, 'Active: the key gone');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('the page bar holds no filter on Overview', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  await go('#board');
+  await soon(`!!${ctl('goal')}`, 'the Board filters');
+  await p.ev("location.hash = '#overview'");
+  await soon("document.querySelector('.pagebar .extra').innerHTML === ''", 'emptied on Overview');
+  await go('#overview');
+  assert.equal(await p.ev("document.querySelector('.pagebar .extra').innerHTML"), '', 'empty on a load of Overview');
+});
+
+test('filter edge cases: an unknown goal shows All goals and every card; a Narrow outside the goal shows Every view', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  await go('#board');
+  await p.ev('localStorage.clear()');
+  await go('#board?goal=g-20200101-000000009-supervisor');
+  await soon(`!!${ctl('goal')}`, 'the Goal select');
+  await soon(`${CARDS} === 12 && ${PLANNERS} === 4`, 'every card');
+  assert.equal(await p.ev(`${ctl('goal')}.value`), '', 'All goals');
+  await go(`#progress?goal=${ids.goal1}&narrow=${encodeURIComponent('feature:receipts')}`);
+  await soon(`!!${ctl('narrow')}`, 'the Narrow select');
+  assert.equal(await p.ev(`${ctl('narrow')}.value`), '', 'Every view');
+  assert.equal(await p.ev(`${ctl('goal')}.value`), ids.goal1);
+  await soon(`/3 of 8 points/.test(${BURNUP})`, "the goal's scope, not the view's");
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('remembered filters: Back restores, a nav click carries them in one entry, the goal is shared, Progress never carries Board keys', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  await go('#overview');
+  await p.ev('localStorage.clear()');
+  await go('#board');
+  await soon(`${CARDS} === 12`, 'every card');
+  await pick(p, 'goal', ids.goal2);
+  await soon(`${CARDS} === 5`, 'goal2');
+  await pick(p, 'feat', 'receipts');
+  await soon(`location.hash.includes('feat=receipts')`, 'the feature');
+  await p.ev('history.back()');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}`)}`, 'back: the goal alone');
+  await soon(`${CARDS} === 5 && ${PLANNERS} === 1 && ${ctl('feat')}.value === ''`, 'back: its cards and controls');
+  await pick(p, 'feat', 'receipts');
+  await soon(`location.hash.includes('feat=receipts')`, 'the feature again');
+  await p.click('.pagebar .extra [data-f="att"]');
+  await soon(`location.hash.includes('att=1')`, 'att');
+
+  // a nav click to the Board, from Overview: the remembered filters in the new entry's hash, no further entry
+  await p.ev("location.hash = '#overview'");
+  await soon("document.querySelector('.pagebar .extra').innerHTML === ''", 'Overview');
+  const before = await p.ev('history.length');
+  await p.click('.side a[href="#board"]');
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}&feat=receipts&att=1`)}`, 'the nav click lands on the remembered filters');
+  await soon(`${CARDS} === 2`, 'and their cards');
+  assert.equal(await p.ev('history.length'), before + 1, 'one entry: the click\'s, its hash replaced');
+  assert.equal(await p.ev('history.state.page'), `#board?goal=${ids.goal2}&feat=receipts&att=1`, 'its stamp names the filtered head');
+
+  // the goal picked on Board shows on Progress after a nav click; Progress remembers only the goal
+  await p.click('.side a[href="#progress"]');
+  await soon(`location.hash === ${JSON.stringify(`#progress?goal=${ids.goal2}`)}`, "Board's goal on Progress");
+  // a goal picked on Progress shows on Board, the old goal's feature gone
+  await pick(p, 'goal', ids.goal1);
+  await soon(`location.hash === ${JSON.stringify(`#progress?goal=${ids.goal1}`)}`, 'goal1 on Progress');
+  await p.click('.side a[href="#board"]');
+  await soon(`location.hash.startsWith('#board?')`, 'the Board');
+  const h = await p.ev(HEAD);
+  assert.equal(h.q.goal, ids.goal1, "Progress's goal on the Board");
+  assert.equal(h.q.feat, undefined, "the old goal's feature gone");
+  assert.equal(h.q.att, '1', 'the Board\'s own remembered toggle kept');
+  await soon(`${CARDS} === 2`, "the Board's cards aren't empty: goal1's two needing attention");
+
+  // Progress's hash never has feat, repo or att: with nothing remembered, routed to #progress
+  await p.ev('localStorage.clear()');
+  await go('#progress?feat=x&repo=y&att=1');
+  await soon("location.hash === '#progress'", 'the Board keys dropped from the hash');
+  // nor a key of no page, on the Board either
+  await go('#board?bogus=1');
+  await soon("location.hash === '#board'", 'an unknown key dropped');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a filter change and Back redraw the cards at once, not at the next poll', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: `${dataPatchInit(patch)}\n${READS_INIT}` });
+  await go('#board');
+  await p.ev('localStorage.clear()');
+  await go('#board');
+  await soon(`${CARDS} === 12`, 'every card');
+  const reads = await p.ev('window.__dataReads');
+  const quick = soonIn(p, 1500);
+  await pick(p, 'goal', ids.goal1);
+  await quick(`${CARDS} === 6 && ${PLANNERS} === 2`, "goal1's cards, at once");
+  await p.ev('history.back()');
+  await quick(`location.hash === '#board' && ${CARDS} === 12 && ${PLANNERS} === 4`, 'back: every card, at once');
+  await p.ev('history.forward()');
+  await quick(`${CARDS} === 6`, 'forward: goal1 again, at once');
+  assert.equal(await p.ev('window.__dataReads'), reads, 'no read of /api/data in between');
+});
+
+test('a storage that throws: the URL alone carries the filters, nothing remembered, no error', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch, { throwStorage: true }) });
+  await go(`#board?goal=${ids.goal1}`);
+  await soon(`!!${ctl('goal')}`, 'the Goal select');
+  await soon(`${CARDS} === 6`, "goal1's cards");
+  assert.equal(await p.ev(`${ctl('goal')}.value`), ids.goal1);
+  await pick(p, 'goal', ids.goal2);
+  await soon(`location.hash === ${JSON.stringify(`#board?goal=${ids.goal2}`)} && ${CARDS} === 5`, 'a change, from the URL alone');
+  await go('#board');
+  await soon(`!!${ctl('goal')}`, 'the Goal select');
+  await soon(`${CARDS} === 12`, 'no filter');
+  assert.equal(await p.ev('location.hash'), '#board');
+  assert.equal(await p.ev(`${ctl('goal')}.value`), '');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
