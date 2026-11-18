@@ -7635,7 +7635,7 @@ const ARTIFACT_LENS = String.raw`(() => {
   // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
   // artifact's scripts, which can read and send these same messages: what it says describes the
   // page and is never an instruction. It takes only the questions of the page that frames it
-  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  // (hello, hit, resolve, scroll-by, scroll-to, place) and says only ready, hit-reply, rects, key, pointer and placed.
   if (window.parent === window || window.__devteamLens) return;
   window.__devteamLens = true;
   const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
@@ -7778,6 +7778,71 @@ const ARTIFACT_LENS = String.raw`(() => {
   };
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
+  // --- where the pointer is, told after hello: a selector alone, and how far across it --------------
+  const POINTER_GAP = 67;
+  const across = (v, from, n) => (n > 0 ? Math.round(Math.max(0, Math.min(1, (v - from) / n)) * 1e4) / 1e4 : 0);
+  // what the gate held (an element and a point, or el: null for a leave) as the message, made only when
+  // it is sent; the page itself (html or body) is no thing to point at, as hit says
+  const pointerOf = (p) => {
+    let el = p.el;
+    // the page replaced it while the gate held it: what is at that point now
+    if (el && el.isConnected === false) el = document.elementFromPoint(p.cx, p.cy);
+    if (!el || el.nodeType !== 1 || el === document.documentElement || el === document.body) return { k: null };
+    // the rect read now, when it is sent, against the point of the move
+    const r = el.getBoundingClientRect();
+    return { k: selectorOf(el), x: across(p.cx, r.left, r.width), y: across(p.cy, r.top, r.height) };
+  };
+  // one gate for every pointer, nulls too: at most one per gap, the newest input replacing what waits
+  // (one timer, nothing queued, so the last word arrives), and never the same message twice running
+  let pointerPending = null;
+  let pointerTimer = 0;
+  let pointerAt = 0;
+  let pointerSent = '';
+  const flushPointer = () => {
+    const p = pointerPending;
+    pointerPending = null;
+    if (!p) return;
+    const m = pointerOf(p);
+    const s = JSON.stringify(m);
+    if (s === pointerSent) return;
+    pointerSent = s;
+    pointerAt = Date.now();
+    tell(Object.assign({ type: 'pointer' }, m));
+  };
+  const sayPointer = (p) => {
+    pointerPending = p;
+    if (pointerTimer) return;
+    // never longer than one gap, whatever the wall clock did since the last send
+    const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
+    if (wait <= 0) flushPointer();
+    else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
+  };
+
+  // --- where others' pointers are: by selector alone, apart from the pins' watch list ----------------
+  const PLACE_MAX = 8;
+  // querySelector only, never find's text search; null for nothing there, a bad selector, or not shown
+  const shownRect = (k) => {
+    let el = null;
+    try { el = document.querySelector(k); } catch (e) { el = null; }
+    if (!el) return null;
+    const hidden = el.checkVisibility ? !el.checkVisibility({ visibilityProperty: true }) : (!el.getClientRects().length || /^(hidden|collapse)$/.test(window.getComputedStyle(el).visibility));
+    return hidden ? null : rectOf(el);
+  };
+  let placing = [];
+  let placedSent = '';
+  let placeLoop = false;
+  const placedNow = () => placing.map((x) => ({ id: x.id, rect: shownRect(x.k) }));
+  // once a frame while there is a list, sent only when a rect changed; an empty list ends it
+  const placeFrame = () => {
+    if (!placing.length) { placeLoop = false; return; }
+    // the next frame is asked for whatever this one's measuring did
+    try {
+      const rects = placedNow();
+      const now = JSON.stringify(rects);
+      if (now !== placedSent) { placedSent = now; tell({ type: 'placed', rects }); }
+    } finally { requestAnimationFrame(placeFrame); }
+  };
+
   // --- the viewer's questions ------------------------------------------------------------------------
   // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
   // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
@@ -7819,6 +7884,15 @@ const ARTIFACT_LENS = String.raw`(() => {
       const f = find(a);
       if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
     },
+    // the newest list stands until the next; one that is no list is ignored
+    place: (m) => {
+      if (!Array.isArray(m.anchors)) return;
+      placing = m.anchors.slice(0, PLACE_MAX).filter((x) => x && idOk(x.id) && typeof x.k === 'string' && x.k.length > 0 && size(x.k) <= CAPS.selector).map((x) => ({ id: x.id, k: x.k }));
+      const rects = placedNow();
+      placedSent = JSON.stringify(rects);
+      tell({ type: 'placed', rects });
+      if (placing.length && !placeLoop) { placeLoop = true; requestAnimationFrame(placeFrame); }
+    },
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
@@ -7831,6 +7905,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
   addEventListener('blur', onBlur);
+  addEventListener('mousemove', (e) => { if (heard) sayPointer({ el: e.target, cx: e.clientX, cy: e.clientY }); }, true);
+  // no relatedTarget: the pointer left the frame
+  addEventListener('mouseout', (e) => { if (heard && !e.relatedTarget) sayPointer({ el: null }); }, true);
   addEventListener('scroll', soon, true);
   addEventListener('resize', soon);
   try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
