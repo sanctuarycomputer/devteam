@@ -46,7 +46,7 @@ test('presence C1: the contract states every message, part and limit', () => {
 
 test('presence C2: the lens, hub-visible, peek and present', () => {
   const md = contract();
-  all(md, 'The lens', ['"type": "pointer"', '"type": "place"', '"type": "placed"', '"lens": 1', 'at most 8', 'viewport in CSS pixels']);
+  all(md, 'The lens', ['"type": "pointer"', '"type": "place"', '"type": "placed"', '"lens": 1', 'at most 8', 'viewport in CSS pixels', '`mouseleave` on the iframe as a leave', 'sends `{ "t": "move", "a": null }` itself', '`mouseout` with no `relatedTarget`']);
   all(md, 'hub-visible', [
     'dashboard-shell@3', '{ "devteam": "hub-visible"', 'hidden or shown', 'every load of a frame',
     "Presence's additions to shell@3's sender", "hasn't heard it counts as hidden",

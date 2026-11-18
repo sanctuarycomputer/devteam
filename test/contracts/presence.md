@@ -81,6 +81,7 @@ A top-level page is visible when `document.visibilityState` says so. A dashboard
 Additive to `artifact-notes@1`'s lens messages, which carry `{ lens: 1, type }`, so these do too; pins, `resolve` and its watch list are unchanged:
 
 - the lens says `{ "lens": 1, "type": "pointer", "k": "<selector>", "x", "y" }` (`k` 1 to 200 bytes, `x`, `y` in 0..1 across the element), or `{ "lens": 1, "type": "pointer", "k": null }` when the pointer leaves, at most 15 a second;
+- **A leave the frame never sees.** The artifact frame may run out of process, so a real mouse leaving it can give the lens no event at all. The viewer treats its own `mouseleave` on the iframe as a leave and sends `{ "t": "move", "a": null }` itself; the lens sends `"k": null` on a `mouseout` with no `relatedTarget`, where the browser delivers one. Either alone ends the cursor on the others' screens;
 - the viewer asks `{ "lens": 1, "type": "place", "anchors": [ { "id", "k" } ] }`, at most 8 (the lens takes the first 8 of a longer list), `id` the conn, `k` a selector of 1 to 200 bytes; the newest `place` stands until the next, and an empty list stops it;
 - the lens answers `{ "lens": 1, "type": "placed", "rects": [ { "id", "rect": { "x", "y", "w", "h" } | null } ] }`, in the frame's viewport in CSS pixels, rounded to whole numbers, as `rects` already is: once at once after each `place`, then at most once per animation frame and only when a rect changed; `rect` null when the selector finds nothing or the element isn't shown. It never runs the text-search fallback.
 
