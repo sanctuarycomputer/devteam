@@ -97,9 +97,10 @@ const RECORD = `(() => {
     // and, just after peekHide's own end listener (added in a microtask queued here, inside peekHide before
     // it adds end; the microtask runs once the closing handler or evaluate returns, before any frame), whether
     // the slide out's own transitionend hid the drawer: never the safety net a second later. A stale end from
-    // the slide in (a transform transition still running) is skipped. And __cut: a transition event that hid
-    // the drawer while a transform transition still ran on it (read in the capture phase, before the page's
-    // listeners), i.e. a slide out cut short. Listeners left by a close that was reopened go at the next close or RECORD.
+    // the slide in (a transform transition still running) is skipped. And, for an end or cancel that came while
+    // the drawer was shown and a transform transition still ran on it (read in the capture phase, before the
+    // page's listeners): __hit, a leftover event from the slide in reached the page during its slide out; __cut,
+    // that event hid the drawer, a slide out cut short. Listeners left by a close that was reopened go at the next close or RECORD.
     const slides = () => d.getAnimations().some((a) => a.transitionProperty === 'transform');
     for (const ty of ['transitionend', 'transitioncancel']) addEventListener(ty, (e) => { if (e.target === d && e.propertyName === 'transform') window.__pre = { shown: !d.hidden, sliding: slides() }; }, true);
     cl.remove = (...c) => { const was = c.includes('peek-open') && cl.contains('peek-open'); const r = remove(...c);
@@ -107,10 +108,12 @@ const RECORD = `(() => {
         window.__out = { hidden: d.hidden, scrim: document.getElementById('scrim').hidden, sliding: slides() };
         if (window.__endL) d.removeEventListener('transitionend', window.__endL);
         if (window.__cutL) for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL);
+        window.__hit = false;
+        window.__cut = null;
         queueMicrotask(() => {
           const l = window.__endL = (e) => { if (e.target !== d || e.propertyName !== 'transform' || slides()) return; window.__endHidden = d.hidden; d.removeEventListener('transitionend', l); if (window.__endL === l) window.__endL = null; };
           d.addEventListener('transitionend', l);
-          const cut = window.__cutL = (e) => { if (e.target === d && e.propertyName === 'transform' && d.hidden && window.__pre?.shown && window.__pre.sliding) window.__cut = e.type; };
+          const cut = window.__cutL = (e) => { if (e.target !== d || e.propertyName !== 'transform' || !window.__pre?.shown || !window.__pre.sliding) return; window.__hit = true; if (d.hidden) window.__cut = e.type; };
           for (const ty of ['transitionend', 'transitioncancel']) d.addEventListener(ty, cut);
         });
       }
@@ -119,6 +122,7 @@ const RECORD = `(() => {
   if (window.__endL) { d.removeEventListener('transitionend', window.__endL); window.__endL = null; }
   if (window.__cutL) { for (const ty of ['transitionend', 'transitioncancel']) d.removeEventListener(ty, window.__cutL); window.__cutL = null; }
   window.__cut = null;
+  window.__hit = false;
   window.__tr.length = 0;
   window.__closed = null;
   window.__out = null;
@@ -353,13 +357,9 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   // A close during the slide in, or in the frame it ends, still slides out (kit-289): the slide in's own
   // transitioncancel (or a late transitionend), sent with the next frame, must not hide the drawer at once.
   // Each close clears __tr in its own task, so the first transitionrun read after it is the slide out's.
-  // full: a slide out of the whole --dur, which must still be shown when its transitionrun arrives. A close
-  // mid slide in reverses it in a shorter slide, which one slow frame on a loaded runner can outlast (it is
-  // over before Chrome sends its events, and hiding then is right): there, that nothing hid the drawer while
-  // its slide out still ran (__cut) is the check.
-  const slidesOut = async (what, { full = true } = {}) => {
+  const slidesOut = async (what) => {
     await soon("window.__tr.some((x) => x.type === 'transitionrun')", `${what}: the slide out runs`);
-    if (full) assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${what}: shown when the slide out's transitionrun arrives`);
+    assert.equal(await p.ev("window.__tr.find((x) => x.type === 'transitionrun').hidden"), false, `${what}: shown when the slide out's transitionrun arrives`);
     await soon(isClosed, `${what}: closed`);
     assert.equal(await p.ev('window.__cut'), null, `${what}: not hidden while its slide out ran`);
     await soon("window.__tr.some((x) => x.type === 'transitionend')", `${what}: the slide out ended`);
@@ -401,12 +401,18 @@ test('the frame', { skip: SKIP, timeout: 600000 }, async (t) => {
   });
 
   await t.test('slide out survives: a close mid slide in', async () => {
-    // mid slide: drawn (its transitionrun sent) and 40-200 ms into its 280; a poll that misses that window
-    // (a slow frame on a loaded runner) tries again
-    let closed = false;
-    for (let i = 0; i < 5 && !closed; i++) closed = await closeWhen("(a) => !!a && window.__tr.some((x) => x.type === 'transitionrun') && a.currentTime >= 40 && a.currentTime <= 200");
-    assert.ok(closed, 'closed mid slide in');
-    await slidesOut('mid slide in', { full: false });
+    // mid slide: drawn (its transitionrun sent) and 40-200 ms into its 280. A try counts once the slide in's
+    // cancel reached the page while the slide out ran (__hit). It is tried again when the poll missed the
+    // window, or when one slow frame on a loaded runner outlasted the shorter reversed slide out (over before
+    // Chrome sent its events, so nothing is left to cut short, and hiding then is right)
+    let hit = false;
+    for (let i = 0; i < 8 && !hit; i++) {
+      if (!(await closeWhen("(a) => !!a && window.__tr.some((x) => x.type === 'transitionrun') && a.currentTime >= 40 && a.currentTime <= 200"))) continue;
+      await soon(isClosed, 'closed');
+      hit = await p.ev('window.__hit');
+    }
+    assert.ok(hit, 'closed mid slide in, and its leftover cancel came while the slide out ran');
+    await slidesOut('mid slide in');
   });
 
   await t.test('slide out survives: a close in the frame the slide in ends', async () => {
