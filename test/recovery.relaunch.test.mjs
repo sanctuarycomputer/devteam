@@ -343,7 +343,7 @@ test('with a worktree_setup, a later relaunch in a tick starts only with the ful
     F.worker('demo-93-marked');
     matchingMarker(F, 'demo-93-marked', 'sleep 12');
     F.tick(UNDER(F));
-    assert.deepEqual(F.state().relaunched, ['demo-93-marked', 'demo-90-a'], 'the one whose marker matches goes first, so no setup can hold it back; then the first with a setup, which took 12 s of the 110: under 100 s left for another');
+    assert.deepEqual(F.state().relaunched, ['demo-90-a', 'demo-93-marked'], 'the first took 12 s of the 110: under 100 s left for another with a setup to run, but enough for one whose marker matches');
     const record = json(fs.readFileSync(F.restartsFile, 'utf8'));
     assert.ok(!record['plan-p91'] && !record['demo-92-c'], 'the others are not claimed');
     F.tick(UNDER(F));

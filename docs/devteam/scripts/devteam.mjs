@@ -12746,9 +12746,10 @@ function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   // in use again: the tick's tidy leaves a worktree alone until it has been quiet a while
   else { const now = new Date(); try { fs.utimesSync(wt, now, now); } catch {} }
   // one there already whose setup never passed (cut short at the deadline, held for a slot, failed:
-  // the marker is cleared before a setup and written only after one passes) is seeded now
+  // the marker is cleared before a setup and written only after one passes) is seeded now; never a
+  // secret post's (secret-…), whose posting never waits for a setup
   const home = repo('home');
-  if (existed && setup && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
+  if (existed && setup && !/^secret-/.test(slugName) && home.settings.worktree_setup && setupMarker.needed(wt, home.settings, home.root)) seedWorktree(wt, { setup, session: true });
   return wt;
 }
 function openPr(wt, branch, title, bodyText) {
@@ -17118,16 +17119,14 @@ function cmdAccountsTick() {
   // cut short into a spent attempt; it waits for the next tick instead.
   state.memory_held = 0;
   if (!state.active_no_room) {
-    // those whose resume runs no setup first (order kept within each), so one waiting for a setup
-    // slot, which can take the whole tick, never holds back one that would be back in seconds
-    const gone = sessionsToRelaunch(launchOf, held).map((g) => ({ ...g, setup: hasWorktreeSetup(g.name, g.launch) })).sort((a, b) => a.setup - b.setup);
+    const gone = sessionsToRelaunch(launchOf, held);
     const settings = gone.length ? loadSettings() : null;
     let said = null;
-    for (const { name, launch, setup } of gone) {
+    for (const { name, launch } of gone) {
       const full = memoryFull(settings);
       const could = full ? budget(3) : 0;
       if (full) said = full;
-      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && setup ? RESTART_CHILD_MS : RESTART_MIN_MS));
+      const did = relaunchGone(name, launch, full ? 0 : budget(3, tries && tries < 3 && hasWorktreeSetup(name, launch) ? RESTART_CHILD_MS : RESTART_MIN_MS));
       if (did === 'gave-up') state.restart_gave_up.push(name);
       else if (did === 'slot-held') state.slot_held += 1;
       else if (did) tries += 1;
