@@ -339,8 +339,11 @@ test('with a worktree_setup, a later relaunch in a tick starts only with the ful
     execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
     // a planner's resume runs home's worktree_setup too
     F.worker('demo-90-a'); F.planner('p91'); F.worker('demo-92-c');
+    // 5f: a real checkout of its own whose setup marker matches: its resume skips the setup, so it is not held back
+    F.worker('demo-93-marked');
+    matchingMarker(F, 'demo-93-marked', 'sleep 12');
     F.tick(UNDER(F));
-    assert.deepEqual(F.state().relaunched, ['demo-90-a'], 'the first took 12 s of the 110: under 100 s left for another');
+    assert.deepEqual(F.state().relaunched, ['demo-90-a', 'demo-93-marked'], 'the first took 12 s of the 110: under 100 s left for another with a setup to run, but enough for one whose marker matches');
     const record = json(fs.readFileSync(F.restartsFile, 'utf8'));
     assert.ok(!record['plan-p91'] && !record['demo-92-c'], 'the others are not claimed');
     F.tick(UNDER(F));
@@ -378,6 +381,20 @@ async function holdSlot(n) {
   // killed and reaped: a zombie still reads as alive
   return async () => { if (c.exitCode === null && c.signalCode === null) { c.kill('SIGKILL'); await exited; } };
 }
+// Session id's worktree made a real checkout of its own (ticket/<id>), with a setup marker that
+// matches setup and its lockfiles, as setupMarker.state writes it: { v: 1, setup, files }, sha256s
+// of the lockfiles at the root and one folder down.
+function matchingMarker(F, id, setup) {
+  const wt = path.join(F.root, '.worktrees', id);
+  execFileSync('git', ['worktree', 'add', '--quiet', '-b', `ticket/${id}`, wt], { cwd: F.root });
+  const LOCKS = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Gemfile.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'go.sum', 'composer.lock'];
+  const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+  const files = {};
+  const dirs = ['', ...fs.readdirSync(wt, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name)];
+  for (const d of dirs) for (const l of LOCKS) { const f = path.join(wt, d, l); if (fs.existsSync(f) && fs.lstatSync(f).isFile()) files[d ? `${d}/${l}` : l] = sha(fs.readFileSync(f)); }
+  const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt, encoding: 'utf8' }).trim();
+  write(path.join(gitDir, 'devteam-setup'), `${JSON.stringify({ v: 1, setup: sha(setup), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) })}\n`);
+}
 const observations = (F) => json(F.run(['log', '--type', 'observation', '--json']).stdout);
 const restarts = (F) => (fs.existsSync(F.restartsFile) ? json(fs.readFileSync(F.restartsFile, 'utf8')) : {});
 
@@ -410,8 +427,11 @@ test('5a\': a relaunch that starts the tmux server leaves no deadline in it; a d
     F.worker('demo-102-boot');
     assert.match(F.tick(env()), /relaunched demo-102-boot/);
     await until(() => F.relaunched().length === 1, 'resumed');
-    const shown = spawnSync('tmux', ['show-environment', '-g', 'DEVTEAM_SETUP_DEADLINE'], { encoding: 'utf8', env: { ...process.env, TMUX_TMPDIR: dir } });
-    assert.ok(shown.status !== 0 || /^-DEVTEAM_SETUP_DEADLINE$/m.test(shown.stdout) || shown.stdout.trim() === '', `the server's environment has no deadline: ${shown.stdout}`);
+    const own = { encoding: 'utf8', env: { ...process.env, TMUX_TMPDIR: dir } };
+    assert.equal(spawnSync('tmux', ['has-session', '-t', `=${F.session}`], own).status, 0, 'the server the relaunch started is up');
+    const shown = spawnSync('tmux', ['show-environment', '-g', 'DEVTEAM_SETUP_DEADLINE'], own);
+    if (shown.status === 0) assert.doesNotMatch(shown.stdout, /^DEVTEAM_SETUP_DEADLINE=/m, 'the server\'s environment has no deadline');
+    else assert.match(shown.stderr, /unknown variable/, `the server answered, without the variable: ${shown.stderr}`);
     assert.deepEqual(fs.readFileSync(envLog, 'utf8').trim().split('\n'), ['none'], 'the window has no deadline');
     // a tick whose own deadline is already past: ignored, so the setup runs and the session comes back
     F.worker('demo-103-past');
@@ -490,39 +510,26 @@ test('5c: a pane stopped at a limit whose resume finds no setup slot is left run
 test('5d: a setup killed at the deadline is a failed attempt, and leaves no process behind', { skip: !hasTmux }, async () => {
   const F = fixture('slotdeadline');
   clearSlots();
-  const left = () => (spawnSync('pgrep', ['-f', 'sleep 71'], { encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean);
+  // this fixture's: on Linux, only one whose working directory is the setup's worktree, so another
+  // run of this file on the machine (a reviewer's, CI's) is never taken for this one's leak
+  const wt = () => fs.realpathSync(path.join(F.root, '.worktrees', 'demo-106-late'));
+  const ours = (pid) => { try { return fs.readlinkSync(`/proc/${pid}/cwd`) === wt(); } catch { return !fs.existsSync('/proc/self/cwd'); } };
+  const left = () => (spawnSync('pgrep', ['-f', 'sleep 71'], { encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean).filter(ours);
   try {
-    withSetup(F, 'sleep 71 & sleep 71');
+    // it says when it has started, so the check below is of a setup that ran, not one cut off before it began
+    const started = path.join(F.base, 'started');
+    withSetup(F, `echo started > ${started}; sleep 71 & sleep 71`);
     F.worker('demo-106-late');
-    const out = F.tick({ ...UNDER(F), ...deadlineIn(2000) });
+    const out = F.tick({ ...UNDER(F), ...deadlineIn(5000) });
+    assert.ok(fs.existsSync(started), 'the setup ran before its deadline');
     assert.match(out, /could not relaunch demo-106-late/);
     assert.doesNotMatch(out, /setup slot/);
     assert.equal(F.state().slot_held, 0);
     assert.equal(restarts(F)['demo-106-late']?.length, 1, 'one attempt counted');
     assert.ok(observations(F).some((o) => o.kind === 'session-relaunched' && /could not/.test(o.detail)));
-    await until(() => left().length === 0, 'no sleep 71 left');
-  } finally { clearSlots(); F.done(); }
-});
-
-test('5f: a later relaunch whose worktree\'s setup marker matches comes back in the same tick', { skip: !hasTmux }, async () => {
-  const F = fixture('slotmarker');
-  clearSlots();
-  try {
-    withSetup(F, 'sleep 12');
-    F.worker('demo-107-plain');
-    F.worker('demo-108-marked');
-    // a real checkout of its own, whose setup marker matches 'sleep 12' and its (no) lockfiles
-    const wt = path.join(F.root, '.worktrees', 'demo-108-marked');
-    execFileSync('git', ['worktree', 'add', '--quiet', '-b', 'ticket/demo-108-marked', wt], { cwd: F.root });
-    const LOCKS = ['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'Gemfile.lock', 'uv.lock', 'poetry.lock', 'Pipfile.lock', 'Cargo.lock', 'go.sum', 'composer.lock'];
-    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
-    const files = {};
-    const dirs = ['', ...fs.readdirSync(wt, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name)];
-    for (const d of dirs) for (const l of LOCKS) { const f = path.join(wt, d, l); if (fs.existsSync(f) && fs.lstatSync(f).isFile()) files[d ? `${d}/${l}` : l] = sha(fs.readFileSync(f)); }
-    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], { cwd: wt, encoding: 'utf8' }).trim();
-    write(path.join(gitDir, 'devteam-setup'), `${JSON.stringify({ v: 1, setup: sha('sleep 12'), files: Object.fromEntries(Object.entries(files).sort(([a], [b]) => a.localeCompare(b))) })}\n`);
-    F.tick(UNDER(F));
-    assert.deepEqual(F.state().relaunched, ['demo-107-plain', 'demo-108-marked'], 'both in one tick');
-    await until(() => F.relaunched().length === 2, 'both resumed');
+    // a few seconds' grace, not until's 120 s: a setup that outlived the deadline must fail this
+    const end = Date.now() + 5000;
+    while (left().length && Date.now() < end) sleepMs(100);
+    assert.deepEqual(left(), [], 'no sleep 71 left');
   } finally { clearSlots(); F.done(); }
 });
