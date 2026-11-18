@@ -708,8 +708,6 @@ test('terminal A4: a supervisor key post types with -H and answers the screen af
   s.kill();
 });
 
-test.todo('terminal A4: on the Shell (opened by shell/open), echo hi shows a line exactly hi (Task 5)');
-
 test('terminal A5: every guard on a key post refuses, in terminal@1 §3 order, and nothing is typed', async () => {
   const T = termFixture('term-a5k');
   after(() => T.done());
@@ -918,8 +916,6 @@ test('terminal A5c: a key post of the wrong shape is 400, a paste over its cap 4
   s.kill();
 });
 
-test.todo("terminal A5c: a shell post naming the marked supervisor pane, the Shell's own pane made the marked one, is 423 (Task 5)");
-
 test('terminal A6: supervisor keys to no, a foreign, a killed or an exited pane get 409, a stale pane 423; each post reads fresh', async () => {
   const T = termFixture('term-a6-keys');
   after(() => T.done());
@@ -985,7 +981,121 @@ test('terminal A6: supervisor keys to no, a foreign, a killed or an exited pane 
   s.kill();
 });
 
-test.todo('terminal A6: shell keys to a stale pane id get 423; shell/open makes one clean window per project (Task 5)');
+// ---- the Shell (terminal@1 §9, §10) ----
+// a window of its own in `target` running a sleeper: its pane id
+const sleeper = (T, target, name, cwd) => { const m = spawnSync('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', target, '-n', name, '-c', cwd, process.execPath, '-e', 'setInterval(() => {}, 1000)'], { env: T.env, encoding: 'utf8' }); assert.equal(m.status, 0, m.stderr); return m.stdout.trim(); };
+const tagPane = (T, pane, value) => assert.equal(spawnSync('tmux', ['set-option', '-p', '-t', pane, '@devteam-shell', value], { env: T.env }).status, 0, `tag ${pane}`);
+// what an agent's session carries, named here, never read from the script (S2-3)
+const AGENT_ENV = ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD', 'DEVTEAM_CHANNEL', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_PID'];
+const openShellAt = (T, port, token, cols, rows) => T.post(port, '/api/term/shell/open', { ...openBody(token), cols, rows }, SAME);
+// the session's panes in windows named shell: id, start path, tag, window size
+const shellPanes = (T, session = T.session) => tmuxOut(T, ['list-panes', '-s', '-t', `=${session}`, '-F', '#{window_name}\t#{pane_id}\t#{pane_start_path}\t#{@devteam-shell}\t#{window_width}x#{window_height}']).split('\n').filter((l) => l.startsWith('shell\t')).map((l) => l.split('\t').slice(1));
+
+test('terminal A6: the Shell is the lowest-id pane tagged with this root in this session, never the marked one; shell/open makes one clean window per project, sized; terminal A4: echo hi on the Shell; terminal A5c: the Shell made the marked pane is 423', async () => {
+  const T = termFixture('term-shell');
+  after(() => T.done());
+  // the marked supervisor pane, tagged with this root, and the lowest id: never the Shell
+  const s = T.standIn({ lines: ['shell stand-in'] });
+  tagPane(T, s.pane, T.root);
+  // tagged with another root; and, in another session on this server, tagged with this root
+  const otherRoot = sleeper(T, `=${T.session}:`, 'decoy', T.root);
+  tagPane(T, otherRoot, path.join(T.F.base, 'elsewhere'));
+  assert.equal(spawnSync('tmux', ['new-session', '-d', '-s', 'another-project', '-c', T.F.base], { env: T.env }).status, 0, 'another session');
+  const elsewhere = sleeper(T, '=another-project:', 'shell', T.root);
+  tagPane(T, elsewhere, T.root);
+  // two tagged panes across a digit boundary, %9 and %10: by number %9 is lower, by string %10
+  const ids = [];
+  while (ids.length < 2) { const p = sleeper(T, `=${T.session}:`, 'tagged', T.root); if (Number(p.slice(1)) >= 9) ids.push(p); else spawnSync('tmux', ['kill-pane', '-t', p], { env: T.env }); }
+  assert.deepEqual(ids, ['%9', '%10'], 'the ids cross a digit boundary');
+  tagPane(T, '%10', T.root);
+  tagPane(T, '%9', T.root);
+  const { port } = await T.dashboard();
+  const tok = await tokenOf(T, port);
+  const shellScreen = () => screenOf(T, port, 'shell');
+  let g = await shellScreen();
+  assert.equal(g.status, 200, g.text);
+  assert.equal(g.json.state, 'live', g.text);
+  assert.equal(g.json.pane, '%9', 'the numerically lowest tagged pane');
+  // the remembered pane retagged: dropped, and looked up again
+  tagPane(T, '%9', path.join(T.F.base, 'elsewhere'));
+  await pause(150);
+  g = await shellScreen();
+  assert.equal(g.json.pane, '%10', g.text);
+  // the remembered pane gone: none of this root in this session but the marked one
+  spawnSync('tmux', ['kill-pane', '-t', '%10'], { env: T.env });
+  await pause(150);
+  g = await shellScreen();
+  assert.equal(g.status, 200, g.text);
+  isGone(g.json, 'shell');
+  // an agent's environment in the server's global one: the Shell gets none of it
+  for (const k of AGENT_ENV) assert.equal(spawnSync('tmux', ['set-environment', '-g', k, 'x'], { env: T.env }).status, 0, k);
+  const global = tmuxOut(T, ['show-environment', '-g']).split('\n');
+  for (const k of AGENT_ENV) assert.ok(global.includes(`${k}=x`), `the server's global environment has ${k}`);
+  assert.equal(shellPanes(T).length, 0, 'no Shell yet');
+  const o = await openShellAt(T, port, tok, 100, 30);
+  assert.equal(o.status, 200, o.text);
+  assert.equal(o.headers['cache-control'], 'no-store');
+  assert.equal(o.json.which, 'shell');
+  assert.equal(o.json.state, 'live');
+  const pane = o.json.pane;
+  assert.match(pane, /^%\d+$/);
+  assert.ok(![s.pane, otherRoot, elsewhere, ...ids].includes(pane), `a new pane: ${pane}`);
+  assert.deepEqual([o.json.cols, o.json.rows], [100, 30], 'the answer is the sized screen');
+  assert.equal(shellWindows(T), 1, 'one shell window');
+  assert.deepEqual(shellPanes(T), [[pane, T.root, T.root, '100x30']], 'at the root, tagged with it, sized');
+  // A4 on the Shell: typed with -H, and a line exactly hi within 5 s
+  const sent = T.callSpans('send-keys').length;
+  const k = await keysTo(T, port, 'shell', keysBody(tok, pane, 1, { data: '6563686f2068690d' }, 'shell'));
+  assert.equal(k.status, 200, k.text);
+  assert.equal(k.json.taken, true);
+  assert.equal(T.callSpans('send-keys').length, sent + 1);
+  let last;
+  for (const stop = Date.now() + 5000; Date.now() < stop; await pause(100)) { last = await shellScreen(); if (last.json?.lines?.includes('hi')) break; }
+  assert.ok(last.json?.lines?.includes('hi'), `a line exactly hi: ${last.text}`);
+  if (process.platform === 'linux') {
+    const pid = tmuxOut(T, ['display', '-p', '-t', pane, '#{pane_pid}']).trim();
+    const environ = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+    const names = environ.map((l) => l.split('=')[0]);
+    for (const k of AGENT_ENV) assert.ok(!names.includes(k), `the Shell has no ${k}`);
+    assert.ok(environ.includes(`TMUX_PANE=${pane}`), 'the Shell has its own TMUX_PANE');
+  }
+  // a second open, another size: the same window, resized
+  const o2 = await openShellAt(T, port, tok, 90, 20);
+  assert.equal(o2.status, 200, o2.text);
+  assert.equal(o2.json.pane, pane);
+  assert.deepEqual([o2.json.cols, o2.json.rows], [90, 20]);
+  assert.equal(shellWindows(T), 1, 'still one shell window');
+  assert.deepEqual(shellPanes(T), [[pane, T.root, T.root, '90x20']]);
+  // a stale pane id: 423, nothing typed
+  const before = sends(T);
+  for (const stale of ['%9999', '%10']) refusedWith(await keysTo(T, port, 'shell', keysBody(tok, stale, 2, { data: hex('echo stale\r') }, 'shell')), 423, W.moved, `a stale pane ${stale}`);
+  // A5c: the Shell's own pane made the marked one: 423, nothing typed
+  markPane(T, pane);
+  refusedWith(await keysTo(T, port, 'shell', keysBody(tok, pane, 2, { data: hex('echo marked\r') }, 'shell')), 423, W.moved, 'the Shell made the marked pane');
+  markPane(T, s.pane);
+  await pause(300);
+  assert.equal(sends(T), before, 'nothing sent');
+  assert.doesNotMatch(tmuxOut(T, ['capture-pane', '-p', '-t', pane]), /stale|marked/, 'the Shell got nothing');
+  // unmarked again it is the Shell once more, and the other session's tagged pane never was
+  const back = await openShellAt(T, port, tok, 90, 20);
+  assert.equal(back.json.pane, pane, back.text);
+  assert.equal(shellWindows(T), 1);
+  // a second project's dashboard on the same tmux server opens its own Shell
+  const F2 = fleetFixture('term-shell-2');
+  let d2 = null;
+  after(async () => { if (d2) await d2.dash.stop(); F2.done(); });
+  const root2 = F2.old;
+  const session2 = sessionOf(root2, 'term-shell-2');
+  assert.equal(spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', session2, '-n', 'main', '-c', root2], { env: T.env }).status, 0, 'the second session');
+  d2 = await dashboardOnFreePort(root2, { ...F2.env({}), TMUX_TMPDIR: T.env.TMUX_TMPDIR });
+  const o3 = await openShellAt(T, d2.port, await tokenOf(T, d2.port), 80, 24);
+  assert.equal(o3.status, 200, o3.text);
+  assert.notEqual(o3.json.pane, pane, 'its own pane');
+  assert.deepEqual(shellPanes(T, session2), [[o3.json.pane, root2, root2, '80x24']], 'in its own session, tagged with its own root');
+  assert.deepEqual(shellPanes(T), [[pane, T.root, T.root, '90x20']], 'this project\'s untouched');
+  assert.equal((await openShellAt(T, port, tok, 90, 20)).json.pane, pane, 'and still its own');
+  s.kill();
+});
 
 test('terminal A7c: posts one at a time in arrival order, each seq taken once; a paste whole and bracketed; a failed send keeps its seq', async () => {
   const T = termFixture('term-a7c');
@@ -1053,5 +1163,43 @@ test('terminal A7c: posts one at a time in arrival order, each seq taken once; a
   const next = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 14, { data: hex('z') }));
   assert.equal(next.json.taken, true, next.text);
   assert.ok(String(await s.received()).endsWith('z'));
+  // T4-4: a 4096-byte data post is taken whole
+  let had = String(await s.received()).length;
+  const full = await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 15, { data: '62'.repeat(4096) }));
+  assert.equal(full.status, 200, full.text);
+  assert.equal(full.json.taken, true);
+  assert.equal(String(await s.received(had + 4096)).slice(had), 'b'.repeat(4096));
+  // T4-4: the same seq posted twice at once types once
+  had = String(await s.received()).length;
+  const twice = await Promise.all([0, 1].map(() => keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 16, { data: hex('Y') }))));
+  for (const r of twice) assert.equal(r.status, 200, r.text);
+  assert.deepEqual(twice.map((r) => r.json.taken).sort(), [false, true]);
+  assert.equal(String(await s.received(had + 1)).slice(had), 'Y');
+  // T4-1: every read after a taken send failing: the answer is the pre-send screen, taken
+  await pause(150);
+  write(delay, JSON.stringify({ 'send-keys': 1000 }));
+  T.clearCalls();
+  const pending = keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 17, { data: hex('Q7') }));
+  await until(() => T.callLog().some((c) => c.cmds.join('+') === 'display+capture-pane'), 'the pre-send read');
+  write(fail, JSON.stringify({ 'display+capture-pane': 'server exited unexpectedly' }));
+  const q = await pending;
+  fs.rmSync(fail);
+  fs.rmSync(delay);
+  assert.equal(q.status, 200, q.text);
+  assert.equal(q.json.taken, true);
+  assert.equal(q.json.state, 'live');
+  assert.ok(!q.json.lines.some((l) => l.includes('Q7')), `the pre-send screen: ${JSON.stringify(q.json.lines)}`);
+  assert.ok(T.callLog().filter((c) => c.cmds.join('+') === 'display+capture-pane').length > 1, 'it read after the send');
+  assert.ok(String(await s.received()).endsWith('Q7'), 'and the keys went');
+  // T4-3: a failed paste whose buffer can't be deleted: the log names the buffer, never its text
+  write(fail, JSON.stringify({ 'paste-buffer': 'server exited unexpectedly', 'delete-buffer': 'server exited unexpectedly' }));
+  refusedWith(await keysTo(T, port, 'supervisor', keysBody(tok, s.pane, 18, { paste: 'secret-paste-T43' })), 500, W.sent, 'a failed paste, its buffer kept');
+  fs.rmSync(fail);
+  const left = buffers().split('\n').filter((n) => n.startsWith('devteam-term-'));
+  assert.equal(left.length, 1, 'the buffer is still there');
+  const dlog = path.join(T.root, 'docs/devteam/run/dashboard.log');
+  await until(() => fs.readFileSync(dlog, 'utf8').includes(left[0]), 'the buffer named in the log');
+  assert.ok(!fs.readFileSync(dlog, 'utf8').includes('secret-paste-T43'), 'never its text');
+  assert.equal(spawnSync('tmux', ['delete-buffer', '-b', left[0]], { env: T.env }).status, 0);
   s.kill();
 });

@@ -16658,7 +16658,11 @@ const TERM = { CAP: 102400, DATA_MAX: 4096, PASTE_MAX: 65536, HISTORY_MAX: 500, 
 // What the gateway signs for a terminal POST (§3): its own domain, the port, the path's which, and the body.
 const termSigned = (domain, which) => (p, ts, nonce, body) => Buffer.from(`${domain}\n${p}\n${which}\n${ts}\n${nonce}\n${sha256(body)}`);
 const TERM_LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1']);
-const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again' };
+// What tmuxServerEnv() removes but TMUX_PANE (tmux sets it fresh for the new pane, and the shell
+// needs it): the Shell's command unsets each, since a new window gets the tmux server's environment,
+// never the calling client's (S7); its session markers are found at open, as sessionMarkerPrefix does.
+const TERM_SHELL_UNSET = ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HUB_RECORD', 'DEVTEAM_CHANNEL'];
+const TERM_WORDS = { page: 'the terminal answers only on this page', token: 'reload the page to type here', shape: 'that was not understood', big: 'that is too large to send', paste: 'that is too large to paste', read: 'the terminal could not be read; try again', supervisor: "the supervisor isn't running", shell: 'the shell is not open', moved: 'the terminal moved to another pane; reading it again', sent: 'the keys may not all have reached the terminal; look at it before typing again', open: 'the shell could not be opened' };
 // A refusal sent before its body is read drains it, but only so far: past 4 × CAP it is cut off.
 const termDrain = (req) => { if (req.complete) return; let n = 0; req.on('data', (c) => { if ((n += c.length) > 4 * TERM.CAP) req.destroy(); }); req.resume(); };
 // The one-call read's display fields (§6), tab-separated; pid is the server's (S1).
@@ -16805,7 +16809,11 @@ function termRoutes({ port, host, log }) {
     const name = `devteam-term-${process.pid}-${++buffers}`;
     const loaded = await tmuxCall(['load-buffer', '-b', name, '-'], text);
     const sent = loaded.ok ? await tmuxCall(['paste-buffer', '-p', '-d', '-b', name, '-t', pane]) : loaded;
-    if (!sent.ok) await tmuxCall(['delete-buffer', '-b', name]);
+    if (!sent.ok) {
+      const gone = await tmuxCall(['delete-buffer', '-b', name]);
+      // its name only, so the owner can delete it by hand; never its text
+      if (!gone.ok && !/unknown buffer/.test(gone.err)) log(`/api/term/: tmux buffer ${name} kept after a failed paste; delete it with tmux delete-buffer -b ${name}`);
+    }
     return sent;
   }
   // §3 steps 11 and 12, then the send, inside the pane's turn: against a read made in that turn, never
@@ -16834,7 +16842,9 @@ function termRoutes({ port, host, log }) {
     const sent = 'data' in b ? await sendData(s.pane, Buffer.from(b.data, 'hex')) : await sendPaste(s.pane, b.paste);
     voidScreen(which);
     if (!sent.ok) { log(`/api/term/${which}/keys: tmux failed on the send: ${sent.timedOut ? 'timed out' : sent.err.trim()}`); return json(res, 500, { error: TERM_WORDS.sent }); }
-    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the last
+    // the screen after the change: read until it differs, for up to SETTLE_MS; a failed read keeps the
+    // last, so if every read fails the answer is the pre-send screen, taken: the keys went (their seq
+    // is spent), and a 500 would tell the page they may not have; its next poll shows the change
     let now = s;
     for (const stop = Date.now() + TERM.SETTLE_MS; ;) {
       const got = await readScreen(which, { fresh: true });
@@ -16844,6 +16854,42 @@ function termRoutes({ port, host, log }) {
       await new Promise((r) => setTimeout(r, 5));
     }
     return json(res, 200, { ...now, taken: true });
+  }
+  // Shell open (§9), inside the Shell's turn: the found pane (the read checks a remembered one, and
+  // looks again if it moved), else a new window in this project's session, tagged; sized on every
+  // call (the kit is the only one that sizes it); then the screen.
+  async function openShell(res, b) {
+    const failed = (status, reason) => { log(status === 409 ? `refused /api/term/shell/open: ${reason}` : `/api/term/shell/open: tmux failed: ${reason}`); return json(res, status, { error: TERM_WORDS.open }); };
+    const why = (got) => (got.timedOut ? 'timed out' : got.err.trim());
+    const s = await readScreen('shell', { fresh: true });
+    if (s.error) return json(res, 500, { error: s.error });
+    let pane = s.state === 'live' ? s.pane : null;
+    if (!pane) {
+      const has = await tmuxCall(['has-session', '-t', `=${session}`]);
+      if (!has.ok) return has.missing ? failed(409, `no tmux session ${session}`) : failed(500, why(has));
+      // the markers the new window would get: a failed read could miss one, so it is no open
+      const envs = await Promise.all([['-g'], ['-t', `=${session}`]].map((a) => tmuxCall(['show-environment', ...a])));
+      const bad = envs.find((e) => !e.ok);
+      if (bad) return failed(bad.missing ? 409 : 500, why(bad));
+      const markers = [...new Set(envs.flatMap((e) => e.out.split('\n')).map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+      const ds = await tmuxCall(['show-options', '-gv', 'default-shell']);
+      const shell = (ds.ok && ds.out.trim()) || '/bin/sh';
+      const made = await tmuxCall(['new-window', '-d', '-P', '-F', '#{pane_id}', '-n', 'shell', '-c', root, '-t', `=${session}:`, 'env', ...[...TERM_SHELL_UNSET, ...markers].flatMap((k) => ['-u', k]), shell, '-l']);
+      pane = made.out.trim();
+      if (!made.ok || !/^%\d+$/.test(pane)) return failed(made.missing ? 409 : 500, made.ok ? `new-window answered ${JSON.stringify(pane)}` : why(made));
+      const tagged = await tmuxCall(['set-option', '-p', '-t', pane, '@devteam-shell', root]);
+      // an untagged window would never be found, and the next open would make another
+      if (!tagged.ok) { await tmuxCall(['kill-pane', '-t', pane]); return failed(500, why(tagged)); }
+    }
+    const sized = await tmuxCall(['resize-window', '-t', pane, '-x', String(b.cols), '-y', String(b.rows)]);
+    if (!sized.ok) { shellPane = null; return failed(sized.missing ? 409 : 500, why(sized)); }
+    shellPane = pane;
+    // a read begun before the open never fills the cache after it
+    voidScreen('shell');
+    const now = await readScreen('shell', { fresh: true });
+    if (now.error) return json(res, 500, { error: now.error });
+    if (now.state !== 'live') return failed(409, `the Shell's pane ${pane} went`);
+    return json(res, 200, now);
   }
   function route(pathname) {
     if (pathname === '/api/term/token') return { name: 'token', method: 'GET' };
@@ -16951,7 +16997,7 @@ function termRoutes({ port, host, log }) {
     if (r.name === 'keys' && 'paste' in b && Buffer.byteLength(b.paste, 'utf8') > TERM.PASTE_MAX) return no(413, { error: TERM_WORDS.paste }, 'a paste over its cap');
     if (threadsNeedGateway()) { const p = proofWhy(req, r, got.body); if (p) return no(403, { error: TERM_WORDS.page }, p); }
     if (r.name === 'keys') return queue(r.which, () => keys(res, r.which, b));
-    return json(res, 501, { error: 'not yet' });
+    return queue('shell', () => openShell(res, b));
   }
   return {
     // any throw answers 500 and never ends the dashboard (S15)
