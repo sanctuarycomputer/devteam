@@ -487,3 +487,205 @@ test('help names box-pins and says only the top package of npm and PyPI tools is
   assert.equal(r.status, 0, r.stderr);
   for (const re of [/box-pins verify \[--release vX\.Y\.Z\]/, /check \[--json\]/, /bump --release vX\.Y\.Z \[--dry-run\]/, /box-pins installed/, /only the top package of the npm and PyPI tools is pinned/i]) assert.match(r.stdout, re);
 });
+
+// ===== box-pins changed: what a release range changes in what the box image runs (image-changes@1) =====
+// A kit repo made from this checkout's tracked tree (the working tree's copy, so the change under
+// test is in it), tagged v9.1.0; each case is a branch off the tag with one commit, run with that
+// branch's own script, as a release script or the deploy gate runs it from a checkout at --to.
+const SCRIPT = 'docs/devteam/scripts/devteam.mjs';
+const GIT_ID = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+const changedRepo = path.join(tmp, 'changed-kit');
+const cg = (args) => execFileSync('git', args, { cwd: changedRepo, encoding: 'utf8', env: { ...pinsEnv(), ...GIT_ID } });
+let changedBuilt = false;
+function changedKit() {
+  if (changedBuilt) return changedRepo;
+  fs.mkdirSync(changedRepo);
+  cg(['init', '-q', '-b', 'main']);
+  cg(['remote', 'add', 'origin', 'git@github.com:sanctuarycomputer/devteam.git']);
+  for (const f of execFileSync('git', ['ls-files', '-z'], { cwd: REPO, encoding: 'utf8' }).split('\0').filter(Boolean)) {
+    const from = path.join(REPO, f), to = path.join(changedRepo, f);
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    const st = fs.lstatSync(from, { throwIfNoEntry: false });
+    if (!st) continue; // deleted in the working tree, not yet committed
+    if (st.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(from), to);
+    else fs.copyFileSync(from, to), fs.chmodSync(to, st.mode & 0o777);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', 'v9.1.0']);
+  cg(['tag', 'v9.1.0']);
+  changedBuilt = true;
+  return changedRepo;
+}
+// edits: { path: (text) => text | null (delete) }, or a function given the repo for anything else
+function onBranch(name, edits, from = 'v9.1.0') {
+  changedKit();
+  cg(['checkout', '-q', '-B', name, from]);
+  if (typeof edits === 'function') edits(changedRepo);
+  else for (const [f, fn] of Object.entries(edits)) {
+    const p = path.join(changedRepo, f);
+    const t = fn(fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '');
+    if (t === null) fs.rmSync(p); else write(p, t);
+  }
+  cg(['add', '-A']);
+  cg(['commit', '-qm', name]);
+  return cg(['rev-parse', 'HEAD']).trim();
+}
+// one edit to the script: text after an anchor that must occur exactly once
+const after = (anchor, add) => (t) => { assert.equal(t.split(anchor).length, 2, `anchor ${anchor} once`); return t.replace(anchor, () => `${anchor}${add}`); };
+const changed = (args, env = {}) => spawnSync(process.execPath, [path.join(changedRepo, SCRIPT), 'box-pins', 'changed', ...args], { cwd: changedRepo, encoding: 'utf8', env: pinsEnv(env), timeout: 600000 });
+const append = (s) => (t) => `${t}${s}`;
+
+test('box-pins changed: dashboards, process docs, an unlisted declaration and a new command are a patch', () => {
+  onBranch('patch', {
+    'docs/devteam/dashboard/index.html': append('<!-- kit-671 probe -->\n'),
+    'docs/devteam/process/supervisor.md': append('\nkit-671 probe.\n'),
+    [SCRIPT]: (t) => after("  dashboard: cmdDashboard,", " 'kit-671-probe': cmdTimeline,")(after('function cmdTimeline() {\n', '  // kit-671 probe\n')(t)),
+  });
+  const r = changed(['--since', 'v9.1.0']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.equal(r.stdout, 'kind: patch\n');
+});
+
+test('box-pins changed names each change to what the image runs, alone, and exits 3', () => {
+  const cases = [
+    ['gateway', { 'cloud/gateway.mjs': append('// kit-671 probe\n') }, ['cloud/gateway.mjs']],
+    ['dockerfile', { 'cloud/Dockerfile': append('# kit-671 probe\n') }, ['cloud/Dockerfile']],
+    ['hub-page', { 'docs/devteam/dashboard/hub.html': append('<!-- kit-671 probe -->\n') }, ['docs/devteam/dashboard/hub.html']],
+    ['operator', { 'docs/devteam/process/operator.md': append('\nkit-671 probe.\n') }, ['docs/devteam/process/operator.md']],
+    ['cmd-hub', { [SCRIPT]: after('function cmdHub() {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#cmdHub`]],
+    ['import', { [SCRIPT]: after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n") }, [`${SCRIPT}#(rest)`]],
+    ['home-at', { [SCRIPT]: after('const homeAt = (() => {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#homeAt`]],
+    ['proof', { [SCRIPT]: after('function dashboardProofProblem(proof, signed, now = Date.now()) {\n', '  // kit-671 probe\n') }, [`${SCRIPT}#dashboardProofProblem`]],
+    ['reads', { [SCRIPT]: after("'sensor series', 'peek'", ", 'kit-671-probe'") }, [`${SCRIPT}#OPERATOR_READS`]],
+    ['subcommanded', { [SCRIPT]: after("'sensor', 'settings', 'unread'", ", 'kit-671-probe'") }, [`${SCRIPT}#OPERATOR_SUBCOMMANDED`]],
+    ['rename', (r) => execFileSync('git', ['mv', 'cloud/gateway.mjs', 'cloud/gw.mjs'], { cwd: r }), ['cloud/gateway.mjs', 'cloud/gw.mjs']],
+    ['in-region', { [SCRIPT]: after('/* box start */\n', 'const kit671Probe = 1;\n') }, [`${SCRIPT}#box`]],
+  ];
+  for (const [name, edits, want] of cases) {
+    onBranch(`minor-${name}`, edits);
+    const r = changed(['--since', 'v9.1.0']);
+    assert.equal(r.status, 3, `${name}: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, `${want.map((w) => `image: ${w}\n`).join('')}kind: minor (${want.length} changes the image runs)\n`, name);
+  }
+});
+
+test('box-pins changed reads the range --to names, not HEAD', () => {
+  const a = onBranch('to-a', { 'cloud/gateway.mjs': append('// kit-671 probe\n') });
+  const b = onBranch('to-b', (r) => execFileSync('git', ['checkout', 'v9.1.0', '--', 'cloud/gateway.mjs'], { cwd: r }), 'to-a');
+  const ra = changed(['--since', 'v9.1.0', '--to', a]);
+  assert.equal(ra.status, 3, ra.stderr);
+  assert.equal(ra.stdout, 'image: cloud/gateway.mjs\nkind: minor (1 changes the image runs)\n');
+  for (const args of [['--to', b], []]) {
+    const r = changed(['--since', 'v9.1.0', ...args]);
+    assert.equal(r.status, 0, `${args}: ${r.stderr}${r.stdout}`);
+    assert.equal(r.stdout, 'kind: patch\n');
+  }
+});
+
+test('box-pins changed exits 2, saying why on stderr and nothing on stdout, when it can\'t tell', () => {
+  onBranch('cant-tell', { 'docs/devteam/dashboard/index.html': append('<!-- x -->\n') });
+  for (const json of [[], ['--json']]) {
+    const r = changed(['--since', 'v9.9.0', ...json]);
+    assert.equal(r.status, 2, r.stderr);
+    assert.equal(r.stdout, '');
+    assert.match(r.stderr.split('\n')[0], /^devteam: .*--since/);
+  }
+  for (const args of [[], ['--since'], ['--since', 'v9.1.0', '--frob'], ['--since', 'v9.1.0', '--to'], ['--since', 'v9.1.0', 'extra'], ['--since', 'v9.1.0', 'v9.1.0']]) {
+    const r = changed(args);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.equal(r.stdout, '', args.join(' '));
+    assert.match(r.stderr, /^devteam: /, args.join(' '));
+  }
+});
+
+// keys in order, and each value's type; a change's part is a string or null
+const shapeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? ['array'] : typeof v === 'object' ? Object.entries(v).map(([k, x]) => [k, shapeOf(x)]) : typeof v);
+const render = (j) => `${j.changes.map((c) => `image: ${c.file}${c.part === null ? '' : `#${c.part}`}\n`).join('')}${j.kind === 'patch' ? 'kind: patch' : `kind: minor (${j.changes.length} changes the image runs)`}\n`;
+const sortedChanges = (cs) => [...cs].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : a.part < b.part ? -1 : 1));
+
+test('box-pins changed --json has the shape of image-changes@1\'s fixtures, and the text renders it', () => {
+  const fixture = (f) => JSON.parse(fs.readFileSync(path.join(REPO, 'test/fixtures/image-changes', f), 'utf8'));
+  const since = (changedKit(), cg(['rev-parse', 'v9.1.0^{commit}']).trim());
+  const cases = [
+    ['json-patch', { 'docs/devteam/dashboard/index.html': append('<!-- x -->\n') }, 'patch.json', 0],
+    ['json-minor', { 'cloud/gateway.mjs': append('// x\n'), [SCRIPT]: (t) => after("import crypto from 'node:crypto';\n", "import util from 'node:util';\n")(after('function cmdHub() {\n', '  // x\n')(t)) }, 'minor.json', 3],
+  ];
+  for (const [name, edits, fx, code] of cases) {
+    const head = onBranch(name, edits);
+    const j = changed(['--since', 'v9.1.0', '--json']);
+    assert.equal(j.status, code, j.stderr);
+    const got = JSON.parse(j.stdout);
+    const want = fixture(fx);
+    assert.deepEqual(shapeOf(got), shapeOf(want), name);
+    for (const c of got.changes) {
+      assert.deepEqual(Object.keys(c), ['file', 'part']);
+      assert.equal(typeof c.file, 'string');
+      assert.ok(c.part === null || typeof c.part === 'string');
+    }
+    assert.equal(got.v, 1);
+    assert.equal(got.since, since);
+    assert.equal(got.to, head);
+    assert.equal(got.kind, code === 0 ? 'patch' : 'minor');
+    assert.equal(got.changes.length === 0, got.kind === 'patch');
+    assert.deepEqual(got.changes, sortedChanges(got.changes));
+    const t = changed(['--since', 'v9.1.0']);
+    assert.equal(t.status, code);
+    assert.equal(t.stdout, render(got), name);
+  }
+  assert.deepEqual(JSON.parse(changed(['--since', 'v9.1.0', '--json']).stdout).changes, [
+    { file: 'cloud/gateway.mjs', part: null }, { file: SCRIPT, part: '(rest)' }, { file: SCRIPT, part: 'cmdHub' },
+  ]);
+});
+
+// IMAGE_RUNS and the kit's parts and glob readers, read from this checkout's script
+const kitSource = fs.readFileSync(path.join(REPO, SCRIPT), 'utf8');
+const regionOf = (name) => kitSource.slice(kitSource.indexOf(`/* ${name} start */`), kitSource.indexOf(`/* ${name} end */`));
+const partsLib = new Function(`${regionOf('parts')}; return { fileParts, partLeaves };`)();
+const globsLib = new Function(`${regionOf('globs')}; return { pathMatches };`)();
+function imageRunsFromSource() {
+  const at = kitSource.indexOf('\nconst IMAGE_RUNS = {');
+  assert.ok(at !== -1, 'IMAGE_RUNS is declared');
+  const end = kitSource.indexOf('\n};\n', at);
+  return { list: new Function(`return ${kitSource.slice(at + '\nconst IMAGE_RUNS = '.length, end + 2)}`)(), at };
+}
+
+test('IMAGE_RUNS lists every machineWide handler, the guards, and only parts and files that exist', () => {
+  const { list } = imageRunsFromSource();
+  assert.equal(list.script, SCRIPT);
+  const listed = new Set(list.parts);
+  const wide = kitSource.split('\n').find((l) => /^\s*const machineWide = /.test(l));
+  assert.ok(wide, 'the machineWide line');
+  const commands = [...new Set([...[...wide.matchAll(/\[([^\]]*)\]\.includes\(command\)/g)].flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1])), ...[...wide.matchAll(/command === '([^']+)'/g)].map((m) => m[1])])];
+  assert.deepEqual(commands.sort(), ['box-pins', 'hub', 'machine', 'operator-thread', 'recover']);
+  const table = kitSource.slice(kitSource.indexOf('\nconst COMMANDS = {'), kitSource.indexOf('\n};\n', kitSource.indexOf('\nconst COMMANDS = {')));
+  const handlers = commands.map((c) => { const m = new RegExp(`(?:^|[\\s,{])(?:'${c}'|${c.includes('-') ? `'${c}'` : c}): (\\w+)`).exec(table); assert.ok(m, `COMMANDS has ${c}`); return m[1]; });
+  assert.deepEqual(handlers.sort(), ['cmdBoxPins', 'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover']);
+  for (const h of handlers) assert.ok(listed.has(h), `${h} is in IMAGE_RUNS`);
+  const P = partsLib.fileParts(kitSource, SCRIPT);
+  const guardLine = P.lines.findIndex((l) => l.startsWith('if (process.env.DEVTEAM_RUN && command')) + 1;
+  assert.ok(guardLine > 0, 'the DEVTEAM_RUN guard');
+  const guardPart = P.owner[guardLine].slice(2).replace(/#\d+$/, "").split("/").pop();
+  assert.ok(listed.has(guardPart), `the guard's part ${guardPart} is in IMAGE_RUNS`);
+  assert.ok(listed.has('homeAt'));
+  for (const n of list.parts) assert.ok(P.places.has(n), `${n} is a part of ${SCRIPT}`);
+  assert.equal(new Set(list.parts).size, list.parts.length, 'no part twice');
+  const tracked = execFileSync('git', ['ls-files'], { cwd: REPO, encoding: 'utf8' }).split('\n').filter(Boolean);
+  for (const g of list.files) assert.ok(tracked.some((f) => globsLib.pathMatches(g, f)), `${g} matches a tracked file`);
+});
+
+test('IMAGE_RUNS: the three kinds under the rule, with the parts the design names; usage names changed', () => {
+  const { list, at } = imageRunsFromSource();
+  assert.deepEqual(list.files, ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md']);
+  const named = ['gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+    'homeAt', 'realPathMade', 'startHub', 'HUB_ACTIONS', 'probeHello', 'recoverMachine', 'projectKit', 'box', 'box-memory', 'readPins', 'imageHub'];
+  for (const n of named) assert.ok(list.parts.includes(n), `${n} is listed`);
+  const before = kitSource.slice(0, at).split('\n');
+  let i = before.length - 1;
+  const comment = [];
+  while (i >= 0 && /^\/\//.test(before[i])) comment.unshift(before[i--]);
+  const rule = comment.map((l) => l.replace(/^\/\/ ?/, '')).join(' ');
+  assert.match(rule, /box image runs[\s\S]*relies on/);
+  assert.match(rule, /new image command adds its parts here/);
+  assert.match(rule, /bumps a crossing's version is a minor/);
+  assert.match(kitSource, /^const BOX_PINS_USAGE = '[^\n]*changed --since <ref> \[--to <ref>\] \[--smoke\] \[--json\]/m);
+});

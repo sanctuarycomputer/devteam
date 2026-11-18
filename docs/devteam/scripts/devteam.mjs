@@ -17964,11 +17964,111 @@ async function bumpPins(pins, release) {
   set(pins.releaseLine, 'DEVTEAM_RELEASE', pins.release, release);
   return { text: lines.join('\n'), changes, held: pins.tools.filter((p) => p.hold).map((p) => ({ name: p.tool.name, reason: p.hold })) };
 }
-const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | installed   (verify, check and bump take --dockerfile <path>)';
+// What the box image runs from its own copy of the kit, or relies on in a project's kit: a change to
+// any of it since the minor the image was built at makes a release a minor (box-pins changed,
+// test/contracts/image-changes.md). A new image command adds its parts here; a change that bumps a
+// crossing's version is a minor whatever this list says. Anything not listed reaches the image at
+// the next minor: staleness, never breakage, since the image is always a whole release. The file's
+// rest (the imports, the Node check, the re-exec) always counts, so it isn't listed.
+const IMAGE_RUNS = {
+  // whole files, as globs relative to the kit repo
+  files: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md'],
+  // parts of this file, as fileParts names them
+  script: 'docs/devteam/scripts/devteam.mjs',
+  parts: [
+    // the handlers the machineWide expression dispatches to
+    'cmdHub', 'cmdMachine', 'cmdOperatorThread', 'cmdRecover', 'cmdBoxPins',
+    // what they are built from that serves only the image: the hub
+    'probeHello', 'HUB_BODY_MAX', 'hubTurnOk', 'HUB_ACTIONS', 'startHub', 'hubLogger', 'imageHub',
+    // recover --machine (the project's own recover is each project's kit, never the image's)
+    'siblingOf', 'isAdopted', 'machineProjects', 'projectKit', 'projectJson', 'kitHasRecover', 'notedPaneOf', 'tmuxName', 'readUpList', 'recoverMachine', 'LEGACY_RECOVER_MESSAGE', 'legacyRecover',
+    // machine status, tell, alert, pane-state
+    'PANE_DIALOG', 'PANE_LIMIT_LINE', 'plainText', 'paneState', 'machineUsage', 'machineSpeaker', 'machineAlert', 'TELL_ENTER_TRIES', 'enterLanded', 'TELL_PREFIX', 'machineTell',
+    'notedIn', 'openQuestionsOf', 'machineQuestions', 'utcDay', 'lastReview', 'harvestOf', 'machineKnowledge', 'vParts', 'versionBefore', 'portAnswers', 'hubLine', 'boxStatusLine',
+    'box-memory', 'machineLine', 'statusLastFile', 'partlyHeld', 'SUPERVISOR_IDLE_MS', 'supervisorIdleMinutes', 'machineStatus',
+    // operator threads
+    'OPERATOR_THREAD_ID', 'OPERATOR_SUBJECT_MAX', 'OPERATOR_STARTING_MS', 'box', 'gatewayProofProblem', 'proofBody', 'operatorSession', 'operatorDir', 'operatorThreadsFile', 'operatorId', 'OPERATOR_PARTS',
+    'operatorSubjectProblem', 'operatorLines', 'operatorThreads', 'operatorAppend', 'operatorLocked', 'tmuxAsk', 'OPERATOR_PANE_FORMAT', 'OPERATOR_MARK', 'operatorPaneRows', 'operatorPanes',
+    'operatorStartFile', 'operatorStartNote', 'operatorStarting', 'operatorNoted', 'isShellPane', 'operatorSeat', 'operatorState', 'OPERATOR_OPENING', 'operatorStart', 'typeLine', 'OPERATOR_HELD',
+    'operatorHeld', 'deliverToOperator', 'operatorDataFrame', 'operatorThreadUsage',
+    // box-pins (installed runs in the image; verify, check and bump beside it)
+    'firstVersion', 'BOX_TOOLS', 'BOX_ARCHES', 'pinForm', 'escapeRe', 'HOLD_LIKE', 'readPins', 'pinsFile', 'releaseFlag', 'pinsBase', 'upstreamJson', 'notRelease', 'latestOf', 'holdText',
+    'checkPins', 'pinsCheckLine', 'assetSum', 'bumpPins', 'BOX_PINS_USAGE',
+    // the guards that let the image's commands run outside a project: the machineWide expression,
+    // and the DEVTEAM_RUN guard in realPathMade's part, which repeats that list
+    'homeAt', 'realPathMade',
+    // the project-side parts the image relies on (the crossings): the presses the gateway signs and
+    // a dashboard verifies, and the operator's role guard
+    'gatewaySigned', 'termSigned', 'dashboardProofProblem', 'paneSigned', 'ownerSettingSigned', 'paneProofProblem', 'ownerSettingProofProblem', 'OPERATOR_READS', 'OPERATOR_SUBCOMMANDED',
+  ],
+};
+// box-pins changed: the changes, sorted (image-changes@1 §5), between two commits of the cwd's repo
+// in what IMAGE_RUNS names: a file a glob matches (either side of a rename), a listed part of the
+// script whose leaves changed (judged as partsChanged judges them), and the script's rest (its r:
+// leaf only, never a region's rest). With smoke, also what the image's readers print of a project on
+// each kit. Dies with 2 when it can't tell.
+function imageChanges(since, to, { smoke = false } = {}) {
+  const cant = (why) => die(`box-pins changed: ${why}`, 2);
+  const found = new Map();
+  const add = (file, part) => found.set(`${file}\0${part ?? ''}`, { file, part });
+  const raw = git(['diff', '-z', '--name-status', '-M', since, to], repoRoot);
+  if (raw === null) cant(`git diff ${since} ${to} failed in ${repoRoot}`);
+  const tokens = raw.split('\0');
+  const paths = [];
+  for (let i = 0; i < tokens.length;) {
+    const status = tokens[i++];
+    if (!status) continue;
+    const n = /^[RC]/.test(status) ? 2 : 1;
+    paths.push(...tokens.slice(i, i + n));
+    i += n;
+  }
+  for (const p of paths) if (IMAGE_RUNS.files.some((g) => pathMatches(g, p))) add(p, null);
+  const S = IMAGE_RUNS.script;
+  if (paths.includes(S)) {
+    const textAt = (sha) => {
+      if (git(['cat-file', '-e', `${sha}:${S}`], repoRoot) === null) return '';
+      const t = git(['show', `${sha}:${S}`], repoRoot);
+      if (t === null) cant(`git show ${sha}:${S} failed`);
+      return t;
+    };
+    const base = textAt(since), head = textAt(to);
+    const B = fileParts(base, S), H = fileParts(head, S);
+    const inBase = new Set(B.owner.slice(1));
+    const leaves = partsChanged(base, head, S, []);
+    if (leaves.includes('r:')) add(S, '(rest)');
+    for (const name of IMAGE_RUNS.parts) {
+      const cb = partLeaves(B, name), ch = partLeaves(H, name);
+      if (leaves.some((k) => (inBase.has(k) ? cb : ch).has(k))) add(S, name);
+    }
+  }
+  if (smoke) cant('--smoke is not built yet');
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...found.values()].sort((a, b) => cmp(a.file, b.file) || (a.part === b.part ? 0 : a.part === null ? -1 : b.part === null ? 1 : cmp(a.part, b.part)));
+}
+const BOX_PINS_USAGE = 'box-pins verify [--release vX.Y.Z] | check [--json] | bump --release vX.Y.Z [--dry-run] | changed --since <ref> [--to <ref>] [--smoke] [--json] | installed   (verify, check and bump take --dockerfile <path>)';
 // box-pins: verify, check and bump in the kit's own checkout (a KIT_VIEWS command; bump writes only
 // the Dockerfile's pins), and installed inside the box image, from anywhere.
 async function cmdBoxPins() {
   const mode = positional[0];
+  if (mode === 'changed') {
+    // image-changes@1: exit 0 patch, 3 minor, 2 can't tell (said on stderr, nothing on stdout)
+    const usage = () => die(`usage: ${BOX_PINS_USAGE}`, 2);
+    if (positional.length !== 1 || rest !== null || Object.keys(flags).some((k) => !['since', 'to', 'smoke', 'json'].includes(k))) usage();
+    for (const k of ['since', 'to']) if (flags[k] !== undefined && (typeof flags[k] !== 'string' || !flags[k] || flags[k].startsWith('-'))) usage();
+    for (const k of ['smoke', 'json']) if (flags[k] !== undefined && flags[k] !== true) usage();
+    if (flags.since === undefined) usage();
+    const sha = (k, ref) => git(['rev-parse', '--verify', '-q', `${ref}^{commit}`], repoRoot) ?? die(`box-pins changed: --${k} ${ref} does not resolve to a commit`, 2);
+    const since = sha('since', flags.since), to = sha('to', flags.to ?? 'HEAD');
+    const changes = imageChanges(since, to, { smoke: !!flags.smoke });
+    const kind = changes.length ? 'minor' : 'patch';
+    if (flags.json) out(JSON.stringify({ v: 1, since, to, kind, changes }, null, 2));
+    else {
+      for (const c of changes) out(`image: ${c.file}${c.part === null ? '' : `#${c.part}`}`);
+      out(kind === 'patch' ? 'kind: patch' : `kind: minor (${changes.length} changes the image runs)`);
+    }
+    process.exitCode = changes.length ? 3 : 0;
+    return;
+  }
   if (mode === 'verify') {
     const want = releaseFlag();
     const { text } = pinsFile();
