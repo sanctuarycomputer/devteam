@@ -2005,23 +2005,24 @@ function columnOf(t) {
 }
 /* board-filter start */
 // The Board's and Progress's pure rules (kit-91), run alone in vm by test/dashboard-board-progress:
-// no page globals. x is a ticket (kind 'ticket' or none) or a planner (kind 'planner').
+// no page globals. x is a ticket row or a planner row as /api/data serves them. A ticket row always has
+// a stage (and its own kind: build, chore…); a planner row has goals and no stage.
+const isPlannerRow = (x) => x.stage === undefined && Array.isArray(x.goals);
 // needsAttention: a ticket blocked, waiting at a pane or held by a question; a planner waiting at a
 // pane, with no window, or held by a question.
 function needsAttention(x) {
-  if (x.kind === 'planner') return !!(x.waiting || x.window === false || x.held_by);
-  if (!x.kind || x.kind === 'ticket') return !!(x.phase === 'blocked' || x.waiting || x.held_by);
-  return false;
+  if (isPlannerRow(x)) return !!(x.waiting || x.window === false || x.held_by);
+  return !!(x.phase === 'blocked' || x.waiting || x.held_by);
 }
 // boardKeep: whether the Board shows x under the header's filters f = { goal, feat, repo, att };
 // ctx.goalFeatures is the goal's features (a Set), or null when no goal applies (none, or unknown).
 // A planner is always home's, and is kept by its own goals, not its feature's.
 function boardKeep(x, f, ctx) {
-  const gf = ctx && ctx.goalFeatures ? ctx.goalFeatures : null;
+  const gf = f.goal && ctx && ctx.goalFeatures ? ctx.goalFeatures : null;
   if (f.feat && x.feature !== f.feat) return false;
   if (f.att && !needsAttention(x)) return false;
-  if (x.kind === 'planner') {
-    if (f.goal && gf && !(x.goals || []).includes(f.goal)) return false;
+  if (isPlannerRow(x)) {
+    if (gf && !x.goals.includes(f.goal)) return false;
     return !f.repo || f.repo === 'home';
   }
   if (gf && !gf.has(x.feature)) return false;

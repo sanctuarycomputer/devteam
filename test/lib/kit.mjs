@@ -668,7 +668,7 @@ export function dataRewriteInit(fx) {
 // with each top-level key of patch put in place of the server's, except ooda, merged one level (and
 // its roadmap one level inside it), so the page keeps the rest of what it reads. window.__fx is read
 // on every answer, so a test can change it in the page; every error goes in window.__errors, and the
-// 10 s poll runs every 300 ms. throwStorage: localStorage's getItem and setItem throw, from before the
+// 10 s poll runs every 300 ms. throwStorage: Storage's getItem and setItem throw (localStorage and sessionStorage alike), from before the
 // page's own scripts run.
 export function dataPatchInit(patch, { throwStorage = false } = {}) {
   return `(() => {
@@ -851,7 +851,7 @@ export function boardFixture({ now = Date.now() } = {}) {
   const planners = [
     planner(ids.planLimit, 'Pay by card, the rest', [goal1], { tickets: 2, waiting: LIMIT }),
     planner(ids.planPromptQ, 'Receipts export', [goal2], { waiting: PROMPT, waiting_on_owner: [qPlanner], held_by: qPlanner }),
-    planner(ids.planNoWindow, 'Onboarding', [], { window: false, waiting_on_supervisor: [{ id: ids.msgSupervisor, kind: 'blocked', text: 'The design needs the pricing page: may I read it?' }] }),
+    planner(ids.planNoWindow, 'Onboarding', [], { window: false, problem: 'its tmux window is gone', waiting_on_supervisor: [{ id: ids.msgSupervisor, kind: 'blocked', text: 'The design needs the pricing page: may I read it?' }] }),
     planner(ids.planAnswers, 'Pay from a wallet', [goal1], { tickets: 1, waiting_on_owner: [...qAnswers], held_by: qAnswers[0] }),
   ];
   const patch = {

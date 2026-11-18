@@ -28,14 +28,14 @@ test('board-filter: needsAttention, boardKeep and progressShown', () => {
   const { needsAttention, boardKeep, progressShown } = ctx;
 
   // tickets: g1 holds features fa and fb, g2 holds fc; one ticket of each kind of trouble
-  const T = (o) => ({ kind: 'ticket', id: 'x', feature: 'fa', repo: 'home', stage: 'building', phase: 'build', waiting: null, held: null, held_by: null, ...o });
+  const T = (o) => ({ kind: 'build', id: 'x', feature: 'fa', repo: 'home', stage: 'building', phase: 'build', waiting: null, held: null, held_by: null, ...o });
   const plain = T({ id: 'plain' });
   const blocked = T({ id: 'blocked', phase: 'blocked' });
   const waiting = T({ id: 'waiting', feature: 'fb', waiting: { kind: 'limit' } });
   const heldBy = T({ id: 'held-by', feature: 'fc', repo: 'devteam-kit', held_by: 'q-1' });
   const kitPlain = T({ id: 'kit-plain', feature: 'fb', repo: 'devteam-kit' });
   const noGoal = T({ id: 'no-goal', feature: 'fz' });
-  const bare = { id: 'bare', feature: 'fa', repo: 'home', phase: 'build' }; // no kind: a ticket
+  const bare = { id: 'bare', kind: 'chore', feature: 'fa', repo: 'home', stage: 'ready', phase: 'build' }; // a chore: a ticket all the same
 
   // needsAttention: a ticket blocked, waiting at a pane or held by a question; none for a plain building one
   assert.equal(needsAttention(blocked), true, 'phase blocked');
@@ -44,13 +44,13 @@ test('board-filter: needsAttention, boardKeep and progressShown', () => {
   assert.equal(needsAttention(heldBy), true, 'held_by');
   assert.equal(needsAttention(T({ phase: 'blocked', held_by: 'q-2' })), true, 'blocked and held_by');
   assert.equal(needsAttention(plain), false, 'a plain building ticket');
-  assert.equal(needsAttention(bare), false, 'a ticket with no kind, plain');
-  assert.equal(needsAttention({ ...bare, phase: 'blocked' }), true, 'a ticket with no kind, blocked');
+  assert.equal(needsAttention(bare), false, 'a chore, plain');
+  assert.equal(needsAttention({ ...bare, phase: 'blocked' }), true, 'a chore, blocked');
   assert.equal(needsAttention(T({ held: { reason: 'later' } })), false, 'held with no question is not attention');
   assert.equal(needsAttention(T({ window: false })), false, 'a ticket has no window to lose');
 
   // planners: waiting at a pane, no window, held by a question; none for a fine one
-  const P = (o) => ({ kind: 'planner', feature: 'fa', goals: ['g1'], window: true, waiting: null, held_by: null, ...o });
+  const P = (o) => ({ feature: 'fa', goals: ['g1'], window: true, waiting: null, held_by: null, ...o });
   const finePlanner = P({});
   assert.equal(needsAttention(P({ waiting: { kind: 'limit' } })), true, 'planner waiting');
   assert.equal(needsAttention(P({ window: false })), true, 'planner with no window');
@@ -98,9 +98,23 @@ test('board-filter: needsAttention, boardKeep and progressShown', () => {
   assert.deepEqual(keptP({ repo: 'home' }), ['withGoal', 'otherGoal', 'twoGoals', 'noGoals'], 'home shows them');
   assert.deepEqual(keptP({ att: '1' }), ['twoGoals'], 'a planner needing attention');
   assert.deepEqual(keptP({ goal: 'g1', repo: 'home', att: '1' }, { goalFeatures: g1 }), ['twoGoals'], 'combined');
+  assert.deepEqual(keptP({}, { goalFeatures: g1 }), ['withGoal', 'otherGoal', 'twoGoals', 'noGoals'], 'goal features with no goal picked filter no planner');
+  assert.deepEqual(kept({}, { goalFeatures: g1 }), all.map((x) => x.id), 'nor any ticket');
+
+  // the rows as /api/data serves them (boardFixture: tickets with their own kind, planners with none)
+  const { patch, ids } = boardFixture();
+  const rows = new Map(patch.tickets.map((t) => [t.id, t]));
+  for (const id of [ids.tBlockedQ, ids.tBlockedNoQ, ids.tLimit, ids.tPrompt]) assert.equal(needsAttention(rows.get(id)), true, `served ticket ${id} needs attention`);
+  for (const id of [ids.tPlain, ids.tBuilding, ids.tHighRisk, ids.tHeld]) assert.equal(needsAttention(rows.get(id)), false, `served ticket ${id} doesn't`);
+  const plans = new Map(patch.planners.map((p) => [p.feature, p]));
+  for (const id of [ids.planLimit, ids.planPromptQ, ids.planNoWindow, ids.planAnswers]) assert.equal(needsAttention(plans.get(id)), true, `served planner ${id} needs attention`);
+  assert.equal(needsAttention({ ...plans.get(ids.planLimit), waiting: null }), false, 'a served planner, fine');
+  assert.ok(patch.planners.every((p) => boardKeep(p, { repo: 'home' }, { goalFeatures: null })), 'served planners are home\'s');
+  assert.deepEqual(patch.tickets.filter((t) => boardKeep(t, { att: '1' }, { goalFeatures: null })).map((t) => t.id).sort(), [ids.tBlockedQ, ids.tBlockedNoQ, ids.tLimit, ids.tPrompt].sort(), 'Needs attention on served rows');
   assert.deepEqual(keptP({ goal: 'g2', feat: 'fa' }, { goalFeatures: g2 }), [], 'goal and a feature of another goal');
-  assert.equal(boardKeep(P({ goals: undefined }), { goal: 'g1' }, { goalFeatures: g1 }), false, 'a planner with no goals list, under a goal');
-  assert.equal(boardKeep(P({ goals: undefined }), {}, { goalFeatures: null }), true, 'a planner with no goals list, no goal');
+  // a planner row is told by its goals list and no stage (the server always sends both shapes so): a row with a
+  // stage is a ticket whatever else it has
+  assert.equal(needsAttention({ ...P({ window: false }), stage: 'ready' }), false, 'a row with a stage is a ticket: no window means nothing');
 
   // progressShown: Active (the default) the rows not done, Complete the done, Everything both
   for (const show of [undefined, '', 'active', 'nonsense']) {
