@@ -4447,12 +4447,12 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
     // the next goal press reaches the real server with a verdict it doesn't take, as a page older
     // than its server could send one
     await p.ev(`(() => { const f0 = window.fetch; window.__badVerdict = true; window.fetch = (u, o) => { if (window.__badVerdict && String(u) === '/api/goal-decide') { window.__badVerdict = false; o = { ...o, body: JSON.stringify({ ...JSON.parse(o.body), verdict: 'yes' }) }; } return f0(u, o); }; })(); void 0`);
-    // the pick, the note's focus and the typing in one still step: no read redraws the card under them
+    // the pick pressed, and the note written as an input event (a focus from a phone's emulated tap
+    // isn't certain on a loaded runner, and typing isn't what this checks), in one still step: no
+    // read redraws the card between them
     await still(async () => {
       await p.click(`#q-${GR.q} input[data-pick][value="Refine"]`);
-      await p.click(`#q-${GR.q} textarea[data-q]`);
-      await soon(`document.activeElement === ${card(GR.q)}.querySelector('textarea[data-q]')`, 'the note focused');
-      await p.type('a smaller measure');
+      await p.ev(`(() => { const ta = ${card(GR.q)}.querySelector('textarea[data-q]'); ta.value = 'a smaller measure'; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
     });
     await soon(`${card(GR.q)}.querySelector('textarea[data-q]').value === 'a smaller measure'`, 'the note typed');
     await p.click(`#q-${GR.q} [data-answer]`);
