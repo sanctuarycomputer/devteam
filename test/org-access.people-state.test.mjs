@@ -434,10 +434,10 @@ test('org-access A9: a person\'s session opens artifact links, the terminal\'s s
     assert.equal(await termWs(gw, undefined), 401, 'and without a session it is refused');
     assert.equal(await previewWs(gw, cookie), 503, 'a preview\'s upgrade gets past the session check to "no such preview"');
     assert.equal(await previewWs(gw, undefined), 401);
-    // an unclaimed box (today's reclaim leaves peopleSessions) honours no link, as no other path
-    const r = reclaim(gw);
-    assert.equal(r.status, 0, r.stderr);
-    assert.ok(gw.state().peopleSessions.length, 'Ana\'s entry outlived the reclaim');
+    // an unclaimed box honours no link, as no other path, even with Ana's entry live (as an older
+    // gateway's reclaim leaves it, until the next start's stamp check)
+    gw.write({ ...gw.state(), passkeys: [], sessions: [] });
+    assert.ok(gw.state().peopleSessions.length, 'Ana\'s entry is live');
     assert.equal((await gw.req('GET', link, { on: P, cookie: '' })).status, 403, 'capOk needs the box claimed');
   } finally { await gw.close(); }
 });
@@ -797,4 +797,172 @@ test('org-access A9: push subscriptions are each person\'s own', async () => {
     assert.deepEqual(ends(s.pushSubs), [A(20)]);
     assert.equal(rowOf(s, anaRow.id).rev, anaRow.rev, 'push does not bump rev');
   } finally { await new Promise((r) => hub.close(r)); await gw.close(); }
+});
+
+// --- A11: the rollback, against the gateway before people (OLD) ---------------------------------
+const OLD_SHA = '7eebabfde62c642427c0c507f41fdb9db62bedc6';
+let oldFile = null;
+// OLD's cloud/gateway.mjs from git history, fetched when the checkout lacks it (CI's depth-1 clone).
+// Throws when it can't be had: the test fails, never skips.
+const oldGateway = () => {
+  if (oldFile) return oldFile;
+  const git = (args, opts = {}) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+  try { git(['cat-file', '-e', `${OLD_SHA}^{commit}`]); } catch { git(['fetch', '--depth=1', '--no-tags', 'origin', OLD_SHA], { timeout: 120e3 }); }
+  const file = path.join(tmp, 'old', 'gateway.mjs');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, git(['show', `${OLD_SHA}:cloud/gateway.mjs`], { maxBuffer: 64 << 20 }));
+  oldFile = file;
+  return file;
+};
+// a gateway's `reclaim` command (OLD's or this one's) on a folder, as a shell on the box runs it
+const reclaimWith = (file, dir, pub) => {
+  const r = spawnSync(process.execPath, [file, 'reclaim'], { env: { ...process.env, DEVTEAM_PUBLIC_URL: pub, DEVTEAM_GATEWAY_DIR: dir }, encoding: 'utf8', timeout: 60e3 });
+  assert.equal(r.status, 0, r.stderr);
+  return r;
+};
+const tokenOf = (out) => { const t = /claim#([\w-]+)/.exec(out)?.[1]; assert.ok(t, out); return t; };
+// Ana signed in, an invite for her, and a stub method in the owner's row with a session opened with it
+const rollbackSetup = async (name) => {
+  const p = await people(name);
+  const ac = await signIn(p.gw, p.ana);
+  const s = p.gw.state();
+  p.gw.write({ ...s, invites: [{ hash: u(crypto.randomBytes(32)), person: p.anaRow.id, expires: Date.now() + 86400e3 }] });
+  const stub = ownerStub(p.gw);
+  return { ...p, ac, stub };
+};
+const RESET_LINE = 'the owner\'s passkeys changed under an older gateway: every other person\'s session and every invite ended; they sign in again';
+// what a start after an older gateway's reset leaves
+const assertReset = (gw, before, counts) => {
+  const s = gw.state();
+  assert.deepEqual(s.peopleSessions, []);
+  assert.deepEqual(s.invites, []);
+  const [owner] = ownerOf(s);
+  assert.deepEqual(owner.methods, []);
+  assert.equal(owner.rev, ownerOf(before)[0].rev + 1);
+  assert.ok(!s.sessions.some((x) => x.method === ownerOf(before)[0].methods[0].id), 'no session opened with the stub');
+  for (const p of before.people.filter((x) => x.role !== 'owner')) assert.deepEqual(rowOf(s, p.id).methods, p.methods, `${p.name}'s methods stay`);
+  assert.equal(s.peopleStamp, stampOf(s.passkeys.map((p) => p.id)));
+  const notes = owner.notices.filter((n) => n.kind === 'people-reset');
+  assert.equal(notes.length, 1);
+  assert.deepEqual({ ...notes[0], at: undefined }, { kind: 'people-reset', at: undefined, ...counts });
+  assert.ok(gw.logs.includes(RESET_LINE), gw.logs.join('\n'));
+};
+
+test('org-access A11: an older gateway reading the new state admits only the owner', async () => {
+  const { gw, owner, ana, ownerCookie } = await people('a11-old-reads');
+  const ac = await signIn(gw, ana);
+  await gw.close();
+  const old = await gateway('a11-old-reads-old', { module: oldGateway(), dir: gw.dir });
+  try {
+    assert.equal((await old.req('GET', '/box.json', { cookie: ownerCookie })).status, 200, 'the owner\'s session');
+    assert.equal((await old.login(owner)).status, 200, 'the owner\'s passkey');
+    const r = await old.login(ana);
+    assert.notEqual(r.status, 200);
+    assert.match(r.body, /unknown passkey/);
+    assert.equal((await old.req('GET', '/box.json', { cookie: ac })).status, 401, 'Ana\'s live session');
+  } finally { await old.close(); }
+});
+
+test('org-access A11: a start after an older gateway\'s reclaim ends everyone else\'s sessions, the invites and the owner\'s other methods', async () => {
+  const { gw, ana } = await rollbackSetup('a11-old-reclaim');
+  await gw.close();
+  const r = reclaimWith(oldGateway(), gw.dir, gw.publicUrl);
+  const before = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
+  const again = await gateway('a11-old-reclaim-new', { dir: gw.dir, token: tokenOf(r.stdout) });
+  try {
+    assertReset(again, before, { sessions_ended: 1, invites_deleted: 1, methods_deleted: 1 });
+    assert.deepEqual(again.state().passkeys, [], 'still unclaimed');
+    const c = await again.claim(authenticator());
+    assert.equal(c.status, 200, c.body);
+    await signIn(again, ana);
+  } finally { await again.close(); }
+});
+
+test('org-access A11: a start after an older gateway removed or added an owner passkey resets the same', async () => {
+  // removed: OLD's remove keeps only the requester's session, the stub's among those it ends
+  {
+    const { gw, owner, ana, ownerCookie } = await rollbackSetup('a11-old-remove');
+    const second = authenticator();
+    assert.equal((await addPasskey(gw, second, ownerCookie)).verify.status, 200);
+    await gw.close();
+    const old = await gateway('a11-old-remove-old', { module: oldGateway(), dir: gw.dir });
+    try {
+      const r = await old.req('POST', '/auth/passkeys/remove', { cookie: ownerCookie, body: { id: u(second.id) } });
+      assert.equal(r.status, 200, r.body);
+    } finally { await old.close(); }
+    const before = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
+    const again = await gateway('a11-old-remove-new', { dir: gw.dir });
+    try {
+      assertReset(again, before, { sessions_ended: 1, invites_deleted: 1, methods_deleted: 1 });
+      assert.deepEqual(again.state().passkeys.map((p) => p.id), [u(owner.id)], 'still claimed');
+      assert.equal((await again.req('GET', '/box.json', { cookie: ownerCookie })).status, 200);
+      await signIn(again, ana);
+    } finally { await again.close(); }
+  }
+  // added: OLD leaves every session, the stub's too; only the start's reset ends that one
+  {
+    const { gw, owner, ana, ownerCookie, stub } = await rollbackSetup('a11-old-add');
+    await gw.close();
+    const second = authenticator();
+    const old = await gateway('a11-old-add-old', { module: oldGateway(), dir: gw.dir });
+    try {
+      assert.equal((await addPasskey(old, second, ownerCookie)).verify.status, 200);
+      assert.equal((await old.req('GET', '/box.json', { cookie: stub.cookie })).status, 200, 'OLD keeps the stub\'s session');
+    } finally { await old.close(); }
+    const before = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
+    assert.ok(before.sessions.some((x) => x.hash === stub.hash));
+    const again = await gateway('a11-old-add-new', { dir: gw.dir });
+    try {
+      assertReset(again, before, { sessions_ended: 2, invites_deleted: 1, methods_deleted: 1 });
+      assert.deepEqual(again.state().passkeys.map((p) => p.id).sort(), [u(owner.id), u(second.id)].sort());
+      assert.equal((await again.req('GET', '/box.json', { cookie: stub.cookie })).status, 401, 'the stub\'s session ended');
+      assert.equal((await again.req('GET', '/box.json', { cookie: ownerCookie })).status, 200, 'the passkey\'s stays');
+      await signIn(again, ana);
+    } finally { await again.close(); }
+  }
+});
+
+test('org-access A11: an owner\'s sign-in under an older gateway trips nothing', async () => {
+  const { gw, owner, ac, stub } = await rollbackSetup('a11-old-signin');
+  await gw.close();
+  const old = await gateway('a11-old-signin-old', { module: oldGateway(), dir: gw.dir });
+  try { assert.equal((await old.login(owner)).status, 200); } finally { await old.close(); }
+  const before = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
+  const again = await gateway('a11-old-signin-new', { dir: gw.dir });
+  try {
+    const s = again.state();
+    for (const k of ['peopleSessions', 'invites', 'people', 'peopleStamp', 'sessions']) assert.equal(JSON.stringify(s[k]), JSON.stringify(before[k]), `${k} as it was`);
+    assert.ok(!again.logs.includes(RESET_LINE));
+    assert.equal((await again.req('GET', '/box.json', { cookie: ac })).status, 200, 'Ana\'s session');
+    assert.equal((await again.req('GET', '/box.json', { cookie: stub.cookie })).status, 200, 'the stub\'s session');
+  } finally { await again.close(); }
+});
+
+test('org-access A11: the new reclaim ends every session, invite and owner method, and keeps other people\'s methods', async () => {
+  const { gw, anaRow, vicRow } = await rollbackSetup('a11-new-reclaim');
+  let s = gw.state();
+  gw.write({ ...s, invites: [...s.invites, { hash: u(crypto.randomBytes(32)), person: anaRow.id, expires: Date.now() + 86400e3 }], pushSubs: [pushSub('https://web.push.apple.com/owner')] });
+  const before = gw.state();
+  await gw.close();
+  const r = reclaimWith(NEW, gw.dir, gw.publicUrl);
+  assert.match(r.stdout, /every passkey and session is forgotten\. Claim the box again: .*\/auth\/claim#/);
+  assert.match(r.stdout, /^2 other people can still sign in: check who they are in the hub's Settings › People after claiming$/m);
+  s = JSON.parse(fs.readFileSync(gw.file, 'utf8'));
+  assert.deepEqual([s.passkeys, s.sessions, s.pushSubs, s.peopleSessions, s.invites], [[], [], [], [], []]);
+  assert.deepEqual(ownerOf(s)[0].methods, []);
+  assert.equal(ownerOf(s)[0].rev, ownerOf(before)[0].rev + 1);
+  for (const id of [anaRow.id, vicRow.id]) assert.deepEqual(rowOf(s, id).methods, rowOf(before, id).methods);
+  assert.equal(s.peopleStamp, stampOf([]));
+  const again = await gateway('a11-new-reclaim-new', { dir: gw.dir, token: tokenOf(r.stdout) });
+  try {
+    assert.equal(JSON.stringify(again.state()), JSON.stringify(s), 'the start writes nothing: no reset');
+    assert.ok(!again.logs.includes(RESET_LINE));
+  } finally { await again.close(); }
+  // nobody else on the box: no such line
+  const alone = await gateway('a11-new-reclaim-alone');
+  try {
+    assert.equal((await alone.claim(authenticator())).status, 200);
+  } finally { await alone.close(); }
+  const r2 = reclaimWith(NEW, alone.dir, alone.publicUrl);
+  assert.doesNotMatch(r2.stdout, /other (people|person)/);
 });

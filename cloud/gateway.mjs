@@ -220,6 +220,22 @@ const ownerRow = (s) => (s.people ?? []).find((p) => p.role === 'owner') ?? null
 const withOwner = (s, now = Date.now()) => (ownerRow(s) ? s : { ...s, people: [...(s.people ?? []), { id: newId('p-'), name: 'Owner', role: 'owner', level: 'full', methods: [], pushSubs: [], added_at: new Date(now).toISOString(), last_seen: null, notices: [], rev: 1 }] });
 // Every write that changes `passkeys` goes through this, so an older gateway's change shows on start.
 const stamped = (s) => ({ ...s, peopleStamp: peopleStamp(s.passkeys) });
+// An older gateway reset the owner (its reclaim, a passkey removed or added under it): whoever it
+// let in may not be the owner we knew, so nobody else's session or invite stands, nor any other way
+// in as the owner. Other people keep their methods: they sign in again. The counts go in a notice.
+const resetPeople = (s, now = Date.now()) => {
+  const owner = ownerRow(s);
+  const gone = new Set((owner?.methods ?? []).map((m) => m.id));
+  const live = (x) => x.expires > now;
+  const counts = {
+    sessions_ended: (s.peopleSessions ?? []).filter(live).length + s.sessions.filter((x) => live(x) && gone.has(x.method)).length,
+    invites_deleted: (s.invites ?? []).length,
+    methods_deleted: gone.size,
+  };
+  const notice = { kind: 'people-reset', at: new Date(now).toISOString(), ...counts };
+  const people = s.people.map((p) => (p === owner ? { ...p, methods: [], rev: p.rev + 1, notices: [...(p.notices ?? []), notice] } : p));
+  return { next: stamped({ ...s, people, peopleSessions: [], invites: [], sessions: s.sessions.filter((x) => !gone.has(x.method)) }), counts };
+};
 
 // The box's own address. Each instance is a subdomain of it, so its DNS needs the name and a
 // wildcard under it (box.example.com and *.box.example.com). http only for a *.localhost test.
@@ -1011,10 +1027,16 @@ export function createGateway(opts = {}) {
   // Unclaimed: the token named in the environment, else one made now and printed once (whoever
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
   try {
-    const s = store.load();
+    let s = store.load();
     // A box claimed before people: its passkeys, sessions and devices become the owner's where they
     // are, so the write only adds the row and the stamp after the old keys. Once there, nothing.
-    if (s.passkeys.length && !s.people) store.save(stamped(withOwner(s)));
+    if (s.passkeys.length && !s.people) store.save(s = stamped(withOwner(s)));
+    // Only an older gateway changes `passkeys` without the stamp, and none runs beside this one, so
+    // the check is here alone. A sign-in under it changes counters, never ids, and trips nothing.
+    else if (s.people && s.peopleStamp !== peopleStamp(s.passkeys)) {
+      store.save(s = resetPeople(s).next);
+      log('the owner\'s passkeys changed under an older gateway: every other person\'s session and every invite ended; they sign in again');
+    }
     // made before sign-in moved under /auth (or for another name): the browser won't offer them here
     if (s.passkeys.some((x) => x.rp !== RP_ID)) log(`passkeys made before sign-in moved to ${PUB}/auth (or for another name) can't sign in here: run devteam-reclaim in a shell on the box for a claim link, and claim it again`);
     if (!s.passkeys.length) {
@@ -2718,8 +2740,14 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       // shell on the box (Render's Shell tab, fly ssh console): that access is the root of trust.
       const pub = publicUrl();
       const store = stateStore(gatewayDir());
-      store.save({ ...store.load(), passkeys: [], sessions: [], pushSubs: [] });
+      // Everyone's sessions and every invite go too, and the owner's other methods, since whoever
+      // claims next is the owner; other people keep theirs, to be checked in People after the claim.
+      const s = store.load();
+      const people = s.people?.map((p) => (p.role === 'owner' ? { ...p, methods: [], rev: p.rev + 1 } : p));
+      store.save(stamped({ ...s, passkeys: [], sessions: [], pushSubs: [], peopleSessions: [], invites: [], ...(people ? { people } : {}) }));
       process.stdout.write(`every passkey and session is forgotten. Claim the box again: ${claimUrl(pub, newClaim(store))}\n`);
+      const n = (people ?? []).filter((p) => p.role !== 'owner' && p.methods.length).length;
+      if (n > 0) process.stdout.write(`${n} other ${n === 1 ? 'person' : 'people'} can still sign in: check who they are in the hub's Settings › People after claiming\n`);
     } else if (cmd === 'thread-key') {
       // The public half of the key that signs the owner's thread presses, for the boot to put where
       // only root can write and every user can read (cloud/Dockerfile, /etc/devteam/thread-key.pub).
