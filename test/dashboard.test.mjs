@@ -4410,6 +4410,11 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   await p.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  // kit-300: DEVTEAM_TEST_CPU_THROTTLE=<n> runs the page n times slower, as a loaded runner does;
+  // DEVTEAM_TEST_SLIDE_MS=<ms> makes the panel's slide-in take that long, so a click aimed while it
+  // moves (the race this test lost on CI, where the cards drew before the slide had ended) always shows
+  if (process.env.DEVTEAM_TEST_CPU_THROTTLE) await p.send('Emulation.setCPUThrottlingRate', { rate: Number(process.env.DEVTEAM_TEST_CPU_THROTTLE) });
+  if (process.env.DEVTEAM_TEST_SLIDE_MS) await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `document.addEventListener('DOMContentLoaded', () => document.documentElement.style.setProperty('--dur', '${Number(process.env.DEVTEAM_TEST_SLIDE_MS)}ms'))` });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
   const soon = soonIn(p, 30000, () => dash.out());
@@ -4419,6 +4424,10 @@ test('a goal approval from the phone', { skip: canDrive ? false : 'needs Chrome 
   // what is clicked between its press and its release
   const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   await soon(`!!${card(GY.q)} && !!${card(GR.q)} && innerWidth === 390`, 'both approvals, on a phone');
+  // kit-300: the cards are the Threads panel's Inbox tab (#th-inbox #questions), which slides in over
+  // --dur. A click aims at where its target is, then presses there: aimed while the panel still moves
+  // (the cards can draw before the slide ends), the press lands beside the choice and picks nothing
+  await soon(`document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the panel open on Inbox, at rest');
 
   await t.test('a recommendation that names no verdict is said as words', async () => {
     const shown = async (q) => JSON.parse(await p.ev(`JSON.stringify((() => { const c = ${card(q)}; return { suggest: c.querySelector('[data-goal-suggest]')?.textContent ?? null, labels: [...c.querySelectorAll('input[data-pick]')].map((i) => i.value), rec: [...c.querySelectorAll('.choice.rec input')].map((i) => i.value) }; })())`));

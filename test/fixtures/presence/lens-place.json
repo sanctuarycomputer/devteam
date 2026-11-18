@@ -1,0 +1,14 @@
+{
+  "lens": 1,
+  "type": "place",
+  "anchors": [
+    {
+      "id": "c1",
+      "k": "main > h1"
+    },
+    {
+      "id": "c3",
+      "k": "main > p:nth-of-type(3)"
+    }
+  ]
+}
