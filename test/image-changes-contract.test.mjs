@@ -22,6 +22,7 @@ const exitOf = (stem) => {
 
 const SMOKE_COMMANDS = ['machine status', 'machine status --questions', 'machine status --knowledge', 'recover --machine --dry-run --force'];
 const SHA = /^[0-9a-f]{40}$/;
+const SCRIPT = 'docs/devteam/scripts/devteam.mjs';
 const fail = (rule, why) => { throw new Error(`${rule}: ${why}`); };
 
 // §5's order: file, then part, by UTF-16 code units; a null part before any string.
@@ -47,6 +48,7 @@ function checkRun({ exit, stdout, json }) {
     if (typeof c.file !== 'string' || !c.file || c.file.startsWith('/')) fail('changes', `file ${JSON.stringify(c.file)} is not a repo path or "(smoke)"`);
     if (!(c.part === null || (typeof c.part === 'string' && c.part))) fail('changes', `part ${JSON.stringify(c.part)} is neither null nor a name`);
     if (c.file === '(smoke)' && !SMOKE_COMMANDS.includes(c.part)) fail('changes', `a smoke change's part ${JSON.stringify(c.part)} is not one of the smoke commands`);
+    if (c.part !== null && c.file !== '(smoke)' && c.file !== SCRIPT) fail('changes', `${c.file} has a part, but only ${SCRIPT} and "(smoke)" have parts`);
     const parts = seen.get(c.file) ?? [];
     if (parts.includes(c.part)) fail('changes', `${c.file} ${JSON.stringify(c.part)} appears twice`);
     if (parts.length && (c.part === null || parts.includes(null))) fail('changes', `${c.file} has both a whole-file change and a part`);
@@ -163,6 +165,12 @@ test('the checker refuses what a caller refuses', () => {
   assert.throws(() => checkRun(withJson(minor, { ...minor.json, v: 2 })), { message: /^v:/ });
   // (f) text that isn't its JSON rendered
   assert.throws(() => checkRun({ ...minor, stdout: minor.stdout.replace('(4 changes', '(3 changes') }), { message: /^text:/ });
-  // and a can't-tell that exits like a patch
+  // (g) a file changed whole and in a part; (h) a change twice; (i) a part on a file that has none
+  const minorWith = (changes) => withJson(minor, { ...minor.json, changes });
+  assert.throws(() => checkRun(minorWith([...minor.json.changes, { file: SCRIPT, part: null }].sort(byChange))), { message: /^changes: .* both a whole-file change and a part/ });
+  assert.throws(() => checkRun(minorWith([...minor.json.changes, minor.json.changes[1]].sort(byChange))), { message: /^changes: .* appears twice/ });
+  assert.throws(() => checkRun(minorWith([...minor.json.changes, { file: 'cloud/Dockerfile', part: 'boot' }].sort(byChange))), { message: /^changes: .* has a part/ });
+  // and a can't-tell that exits like a patch, or whose reason lacks the kit's prefix
   assert.throws(() => checkCantTell({ exit: 0, stderr: fixture('cant-tell.txt') }), { message: /^exit:/ });
+  assert.throws(() => checkCantTell({ exit: 2, stderr: fixture('cant-tell.txt').replace(/^devteam: /, '') }), { message: /^stderr: .*devteam: / });
 });
