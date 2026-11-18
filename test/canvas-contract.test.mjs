@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -226,6 +227,119 @@ function wide(count) {
   return d;
 }
 const timed = (fn) => { const t0 = Date.now(); const v = fn(); return [v, Date.now() - t0]; };
+
+// ---- the contract: its machine-read tables, found by their ### heading ----
+
+const contract = () => fs.readFileSync(path.join(here, 'contracts', 'canvas.md'), 'utf8');
+const cellsOf = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+const spans = (cell) => [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+const first = (cell, what) => { const s = spans(cell); assert.ok(s.length > 0, `${what}: a code span in ${JSON.stringify(cell)}`); return s[0]; };
+// The rows of the first table under `### <heading>` (before any other heading), its header checked.
+function table(md, heading, header) {
+  const lines = md.split('\n');
+  const at = lines.flatMap((l, i) => (l === `### ${heading}` ? [i] : []));
+  assert.equal(at.length, 1, `one ### ${heading} heading`);
+  let i = at[0] + 1;
+  while (i < lines.length && !lines[i].startsWith('|')) { assert.ok(!lines[i].startsWith('#'), `### ${heading} holds a table`); i++; }
+  assert.deepEqual(cellsOf(lines[i] || ''), header, `### ${heading}: its header`);
+  assert.match(lines[i + 1] || '', /^\|(?:\s*-+\s*\|)+$/, `### ${heading}: its separator`);
+  const rows = [];
+  for (i += 2; i < lines.length && lines[i].startsWith('|'); i++) {
+    const c = cellsOf(lines[i]);
+    assert.equal(c.length, header.length, `### ${heading}: ${header.length} cells in ${lines[i]}`);
+    rows.push(c);
+  }
+  assert.ok(rows.length > 0, `### ${heading} has rows`);
+  return rows;
+}
+const sameSet = (got, want, what) => {
+  assert.equal(new Set(got).size, got.length, `${what}: no row twice`);
+  assert.deepEqual([...got].sort(), [...want].sort(), `${what}: the contract's rows and the code's, both ways`);
+};
+const has = (text, needle, where) => assert.ok(text.includes(needle), `${where} says ${JSON.stringify(needle)}`);
+// The text from the `## ` heading naming `word` to the next `## ` heading (a `###` never cuts it).
+function section(md, word) {
+  const hit = md.split(/^## /m).filter((p) => p.split('\n', 1)[0].includes(word));
+  assert.equal(hit.length, 1, `one ## section names ${word}`);
+  return hit[0];
+}
+const all = (md, word, needles) => { const s = section(md, word); for (const n of needles) has(s, n, `section ${word}`); };
+// What crossing a limit answers, as the Limits table words it.
+const ANSWERS = [
+  /^refused (?:value|limit)$/, /^close (?:1008|1001)$/, /^(?:400|413)$/, /^window: (?:ping|saved|selections)$/,
+  /^ignored$/, /^split; one op over: 409 limit$/, /^fragmented$/, /^not an anchor$/,
+];
+
+// ---- the fixtures: every file under test/fixtures/canvas/ is of a known kind by its name ----
+
+const FIX = path.join(here, 'fixtures', 'canvas');
+const readFix = (rel) => JSON.parse(fs.readFileSync(path.join(FIX, rel), 'utf8'));
+const MSG_KINDS = [...PAGE_KINDS, ...SERVER_KINDS];
+const NAMED = [...MSG_KINDS.map((k) => [`msg-${k}`, k]), ['presence-here', 'presence-here'], ['presence-move', 'presence-move'], ['note-anchor', 'note-anchor']];
+const MAGIC = {
+  png: (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  jpg: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff,
+  gif: (b) => b.subarray(0, 4).toString('latin1') === 'GIF8',
+  webp: (b) => b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP',
+};
+// { kind: 'doc' | 'http' | 'exchange' | 'image' | 'message', shape? } or null for an unknown file.
+function fixtureKind(rel) {
+  if (rel.startsWith('images/')) return IMAGE_FILE_RE.test(rel.slice('images/'.length)) ? { kind: 'image' } : null;
+  if (rel.includes('/') || !rel.endsWith('.json')) return null;
+  const base = rel.slice(0, -'.json'.length);
+  if (base === 'hostile' || /^doc-[a-z0-9-]+$/.test(base)) return { kind: 'doc' };
+  if (/^http-[a-z0-9-]+$/.test(base)) return { kind: 'http' };
+  if (/^exchange-[a-z0-9-]+$/.test(base)) return { kind: 'exchange' };
+  const hits = NAMED.filter(([pre]) => base === pre || (base.startsWith(`${pre}-`) && /^[a-z0-9-]+$/.test(base))).sort((a, b) => b[0].length - a[0].length);
+  return hits.length ? { kind: 'message', shape: hits[0][1] } : null;
+}
+// Every file under the folder, relative, `images/` one level down; any other folder is listed as itself.
+function fixtureFiles() {
+  const out = [];
+  for (const e of fs.readdirSync(FIX, { withFileTypes: true })) {
+    if (e.isDirectory() && e.name === 'images') for (const f of fs.readdirSync(path.join(FIX, 'images'))) out.push(`images/${f}`);
+    else out.push(e.isDirectory() ? `${e.name}/` : e.name);
+  }
+  return out.sort();
+}
+const imagesOf = () => {
+  const names = fs.existsSync(path.join(FIX, 'images')) ? fs.readdirSync(path.join(FIX, 'images')) : [];
+  const bytes = names.reduce((s, f) => s + fs.statSync(path.join(FIX, 'images', f)).size, 0);
+  return { images: new Set(names), folderBytes: bytes };
+};
+const docFixtures = () => fixtureFiles().filter((f) => (fixtureKind(f) || {}).kind === 'doc');
+// A value at a stored property path (groups nested by their dots), or undefined.
+function valueAt(n, p) {
+  let v = n;
+  for (const seg of p.split('.')) {
+    if (v === null || typeof v !== 'object' || !Object.hasOwn(v, seg)) return undefined;
+    v = v[seg];
+  }
+  return v;
+}
+// Whether a node uses a property: a plain path set, or a map-entry template with an entry.
+function uses(n, p) {
+  const nonEmpty = (m) => m !== null && typeof m === 'object' && Object.keys(m).length > 0;
+  if (!p.includes('<')) return valueAt(n, p) !== undefined;
+  if (p === 'props.<name>') return nonEmpty(n.props);
+  if (p === 'variants.<name>') return nonEmpty(n.variants);
+  if (p === 'variants.<name>.<id>.<prop>') return nonEmpty(n.variants) && Object.values(n.variants).some((v) => nonEmpty(v) && Object.values(v).some(nonEmpty));
+  if (p === 'overrides.<id>.<prop>') return nonEmpty(n.overrides) && Object.values(n.overrides).some(nonEmpty);
+  throw new Error(`no use rule for ${p}`);
+}
+function tokenTypesOf(tokens) {
+  const out = new Set();
+  const stack = [tokens];
+  while (stack.length) {
+    const g = stack.pop();
+    for (const v of Object.values(g)) {
+      if (v && typeof v === 'object' && Object.hasOwn(v, '$type')) out.add(v.$type);
+      else if (v && typeof v === 'object') stack.push(v);
+    }
+  }
+  return out;
+}
+const FREE_KINDS = ['page-name', 'node-name', 'text', 'prop-default', 'prop-value', 'variant-text', 'override-text'];
 
 test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one another, and no canvas test skips', async (t) => {
   await t.test('rules: a minimal document is valid', () => {
@@ -680,6 +794,231 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     assert.ok(measureProblems([me, { name: 'canvas-copy.test.mjs', source: me.source }]).length > 0, "this file's own A1 is counted (a copy repeats it)");
     assert.ok(measureProblems([{ name: 'elsewhere.test.mjs', source: me.source }]).length > 0, 'and is a canvas file');
   });
+  await t.test('contract: tables match the code', () => {
+    const md = contract();
+    // types and properties, with class, enum words and default (`every` for the common rows)
+    const props = new Map();
+    for (const [typeCell, propCell, classCell, defCell] of table(md, 'Properties', ['Type', 'Property', 'Class', 'Default'])) {
+      const types = typeCell === 'every' ? [...TYPES] : spans(typeCell);
+      assert.ok(types.length > 0 && types.every((ty) => TYPES.includes(ty)), `Properties: types in ${typeCell}`);
+      const prop = first(propCell, 'Properties');
+      const [cls, ...words] = spans(classCell);
+      let def;
+      if (defCell === 'required') def = { default: undefined, required: true };
+      else if (defCell === 'absent') def = { default: undefined, required: false };
+      else def = { default: JSON.parse(first(defCell, `Properties ${prop}`)), required: false };
+      for (const ty of types) {
+        const key = `${ty} ${prop}`;
+        assert.ok(!props.has(key), `Properties: ${key} once`);
+        props.set(key, { class: cls, default: def.default, required: def.required, ...(cls === 'enum' ? { words } : {}) });
+      }
+    }
+    const code = new Map();
+    for (const ty of TYPES) {
+      for (const [p, d] of Object.entries(PROPS[ty])) code.set(`${ty} ${p}`, { class: d.class, default: d.default, required: d.required, ...(d.class === 'enum' ? { words: [...d.words] } : {}) });
+    }
+    sameSet([...props.keys()], [...code.keys()], 'Properties');
+    for (const [k, v] of code) assert.deepEqual(props.get(k), v, `Properties: ${k}: class, words, default`);
+
+    const names = (heading, header) => table(md, heading, header).map((r) => { assert.ok(r.slice(1).every((c) => c.length > 0), `${heading}: ${r[0]} is described`); return first(r[0], heading); });
+    sameSet(names('Value classes', ['Class', 'Rule']), CLASSES, 'Value classes');
+    sameSet(names('Token types', ['$type', '$value']), TOKEN_TYPES, 'Token types');
+    assert.deepEqual(names('Ops', ['Op', 'Shape', 'Idempotent as']), [...OPS], 'Ops, in order');
+    sameSet(names('Page messages', ['t', 'Shape']), PAGE_KINDS, 'Page messages');
+    sameSet(names('Server messages', ['t', 'Shape']), SERVER_KINDS, 'Server messages');
+    sameSet(names('HTTP bodies', ['Kind', 'Shape']), HTTP_KINDS, 'HTTP bodies');
+    assert.deepEqual(names('Refusals', ['why', 'When']), [...REFUSALS], 'Refusals, in order');
+    // document rules: names and codes, in judgement order
+    const rules = table(md, 'Document rules', ['Rule', 'Code', 'What']).map(([r, c, w]) => { assert.ok(w.length > 0); return [first(r, 'rule'), first(c, 'code')]; });
+    assert.deepEqual(rules, DOC_RULES.map((r) => [r.rule, r.code]), 'Document rules, with their codes, in order');
+    // limits: every LIMITS key with its number and what crossing it answers
+    const limits = table(md, 'Limits', ['Name', 'Number', 'Answer']);
+    sameSet(limits.map((r) => first(r[0], 'Limits')), Object.keys(LIMITS), 'Limits');
+    for (const [n, num, answer] of limits) {
+      const name = first(n, 'Limits');
+      assert.equal(Number(first(num, `Limits ${name}`)), LIMITS[name], `Limits: ${name}'s number`);
+      assert.ok(ANSWERS.some((rx) => rx.test(answer)), `Limits: ${name}'s answer ${JSON.stringify(answer)} is one the contract words`);
+    }
+    // the class-bound limits answer value, the counts and sizes of the document limit
+    for (const k of ['tracks', 'idChars', 'nameChars', 'textChars', 'pathBytes', 'figmaChars', 'propNameChars', 'tokenSegmentChars']) {
+      assert.equal(limits.find((r) => first(r[0], 'Limits') === k)[2], 'refused value', `Limits: ${k} is a class bound`);
+    }
+    for (const k of ['docBytes', 'folderBytes', 'nodes', 'pages', 'tokens', 'tokenDepth', 'depth', 'overrideEntries', 'props', 'variants', 'editOpsBytes']) {
+      assert.equal(limits.find((r) => first(r[0], 'Limits') === k)[2], 'refused limit', `Limits: ${k} is a count or size`);
+    }
+    // routes
+    const routes = table(md, 'Routes', ['Key', 'Method and path', 'Fake']).map(([k, mp, f]) => [first(k, 'Routes'), first(mp, 'Routes'), f]);
+    assert.deepEqual(routes, ROUTES.map((r) => [r.key, `${r.method} ${r.path}`, r.fake ? 'yes' : 'no']), 'Routes, in order');
+  });
+
+  await t.test('contract: prose', () => {
+    const md = contract();
+    has(md, 'canvas-doc@1', 'the contract');
+    has(md, 'canvas@1', 'the contract');
+    const order = md.split('\n').filter((l) => l.startsWith('## ')).map((l) => l.slice(3));
+    assert.deepEqual(order.map((h) => h.replace(/^[0-9]+\. /, '')), [
+      'Consumers and providers', 'The document: canvas-doc@1', 'The socket: canvas@1', 'Ops', 'Messages', 'Refusals', 'Limits',
+      'HTTP routes', 'Presence on a canvas', 'Pins', 'Exports', 'Not defended', 'Canvas test files', 'The fake, the exchanges and the HTTP fixtures',
+    ], 'the sections, in order');
+    all(md, 'Consumers and providers', ['`canvas: 1`', 'additive changes only', "ignores keys and message kinds it doesn't know", 'presence@1', 'Nothing in `presence@1` changes']);
+    all(md, 'The document', [
+      'canvas.json', '`{ "canvas": 1, "rev"', 'a flat map by id', '1 to 100', 'unique across pages and nodes', "counts a page's children as 1",
+      'never sits inside another component, at any depth', 'stored nested', 'flat dotted keys', 'splits at its second dot', 'null removes',
+      'only under a parent whose `layout.mode` is `none`', 'Resolution order',
+      "the base value, then the default of a prop aimed at it, then the chosen variant's override, then the instance's override, then the instance's prop value aimed at it",
+      'the last that is present wins', 'shows its base values', 'applies to instances only', 'Free text', "a text prop's `default`",
+      'never `name`, `figma`', 'No aliases inside tokens', 'never both', "in the table's order", 'docErrors(doc, { images, folderBytes })',
+      'JSON.stringify(doc, null, 2)',
+    ]);
+    all(md, 'The socket', [
+      '`GET /canvas?slug=<slug>`', 'presence@1 §2', '§4', '404', '`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`', 'not open for editing',
+      '16 of `[0-9a-z]`', 'the id its next session will use', 'reloads the document over HTTP', 'resends every edit of its own above the last `saved`',
+      'fragmented', 'host, relay mark, path, upgrade, origin, person headers, slug',
+    ]);
+    all(md, 'Ops', [
+      'judged as a whole', 'refer forward', 'charged to its rule', 'An edit with no ops is `shape`', 'raises `rev` by one, whatever it changed',
+      'its properties as `set`s', 'does nothing', 'places last', 'Pages as ops', '"type": "page"', 'removes it and its nodes', 'reorders it', 'no sixth op',
+    ]);
+    all(md, 'Messages', [
+      'acked again to that connection only', '"ops": []', "doesn't raise the client's highest `seq`", 'closed 1008', 'at most 100 ids',
+      'the whole `select` is ignored', 'are dropped', 'in the order they first connected', '250 ms', '500 ms', 'none while saving is paused',
+      '`branch-moved`, `worktree-gone` or `index-dirty`', '`landed` or `removed`', 'a close with code 1000', 'starts a new session',
+      "every client's highest `seq` is forgotten", 'A deleted node leaves every selection', 'every 20 s',
+    ]);
+    all(md, 'Refusals', ['one word', 'plain words', 'No `closed` code', '423']);
+    all(md, 'Limits', ['1048576', 'on each frame header', 'before `welcome`', 'counts toward no connection limit', 'a class bound']);
+    all(md, 'HTTP routes', [
+      '`GET /api/canvas/doc?slug=`', '&at=main', 'the relay mark', '`http://<Host>`', 'View 403', '415', 'a slug `land` closed 423', 'judged first',
+      'first 16 hex of SHA-256', 'the same bytes twice give the same `src`', '`[0-9a-f]{16}\\.(png|jpg|webp|gif)`', 'nothing from the URL is joined to a path',
+      'nosniff', '`x-devteam-canvas-token`', '`run/canvas-token`', '503', '`{ "why": "no-session" }`', 'One judgement, then one change',
+      'each raising `rev` by one', '`ack` null', 'The answer waits for the disk', '`"saved": false`', '409', '50 MB', '501', 'Statuses in order',
+      'keeps that apply', 'counts toward no connection limit', '404',
+    ]);
+    all(md, 'Presence on a canvas', ['"page": "canvas"', '"art": "<slug>@canvas"', '`@<page id>`', 'plus 200 px around', 'content bounds', 'presence-here']);
+    all(md, 'Pins', ['artifact-notes@1', '`{ "node": "<id>" }`', '1 to 64 characters of one line of plain text', '`anchorProblem`', 'note-anchor']);
+    all(md, 'Exports', ['HTML', 'attribute values quoted and escaped', 'sanitiser', 'written as `\\\\(`', 'longer than any run of backticks', 'goldens']);
+    all(md, 'Not defended', ['`run/canvas-token`', 'any session name it claims', 'with no person headers is the owner']);
+    all(md, 'Canvas test files', [
+      'the whole identifier `test`', 'subtest(', 'inside a comment, a string or a template', '`test/canvas-*.test.mjs`', 'skipProblems', 'measureProblems',
+      "skip: canDrive ? false : '<reason>'", "skip: process.platform === 'darwin' ? false : 'not macOS'", './lib/chrome.mjs',
+      'quoted keys', 'computed keys', 'bracket access', 'false positives', "case 'skip':", 'reword',
+    ]);
+    all(md, 'The fake', [
+      'startCanvasFake(opts)', '`canvases`', '`main`', '`images`', '`folderBytes`', '`repo`', '`ownerName`', '`token`', '`clock`', 'serve(req, res)',
+      'doc(slug)', 'rev(slug)', 'session(slug)', 'save(slug)', 'pause(slug, why)', 'resume(slug)', 'replace(slug, doc)', 'land(slug)', 'remove(slug)',
+      'restart(slug)', 'stats()', 'tick(ms)', '1012', 'openCanvas(url', 'continuation frames', 'request(url', 'contentLength',
+      'playExchange(fake, exchange', '"steps"', '"open"', '"as"', '"send"', '"close": true', '"local"', '"do"', '"tick"', '"expect"', '"doc"',
+      '"$session"', '"$conn:<name>"', '{ "$close": <code> }', 'nothing else is a placeholder', 'pings never fall due', 'playHttp',
+      '"requestKind"', '"responseKind"', '`local-request`', 'http-<route key>-<case>.json',
+    ]);
+  });
+
+  await t.test('fixtures: every file is known', () => {
+    const files = fixtureFiles();
+    assert.ok(files.length > 0);
+    const { images, folderBytes } = imagesOf();
+    assert.ok(images.size > 0, 'images/ holds an image');
+    for (const rel of files) {
+      const k = fixtureKind(rel);
+      assert.ok(k, `${rel} is of a known kind by its name`);
+      if (k.kind === 'image') {
+        const bytes = fs.readFileSync(path.join(FIX, rel));
+        const [hex, ext] = rel.slice('images/'.length).split('.');
+        assert.equal(crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16), hex, `${rel} is named by its own hash`);
+        assert.ok(MAGIC[ext](bytes), `${rel} is a ${ext} by its first bytes`);
+      } else if (k.kind === 'doc') {
+        assert.deepEqual(docErrors(readFix(rel), { images, folderBytes }), [], `${rel} is a valid document`);
+      } else if (k.kind === 'message') {
+        assert.deepEqual(shapeErrors(k.shape, readFix(rel)), [], `${rel} holds to ${k.shape}`);
+      } else {
+        // http-* (T3) and exchange-* (T4) are checked by their own runners; here they need only parse
+        readFix(rel);
+      }
+    }
+    // the rule itself: unknown names are unknown
+    for (const bad of ['notes.json', 'msg-nope.json', 'doc.json', 'images/0123456789ABCDEF.png', 'images/x.png', 'golden/a.html', 'doc-a.txt', 'msg-ops_x.json']) {
+      assert.equal(fixtureKind(bad), null, `${bad} is unknown`);
+    }
+    assert.deepEqual(fixtureKind('msg-ops-local.json'), { kind: 'message', shape: 'ops' });
+    assert.deepEqual(fixtureKind('presence-move-empty.json'), { kind: 'message', shape: 'presence-move' });
+  });
+
+  await t.test('fixtures: static coverage', () => {
+    const types = new Set();
+    const used = new Set();
+    const modes = new Set();
+    const tokenTypes = new Set();
+    for (const rel of docFixtures()) {
+      const d = readFix(rel);
+      for (const ty of tokenTypesOf(d.tokens)) tokenTypes.add(ty);
+      for (const n of Object.values(d.nodes)) {
+        types.add(n.type);
+        for (const p of Object.keys(PROPS[n.type])) if (uses(n, p)) used.add(`${n.type} ${p}`);
+        if (n.layout && n.layout.mode) modes.add(n.layout.mode);
+      }
+    }
+    sameSet([...types], TYPES, 'every node type is in a document fixture');
+    for (const ty of TYPES) for (const p of Object.keys(PROPS[ty])) assert.ok(used.has(`${ty} ${p}`), `a document fixture's ${ty} sets ${p}`);
+    sameSet([...modes], PROPS.frame['layout.mode'].words, 'every layout mode');
+    sameSet([...tokenTypes], TOKEN_TYPES, 'every token type');
+    const files = fixtureFiles();
+    for (const kind of MSG_KINDS) assert.ok(files.some((f) => { const k = fixtureKind(f); return k && k.kind === 'message' && k.shape === kind; }), `a msg- fixture of ${kind}`);
+    for (const kind of ['presence-here', 'presence-move', 'note-anchor']) assert.ok(files.some((f) => (fixtureKind(f) || {}).shape === kind), `a fixture of ${kind}`);
+    assert.ok(files.includes('presence-move-empty.json'), 'a cursor over empty canvas');
+    assert.ok(readFix('presence-move-empty.json').a.k.startsWith('@'), 'anchored to @<page id>');
+  });
+
+  await t.test('fixtures: resolve on doc-every-type', () => {
+    const d = readFix('doc-every-type.json');
+    const at = (doc) => resolve(doc, 'buy')['button-label'].text;
+    assert.equal(at(d), 'Buy now', 'the instance prop value');
+    delete d.nodes.buy.props.label;
+    assert.equal(at(d), 'Override label', "then the instance's override");
+    delete d.nodes.buy.overrides['button-label'].text;
+    assert.equal(at(d), 'Variant label', "then the chosen variant's override");
+    delete d.nodes.button.variants.primary['button-label'].text;
+    assert.equal(at(d), 'Default label', "then the prop's default, never the base");
+    delete d.nodes.button.props.label;
+    assert.equal(at(d), 'Base label', 'then the base');
+    // the five levels are really there
+    const full = readFix('doc-every-type.json');
+    assert.equal(full.nodes['button-label'].text, 'Base label');
+    assert.equal(full.nodes.buy.component, 'button');
+    assert.equal(full.nodes.buy.variant, 'primary');
+  });
+
+  await t.test('hostile: valid with every field kind; every free text carries every marker; freeTexts finds each kind', () => {
+    const h = readFix('hostile.json');
+    assert.deepEqual(docErrors(h, imagesOf()), [], 'hostile.json is a valid document');
+    const nodes = Object.values(h.nodes);
+    sameSet([...new Set(nodes.map((n) => n.type))], TYPES, 'every node type');
+    assert.ok(h.pages.length >= 2, 'two pages');
+    const comps = nodes.filter((n) => n.type === 'component');
+    assert.ok(comps.some((c) => Object.values(c.props || {}).some((pd) => pd.type === 'text')), 'a component with a text prop');
+    assert.ok(comps.some((c) => Object.values(c.variants || {}).some((v) => Object.values(v).some((o) => typeof o.text === 'string'))), 'a variant with a text override');
+    const insts = nodes.filter((n) => n.type === 'instance');
+    assert.ok(insts.some((n) => Object.values(n.props || {}).some((v) => typeof v === 'string')), 'an instance with a text prop value');
+    assert.ok(insts.some((n) => Object.values(n.overrides || {}).some((o) => typeof o.text === 'string')), 'an instance with a text override');
+    const texts = freeTexts(h);
+    sameSet([...new Set(texts.map((f) => f.kind))], FREE_KINDS, 'hostile.json fills every kind of free-text field');
+    for (const f of texts) for (const m of HOSTILE_MARKERS) assert.ok(f.value.includes(m), `${f.where} holds ${JSON.stringify(m)}`);
+    assert.ok(texts.some((f) => f.kind === 'node-name' && [...f.value].length <= LIMITS.nameChars), 'a name of at most 200 characters carries every marker');
+    // freeTexts on an inline document with one field of each kind: each kind found once
+    const one = {
+      canvas: 1, rev: 0, tokens: {},
+      pages: [{ id: 'p', name: 'P', children: ['c', 'i'] }],
+      nodes: {
+        c: { type: 'component', parent: 'p', children: ['ct'], props: { a: { type: 'text', default: 'D', target: { id: 'ct', prop: 'text' } } }, variants: { v: { ct: { text: 'V' } } } },
+        ct: { type: 'text', parent: 'c', text: 'T' },
+        i: { type: 'instance', parent: 'p', component: 'c', name: 'N', props: { a: 'PV' }, overrides: { ct: { text: 'O' } } },
+      },
+    };
+    assert.deepEqual(docErrors(one), [], 'the inline document is valid');
+    const got = freeTexts(one);
+    assert.deepEqual(got.map((f) => f.kind).sort(), [...FREE_KINDS].sort(), 'each kind found, once');
+    assert.deepEqual(got.map((f) => f.value).sort(), ['D', 'N', 'O', 'P', 'PV', 'T', 'V']);
+  });
+
   await t.test('rules: Object.prototype is untouched', () => {
     assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).sort(), PROTO_NAMES);
     assert.equal(({}).text, undefined);

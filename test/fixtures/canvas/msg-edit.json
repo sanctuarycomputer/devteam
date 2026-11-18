@@ -1,0 +1,49 @@
+{
+  "t": "edit",
+  "client": "k3f9a2x7q1m0z8w4",
+  "seq": 7,
+  "ops": [
+    {
+      "op": "set",
+      "id": "card",
+      "prop": "layout.gap",
+      "value": 12
+    },
+    {
+      "op": "add",
+      "node": {
+        "id": "k3f9a2-9",
+        "type": "text",
+        "parent": "card",
+        "name": "Note",
+        "text": "Free shipping"
+      },
+      "after": "title"
+    },
+    {
+      "op": "move",
+      "id": "dot",
+      "parent": "actions",
+      "after": null
+    },
+    {
+      "op": "del",
+      "id": "rule"
+    },
+    {
+      "op": "token",
+      "path": "color.accent",
+      "value": {
+        "$type": "color",
+        "$value": {
+          "colorSpace": "srgb",
+          "components": [
+            1,
+            0.5,
+            0
+          ]
+        }
+      }
+    }
+  ]
+}
