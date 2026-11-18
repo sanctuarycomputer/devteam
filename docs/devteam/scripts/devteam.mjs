@@ -7593,7 +7593,8 @@ const ARTIFACT_LENS = String.raw`(() => {
   const sayPointer = (m) => {
     pointerPending = m;
     if (pointerTimer) return;
-    const wait = POINTER_GAP - (Date.now() - pointerAt);
+    // never longer than one gap, whatever the wall clock did since the last send
+    const wait = Math.min(POINTER_GAP, POINTER_GAP - (Date.now() - pointerAt));
     if (wait <= 0) flushPointer();
     else pointerTimer = setTimeout(() => { pointerTimer = 0; flushPointer(); }, wait);
   };

@@ -3,8 +3,10 @@
 // script answering { ask } probes, since an opaque-origin frame is out of the test's reach.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
-import { write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
+import vm from 'node:vm';
+import { kit, write, dashboardOnFreePort, threadsFixture } from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -36,6 +38,9 @@ function landArtifact(F, slug, files) {
 //   is { k, sel }  -> { is }, whether both select the same element (false on a throw)
 //   leave          -> {}, after a mouseout with no relatedTarget on what the last mousemove hit
 //                     (a real mouse leaving an out-of-process frame tells it nothing)
+//   leaveAfter { n } -> {} at once; then each of the next n mousemoves is followed, from a
+//                     setTimeout(0) (the lens hears the move first), by a mouseout with no
+//                     relatedTarget on that move's target
 //   tags           -> { n }, getElementsByTagName calls so far
 //   move { n }     -> { frames: n }, once #mover has moved 1 px a frame for n frames
 //   text           -> {}, once #a reads "A2"
@@ -44,8 +49,9 @@ const OWN_SCRIPT = [
   '  window.__tags = 0;',
   '  var byTag = Document.prototype.getElementsByTagName;',
   '  Document.prototype.getElementsByTagName = function () { window.__tags++; return byTag.apply(this, arguments); };',
-  '  var lastTarget = null;',
-  '  addEventListener("mousemove", function (e) { lastTarget = e.target; }, true);',
+  '  var lastTarget = null, leaves = 0;',
+  '  var leaveOn = function (el) { el.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })); };',
+  '  addEventListener("mousemove", function (e) { var el = e.target; lastTarget = el; if (leaves > 0) { leaves--; setTimeout(function () { leaveOn(el); }, 0); } }, true);',
   '  var say = function (ask, o) { var m = { own: 1, ask: ask }; for (var k in o) m[k] = o[k]; parent.postMessage(m, "*"); };',
   '  var round = function (r) { return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };',
   '  addEventListener("message", function (e) {',
@@ -53,7 +59,8 @@ const OWN_SCRIPT = [
   '    if (!d || typeof d.ask !== "string") return;',
   '    if (d.ask === "rect") { var el = document.querySelector(d.sel); say("rect", { rect: el ? round(el.getBoundingClientRect()) : null }); }',
   '    else if (d.ask === "is") { var same = false; try { same = document.querySelector(d.k) === document.querySelector(d.sel); } catch (err) { same = false; } say("is", { is: same }); }',
-  '    else if (d.ask === "leave") { (lastTarget || document.documentElement).dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: null })); say("leave", {}); }',
+  '    else if (d.ask === "leave") { leaveOn(lastTarget || document.documentElement); say("leave", {}); }',
+  '    else if (d.ask === "leaveAfter") { leaves = d.n; say("leaveAfter", {}); }',
   '    else if (d.ask === "tags") say("tags", { n: window.__tags });',
   '    else if (d.ask === "move") {',
   '      var mover = document.getElementById("mover"), left = parseFloat(mover.style.left) || 0, done = 0, n = d.n;',
@@ -112,9 +119,11 @@ export async function openLens(t) {
 }
 
 const bare = (m) => { const { at: _at, ...rest } = m; return rest; };
-const within = (got, what) => {
+// The span from the test's own clock: the lens can send nothing before the first input, and nothing
+// later than one gap (67 ms) after the last; the parent's receive times stall under load.
+const within = (got, t0, t1, what) => {
   const n = got.length;
-  const secs = n > 1 ? (got[n - 1].at - got[0].at) / 1000 : 0;
+  const secs = (t1 - t0 + 67) / 1000;
   assert.ok(n <= 15 * secs + 2, `${what}: ${n} pointers in ${secs.toFixed(3)} s is more than 15 a second (+2)`);
 };
 
@@ -145,28 +154,32 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   assert.match(String(lastP.k), /:nth-of-type\(/, 'A15b: an element with no id gets a path');
   assert.equal((await own({ ask: 'is', k: lastP.k, sel: 'section > p' })).is, true, 'A15b: the path finds that element in the frame');
 
-  // A15c: 40 moves across #box, 25 ms apart: throttled, and the last position arrives
+  // A15c: 40 moves across #box, back to back (far above 15 a second, under any load): throttled, and
+  // the last position arrives
   let from = (await ptr()).length;
-  for (let i = 0; i < 40; i++) {
-    await mouse(101 + (198 * i) / 39, 110 + (80 * i) / 39);
-    await sleep(25);
-  }
+  let t0 = Date.now();
+  for (let i = 0; i < 40; i++) await mouse(101 + (198 * i) / 39, 110 + (80 * i) / 39);
+  let t1 = Date.now();
   await sleep(300);
   let got = (await ptr()).slice(from);
-  within(got, 'A15c');
-  assert.ok(got.length >= 5, `A15c: ${got.length} pointers for 40 moves: it follows the mouse`);
+  within(got, t0, t1, 'A15c');
+  assert.ok(got.length >= 1, 'A15c: it follows the mouse');
   assert.deepEqual(bare(got[got.length - 1]), { lens: 1, type: 'pointer', k: '#box', x: 0.995, y: 0.9 }, 'A15c: the last move is the last word');
 
-  // A15e: 20 alternations between #box and a leave: nulls pass the same gate, and the leave is last
+  // A15e: 20 real moves over #box back to back, each followed in the frame by a leave, then a last
+  // leave: nulls pass the same gate (ungated, about 40 would be sent), and the leave is last
   from = (await ptr()).length;
-  for (let i = 0; i < 20; i++) {
-    if (i % 2 === 0) await mouse(150, 125); else await own({ ask: 'leave' });
-    await sleep(25);
-  }
+  await own({ ask: 'leaveAfter', n: 20 });
+  t0 = Date.now();
+  for (let i = 0; i < 20; i++) await (i % 2 === 0 ? mouse(150, 125) : mouse(151, 126));
+  await own({ ask: 'leave' });
+  t1 = Date.now();
   await sleep(300);
+  // moves Chrome coalesced leave leaves armed: none may follow A15d's moves
+  await own({ ask: 'leaveAfter', n: 0 });
   got = (await ptr()).slice(from);
-  within(got, 'A15e');
-  assert.ok(got.length, 'A15e: something said');
+  within(got, t0, t1, 'A15e');
+  assert.ok(got.length >= 1, 'A15e: something said');
   assert.deepEqual(bare(got[got.length - 1]), { lens: 1, type: 'pointer', k: null }, 'A15e: the leave is the last word');
 
   // A15d: over the page itself, null; a null after a null, nothing; then #box and a leave, two
@@ -188,4 +201,44 @@ test('presence A15: the lens says pointer: a selector alone, x and y across it, 
   await sleep(300);
   got = (await ptr()).slice(from);
   assert.deepEqual(got.map(bare), [{ lens: 1, type: 'pointer', k: '#box', x: 0.25, y: 0.25 }, { lens: 1, type: 'pointer', k: null }], 'A15d: #box, then exactly one null');
+});
+
+// The lens's script, run in vm against a stand-in page (as test/dashboard.test.mjs's artLensRun): its
+// window listeners, what it posts to its parent, and timers that never fire.
+function lensInVm() {
+  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const script = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(src)[1];
+  const ancestor = 'http://127.0.0.1:4321';
+  const listeners = {};
+  const posted = [];
+  const parent = { postMessage: (m) => posted.push(JSON.parse(JSON.stringify(m))) };
+  const doc = { title: 'A mock', documentElement: {}, body: {}, elementFromPoint: () => null, querySelectorAll: () => [], querySelector: () => null, getElementsByTagName: () => [], getElementById: () => null };
+  const win = {
+    document: doc, parent, innerWidth: 800, innerHeight: 600,
+    location: { pathname: '/artifact/main/lens-mock/index.html', ancestorOrigins: [ancestor] },
+    addEventListener: (type, f) => { (listeners[type] ??= []).push(f); },
+    setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {}, requestAnimationFrame: () => 0,
+    MutationObserver: class { observe() {} }, TextEncoder, CSS: { escape: (s) => s },
+  };
+  win.window = win;
+  vm.runInNewContext(script, win);
+  const fire = (type, e) => { for (const f of listeners[type] ?? []) f(e); };
+  fire('message', { data: { lens: 1, type: 'hello' }, source: parent, isTrusted: true, origin: ancestor });
+  return { posted, fire };
+}
+// an element with no id, class or siblings: its selector is a path of one step
+const fakeDiv = (width, height) => ({ nodeType: 1, localName: 'div', id: '', getAttribute: () => null, classList: [], previousElementSibling: null, parentElement: null, getBoundingClientRect: () => ({ left: 0, top: 0, width, height }) });
+
+test('presence A15f: pointer fractions are clamped to 0..1 and rounded to 4 decimals', () => {
+  const cases = [
+    [fakeDiv(3, 3), 1, 1, { x: 0.3333, y: 0.3333 }, 'a third across, to 4 decimals'],
+    [fakeDiv(3, 3), -5, 10, { x: 0, y: 1 }, 'outside the element: clamped to 0..1'],
+    [fakeDiv(0, 3), 1, 1, { x: 0, y: 0.3333 }, 'a zero width: 0'],
+  ];
+  for (const [target, clientX, clientY, want, what] of cases) {
+    const { posted, fire } = lensInVm();
+    fire('mousemove', { target, clientX, clientY });
+    const ptr = posted.filter((m) => m.type === 'pointer');
+    assert.deepEqual(ptr, [{ lens: 1, type: 'pointer', k: 'div:nth-of-type(1)', ...want }], what);
+  }
 });
