@@ -39,7 +39,8 @@ FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8
 
 ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1 DEVTEAM_PREVIEWS=1
 
-RUN apt-get update \
+RUN printf 'Acquire::Retries "5";\n' > /etc/apt/apt.conf.d/80-retries \
+ && apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -47,7 +48,7 @@ RUN apt-get update \
 # outside /data resets on a deploy, so only what needs root lives here: system libraries, and things
 # worth having prebuilt. Languages and their versions are per project, with mise, on the disk.
 # Postgres 14, 16 and 17 with pgvector, as on the owner's Mac; `box-pg` runs a server of any of them.
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
+RUN curl -fsSL --retry 5 --retry-all-errors https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
  && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends postgresql-common \
@@ -83,7 +84,7 @@ RUN case "$(uname -m)" in \
       aarch64) sum=$TTYD_SHA256_AARCH64 ;; \
       *) echo "no ttyd for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/$TTYD_VERSION/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
 # gh, from its release tarball (only the binary; the image has no man). /usr/bin/gh stays, as a
@@ -96,7 +97,7 @@ RUN case "$(uname -m)" in \
       aarch64) arch=arm64; sum=$GH_SHA256_AARCH64 ;; \
       *) echo "no gh for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/gh.tgz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$arch.tar.gz" \
  && echo "$sum  /tmp/gh.tgz" | sha256sum -c - \
  && tar -xzf /tmp/gh.tgz --no-same-owner -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_$arch/bin/gh" && rm /tmp/gh.tgz \
  && chmod 755 /usr/local/bin/gh && ln -sf /usr/local/bin/gh /usr/bin/gh
@@ -111,7 +112,7 @@ RUN case "$(uname -m)" in \
       aarch64) arch=arm64; sum=$MISE_SHA256_AARCH64 ;; \
       *) echo "no mise for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/$MISE_VERSION/mise-$MISE_VERSION-linux-$arch" \
  && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # uv, which brings claude-swap the Python 3.12 it needs (Debian's is older)
@@ -123,7 +124,7 @@ RUN case "$(uname -m)" in \
       aarch64) sum=$UV_SHA256_AARCH64 ;; \
       *) echo "no uv for $(uname -m)" >&2; exit 1 ;; \
     esac \
- && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
+ && curl -fsSL --retry 5 --retry-all-errors -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
  && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz
 
 # claude-swap: with it devteam rotates this box's Claude accounts on its own; its logins land in $HOME, on the volume

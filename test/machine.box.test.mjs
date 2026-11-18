@@ -310,6 +310,19 @@ test('the minute loop recreates home:hub only when it is gone', () => {
   assert.deepEqual(made(noServer.calls), []);
 });
 
+test('the image\'s downloads retry', () => {
+  const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').replace(/\\\n/g, ' ');
+  const curls = df.split('\n').filter((l) => /\bcurl\b/.test(l) && /https:\/\//.test(l));
+  assert.ok(curls.length >= 5, `at least 5 network curl lines, found ${curls.length}`);
+  for (const l of curls) {
+    assert.match(l, /--retry 5\b/, `--retry 5 on: ${l.slice(0, 80)}`);
+    assert.match(l, /--retry-all-errors\b/, `--retry-all-errors on: ${l.slice(0, 80)}`);
+  }
+  const conf = df.indexOf('Acquire::Retries "5"');
+  assert.ok(conf >= 0, 'apt is told to retry');
+  assert.ok(conf < df.indexOf('apt-get update'), 'the apt retry config is written before the first apt-get update');
+});
+
 test('the boot\'s hub lines sit where the boot needs them', () => {
   assert.ok(fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').includes('ENV DEVTEAM_IMAGE_HUB=4320'));
   const d = devteamDev();
