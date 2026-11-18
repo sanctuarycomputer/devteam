@@ -2182,6 +2182,8 @@ function actView(a) {
 
 // ---- questions: the choices as one list, the recommended one marked in place ----
 const norm = (x) => String(x ?? '').trim().toLowerCase();
+// a goal approval's choices, as the verdicts goal decide takes: the press sends one of these, nothing else
+const GOAL_VERDICTS = { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' };
 function choicesOf(q) {
   let list = (q.choices || []).length ? q.choices.map((c) => ({ ...c })) : (q.options || []).map((label) => ({ label }));
   if (q.kind === 'goal-approval') list = [
@@ -2195,8 +2197,9 @@ function choicesOf(q) {
   if (isOa(q)) return doneCant.map((c) => ({ ...c, rec: false }));
   if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = doneCant;
   // a goal's approval takes only Approve, Refine or Let go (goal decide): a recommendation in other
-  // words ("Yes") marks Approve rather than adding a choice the press can't send
-  const rec = q.kind === 'goal-approval' && /^(yes|approve[ds]?|go ahead)\b/i.test(String(q.recommendation ?? '').trim()) ? 'Approve' : q.recommendation;
+  // words ("Yes") marks Approve rather than adding a choice the press can't send; only words that say
+  // just yes do ("Yes, but refine the measure" marks nothing)
+  const rec = q.kind === 'goal-approval' && /^(yes|approve[ds]?|go ahead)[\s.!]*$/i.test(String(q.recommendation ?? '').trim()) ? 'Approve' : q.recommendation;
   if (rec && !list.some((c) => norm(c.label) === norm(rec)) && q.kind !== 'goal-approval') list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
@@ -8471,7 +8474,7 @@ document.addEventListener('click', async (ev) => {
       if (open.length) { NOT_DONE.set(id, open); oaPaint(); return; }
     }
     if (NOT_DONE.delete(id)) oaPaint();
-    if (goalId && !['Approve', 'Refine', 'Let go'].includes(picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
+    if (goalId && !Object.hasOwn(GOAL_VERDICTS, picked)) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = card?.querySelector('input[data-auto]:checked')?.value;
     const asRule = card?.querySelector('input[data-rulebox]')?.checked;
@@ -8481,7 +8484,7 @@ document.addEventListener('click', async (ev) => {
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     const seen = seenHash(id);
     answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
-      ? { action: 'goal-decide', body: { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined } }
+      ? { action: 'goal-decide', body: { id: goalId, verdict: GOAL_VERDICTS[picked], notes: note || undefined } }
       : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }));
     return;
   }

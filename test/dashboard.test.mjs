@@ -4343,3 +4343,33 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   await click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
   await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });
+
+// kit-287: a goal approval's card offers Approve, Refine and Let go whatever the supervisor's
+// recommendation says, and each, through the page's own verdict map, is a body the dashboard server's
+// goal-decide check takes. Approve (or the verdict named) is marked only when the recommendation says
+// just that: "Yes, but refine the measure" marks nothing.
+test("a goal approval's choices are the three verdicts, each one the server takes, whatever the recommendation says", () => {
+  const PAGE = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  const SERVER = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const from = (src, start, end) => { const a = src.indexOf(start); const b = src.indexOf(end, a); assert.ok(a >= 0 && b > a, `${start} is in the source`); return src.slice(a, b); };
+  const line = (src, start) => from(src, start, '\n');
+  const ctx = vm.createContext({});
+  vm.runInContext([
+    // norm, the page's GOAL_VERDICTS and choicesOf, in the page's order
+    from(PAGE, 'const norm = ', '// An open owner-action without secrets'),
+    from(PAGE, 'const isOa = ', '\n// What the supervisor suggested'),
+    line(SERVER, 'const ID = /^[a-z]-'),
+    line(SERVER, 'const text = (x, max = 4000)'),
+    `const goalDecide = ${line(SERVER, "'goal-decide': (b) => ").replace(/^'goal-decide': /, '').replace(/,\s*$/, '')};`,
+    'this.choicesOf = choicesOf; this.GOAL_VERDICTS = GOAL_VERDICTS; this.goalDecide = goalDecide;',
+  ].join('\n'), ctx);
+  const G = 'g-20261117-174044056-supervisor';
+  const marks = { Yes: 'Approve', 'Yes.': 'Approve', APPROVE: 'Approve', approved: 'Approve', 'go ahead': 'Approve', Refine: 'Refine', 'let go': 'Let go', 'Refine the measure': null, No: null, 'Yes, but refine the measure': null, 'Approve with changes': null, '': null };
+  for (const rec of [...Object.keys(marks), null]) {
+    const c = JSON.parse(JSON.stringify(ctx.choicesOf({ kind: 'goal-approval', status: 'open', options: [], choices: [], secrets: [], recommendation: rec })));
+    assert.deepEqual(c.map((x) => x.label), ['Approve', 'Refine', 'Let go'], `recommendation ${JSON.stringify(rec)}: the three verdicts, nothing else`);
+    for (const x of c) assert.ok(ctx.goalDecide({ id: G, verdict: ctx.GOAL_VERDICTS[x.label] }), `recommendation ${JSON.stringify(rec)}: ${x.label} is a body the server takes`);
+    assert.deepEqual(c.filter((x) => x.rec).map((x) => x.label), marks[rec] ? [marks[rec]] : [], `recommendation ${JSON.stringify(rec)}: marks ${marks[rec] ?? 'nothing'}`);
+  }
+  assert.equal(ctx.goalDecide({ id: G, verdict: undefined }), null, 'and a label the map lacks is refused, as the owner saw');
+});
