@@ -5709,6 +5709,8 @@ document.addEventListener('keydown', (e) => {
   if (document.activeElement?.matches?.('.props dt[title]')) return void document.activeElement.blur();
   // a half-typed answer in the Inbox tab isn't hidden by a stray key: no peek closes under it (kit-100 spec §2.7)
   if (!AV && !RV && inboxTyping(document.activeElement)) return;
+  // a floating card over the viewer closes first; the next Escape closes the viewer (kit-141 spec §Approach 7)
+  if (AV && tlFloating()) return void tlClose();
   if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (peekIsOpen()) closeDrawer(); else thEscapePage();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
@@ -6525,7 +6527,8 @@ function tLensMessage(e, frameWin, minted) {
   }
   // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
-  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
+  // a keyup's key message is marked up (kit-141 design-change 1); the field is left out for a keydown's
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true, ...(m.up === true ? { up: true } : {}) };
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
   return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x.replace(T_UNSAFE, '')), T_ERROR_MAX)) };
@@ -6582,6 +6585,9 @@ const layerField = tlOwn;
 // a text field in the Inbox tab: Escape there is the field's, and closes nothing (kit-100 spec §2.7)
 const inboxTyping = (el) => inInbox(el) && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text'));
 const tlShowing = () => !tlEl('tl-cursor').hidden;
+// A thread's card open floating (beside its pin, or a draft), not the panel's in-panel thread: an Escape
+// over the viewer closes it before the viewer (kit-141 spec §Approach 7).
+const tlFloating = () => !tlEl('tl-card').hidden && !tlEl('tl-card').classList.contains('in-panel');
 // The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
 function tlSection(el) {
   const sec = el?.closest?.('main > section[id]');
@@ -8111,8 +8117,22 @@ window.addEventListener('message', (e) => {
   // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
   // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
   // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
-  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame ends pin mode only.
-  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { if (TL.pin) tlPinMode(false); } else if (m.shift) tsRaise(true); return; }
+  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame (its keydown's message
+  // only, never the keyup's, marked up) ends pin mode; else, with the overlay raised or the chip
+  // showing (Shift may be held), nothing; else it closes a floating card, else the viewer (kit-141
+  // spec §Approach 7). A page that fakes it can only close its own viewer, and only when the owner
+  // isn't pointing.
+  if (m.type === 'key') {
+    if (document.activeElement !== tsFrame()) return;
+    if (m.key === 'Escape') {
+      if (m.up) return;
+      if (TL.pin) tlPinMode(false);
+      else if (TS.raised || tlShowing()) {}
+      else if (tlFloating()) tlClose();
+      else leaveArtifact();
+    } else if (m.shift) tsRaise(true);
+    return;
+  }
   if (m.type === 'hit-reply') {
     // one answer a question: its id let go of as it is taken, so a page that answers it again is
     // dropped by tLensMessage and costs nothing more
