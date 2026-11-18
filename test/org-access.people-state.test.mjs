@@ -1001,10 +1001,13 @@ test('org-access A9: a request in flight when the box is reclaimed lands nothing
     const add = slowPost(gw, '/auth/passkeys/verify', ownerCookie, thief.create(o.json, gw.publicUrl));
     const sub = slowPost(gw, '/push/subscribe', ownerCookie, subscribing('https://web.push.apple.com/thief'));
     const hers = slowPost(gw, '/push/subscribe', ac, subscribing('https://web.push.apple.com/ana'));
+    // without the re-check these would answer 400 (her last method) and 404 (no such device)
+    const remove = slowPost(gw, '/auth/method/remove', ac, { id: anaRow.methods[0].id });
+    const ping = slowPost(gw, '/push/test', ac, { endpoint: 'https://web.push.apple.com/ana' });
     await new Promise((r) => setTimeout(r, 200));
     const rc = reclaim(gw);
     assert.equal(rc.status, 0, rc.stderr);
-    for (const [what, x] of [['the add', add], ['the owner\'s subscribe', sub], ['Ana\'s subscribe', hers]]) {
+    for (const [what, x] of [['the add', add], ['the owner\'s subscribe', sub], ['Ana\'s subscribe', hers], ['Ana\'s remove', remove], ['Ana\'s push test', ping]]) {
       const r = await x.finish();
       assert.equal(r.status, 401, `${what}: ${r.body}`);
     }
