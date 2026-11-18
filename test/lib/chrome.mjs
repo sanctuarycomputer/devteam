@@ -24,7 +24,7 @@ const CODES = { ' ': 'Space' };
 // 256 MB JavaScript heap per renderer.
 export const chromeArgs = (profile) => [
   '--headless=new', '--disable-gpu', '--no-sandbox', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--remote-debugging-port=0',
-  '--renderer-process-limit=2', '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--js-flags=--max-old-space-size=256',
+  '--disable-extensions', '--disable-component-update', '--disable-background-networking', '--js-flags=--max-old-space-size=256',
   'about:blank',
 ];
 
