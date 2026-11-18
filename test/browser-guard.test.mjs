@@ -298,6 +298,48 @@ test('A5: a request that is not a proxy request gets 400', async () => {
   } finally { await g.stop(); }
 });
 
+test('a host the contract can\'t carry is named in its allowed characters', async () => {
+  const g = await startGuard();
+  const long = `${Array(5).fill('x'.repeat(60)).join('.')}.localhost`;
+  try {
+    for (const [host, named] of [['a_b.localhost', 'a_b.localhost'], ['a!b.localhost', 'a-b.localhost'], ['a$b.localhost', 'a-b.localhost'], [long, long.slice(0, 255)]]) {
+      for (const r of [await get(g.port, `http://${host}/`), await connect(g.port, `${host}:443`)]) {
+        assert.equal(r.status, 403, `${host.slice(0, 40)}: ${r.head}`);
+        const o = refusal(r);
+        assert.equal(o.rule, 'own-name');
+        assert.ok(o.host.startsWith(named.slice(0, 200)), `${o.host.slice(0, 40)} for ${host.slice(0, 40)}`);
+      }
+    }
+  } finally { await g.stop(); }
+});
+
+test('rule order: a name rule is reported before an address rule, own-name before gateway', async () => {
+  const g = await startGuard({ env: { DEVTEAM_PUBLIC_URL: 'http://10.9.9.9' } });
+  try { assert.equal(refusal(await get(g.port, 'http://10.9.9.9/')).rule, 'gateway'); } finally { await g.stop(); }
+  const h = await startGuard({ env: { DEVTEAM_PUBLIC_URL: 'https://box.localhost' } });
+  try { assert.equal(refusal(await get(h.port, 'http://x.box.localhost/')).rule, 'own-name'); } finally { await h.stop(); }
+});
+
+test('CONNECT authorities that reach the guard but are not <host>:<port> get 400', async () => {
+  const g = await startGuard();
+  try {
+    for (const a of ['a/b:443', 'a?b:443', 'a#b:443', '[::1:443', 'a:b:443', 'a:0', 'a:65536', ':443']) {
+      const r = await connect(g.port, a);
+      assert.equal(r.status, 400, `${a}: ${r.head}`);
+      assert.equal(refusal(r).rule, 'not-a-proxy-request', a);
+    }
+  } finally { await g.stop(); }
+});
+
+test('a fault inside the decision is a 502, and the guard stays up', async () => {
+  const g = await startGuard({ stub: true, env: { GUARD_STUB_IFACES_FILE: path.join(TMP, 'no-such-ifaces.json') } });
+  try {
+    for (const r of [await get(g.port, 'http://8.8.8.8/'), await connect(g.port, '8.8.8.8:443')]) assert.equal(r.status, 502, r.head);
+    assert.equal(g.child.exitCode, null, `the guard exited: ${g.stderr()}`);
+    assert.equal(refusal(await get(g.port, 'http://localhost/')).rule, 'own-name');
+  } finally { await g.stop(); }
+});
+
 test('the command prints its port and stays up', async () => {
   const g = await startGuard();
   try {

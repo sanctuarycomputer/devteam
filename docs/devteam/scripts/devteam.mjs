@@ -22429,6 +22429,9 @@ function guardOwn(a) {
 }
 const guardBare = (h) => String(h ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
 const GUARD_HOST = /^[A-Za-z0-9._:\[\]-]{1,255}$/;
+// A host as the refusal may name it (browser@1 host's pattern): every other character a -, at most
+// 255. URL lets a name keep characters the contract doesn't (a_b.localhost).
+const guardFit = (h) => (GUARD_HOST.test(h) ? h : String(h).replace(/[^A-Za-z0-9._:\[\]-]/g, '-').slice(0, 255) || '-');
 // What a request asks for: { name, asked, port, connect, hostHeader?, path? }, or null (400). An
 // absolute-form http: URL, or a CONNECT authority of exactly <host>:<port>, with the port read from
 // the authority itself (URL drops a default one, and a ws: page's CONNECT names :80).
@@ -22452,7 +22455,7 @@ function guardTarget(method, target) {
   }
   const name = guardBare(u.hostname);
   if (!name || port < 1 || port > 65535) return null;
-  if (!GUARD_HOST.test(asked)) asked = u.host;
+  asked = guardFit(GUARD_HOST.test(asked) ? asked : u.host);
   if (method === 'CONNECT') return { name, asked, port, connect: true };
   const rest = target.slice(7 + target.slice(7).split(/[/?#]/)[0].length).split('#')[0];
   return { name, asked, port, connect: false, hostHeader: u.host, path: rest.startsWith('/') ? rest : `/${rest}` };
@@ -22481,6 +22484,8 @@ async function guardDecide(t, lookup) {
 const guardEsc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 // The refusal page: plain words, and the browser@1 refusal object as JSON with every < escaped.
 function guardRefusal(rule, { asked, address, range } = {}) {
+  // an address as given (a resolver answer that couldn't be read) is 2 to 64 characters there
+  if (address !== undefined) address = String(address).slice(0, 64).padEnd(2, '?');
   const at = address ? `${asked} (${address})` : asked;
   const why = {
     'own-name': `The supervisor's browser can't open ${asked}: it is this machine's own name.`,
@@ -22517,22 +22522,28 @@ async function startBrowserGuard({ port = 0 } = {}) {
   server.on('connection', (s) => s.on('error', () => {}));
   // a head Node's own parser refuses (a backslash in a CONNECT authority, say) is no proxy request either
   server.on('clientError', (e, s) => { if (!s.writable) return void s.destroy(); const r = guardRefusal('not-a-proxy-request'); guardSocketAnswer(s, r.status, r.body); });
-  server.on('request', async (req, res) => {
+  // One request or CONNECT: decided, then refused, failed (502) or passed on. answer(status, body,
+  // type) writes the guard's own answer; pass(t, address) dials. Nothing it throws ends the guard:
+  // whatever goes wrong is a 502, never a pass.
+  const serve = async (method, target, answer, pass) => {
+    const t = guardTarget(method, target);
+    if (!t) { const r = guardRefusal('not-a-proxy-request'); return answer(r.status, r.body); }
+    const fail = (why) => answer(502, `The supervisor's browser couldn't reach ${t.asked}: ${why}\n`, 'text/plain; charset=utf-8');
+    try {
+      const d = await guardDecide(t, lookup);
+      if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return answer(r.status, r.body); }
+      if (d.fail) return fail(d.fail);
+      return await pass(t, d.address, fail);
+    } catch (e) { return fail(e?.code ?? 'the guard failed'); }
+  };
+  server.on('request', (req, res) => {
     req.on('error', () => {});
     res.on('error', () => {});
-    const t = guardTarget(req.method, req.url);
-    if (!t) { const r = guardRefusal('not-a-proxy-request'); return guardAnswer(res, r.status, r.body); }
-    const d = await guardDecide(t, lookup);
-    if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return guardAnswer(res, r.status, r.body); }
-    return guardAnswer(res, 502, `The supervisor's browser couldn't reach ${t.asked}: ${d.fail ?? 'not dialled yet'}\n`, 'text/plain; charset=utf-8');
+    serve(req.method, req.url, (status, body, type) => guardAnswer(res, status, body, type), (t, address, fail) => fail('not dialled yet')).catch(() => res.destroy());
   });
-  server.on('connect', async (req, sock) => {
+  server.on('connect', (req, sock) => {
     sock.on('error', () => {});
-    const t = guardTarget('CONNECT', req.url);
-    if (!t) { const r = guardRefusal('not-a-proxy-request'); return guardSocketAnswer(sock, r.status, r.body); }
-    const d = await guardDecide(t, lookup);
-    if (d.refuse) { const r = guardRefusal(d.refuse.rule, { asked: t.asked, ...d.refuse }); return guardSocketAnswer(sock, r.status, r.body); }
-    return guardSocketAnswer(sock, 502, `The supervisor's browser couldn't reach ${t.asked}: ${d.fail ?? 'not dialled yet'}\n`, 'text/plain; charset=utf-8');
+    serve('CONNECT', req.url, (status, body, type) => guardSocketAnswer(sock, status, body, type), (t, address, fail) => fail('not dialled yet')).catch(() => sock.destroy());
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', () => { server.off('error', reject); resolve(); }); });
   return { port: server.address().port, close: () => new Promise((resolve) => { server.closeAllConnections?.(); server.close(() => resolve()); }) };
