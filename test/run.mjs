@@ -10,6 +10,11 @@
 //
 //   --concurrency n      files at once (default DEVTEAM_TEST_CONCURRENCY, else 2). Files in the
 //                        `alone` group run one at a time before any other.
+//   --chrome-concurrency n
+//                        files of the `chrome` group at once, within --concurrency: each starts a
+//                        headless Chrome, so off CI they run one at a time while other files run
+//                        beside them. Default DEVTEAM_TEST_CHROME_CONCURRENCY; else, when CI is set
+//                        (to anything but empty, 0 or false), --concurrency; else 1.
 //   --file-timeout s     every file's watchdog, in seconds. Without it: 600 for `chain` and for the
 //                        files in LONG below, 300 for the rest. A file past its timeout is stopped
 //                        and killed with its whole process tree, its tmux servers are killed and its
@@ -58,13 +63,17 @@ const relOf = (root, abs) => {
   return rel.startsWith('..') || path.isAbsolute(rel) ? abs : rel.split(path.sep).join('/');
 };
 
+// CI is a machine of its own: there the chrome group keeps the run's concurrency
+export const isCI = (env) => !!env.CI && !/^(0|false)$/i.test(env.CI);
+
 export function parseArgs(argv, env, root = ROOT) {
-  const o = { files: [], groups: null, shard: null, list: false, repeat: 1, timings: null, concurrency: null, fileTimeout: null };
+  const o = { files: [], groups: null, shard: null, list: false, repeat: 1, timings: null, concurrency: null, chromeConcurrency: null, fileTimeout: null };
   for (let k = 0; k < argv.length; k++) {
     const a = argv[k];
     const val = () => { if (k + 1 >= argv.length) throw new UsageError(`${a} wants a value`); return argv[++k]; };
     if (a === '--list') o.list = true;
     else if (a === '--concurrency') o.concurrency = posInt(a, val());
+    else if (a === '--chrome-concurrency') o.chromeConcurrency = posInt(a, val());
     // a day at most: setTimeout can't count past about 24.8 days, and no file needs a day
     else if (a === '--file-timeout') o.fileTimeout = posInt(a, val(), 1, 86400);
     else if (a === '--repeat') o.repeat = posInt(a, val());
@@ -88,6 +97,7 @@ export function parseArgs(argv, env, root = ROOT) {
     }
   }
   if (o.concurrency === null) o.concurrency = env.DEVTEAM_TEST_CONCURRENCY ? posInt('DEVTEAM_TEST_CONCURRENCY', env.DEVTEAM_TEST_CONCURRENCY) : 2;
+  if (o.chromeConcurrency === null) o.chromeConcurrency = env.DEVTEAM_TEST_CHROME_CONCURRENCY ? posInt('DEVTEAM_TEST_CHROME_CONCURRENCY', env.DEVTEAM_TEST_CHROME_CONCURRENCY) : isCI(env) ? o.concurrency : 1;
   return o;
 }
 

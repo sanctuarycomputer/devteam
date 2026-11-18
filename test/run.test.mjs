@@ -114,6 +114,20 @@ test('parseArgs', () => {
   assert.equal(R.parseArgs([], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 3);
   assert.equal(R.parseArgs(['--concurrency', '4'], { DEVTEAM_TEST_CONCURRENCY: '3' }, root).concurrency, 4);
   assert.deepEqual(R.parseArgs(['--shard', '2/3'], {}, root).shard, { i: 2, n: 3 });
+  // the chrome group's cap: the flag, then the variable, then --concurrency on CI, else 1
+  const cc = (argv, env) => R.parseArgs(argv, env, root).chromeConcurrency;
+  assert.equal(cc([], {}), 1);
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true' }), 3);
+  assert.equal(cc(['--concurrency', '3'], { CI: 'TRUE' }), 3);
+  assert.equal(cc(['--concurrency', '3'], { CI: '1' }), 3);
+  for (const ci of ['', '0', 'false', 'False']) assert.equal(cc(['--concurrency', '3'], { CI: ci }), 1, `CI=${ci}`);
+  assert.equal(cc([], { DEVTEAM_TEST_CONCURRENCY: '4', CI: 'true' }), 4, 'CI follows the concurrency from the variable too');
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true', DEVTEAM_TEST_CHROME_CONCURRENCY: '2' }), 2, 'the variable beats CI');
+  assert.equal(cc([], { DEVTEAM_TEST_CHROME_CONCURRENCY: '' }), 1, 'empty is unset');
+  assert.equal(cc(['--concurrency', '3'], { CI: 'true', DEVTEAM_TEST_CHROME_CONCURRENCY: '' }), 3, 'empty is unset, so CI decides');
+  assert.equal(cc(['--chrome-concurrency', '3'], { DEVTEAM_TEST_CHROME_CONCURRENCY: '2' }), 3, 'the flag beats the variable');
+  for (const bad of [['--chrome-concurrency', '0'], ['--chrome-concurrency', 'abc'], ['--chrome-concurrency']]) assert.throws(() => R.parseArgs(bad, {}, root), R.UsageError, bad.join(' '));
+  assert.throws(() => R.parseArgs([], { DEVTEAM_TEST_CHROME_CONCURRENCY: '0' }, root), R.UsageError);
   const link = path.join(fresh('link'), 'kit');
   fs.symlinkSync(root, link);
   try {
