@@ -1032,8 +1032,11 @@ test('terminal A6: the Shell is the lowest-id pane tagged with this root in this
   const global = tmuxOut(T, ['show-environment', '-g']).split('\n');
   for (const k of AGENT_ENV) assert.ok(global.includes(`${k}=x`), `the server's global environment has ${k}`);
   assert.equal(shellPanes(T).length, 0, 'no Shell yet');
-  const o = await openShellAt(T, port, tok, 100, 30);
+  // two opens at once make one window (T5-2)
+  const [o, oo] = await Promise.all([openShellAt(T, port, tok, 100, 30), openShellAt(T, port, tok, 100, 30)]);
   assert.equal(o.status, 200, o.text);
+  assert.equal(oo.status, 200, oo.text);
+  assert.equal(oo.json.pane, o.json.pane, 'two opens at once: one pane');
   assert.equal(o.headers['cache-control'], 'no-store');
   assert.equal(o.json.which, 'shell');
   assert.equal(o.json.state, 'live');
@@ -1086,14 +1089,42 @@ test('terminal A6: the Shell is the lowest-id pane tagged with this root in this
   after(async () => { if (d2) await d2.dash.stop(); F2.done(); });
   const root2 = F2.old;
   const session2 = sessionOf(root2, 'term-shell-2');
-  assert.equal(spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', session2, '-n', 'main', '-c', root2], { env: T.env }).status, 0, 'the second session');
+  const allWindows = () => tmuxOut(T, ['list-windows', '-a', '-F', '#{session_name}:#{window_id}']);
+  // T5-3: its session missing, open is 409 and no window appears anywhere (the dashboard first)
   d2 = await dashboardOnFreePort(root2, { ...F2.env({}), TMUX_TMPDIR: T.env.TMUX_TMPDIR });
+  const windows = allWindows();
+  refusedWith(await openShellAt(T, d2.port, await tokenOf(T, d2.port), 80, 24), 409, 'the shell could not be opened', 'no session');
+  assert.equal(allWindows(), windows, 'no window anywhere');
+  assert.equal(spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', session2, '-n', 'main', '-c', root2], { env: T.env }).status, 0, 'the second session');
   const o3 = await openShellAt(T, d2.port, await tokenOf(T, d2.port), 80, 24);
   assert.equal(o3.status, 200, o3.text);
   assert.notEqual(o3.json.pane, pane, 'its own pane');
   assert.deepEqual(shellPanes(T, session2), [[o3.json.pane, root2, root2, '80x24']], 'in its own session, tagged with its own root');
+  assert.equal(o3.json.which, 'shell');
   assert.deepEqual(shellPanes(T), [[pane, T.root, T.root, '90x20']], 'this project\'s untouched');
   assert.equal((await openShellAt(T, port, tok, 90, 20)).json.pane, pane, 'and still its own');
+  // T5-1: a dead Shell kept by remain-on-exit never shadows a live one
+  assert.equal(spawnSync('tmux', ['set-option', '-w', '-t', pane, 'remain-on-exit', 'on'], { env: T.env }).status, 0);
+  const ex = await keysTo(T, port, 'shell', keysBody(tok, pane, 3, { data: hex('exit\r') }, 'shell'));
+  assert.equal(ex.json?.taken, true, ex.text);
+  await until(() => tmuxOut(T, ['display', '-p', '-t', pane, '#{pane_dead}']).trim() === '1', 'the first Shell dead, its pane kept');
+  const fresh = await openShellAt(T, port, tok, 90, 20);
+  assert.equal(fresh.status, 200, fresh.text);
+  assert.equal(fresh.json.state, 'live');
+  const live = fresh.json.pane;
+  assert.ok(Number(live.slice(1)) > Number(pane.slice(1)), `a new, higher pane: ${live} after ${pane}`);
+  // the remembered id dropped (the live pane retagged a moment, so the read moves off it): the lookup
+  // that follows picks the live pane, not the dead one with the lower id
+  tagPane(T, live, path.join(T.F.base, 'elsewhere'));
+  await pause(150);
+  isGone((await shellScreen()).json, 'shell');
+  tagPane(T, live, T.root);
+  await pause(150);
+  const found = await shellScreen();
+  assert.equal(found.json.pane, live, `the live pane, not the dead ${pane}: ${found.text}`);
+  const typed = await keysTo(T, port, 'shell', keysBody(tok, live, 4, { data: hex('echo again\r') }, 'shell'));
+  assert.equal(typed.status, 200, typed.text);
+  assert.equal(typed.json.taken, true);
   s.kill();
 });
 

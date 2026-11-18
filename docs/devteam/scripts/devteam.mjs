@@ -16710,16 +16710,18 @@ function termRoutes({ port, host, log }) {
   const fieldsOf = (line) => { const v = line.split('\t'); const n = TERM_FIELDS.length; if (v.length > n) v.splice(n - 2, v.length - n + 1, v.slice(n - 2, -1).join('\t')); return Object.fromEntries(TERM_FIELDS.map((f, i) => [f, v[i] ?? ''])); };
   // the supervisor's: the marked pane only, as an id (S11)
   const marked = () => { const p = markedPane(runDir); return p && /^%\d+$/.test(p) ? p : null; };
-  // the Shell's: remembered, else the lowest-numbered pane of this session tagged with this root, not
-  // the marked one. A lookup tmux failed (not "isn't there") is { error }, never no pane (P4).
+  // the Shell's: remembered, else the lowest-numbered live pane of this session tagged with this root,
+  // not the marked one (a dead one, kept by remain-on-exit, would shadow a live one; T5-1). A lookup
+  // tmux failed (not "isn't there") is { error }, never no pane (P4).
   let shellPane = null;
   async function paneOf(which) {
     if (which === 'supervisor') return marked();
     if (shellPane) return shellPane;
-    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{@devteam-shell}']);
+    const got = await tmuxCall(['list-panes', '-s', '-t', `=${session}`, '-F', '#{pane_id}\t#{pane_dead}\t#{@devteam-shell}']);
     if (!got.ok) { if (got.missing) return null; log(`/api/term/shell: tmux failed: ${got.timedOut ? 'timed out' : got.err.trim()}`); return { error: TERM_WORDS.read }; }
     const m = marked();
-    const ids = got.out.split('\n').map((l) => l.split('\t')).filter(([id, tag]) => /^%\d+$/.test(id) && tag === root && id !== m).map(([id]) => id);
+    // the tag last, whole: a tab in a root stays in it
+    const ids = got.out.split('\n').map((l) => l.split('\t')).map(([id, dead, ...tag]) => [id, dead, tag.join('\t')]).filter(([id, dead, tag]) => /^%\d+$/.test(id) && dead === '0' && tag === root && id !== m).map(([id]) => id);
     return (shellPane = ids.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))[0] ?? null);
   }
   // held is kit-618's; until the floor ships it is this (§6). The etag covers only whether oldest_ms is due.
