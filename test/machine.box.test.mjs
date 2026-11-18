@@ -569,7 +569,7 @@ case $cmd in
 esac
 `);
 write(path.join(loopFakes, 'timeout'), '#!/bin/sh\nshift\nexec "$@"\n');
-write(path.join(loopFakes, 'flock'), '#!/bin/sh\necho "$*" >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
+write(path.join(loopFakes, 'flock'), '#!/bin/sh\nfor a; do printf \'%s\\037\' "$a" >> "$HOME/.flocks"; done; echo >> "$HOME/.flocks"\n[ -z "$LOCK_HELD" ]\n');
 write(path.join(loopFakes, 'node'), '#!/bin/sh\n[ -z "$STOP_DURING" ] || : > "$HOME/.box/stopping"\ncase $* in *"settings --get tmux_session"*) cat .session 2>/dev/null || echo null ;; esac\n');
 write(path.join(loopFakes, 'box-recover'), '#!/bin/sh\necho ran >> "$HOME/.recovers"\n');
 for (const f of ['tmux', 'timeout', 'flock', 'node', 'box-recover']) fs.chmodSync(path.join(loopFakes, f), 0o755);
@@ -740,7 +740,7 @@ test('the minute loop brings back a lost tmux server as a boot does, from the li
   assert.equal(recovers(), before, 'none started');
   const owed = path.join(h, '.box', 'recover.owed');
   assert.ok(fs.existsSync(owed), 'owed');
-  assert.ok(!read(path.join(h, '.flocks')).includes('-w'), 'the loop never waits on the lock');
+  assert.ok(!read(path.join(h, '.flocks')).split('\n').some((l) => l.split('\x1f').some((a) => /^-[A-Za-z]*w/.test(a) || /^--(wait|timeout)(=|$)/.test(a))), 'the loop never waits on the lock');
   state({ pid: 905, home: ['operator', 'hub'], panes: '' });
   turn({ LOCK_HELD: '1' });
   assert.equal(recovers(), before, 'still held: still owed');
