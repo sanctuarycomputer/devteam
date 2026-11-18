@@ -1397,8 +1397,8 @@ test('the plan TL;DR limit counts its own bullets, not header fields', () => {
     const d = approve();
     assert.notEqual(d.status, 0, d.text);
     assert.match(d.text, /8 bullets/);
-    // A4a: every header label form, nine of them, plus six body bullets is approved
-    plan(tldr([...H, '- **Goal**: g', '- __Spec__: s', '- Goal: g', '- **Tech Stack:** node', '- tech-stack: node', ...body(6)]));
+    // A4a: every header label form, nine of them, plus seven body bullets (the limit, so any one header that counts is refused) is approved
+    plan(tldr([...H, '- **Goal**: g', '- __Spec__: s', '- Goal: g', '- **Tech Stack:** node', '- tech-stack: node', ...body(7)]));
     const a = approve();
     assert.equal(a.status, 0, a.text);
   } finally { F.done(); }
