@@ -13754,6 +13754,7 @@ function collectProgress() {
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
       merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha, releaseOf(t)) : null, target_release: targets[0] ?? null,
       stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null, waiting: st?.waiting ?? null,
+      repo: repoOfTicketLink(t),
     };
   });
   return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };
@@ -13872,8 +13873,8 @@ function dashboardDataRead() {
     caps: { max_active_tickets: settings.max_active_tickets },
     asked_settings: askedSettingsView(),
     gates_configured: Object.keys(settings.gates ?? {}),
-    // held_by: the open question holding it, or null
-    tickets: deriveStatus().map((r) => ({ ...r, held_by: H.get(r.id) ?? null })),
+    // held_by: the open question holding it, or null; repo: its component's repo link, home for home's lines
+    tickets: deriveStatus().map((r) => ({ ...r, repo: repoOfTicketLink(r), held_by: H.get(r.id) ?? null })),
     // every kind of decision in plain words; each row with a class carries its class_name
     class_words: CLASS_WORDS,
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
