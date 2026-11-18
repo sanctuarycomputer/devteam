@@ -212,3 +212,77 @@ test('a link flag after -- is refused, and the printed command puts --approved b
     assert.equal(T.links().console.worktree_setup, '--x');
   } finally { T.done(); }
 });
+
+// ask --link-change: the supervisor asks in its own words, the kit writes the lines the answer binds by
+const ownWords = (T, change, cls = 'governance-edit') => T.ask(['ask', '--class', cls, '--question', 'May I make this registry change?', '--recommendation', 'yes', '--stake', '1', '--urgency', '2', '--link-change', JSON.stringify(change)]).qid;
+
+test('an own-words question approves a set: link set asks nothing more and lands it with that answer', () => {
+  const T = setup('one-yes-own-words');
+  try {
+    const qid = ownWords(T, { link: 'console', field: 'records', value: 'home' });
+    assert.deepEqual(T.section(T.question(qid).context), ['links.console.records: main has null; would be "home"']);
+    T.yes(qid);
+    const n = T.questionCount();
+    const out = T.ok(['link', 'set', 'console', 'records', 'home']);
+    assert.equal(T.questionCount(), n, 'no second question');
+    assert.ok(out.includes(`--approved ${qid}`), out);
+    T.ok(['link', 'set', 'console', 'records', 'home', '--approved', qid]);
+    assert.equal(T.links().console.records, 'home');
+  } finally { T.done(); }
+});
+
+test('an own-words question about a gate field in governance-edit: the act is in the answer\'s class', () => {
+  const T = setup('one-yes-own-gate');
+  try {
+    const qid = ownWords(T, { link: 'console', field: 'gates', value: { test: 'true' } });
+    T.yes(qid);
+    T.ok(['link', 'set', 'console', 'gates', '{"test":"true"}', '--approved', qid]);
+    const act = T.acts().find((a) => a.approved_by === qid);
+    assert.equal(act.class, 'governance-edit');
+  } finally { T.done(); }
+});
+
+test('an own-words question approves an add and a removal', () => {
+  const T = setup('one-yes-own-entry');
+  try {
+    const entry = { kind: 'repo', remote: 'usbclub/docs', title: 'Docs site' };
+    const q1 = ownWords(T, { link: 'docs', entry });
+    assert.deepEqual(T.section(T.question(q1).context), [`links.docs: main has null; would be ${JSON.stringify(entry)}`]);
+    T.yes(q1);
+    T.ok(['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site', '--approved', q1]);
+    assert.deepEqual(T.links().docs, entry);
+    // companion's component goes first, on main and here: a link a component uses can't be removed
+    T.onMain((j) => { delete j.components.companion; });
+    T.edit((j) => { delete j.components.companion; });
+    const q2 = ownWords(T, { link: 'companion', entry: null });
+    T.yes(q2);
+    T.ok(['link', 'rm', 'companion', '--approved', q2]);
+    assert.equal(T.links().companion, undefined);
+  } finally { T.done(); }
+});
+
+test('binding lines are the kit\'s: typed or quoted they are refused, and --link-change only where it means something', () => {
+  const T = setup('one-yes-typed');
+  try {
+    const n = T.questionCount();
+    const base = ['ask', '--class', 'governance-edit', '--recommendation', 'yes'];
+    for (const args of [
+      [...base, '--question', 'Change it?', '--context', 'links.console.gates: main has 1; would be 2'],
+      [...base, '--question', 'Change it?', '--context', HEADER],
+      [...base, '--question', 'links.console: main has null; would be {}'],
+    ]) assert.equal(T.run(args).status, 1, args.join(' '));
+    const strat = T.run(['ask', '--class', 'strategy-change', '--question', 'x?', '--link-change', '{"link":"console","field":"records","value":"home"}']);
+    assert.equal(strat.status, 1);
+    assert.match(strat.err, /--link-change goes with --class governance-edit or gate-change/);
+    const noop = T.run([...base, '--question', 'x?', '--link-change', '{"link":"console","field":"main_branch","value":"trunk"}']);
+    assert.equal(noop.status, 1);
+    assert.match(noop.err, /main already has that/);
+    const notOnMain = T.run([...base, '--question', 'x?', '--link-change', '{"link":"docs","field":"records","value":"home"}']);
+    assert.equal(notOnMain.status, 1);
+    assert.match(notOnMain.err, /not a link on main.*"entry"/);
+    const change = T.run([...base, '--question', 'x?', '--change', '{}']);
+    assert.equal(change.status, 1);
+    assert.match(change.err, /--link-change/);
+    assert.equal(T.questionCount(), n, 'nothing asked');
+  } finally { T.done(); }
+});

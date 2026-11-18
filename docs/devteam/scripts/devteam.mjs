@@ -6893,6 +6893,43 @@ function askLine({ thread } = {}) {
     // what the owner reads in the Inbox says exactly what approving this lands
     context = [context, `Approving this lands: ${remediationEntries.map((e) => (e.sha ? `${e.name} (${e.script} at blob ${e.sha})` : `the removal of ${e.name}`)).join('; ')}`].filter(Boolean).join('\n\n');
   }
+  // A repo link change asked in the supervisor's own words (--link-change): the kit writes the lines
+  // the owner's answer binds by (linkAnswerCovers), from main's settings, and nobody else may: a
+  // binding line typed or quoted in the question's own words is refused, so it never approves by accident.
+  const typed = `${q}\n${flagStr('context') ?? ''}`;
+  if (typed.includes(linkAnswerCovers.HEADER) || /^links\.[a-z0-9-]+(\.[a-z_]+)?: main has .*; would be /m.test(typed)) die('--question and --context may not hold a repo link approval line ("links.<id>[.<field>]: main has …; would be …") or its header: the kit writes them, from --link-change');
+  if (flagStr('change') !== undefined && ['governance-edit', 'gate-change'].includes(cls)) die('--change belongs on a goal-change question; a repo link change is --link-change \'{"link":"<id>","field":"<field>","value":<value>}\' (or "entry" for an add or a removal)');
+  const linkChange = jsonFlag('link-change');
+  if (linkChange !== undefined) {
+    if (!['governance-edit', 'gate-change'].includes(cls)) die('--link-change goes with --class governance-edit or gate-change: a repo link change is the owner\'s');
+    const shape = '--link-change: each item is {"link":"<id>","field":"<field>","value":<value>} or {"link":"<id>","entry":{…} | null}';
+    const items = Array.isArray(linkChange) ? linkChange : [linkChange];
+    if (!items.length) die(shape);
+    const mainLinks = mainSettings(null)?.links ?? {};
+    const after = Object.assign(Object.create(null), structuredClone(mainLinks));
+    for (const it of items) {
+      if (!isObj(it) || typeof it.link !== 'string' || Object.hasOwn(it, 'entry') === (Object.hasOwn(it, 'field') || Object.hasOwn(it, 'value'))) die(shape);
+      const onMain = ownEntry(mainLinks, it.link);
+      if (Object.hasOwn(it, 'field')) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; ask about it whole: {"link":"${it.link}","entry":{…}}`);
+        if (!ownersKind(onMain)) die(`--link-change: ${it.link} is a ${onMain.kind} link, the supervisor's (link set)`);
+        if (!linkFields(onMain.kind).includes(it.field) || !LINK_KINDS[onMain.kind].ownerClass(it.field) || !Object.hasOwn(it, 'value')) die(`--link-change: "${it.field}" is not a field of a ${onMain.kind} link the owner approves, with its value`);
+        after[it.link] = { ...ownEntry(after, it.link), [it.field]: it.value };
+      } else if (it.entry === null) {
+        if (!onMain) die(`--link-change: ${it.link} is not a link on main; there is nothing to remove`);
+        delete after[it.link];
+      } else {
+        if (!isObj(it.entry) || !ownersKind(it.entry) && !ownersKind(onMain)) die('--link-change: an entry is a repo link\'s ({"kind":"repo",…})');
+        after[it.link] = it.entry;
+      }
+    }
+    const { errors } = registryProblems({ ...loadSettings(), links: after });
+    if (errors.length) die(`--link-change: not a valid registry:\n  - ${errors.join('\n  - ')}`);
+    const named = new Set(items.map((it) => it.link));
+    const changes = linkFieldChanges(mainLinks, after).filter((c) => named.has(c.id));
+    if (!changes.length) die('--link-change: main already has that; there is nothing to approve');
+    context = [context, [linkAnswerCovers.HEADER, ...changes.map(linkFieldChanges.line)].join('\n')].filter(Boolean).join('\n\n');
+  }
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
     if (kind !== 'owner-action') die('--secrets belongs on an owner-action question: the owner posts values, the supervisor never holds them');
