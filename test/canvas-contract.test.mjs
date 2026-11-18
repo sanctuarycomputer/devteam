@@ -653,6 +653,15 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.ct.name', value: 'x' }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
     refused(base, [{ op: 'set', id: 'n1', prop: 'overrides', value: { ct: { name: 'x' } } }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
     refused(base, [{ op: 'set', id: 'c1', prop: 'variants', value: { dark: { ct: { parent: 'x' } } } }, { op: 'set', id: 'nope', prop: 'opacity', value: 1 }], 'prop');
+    // a key never overridden is prop even when its target doesn't resolve (yet)
+    for (const key of ['name', 'figma', 'component', 'variant', 'props', 'variants', 'overrides', 'id', 'type', 'parent', 'children']) {
+      refused(base, [{ op: 'set', id: 'n1', prop: `overrides.zz.${key}`, value: 'x' }], 'prop');
+      refused(base, [{ op: 'set', id: 'c1', prop: `variants.dark.zz.${key}`, value: 'x' }], 'prop');
+      refused(base, [{ op: 'set', id: 'n1', prop: 'overrides', value: { zz: { [key]: 'x' } } }], 'prop');
+      const stored = small();
+      stored.nodes.n1.overrides.zz = { [key]: 'x' };
+      assert.equal(errs(stored)[0].code, 'prop', `a stored ${key} override on an unknown target is prop first`);
+    }
     // a target that doesn't resolve stays ref, so a forward reference still works; and once its node
     // is known, a key not of its type is prop
     refused(base, [{ op: 'set', id: 'n1', prop: 'overrides.zz.radius', value: 2 }], 'ref');
@@ -702,6 +711,8 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
     b.record(CLIENT, 8, 'value');
     assert.deepEqual(b.judge(CLIENT, 8), { refused: 'value' });
     // remembered while within refusedMemory of the highest seq seen; forgotten beyond it
+    assert.equal(LIMITS.refusedMemory, 2000, "a half-open link's worst case: 30 a second for about 60 s is 1800");
+    assert.ok(LIMITS.refusedMemory >= LIMITS.perSecond * (LIMITS.unansweredPings + 1) * (LIMITS.pingMs / 1000), 'refusedMemory covers the seqs sent before two unanswered pings close the link');
     b.record(CLIENT, 5 + LIMITS.refusedMemory, null);
     assert.deepEqual(b.judge(CLIENT, 5), { refused: 'missing' }, 'exactly refusedMemory below: remembered');
     b.record(CLIENT, 6 + LIMITS.refusedMemory, null);
@@ -1018,13 +1029,14 @@ test('canvas A1: canvas-doc@1 and canvas@1, their fixtures and fake hold to one 
       '`move` of a page with parent null reorders it',
     ]);
     all(md, 'Messages', [
-      'An `edit` at or below it is acked again to that connection only, without being applied',
+      'An `edit` at or below it is acked again to that connection only, without being applied, unless it is a refusal the server remembers',
       'whether or not that `seq` itself was applied',
       "A refused edit doesn't raise the client's highest `seq`.",
       'the page drops its local copy of the refused edit by reloading the document and reapplying its other unacked edits over it, says why in plain words, and never resends an edit it saw refused',
       'An `edit` whose `seq` is one it remembers refusing is answered `refused` again with the same `why`, to that connection only, and never re-acked',
-      "it keeps the seqs it refused that are within 1000 of the client's highest seq seen (`refusedMemory`)",
-      'A refused `seq` more than 1000 below the highest seen is forgotten and, at or below the highest applied, re-acked.',
+      "it keeps the seqs it refused that are within 2000 of the client's highest seq seen (`refusedMemory`)",
+      "2000 covers a half-open link's worst case: a page sending 30 messages a second until two unanswered 20 s pings close it, about 60 s, is 1800 seqs.",
+      'A refused `seq` more than 2000 below the highest seen is forgotten and, at or below the highest applied, re-acked.',
       'A new session (a restart, a `reload`) starts with nothing remembered.',
       'An `edit` whose `client` or `seq` breaks its rule is a message a page must not send: the connection is closed 1008.',
       'a longer list or a bad id and the whole `select` is ignored; ids that name no node are dropped',

@@ -62,7 +62,7 @@ export const LIMITS = Object.freeze({
   openCanvases: 20,
   perServer: 200,
   selectIds: 100,
-  refusedMemory: 1000, // refused seqs remembered within this of a client's highest seq seen
+  refusedMemory: 2000, // refused seqs remembered within this of a client's highest seq seen (a half-open link's ~60 s at 30 a second is 1800)
   pingMs: 20000,
   unansweredPings: 2,
   savedMs: 500,
