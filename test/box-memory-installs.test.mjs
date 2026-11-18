@@ -604,3 +604,13 @@ test('3a: a gate checkout (merge --chore\'s landing one) runs its setup inline: 
     }
   } finally { for (const p of kids) try { p.kill('SIGKILL'); } catch {} I.finish(); }
 });
+
+test('the docs say it', () => {
+  const sup = fs.readFileSync('docs/devteam/process/supervisor.md', 'utf8');
+  const sec = (from) => { const i = sup.indexOf(from); const j = sup.indexOf('\n## ', i + 1); return sup.slice(i, j < 0 ? undefined : j); };
+  const s5 = sec('## 5. Scheduling and merging');
+  for (const re of [/worktree_copy/, /npm install --prefer-offline/, /DEVTEAM_SETUP_SLOTS/, /lockfile/, /worktree_setup_always/, /gate checkouts?/]) assert.match(s5, re, `§5 ${re}`);
+  assert.match(sec('## 11. Recovery'), /slot_held/);
+  const readme = fs.readFileSync('README.md', 'utf8').split('\n').find((l) => l.includes('never inherited'));
+  for (const re of [/worktree_copy/, /worktree_setup_always/, /chore worktrees/, /never (to )?gate checkouts/]) assert.match(readme, re, `README ${re}`);
+});
