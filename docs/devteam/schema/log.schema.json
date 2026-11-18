@@ -2329,6 +2329,402 @@
         "additionalProperties": false,
         "x-required-new": ["thread", "text"]
       }
+    },
+    "self": {
+      "description": "self@1: the shape of project/self.md, what the project is. The file is markdown: a title and prose the owner reads, and exactly one fenced block with the info string self holding JSON, which the kit parses (block). dashboard is that block as dashboard data. Fields are only ever added; self: 2 is refused by an older kit with \"newer kit\". The reference checker is test/fixtures/world/check.mjs.",
+      "block": {
+        "description": "The JSON in self.md's one self block.",
+        "type": "object",
+        "properties": {
+          "self": {
+            "description": "The contract's version: 1.",
+            "type": "integer",
+            "const": 1
+          },
+          "what": {
+            "description": "What the project is, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "makes": {
+            "description": "What the project makes or does, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parts": {
+            "description": "The project's parts, at least one.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {
+              "description": "A part of the project: an id, a name, what it is, and the paths that hold it.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The part's id, unique among every id in self.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The part's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "what": {
+                  "description": "What the part is, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "code": {
+                  "description": "The repo-relative paths that hold the part (kit-139 checks they exist at the draft; on main a missing one raises self-drift).",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "description": "A repo-relative path: no leading /, no .. segment.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$"
+                  }
+                }
+              },
+              "required": ["id", "name", "what", "code"],
+              "additionalProperties": false
+            }
+          },
+          "controls": {
+            "description": "Its boundary: what the project controls (its code, its releases, its pages).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it controls.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "not": {
+            "description": "Its boundary: what the project touches but does not control (a vendor's API, a store's listing).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it touches but does not control.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "required": ["self", "what", "makes", "parts", "controls", "not"],
+        "additionalProperties": false
+      },
+      "dashboard": {
+        "description": "The dashboard-data self block, drawn from main's self.md: the block without its version. Where dashboard data carries it, it is null when main has no self.md or one that fails its check, never a missing key or an empty object.",
+        "type": "object",
+        "properties": {
+          "what": {
+            "description": "What the project is, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "makes": {
+            "description": "What the project makes or does, in one plain sentence.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "parts": {
+            "description": "The project's parts, at least one.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 40,
+            "items": {
+              "description": "A part of the project, as the dashboard shows it.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The part's id, unique among every id in self.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The part's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "what": {
+                  "description": "What the part is, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "code": {
+                  "description": "The repo-relative paths that hold the part (kit-139 checks they exist at the draft; on main a missing one raises self-drift).",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "description": "A repo-relative path: no leading /, no .. segment.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "pattern": "^(?!/)(?!(.*/)?\\.\\.(/|$)).+$"
+                  }
+                }
+              },
+              "required": ["id", "name", "what", "code"],
+              "additionalProperties": false
+            }
+          },
+          "controls": {
+            "description": "Its boundary: what the project controls (its code, its releases, its pages).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it controls.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "not": {
+            "description": "Its boundary: what the project touches but does not control (a vendor's API, a store's listing).",
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "description": "One thing it touches but does not control.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "required": ["what", "makes", "parts", "controls", "not"],
+        "additionalProperties": false
+      }
+    },
+    "exterior": {
+      "description": "exterior@1: the shape of project/exterior.md, what the project relates to, by relation to the Self in self.md. The file is markdown: a title and prose the owner reads, naming each entity outside the block, and exactly one fenced block with the info string exterior holding JSON, which the kit parses (block); a self block in it is refused. A signal names what would show an entity, in words, and no sensor or pages: senses are the supervisor's (project/senses.md). dashboard is the block as dashboard data. Fields are only ever added; exterior: 2 is refused by an older kit with \"newer kit\". The reference checker is test/fixtures/world/check.mjs.",
+      "block": {
+        "description": "The JSON in exterior.md's one exterior block.",
+        "type": "object",
+        "properties": {
+          "exterior": {
+            "description": "The contract's version: 1.",
+            "type": "integer",
+            "const": 1
+          },
+          "strategy_blob": {
+            "description": "The git blob of project/strategy.md it was drawn from.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          },
+          "self_blob": {
+            "description": "The git blob of project/self.md it was drawn against.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+          },
+          "entities": {
+            "description": "What the project relates to; empty while none is drawn yet.",
+            "type": "array",
+            "maxItems": 60,
+            "items": {
+              "description": "An organisation, group or work the project relates to.",
+              "type": "object",
+              "properties": {
+                "id": {
+                  "description": "The entity's id, unique among every id in exterior.md.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "name": {
+                  "description": "The entity's name, as the prose outside the block names it.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "relation": {
+                  "description": "How the entity relates to the Self in self.md. Business roles are examples, not the scheme: a client is something it serves, a vendor something it depends on, a competitor an alternative.",
+                  "type": "string",
+                  "enum": ["serves", "depends_on", "builds_on_it", "alternative", "collaborates", "governs", "affects", "other"]
+                },
+                "relation_word": {
+                  "description": "For relation other only, and required there: the relation in one lowercase word.",
+                  "type": "string",
+                  "maxLength": 40,
+                  "pattern": "^[a-z]+$"
+                },
+                "kind": {
+                  "description": "organisation, group, or work (another project, library, service or standard). There is no person: one person is modelled as the group they belong to.",
+                  "type": "string",
+                  "enum": ["organisation", "group", "work"]
+                },
+                "matters": {
+                  "description": "What matters about the entity to this project, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "weight": {
+                  "description": "Its value to the strategy, 1 to 4, on the scale goal impact uses (4: the project depends on it).",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4
+                },
+                "strategy": {
+                  "description": "The strategy lines it serves: quotes of strategy.md, each found verbatim at strategy_blob.",
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 5,
+                  "items": {
+                    "description": "A quote of strategy.md.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "signals": {
+                  "description": "What would show the entity, in words.",
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "description": "A signal: what would show the entity, and how much it says. No sensor, no pages.",
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "description": "The signal's id, unique among every id in exterior.md.",
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                      },
+                      "what": {
+                        "description": "What would show the entity, in one plain sentence (\"their prices\").",
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "value": {
+                        "description": "How much the signal says about the entity, 1 to 4.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4
+                      }
+                    },
+                    "required": ["id", "what", "value"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["id", "name", "relation", "kind", "matters", "weight", "strategy", "signals"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["exterior", "strategy_blob", "self_blob", "entities"],
+        "additionalProperties": false
+      },
+      "dashboard": {
+        "description": "The dashboard-data exterior block, drawn from main's exterior.md, entities and signals in the file's order. Where dashboard data carries it, it is null when main has no exterior.md or one that fails its check, never a missing key or an empty object.",
+        "type": "object",
+        "properties": {
+          "entities": {
+            "description": "The entities.",
+            "type": "array",
+            "maxItems": 60,
+            "items": {
+              "description": "An entity as the dashboard shows it.",
+              "type": "object",
+              "properties": {
+                "entity": {
+                  "description": "The entity's id.",
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                },
+                "relation": {
+                  "description": "How the entity relates to the Self in self.md. Business roles are examples, not the scheme: a client is something it serves, a vendor something it depends on, a competitor an alternative.",
+                  "type": "string",
+                  "enum": ["serves", "depends_on", "builds_on_it", "alternative", "collaborates", "governs", "affects", "other"]
+                },
+                "relation_word": {
+                  "description": "The relation in one word for relation other, else null.",
+                  "type": ["string", "null"],
+                  "maxLength": 40,
+                  "pattern": "^[a-z]+$"
+                },
+                "kind": {
+                  "description": "organisation, group, or work (another project, library, service or standard). There is no person: one person is modelled as the group they belong to.",
+                  "type": "string",
+                  "enum": ["organisation", "group", "work"]
+                },
+                "name": {
+                  "description": "The entity's name.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "matters": {
+                  "description": "What matters about the entity to this project, in one plain sentence.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "weight": {
+                  "description": "Its value to the strategy, 1 to 4, on the scale goal impact uses (4: the project depends on it).",
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4
+                },
+                "signals": {
+                  "description": "Its signals.",
+                  "type": "array",
+                  "maxItems": 12,
+                  "items": {
+                    "description": "A signal as the dashboard shows it.",
+                    "type": "object",
+                    "properties": {
+                      "signal": {
+                        "description": "The signal's id.",
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+                      },
+                      "what": {
+                        "description": "What would show the entity.",
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "value": {
+                        "description": "How much the signal says, 1 to 4.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4
+                      },
+                      "score": {
+                        "description": "The entity's weight times the signal's value, 1 to 16: the order the supervisor asks in.",
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 16
+                      }
+                    },
+                    "required": ["signal", "what", "value", "score"],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": ["entity", "relation", "relation_word", "kind", "name", "matters", "weight", "signals"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["entities"],
+        "additionalProperties": false
+      }
     }
   },
   "x-id": {
