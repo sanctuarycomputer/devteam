@@ -481,3 +481,179 @@ test('a storage that throws: the URL alone carries the filters, nothing remember
   assert.equal(await p.ev(`${ctl('goal')}.value`), '');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
+
+// ---- kit-91 T4: the Board on the shell ----
+
+// a token's computed colour (a probe styled with it), to compare with a computed border colour
+const TOKEN = (v) => `(() => { const e = document.createElement('i'); e.style.color = 'var(${v})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`;
+// each card's pills, by its id (ticket cards in a root; planner cards by feature)
+const PILLS = (root) => `Object.fromEntries([...document.querySelectorAll(${JSON.stringify(`${root} .tcard[data-ticket]`)})].map((c) => [c.dataset.ticket, [...c.querySelectorAll('.pills .pill')].map((x) => x.textContent.trim())]))`;
+const PL_PILLS = "Object.fromEntries([...document.querySelectorAll('#planners .plcard')].map((c) => [c.dataset.planner, [...c.querySelectorAll('.pills .pill')].map((x) => x.textContent.trim())]))";
+// the fixture's cards, written out: critical path first, the phase with its task, then usage limit, stuck on
+// a prompt, held, high risk, then the component; no Blocked pill
+function expectedPills(ids) {
+  return {
+    [ids.tReleased]: ['pay'], [ids.tMerged]: ['pay'], [ids.tMergedReceipts]: ['receipts'], [ids.tMergedKit]: ['kit'],
+    [ids.tBuilding]: ['building, task 3', 'pay'],
+    [ids.tLimit]: ['building', 'usage limit', 'pay'],
+    [ids.tHighRisk]: ['final review', 'high risk', 'receipts'],
+    [ids.tPrompt]: ['building', 'stuck on a prompt', 'kit'],
+    [ids.tBlockedQ]: ['pay'],
+    [ids.tBlockedNoQ]: ['critical path', 'receipts'],
+    [ids.tPlain]: ['kit'],
+    [ids.tHeld]: ['critical path', 'held', 'pay'],
+  };
+}
+
+test('the Board on the shell: planners strip, columns, card heads and pills, held items with their question', { ...CHROME, timeout: 600000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: `${dataPatchInit(patch)}\n${READS_INIT}` });
+  const J = JSON.stringify;
+  const board = async () => {
+    await go('#overview');
+    await p.ev('localStorage.clear()');
+    await go('#board');
+    await soon(`${CARDS} === 12 && ${PLANNERS} === 4`, 'every card and planner');
+  };
+  const size = (width, height) => p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  const qText = (id) => patch.questions.find((q) => q.id === id).question;
+
+  await t.test('the page is on the shell: no .no-shell, h2, sub-line or scope line', async () => {
+    await board();
+    assert.deepEqual(await p.ev(`(() => { const s = document.getElementById('board'); return { fenced: !!s.closest('.no-shell'), h2: s.querySelectorAll('h2, .sub, #board-scope').length }; })()`), { fenced: false, h2: 0 });
+  });
+
+  await t.test('the planners strip: four across at 1440 in a dashed outline, above the columns; two and one when narrower', async () => {
+    await board();
+    const m = await p.ev(`(() => { const s = document.querySelector('#board .planners'); if (!s) return null; const cs = [...s.querySelectorAll('.plcard')];
+      return { id: s.id, n: cs.length, tops: [...new Set(cs.map((c) => Math.round(c.getBoundingClientRect().top)))].length, dashed: cs.map((c) => getComputedStyle(c).borderTopStyle),
+        above: s.getBoundingClientRect().bottom <= document.getElementById('board-cols').getBoundingClientRect().top }; })()`);
+    assert.deepEqual(m, { id: 'planners', n: 4, tops: 1, dashed: ['dashed', 'dashed', 'dashed', 'dashed'], above: true }, 'the strip at 1440');
+    const across = "(() => { const cs = [...document.querySelectorAll('#board .planners .plcard')]; const top = Math.round(cs[0].getBoundingClientRect().top); return cs.filter((c) => Math.round(c.getBoundingClientRect().top) === top).length; })()";
+    try {
+      await size(1000, 800);
+      await soon(`${across} === 2`, 'two across below 1100px');
+      await size(500, 800);
+      await soon(`${across} === 1`, 'one across below 560px');
+    } finally { await size(1440, 900); }
+    await soon(`${across} === 4`, 'four again at 1440');
+  });
+
+  await t.test('seven columns, Backlog … Released, each at least 180px; each head rule --line, edge to edge', async () => {
+    await board();
+    const cols = await p.ev(`[...document.querySelectorAll('#board-cols > .col')].map((c) => { const h = c.querySelector('h3'), r = c.getBoundingClientRect(), hr = h.getBoundingClientRect(), s = getComputedStyle(h);
+      return { name: h.querySelector('span').textContent, w: r.width, left: Math.abs(hr.left - r.left) <= 1, right: Math.abs(hr.right - r.right) <= 1, rule: s.borderBottomStyle + ' ' + s.borderBottomWidth, color: s.borderBottomColor }; })`);
+    assert.deepEqual(cols.map((c) => c.name), ['Backlog', 'Ready', 'Planning', 'Building', 'Review', 'Merged', 'Released']);
+    const line = await p.ev(TOKEN('--line'));
+    for (const c of cols) {
+      assert.ok(c.w >= 180, `${c.name}: ${c.w}px wide`);
+      assert.deepEqual([c.left, c.right, c.rule, c.color], [true, true, 'solid 1px', line], `${c.name}: its head's rule`);
+    }
+  });
+
+  await t.test('a ticket card: a head with the id in mono and its ⋯ menu, no size; the pills in order and words', async () => {
+    await board();
+    const heads = await p.ev(`[...document.querySelectorAll('#board-cols .tcard[data-ticket]')].map((c) => { const h = c.querySelector(':scope > .tc-head'), b = h?.querySelector('b');
+      return { id: c.dataset.ticket, text: b?.textContent, mono: !!b && /Mono|monospace/.test(getComputedStyle(b).fontFamily),
+        menu: !!h?.querySelector('details.menu'), rule: h ? getComputedStyle(h).borderBottomColor : null, first: c.firstElementChild === h,
+        size: [...c.querySelectorAll('*')].some((e) => !e.children.length && /^(S|M)$|· (S|M)$/.test(e.textContent.trim())), flag: !!c.querySelector('.icon-flag') }; })`);
+    const line = await p.ev(TOKEN('--line'));
+    assert.equal(heads.length, 12);
+    for (const h of heads) assert.deepEqual(h, { id: h.id, text: h.id, mono: true, menu: true, rule: line, first: true, size: false, flag: false }, `${h.id}: its head`);
+    assert.deepEqual(await p.ev(PILLS('#board-cols')), expectedPills(ids), 'every card\'s pills, whole');
+    const cp = await p.ev(`(() => { const x = document.querySelector('#board-cols [data-ticket="${ids.tHeld}"] .pill.cp'); return x && { cls: [...x.classList].sort(), icon: !!x.querySelector('i.icon-route'), title: x.title, dot: getComputedStyle(x, '::before').content }; })()`);
+    assert.deepEqual(cp, { cls: ['badge', 'cp', 'high', 'pill'], icon: true, title: 'On the critical path: it delays the goal', dot: 'none' }, 'the critical-path pill');
+    assert.equal(await p.ev("[...document.querySelectorAll('#board-cols .tcard .pill')].filter((x) => /^blocked$/i.test(x.textContent.trim())).length"), 0, 'no Blocked pill');
+  });
+
+  await t.test('needs attention: the red outline, the question link or "no question yet", never "blocked"', async () => {
+    await board();
+    const red = await p.ev(TOKEN('--red'));
+    const cards = await p.ev(`[...document.querySelectorAll('#board-cols .tcard[data-ticket]')].map((c) => ({ id: c.dataset.ticket, blocked: c.classList.contains('blocked'), color: getComputedStyle(c).borderTopColor,
+      att: c.querySelector(':scope > .att')?.textContent.trim() ?? null, href: c.querySelector(':scope > .att a.att-q')?.getAttribute('href') ?? null, inbox: !!c.querySelector('.att-q i.icon-inbox') }))`);
+    const need = [ids.tBlockedQ, ids.tBlockedNoQ, ids.tLimit, ids.tPrompt];
+    assert.deepEqual(cards.filter((c) => c.blocked).map((c) => c.id).sort(), [...need].sort(), 'every card needing attention has .blocked, and none other');
+    for (const c of cards) assert.equal(c.color === red, c.blocked, `${c.id}: its border ${c.color} is --red only when it needs attention`);
+    const by = Object.fromEntries(cards.map((c) => [c.id, c]));
+    assert.deepEqual([by[ids.tBlockedQ].att, by[ids.tBlockedQ].href, by[ids.tBlockedQ].inbox], [qText(ids.qTicket), `#q/${ids.qTicket}`, true], 'the held card links its question');
+    for (const id of [ids.tBlockedNoQ, ids.tLimit, ids.tPrompt]) assert.deepEqual([by[id].att, by[id].href], ['no question yet', null], `${id}: no question yet`);
+    for (const c of cards) if (!need.includes(c.id)) assert.equal(c.att, null, `${c.id}: no attention row`);
+    const pl = await p.ev(`[...document.querySelectorAll('#planners .plcard')].map((c) => ({ f: c.dataset.planner, blocked: c.classList.contains('blocked'), stuck: c.classList.contains('stuck'), att: c.querySelector(':scope > .att')?.textContent.trim() ?? null, href: c.querySelector('.att a.att-q')?.getAttribute('href') ?? null }))`);
+    assert.deepEqual(pl, [
+      { f: ids.planLimit, blocked: false, stuck: true, att: 'no question yet', href: null },
+      { f: ids.planPromptQ, blocked: true, stuck: true, att: qText(ids.qPlanner), href: `#q/${ids.qPlanner}` },
+      { f: ids.planNoWindow, blocked: false, stuck: true, att: 'no question yet', href: null },
+      { f: ids.planAnswers, blocked: true, stuck: false, att: qText(ids.qAnswers[0]), href: `#q/${ids.qAnswers[0]}` },
+    ], 'the planners: outline, attention row');
+    assert.deepEqual(await p.ev(PL_PILLS), {
+      [ids.planLimit]: ['usage limit'], [ids.planPromptQ]: ['waiting on a prompt', 'waiting for 1 answer from you'],
+      [ids.planNoWindow]: ['window gone', 'waiting for the supervisor'], [ids.planAnswers]: ['waiting for 2 answers from you'],
+    }, "the planners' pills");
+    assert.equal(await p.ev("[...document.querySelectorAll('#board .att')].filter((x) => /blocked/i.test(x.textContent)).length"), 0, 'no .att says blocked');
+    // a question no longer in DATA.questions (answered between reads): "a question", still its link
+    const gone = await p.ev(`(() => { DATA.questions = DATA.questions.filter((q) => q.id !== ${J(ids.qTicket)}); renderBoard(); const a = document.querySelector('#board-cols [data-ticket="${ids.tBlockedQ}"] .att-q'); return a && [a.textContent.trim(), a.getAttribute('href')]; })()`);
+    assert.deepEqual(gone, ['a question', `#q/${ids.qTicket}`], 'a missing question reads "a question"');
+  });
+
+  await t.test('a planner card is a flex column; its question row sits at the bottom beside a taller neighbour', async () => {
+    await board();
+    const m = await p.ev(`(() => { const cs = [...document.querySelectorAll('#planners .plcard')];
+      cs.find((c) => c.dataset.planner === ${J(ids.planNoWindow)}).querySelector('.muted').textContent += ' and a long line '.repeat(12);
+      return cs.map((c) => { const s = getComputedStyle(c), r = c.getBoundingClientRect(), a = c.querySelector(':scope > .att')?.getBoundingClientRect();
+        const content = r.bottom - parseFloat(s.borderBottomWidth) - parseFloat(s.paddingBottom);
+        return { f: c.dataset.planner, flex: s.display + ' ' + s.flexDirection, h: r.height, gap: a ? Math.abs(content - a.bottom) : null }; }); })()`);
+    for (const c of m) assert.equal(c.flex, 'flex column', `${c.f}: a flex column`);
+    const tall = m.find((c) => c.f === ids.planNoWindow).h;
+    for (const c of m.filter((x) => x.f !== ids.planNoWindow)) {
+      assert.ok(c.h >= tall - 1, `${c.f}: stretched to its taller neighbour (${c.h} vs ${tall})`);
+      assert.ok(c.gap !== null && c.gap <= 1, `${c.f}: its attention row at the bottom (${c.gap}px off)`);
+    }
+  });
+
+  await t.test("a held ticket's question link opens the Inbox tab at its card, one history entry, no peek", async () => {
+    await board();
+    const before = await p.ev('history.length');
+    await p.click(`#board-cols [data-ticket="${ids.tBlockedQ}"] .att-q`);
+    await soon(`/[?&]th=inbox/.test(location.hash) && document.body.classList.contains('threads-open') && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true'`, 'the panel on its Inbox tab');
+    await soon(`(() => { const e = document.getElementById(${J(`q-${ids.qTicket}`)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= 0 && r.bottom <= innerHeight + 1; })()`, 'its card on screen');
+    assert.equal(await p.ev('history.length'), before + 1, 'one entry');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open') || !document.getElementById('drawer').hidden"), false, 'no ticket peek');
+  });
+
+  await t.test("a planner's question link opens the Inbox tab, one history entry, no planner peek", async () => {
+    await board();
+    const before = await p.ev('history.length');
+    await p.click(`#planners [data-planner="${ids.planPromptQ}"] .att-q`);
+    await soon(`/[?&]th=inbox/.test(location.hash) && document.querySelector('#th-tabs [role="tab"][data-tab="inbox"]')?.getAttribute('aria-selected') === 'true'`, 'the panel on its Inbox tab');
+    await soon(`!!document.getElementById(${J(`q-${ids.qPlanner}`)})`, 'its card');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(await p.ev('history.length'), before + 1, 'one entry');
+    assert.equal(await p.ev("document.body.classList.contains('peek-open') || !document.getElementById('drawer').hidden || location.hash.includes('planner/')"), false, 'no planner peek');
+  });
+
+  await t.test('a click and Enter on a planner card open its peek', async () => {
+    await board();
+    const card = `document.querySelector('#planners [data-planner="${ids.planNoWindow}"]')`;
+    assert.deepEqual(await p.ev(`[${card}.tagName, ${card}.getAttribute('role'), ${card}.getAttribute('tabindex')]`), ['DIV', 'button', '0']);
+    assert.equal(await p.ev(`(() => { const c = ${card}; c.focus(); if (document.activeElement !== c) return 'not focused'; c.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); return true; })()`), true);
+    await soon(`decodeURIComponent(location.hash) === ${J(`#planner/${ids.planNoWindow}`)} && !document.getElementById('drawer').hidden`, 'Enter: the planner peek');
+    await board();
+    await p.click(`#planners [data-planner="${ids.planNoWindow}"] .pl-head`);
+    await soon(`decodeURIComponent(location.hash) === ${J(`#planner/${ids.planNoWindow}`)} && !document.getElementById('drawer').hidden`, 'a click: the planner peek');
+  });
+
+  await t.test("a feature peek's board: the same cards, the critical-path pill, the held card's outline and question link", async () => {
+    await board();
+    await p.ev(`location.hash = ${J(`#feature/${ids.featPay}`)}`);
+    const B = '#drawer-body .board-peek';
+    await soon(`document.querySelectorAll(${J(`${B} .tcard[data-ticket]`)}).length === ${patch.progress.tickets.filter((x) => x.feature === ids.featPay).length}`, "the feature's cards in its peek");
+    const want = Object.fromEntries(Object.entries(expectedPills(ids)).filter(([id]) => patch.progress.tickets.find((x) => x.id === id).feature === ids.featPay));
+    assert.deepEqual(await p.ev(PILLS(B)), want, "the peek's cards' pills, whole: critical path on the critical card alone");
+    const red = await p.ev(TOKEN('--red'));
+    const held = await p.ev(`(() => { const c = document.querySelector(${J(`${B} [data-ticket="${ids.tBlockedQ}"]`)}); return { blocked: c.classList.contains('blocked'), color: getComputedStyle(c).borderTopColor, href: c.querySelector('.att a.att-q')?.getAttribute('href') ?? null, head: !!c.querySelector('.tc-head') }; })()`);
+    assert.deepEqual(held, { blocked: true, color: red, href: `#q/${ids.qTicket}`, head: true }, "the held card in the peek");
+    assert.equal(await p.ev(`[...document.querySelectorAll(${J(`${B} .tcard.blocked`)})].map((c) => c.dataset.ticket).sort().join()`), [ids.tBlockedQ, ids.tLimit].sort().join(), 'the outline on those needing attention alone');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+});

@@ -482,6 +482,26 @@ try {
   .tcard b { font-family: var(--mono); font-weight: 500; font-size: 11.5px; overflow-wrap: anywhere; }
   .tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+  /* the Board on the shell and the boards in peeks (kit-91, the owner's mock): seven columns of at least 180px on the
+     Board; a column head's rule is the column's own --line and runs to its edges; a card's head holds its id in
+     mono and its ⋯ menu above a --line rule; its pills are .badge.pill (the shell's dot off), alike inside and
+     outside a .no-shell fence; a card that needs attention has the red outline and its attention row */
+  #board .board { grid-template-columns: repeat(7, minmax(180px, 1fr)); }
+  :is(#board, .board-peek) .col h3 { margin: -8px -8px 8px; padding: 8px 12px 7px; font-size: 12px; font-weight: 600; color: var(--fg-2); border-bottom: 1px solid var(--line); }
+  :is(#board, .board-peek) .col.none h3 { color: var(--muted); }
+  .tcard > .tc-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 29px; box-sizing: border-box; margin: -8px -10px 6px; padding: 2px 4px 2px 10px; border-bottom: 1px solid var(--line); }
+  .tcard > .tc-head > b { min-width: 0; }
+  .tcard > .tc-head > details.menu { flex: none; margin: 0; }
+  .col:first-child .tcard > .tc-head > details.menu[open] > .pop { right: auto; left: 0; }
+  .tcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .tcard .pill::before, .plcard .pill::before { content: none; }
+  .tcard .pill i, .plcard .pill i { margin-right: 4px; font-size: 11px; vertical-align: -1px; }
+  :is(#board, .board-peek) .tcard.blocked { border: 1px solid var(--red); box-shadow: 0 0 0 1px color-mix(in srgb, var(--red) 25%, transparent); }
+  .tcard > .att { margin-top: 6px; min-width: 0; }
+  .att-q { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--blue-fg); min-width: 0; text-decoration: none; }
+  .att-q span { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+  .att-q i { flex: none; margin-top: 2px; }
+  .att .badge { margin-right: 0; }
 
   /* loop */
   .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
@@ -589,12 +609,22 @@ try {
   .card h4 a.title-link { color: inherit; }
   .card h4 a.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 
-  /* planners lane */
-  #planners { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-bottom: 10px; }
+  /* the planners strip above the Board (kit-91): four across, two below 1100px, one below 560px; each card in the
+     dashed outline, a flex column whose attention row sits at the bottom; stuck or held by a question, the dashed
+     outline in red */
+  #planners.planners { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+  @media (max-width: 1100px) { #planners.planners { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { #planners.planners { grid-template-columns: minmax(0, 1fr); } }
   #planners:empty { display: none; }
-  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: block; white-space: normal; }
+  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: flex; flex-direction: column; min-width: 0; white-space: normal; }
   .plcard:hover { background: var(--hover); opacity: 1; }
-  .plcard.stuck { border-style: solid; border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .plcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  .plcard .pl-head { margin: -10px -12px 6px; padding: 6px 12px; border-bottom: 1px dashed var(--line-2); }
+  .plcard.stuck, .plcard.blocked { --pl-red: color-mix(in srgb, var(--red) 45%, var(--line-2)); border: 1px dashed var(--pl-red); }
+  .plcard.stuck .pl-head, .plcard.blocked .pl-head { border-bottom-color: var(--pl-red); }
+  .plcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .plcard .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+  .plcard > .att { margin-top: auto; padding-top: 6px; min-width: 0; }
   .plcard b { font-size: 12.5px; }
 
   /* acts in plain words */
@@ -1058,9 +1088,8 @@ try {
     </div>
   </section>
 
-  <section id="board" class="no-shell" data-page="board">
-    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span></h2>
-    <div id="planners"></div>
+  <section id="board" data-page="board">
+    <div id="planners" class="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
 
@@ -2025,31 +2054,43 @@ function progressShown(done, show) {
 }
 /* board-filter end */
 const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
-// A card's pills, most important first: what stops it, then what to know, then what it's doing.
-// Each pill is a word or two and never wraps; the row wraps between pills.
-function ticketPills(t) {
+// A card's pills (kit-91, the mock's order and words): critical path first, then the phase in words with its task
+// (an unmerged ticket not blocked or done), then usage limit or stuck on a prompt, held, high risk, then the
+// component, last. No Blocked pill: the red outline and the attention row say it. [label, tone, title, icon]
+function ticketPills(t, crit) {
   const ps = [];
-  if (t.phase === 'blocked') ps.push(['Blocked', 'high']);
-  if (t.waiting) ps.push([t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line]);
-  if (t.held) ps.push(['Held', '', t.held]);
-  if (t.risk === 'high') ps.push(['High risk', 'medium']);
-  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`]);
+  if (crit && crit.has(t.id)) ps.push(['critical path', 'high cp', 'On the critical path: it delays the goal', 'route']);
+  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([`${PHASE_WORDS[t.phase] || words(t.phase).toLowerCase()}${t.task ? `, task ${String(t.task).replace(/^T(?=\d)/i, '')}` : ''}`, '']);
+  if (t.waiting) ps.push(t.waiting.kind === 'limit' ? ['usage limit', 'medium', t.waiting.line] : ['stuck on a prompt', 'high', t.waiting.line]);
+  if (t.held) ps.push(['held', 'medium', t.held]);
+  if (t.risk === 'high') ps.push(['high risk', 'high']);
+  if (t.component) ps.push([t.component, '']);
   return ps;
 }
+const pillsOf = (ps) => (ps.length ? `<div class="pills">${ps.map(([label, tone, tip, icon]) => `<span class="badge pill${tone ? ` ${tone}` : ''}" title="${esc(tip || label)}">${icon ? `<i class="icon-${icon}" aria-hidden="true"></i>` : ''}${esc(label)}</span>`).join('')}</div>` : '');
+// A card's attention row (a ticket or planner that needs attention): the question holding it, a link that opens
+// the panel's Inbox tab at its card (its text from DATA.questions; "a question" once it has left them), or "no
+// question yet".
+const attLine = (x) => (x.held_by
+  ? `<a class="att-q" href="#q/${esc(encodeURIComponent(x.held_by))}"><i class="icon-inbox" aria-hidden="true"></i><span>${esc((DATA?.questions || []).find((q) => q.id === x.held_by)?.question || 'a question')}</span></a>`
+  : '<span class="badge high">no question yet</span>');
 // The board's columns and cards, for the Board and for a sidepeek's tickets (only: the columns that
-// have cards, so a few tickets don't sit in seven mostly empty columns).
+// have cards, so a few tickets don't sit in seven mostly empty columns). Each item is joined with its
+// /api/data ticket row by id for held_by, so a peek's board shows the outline and the question too.
 function boardCols(items, crit, { only = false, inert = false } = {}) {
-  return COLUMNS.filter(([name]) => !only || items.some((t) => t.stage !== 'superseded' && columnOf(t) === name)).map(([name]) => {
-    let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
+  const rows = ticketMap();
+  const live = items.filter((t) => t.stage !== 'superseded').map((t) => ({ ...t, held_by: t.held_by ?? rows.get(t.id)?.held_by ?? null }));
+  return COLUMNS.filter(([name]) => !only || live.some((t) => columnOf(t) === name)).map(([name]) => {
+    let cards = live.filter((t) => columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
-    return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <div class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `role="button" tabindex="0" data-ticket="${esc(t.id)}" data-open="ticket/${esc(encodeURIComponent(t.id))}" aria-label="Open ${esc(t.title)}"`}>${inert ? '' : cardMenu('ticket', t.id)}
-        <div class="t">${(() => { const b = `<b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b>`; return inert ? b : `<a class="title-link" href="${esc(peekFor('ticket', t.id))}">${b}</a>`; })()}</div>
-        <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
-        ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
-      </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => { const att = needsAttention(t); return `
+      <div class="tcard${inert ? ' inert' : ''}${att ? ' blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `role="button" tabindex="0" data-ticket="${esc(t.id)}" data-open="ticket/${esc(encodeURIComponent(t.id))}" aria-label="Open ${esc(t.title)}"`}>
+        <div class="tc-head"><b>${esc(t.id)}</b>${inert ? '' : cardMenu('ticket', t.id)}</div>
+        <div class="t">${inert ? `<b>${esc(t.title)}</b>` : `<a class="title-link" href="${esc(peekFor('ticket', t.id))}"><b>${esc(t.title)}</b></a>`}</div>
+        ${pillsOf(ticketPills(t, crit))}${att ? `<div class="att">${attLine(t)}</div>` : ''}
+      </div>`; }).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
 
@@ -3841,12 +3882,25 @@ bindTabBar($('goals'), { onSelect: (id) => {
 const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<div class="meta">Registry attestation: precondition ${esc(r.precondition)}, ${esc(r.status)}${r.question ? ` (${qlink(r.question, r.answer ? `answered “${r.answer}”` : 'the question')})` : ''}</div>` : ''; };
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
+// The Board's planner cards (kit-91): a div[role=button] (a button can't hold the question link) opening the
+// planner's peek (data-open: the record cards' one click and Enter handlers, which leave a link inside it to
+// itself); a flex column of its head, its line, its badges as pills and, when it needs attention, the attention
+// row at the bottom. .stuck (waiting, or no window) and .blocked (held by a question) outline it in red.
 function plannerCards(ps) {
-  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
-    <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
+  return ps.map((p) => {
+    const waits = p.waiting_on_owner || [];
+    const pills = [
+      ...(p.waiting ? [[p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt', 'high', p.waiting.line]] : []),
+      ...(!p.window ? [['window gone', 'medium']] : []),
+      ...((p.waiting_on_supervisor || []).length ? [['waiting for the supervisor', 'low']] : []),
+      ...(waits.length ? [[`waiting for ${waits.length} answer${waits.length > 1 ? 's' : ''} from you`, 'medium']] : []),
+    ];
+    return `<div class="plcard${p.waiting || !p.window ? ' stuck' : ''}${p.held_by ? ' blocked' : ''}" role="button" tabindex="0" data-planner="${esc(p.feature)}" data-open="planner/${esc(encodeURIComponent(p.feature))}" aria-label="Open the planner for ${esc(p.title)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
+    <div class="pl-head"><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
     <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
-    <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}${(p.waiting_on_owner || []).length ? `<span class="badge medium">waiting for ${p.waiting_on_owner.length} answer${p.waiting_on_owner.length > 1 ? 's' : ''} from you</span>` : ''}</div>
-  </button>`).join('');
+    ${pillsOf(pills)}${needsAttention(p) ? `<div class="att">${attLine(p)}</div>` : ''}
+  </div>`;
+  }).join('');
 }
 
 function renderOoda(o) {
@@ -8510,8 +8564,7 @@ document.addEventListener('click', async (ev) => {
     document.querySelectorAll('#drawer-body [data-md]').forEach((el) => { el.hidden = el.dataset.md !== v; });
     return;
   }
-  const pl = ev.target.closest('[data-planner]');
-  if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
+  // a planner card opens its peek through the record cards' data-open handlers (kit-91), which leave its question link alone
   // Stop and Start on a preview: the kit's own actions, as an owner action
   const pvb = ev.target.closest('[data-preview-stop],[data-preview-start]');
   if (pvb) {
