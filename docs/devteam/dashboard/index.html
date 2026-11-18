@@ -432,8 +432,12 @@ try {
   .pagebar .extra select { min-width: 0; max-width: 220px; font-size: 12px; }
   .pagebar .extra button[data-f="att"] { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; }
   .pagebar .extra button[data-f="att"][aria-pressed="true"] { background: var(--well); color: var(--fg); border-color: var(--fg-2); }
-  .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
-  @media (max-width: 860px) { .progress-layout { grid-template-columns: minmax(0, 1fr); } }
+  /* Progress on the shell (kit-91): a .g12 of a .c8 and a .c4 column, each a stack of cards; the forecast at the
+     burn-up head's right, cut short rather than overflowing it; the No goal line under Features */
+  #progress .pg-col { display: flex; flex-direction: column; gap: var(--gap); min-width: 0; }
+  #progress .pg-col > .card { margin: 0; }
+  #progress #forecast { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #progress .nogoal { font-size: 12px; color: var(--fg-2); border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
@@ -1067,23 +1071,22 @@ try {
     <div id="unassigned" class="small dim"></div>
   </section>
 
-  <section id="progress" class="no-shell" data-page="progress">
-    <h2>Progress</h2>
-    <div class="small muted"><span id="forecast"></span></div>
-    <div class="progress-layout">
-      <div>
+  <section id="progress" data-page="progress">
+    <div class="g12">
+      <div class="c8 pg-col">
         <div class="card chart" id="burnup-card">
+          <div class="card-head"><i class="icon-chart-line" aria-hidden="true"></i>Burn-up<span class="end" id="forecast"></span></div>
           <div class="legend" id="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div>
           <div id="burnup"></div>
           <div class="tip" id="tip"></div>
         </div>
-        <div class="card"><h3>Stories</h3><div id="w-stories"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-book-open" aria-hidden="true"></i>Stories</div><div id="w-stories"></div></div>
       </div>
-      <div>
-        <div class="card"><h3>Features</h3><div id="w-features"></div></div>
-        <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
-        <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
-        <div class="card"><h3>Points per week</h3><div class="throughput" id="w-throughput"></div><div class="dim small" id="w-throughput-note" style="margin-top:4px"></div></div>
+      <div class="c4 pg-col">
+        <div class="card"><div class="card-head"><i class="icon-layers" aria-hidden="true"></i>Features</div><div id="w-features"></div><div class="nogoal" id="w-nogoal"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-tag" aria-hidden="true"></i>Releases</div><div id="w-releases"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-waves" aria-hidden="true"></i>Waves</div><div id="w-waves"></div></div>
+        <div class="card"><div class="card-head"><i class="icon-chart-column" aria-hidden="true"></i>Points per week</div><div class="throughput" id="w-throughput"></div><div class="dim small" id="w-throughput-note" style="margin-top:4px"></div></div>
       </div>
     </div>
   </section>
@@ -1983,25 +1986,38 @@ function burnup(items, now, ui = PROGRESS_CHART()) {
 function meterRow(label, done, total, note = '', open = null) {
   return `<div class="row"${open ? ` data-open="${esc(open.slice(1))}" tabindex="0" role="link"` : ''}><span>${label}</span><span class="muted">${note || `${done}/${total} · ${pct(done, total)}%`}</span><div class="meter"><span style="width:${pct(done, total)}%"></span></div></div>`;
 }
-function widgets(p, now) {
+// p: Progress's data scoped to the page's items (scopeProgress). show: Progress's Show, each row of Features,
+// Stories, Releases and Waves kept by progressShown (done: every one of its tickets merged); an empty list says
+// None. nameGoals (no goal picked): each wave row names its tickets' goals after it, dim.
+function widgets(p, now, show, { nameGoals = false } = {}) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
-  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(flink(f), pts(ts.filter(isDone)), pts(ts), '', peekFor('feature', f)); }).join('') || empty('No features yet.');
-  const storyDone = (s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
+  const none = empty('None');
+  const allDone = (ts) => ts.length > 0 && ts.every(isDone);
+  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return progressShown(allDone(ts), show) ? meterRow(flink(f), pts(ts.filter(isDone)), pts(ts), '', peekFor('feature', f)) : ''; }).join('') || none;
+  const storyDone = (s) => allDone(p.tickets.filter((t) => t.serves.includes(s)));
   const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
   $('w-releases').innerHTML = rels.map((r) => {
     const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+    const ts = p.tickets.filter((t) => t.target_release === r || stories.some((s) => t.serves.includes(s)));
+    if (!progressShown(allDone(ts), show)) return '';
     const shipped = p.tickets.some((t) => t.released_in === r);
     const done = stories.filter(storyDone).length;
     const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
     return meterRow(`${rlink(r)} ${state}`, done, stories.length, `${done}/${stories.length} stories`, peekFor('release', r));
-  }).join('') || empty('No release targets yet. Each story in a feature names the release it ships in.');
+  }).join('') || none;
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
-  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(wlink(w), ts.filter(isDone).length, ts.length, '', peekFor('wave', w)); }).join('') || empty('No waves yet: they come from the ticket graph.');
-  const storyEntries = Object.entries(p.stories);
-  $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
+  const goalsOf = (ts) => filterGoals().filter((g) => { const gf = goalFeatures(g.id); return ts.some((t) => gf.has(t.feature)); }).map((g) => g.title || g.id);
+  $('w-waves').innerHTML = waves.map((w) => {
+    const ts = p.tickets.filter((t) => t.wave === w);
+    if (!progressShown(allDone(ts), show)) return '';
+    const gs = nameGoals ? goalsOf(ts) : [];
+    return meterRow(`${wlink(w)}${gs.length ? ` <span class="dim wave-goals">${esc(gs.join(', '))}</span>` : ''}`, ts.filter(isDone).length, ts.length, '', peekFor('wave', w));
+  }).join('') || none;
+  const storyRows = Object.entries(p.stories).filter(([id]) => progressShown(storyDone(id), show));
+  $('w-stories').innerHTML = storyRows.length ? `<div>${storyRows.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
     return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`, peekFor('story', id));
-  }).join('')}</div>` : empty('No stories yet. A planner writes them into each feature; chores serve none.');
+  }).join('')}</div>` : none;
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
@@ -2204,15 +2220,31 @@ function renderBoard() {
   $('planners').innerHTML = plannerCards((DATA.planners || []).filter((x) => boardKeep(x, f, ctx)));
   $('board-cols').innerHTML = boardCols(items, new Set(DATA.critical_path));
 }
-// Progress: the burn-up over the goal's tickets, then the Narrow view's within them; the cards below over every
-// ticket for now (kit-91 T5 scopes them and applies Show).
+// Progress's scope (kit-91): the goal's tickets (every ticket with no goal), then the Narrow view's within them.
+function progressItems(p, f) {
+  const items = f.goal ? filterTickets(p, `goal:${f.goal}`) : p.tickets;
+  return f.narrow ? filterTickets({ ...p, tickets: items }, f.narrow) : items;
+}
+// Progress's data scoped to items: those tickets, and the features and stories they hold (the releases and waves
+// widgets() lists come from these), so each card lists only what the items hold.
+function scopeProgress(p, items) {
+  return {
+    ...p, tickets: items,
+    features: p.features.filter((x) => items.some((t) => t.feature === x)),
+    stories: Object.fromEntries(Object.entries(p.stories).filter(([id]) => items.some((t) => t.serves.includes(id)))),
+  };
+}
+// Progress: the burn-up, Points per week and the rows of Features, Stories, Releases and Waves over the goal and
+// Narrow's items, the rows by Show; under Features, the features with no goal and the rate (ooda.roadmap).
 function renderProgress() {
   const p = DATA.progress, now = Date.parse(p.now);
   const f = filtersNow('progress');
-  let items = f.goal ? filterTickets(p, `goal:${f.goal}`) : p.tickets;
-  if (f.narrow) items = filterTickets({ ...p, tickets: items }, f.narrow);
+  const items = progressItems(p, f);
   burnup(items, now);
-  widgets(p, now);
+  widgets(scopeProgress(p, items), now, f.show, { nameGoals: !f.goal });
+  const R = DATA.ooda?.roadmap || {};
+  const un = (R.unassigned || []).map((x) => { const r = R.features?.[x]; const tot = r?.points_total ?? 0; return `${flink(x)} <span class="dim">${tot - (r?.points_left ?? 0)} of ${tot} points</span>`; });
+  $('w-nogoal').innerHTML = `${un.length ? `No goal: ${un.join(', ')} · ` : ''}${esc(R.rate_points_per_day ?? 0)} points a day`;
   const all = forecast(p.tickets, now);
   $('n-progress').textContent = all.scope ? `${pct(all.done, all.scope)}%` : '';
 }

@@ -657,3 +657,160 @@ test('the Board on the shell: planners strip, columns, card heads and pills, hel
     assert.deepEqual(await p.ev('window.__errors'), []);
   });
 });
+
+// ---- kit-91 T5: Progress on the shell ----
+
+// burnup() as kit main 5291c8d0 has it (read with `git show 5291c8d0:docs/devteam/dashboard/index.html` when
+// this test was written, from `function burnup(` to its closing brace): the page's must be the same, byte for byte
+const BURNUP_MAIN = "function burnup(items, now, ui = PROGRESS_CHART()) {\n  const el = ui.el;\n  const setForecast = (s) => { if (ui.forecast) ui.forecast.textContent = s; };\n  ui.legend.hidden = !items.some(isDone);\n  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); setForecast(''); return; }\n  const scopePts = items.reduce((a, t) => a + t.weight, 0);\n  if (!items.some(isDone)) {\n    el.innerHTML = empty(`Nothing merged yet: ${items.length} ticket${items.length > 1 ? 's' : ''}, ${scopePts} point${scopePts > 1 ? 's' : ''} of scope. The chart and the forecast start at the first merge.`);\n    setForecast(`0/${scopePts} pts`);\n    return;\n  }\n  const evs = [];\n  for (const t of items) {\n    evs.push([Date.parse(t.added_at), t.weight, 0]);\n    if (t.merged_at) evs.push([Date.parse(t.merged_at), 0, t.weight]);\n  }\n  evs.sort((a, b) => a[0] - b[0]);\n  const pts = [];\n  let s = 0, d = 0;\n  for (const [ts, ds, dd] of evs) { s += ds; d += dd; pts.push([ts, s, d]); }\n  pts.push([now, s, d]);\n  const fc = forecast(items, now);\n  const t0 = pts[0][0];\n  const end = Math.min(Math.max(now + DAY, fc.finished ? now : (fc.worst || fc.eta || now)), now + 365 * DAY);\n  const t1 = end + (end - t0) * 0.04;\n  const W = Math.round(Math.max(300, el.clientWidth || 640)), H = W < 500 ? 220 : 280, L = 34, R = 12, T = 12, B = 26;\n  const yMax = Math.max(1, s) * 1.1;\n  const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - R);\n  const y = (v) => H - B - (v / yMax) * (H - T - B);\n  const step = (idx) => pts.map((p, i) => `${i ? `H${x(p[0]).toFixed(1)}V` : `M${x(p[0]).toFixed(1)},`}${y(p[idx]).toFixed(1)}`).join('');\n  // whole-number y steps (1, 2, 5, 10, …) and x labels that never repeat a date\n  const yStep = [1, 2, 5, 10, 20, 50, 100, 200, 500].find((st) => yMax / st <= 5) ?? Math.ceil(yMax / 5);\n  const yTicks = []; for (let v = 0; v <= yMax; v += yStep) yTicks.push(v);\n  const short = t1 - t0 < 2 * DAY;\n  const xFmt = (ts) => (short ? new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : fmtDate(ts));\n  const xTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => t0 + f * (t1 - t0)).filter((ts, i, a) => i === 0 || xFmt(ts) !== xFmt(a[i - 1]));\n  let svg = `<svg viewBox=\"0 0 ${W} ${H}\" role=\"img\" aria-label=\"Burn-up chart: ${fc.done} of ${fc.scope} points done\">`;\n  for (const v of [...new Set(yTicks)]) svg += `<line x1=\"${L}\" x2=\"${W - R}\" y1=\"${y(v)}\" y2=\"${y(v)}\" stroke=\"var(--grid)\"/><text x=\"${L - 6}\" y=\"${y(v) + 4}\" text-anchor=\"end\" font-size=\"10\" fill=\"var(--muted)\">${v}</text>`;\n  for (const [i, ts] of xTicks.entries()) svg += `<text x=\"${x(ts)}\" y=\"${H - 8}\" text-anchor=\"${i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}\" font-size=\"10\" fill=\"var(--muted)\">${xFmt(ts)}</text>`;\n  // done area + line, scope line\n  svg += `<path d=\"${step(2)}V${y(0)}H${x(pts[0][0])}Z\" fill=\"var(--series-1)\" opacity=\".12\"/>`;\n  svg += `<path d=\"${step(1)}\" fill=\"none\" stroke=\"var(--muted)\" stroke-width=\"2\" stroke-dasharray=\"5 4\"/>`;\n  svg += `<path d=\"${step(2)}\" fill=\"none\" stroke=\"var(--series-1)\" stroke-width=\"2\"/>`;\n  // forecast: line to the expected date, band between best and worst\n  if (fc.eta && !fc.finished) {\n    svg += `<polygon points=\"${x(now)},${y(fc.done)} ${x(fc.best)},${y(fc.scope)} ${x(fc.worst)},${y(fc.scope)}\" fill=\"var(--series-1)\" opacity=\".08\"/>`;\n    svg += `<line x1=\"${x(now)}\" y1=\"${y(fc.done)}\" x2=\"${x(fc.eta)}\" y2=\"${y(fc.scope)}\" stroke=\"var(--series-1)\" stroke-width=\"2\" stroke-dasharray=\"2 4\"/>`;\n    svg += `<circle cx=\"${x(fc.eta)}\" cy=\"${y(fc.scope)}\" r=\"4\" fill=\"var(--series-1)\" stroke=\"var(--surface)\" stroke-width=\"2\"/>`;\n    svg += `<text x=\"${Math.min(x(fc.eta), W - R - 4)}\" y=\"${y(fc.scope) - 8}\" text-anchor=\"end\" font-size=\"11\" fill=\"var(--fg)\">${fmtDate(fc.eta)}</text>`;\n  }\n  svg += `<line x1=\"${x(now)}\" x2=\"${x(now)}\" y1=\"${T}\" y2=\"${H - B}\" stroke=\"var(--muted)\" stroke-width=\"1\"/>${fc.eta && !fc.finished && x(fc.eta) - x(now) < 70 ? '' : `<text x=\"${x(now) + 4}\" y=\"${T + 10}\" font-size=\"10\" fill=\"var(--muted)\">today</text>`}`;\n  svg += `<line class=\"xh\" x1=\"0\" x2=\"0\" y1=\"${T}\" y2=\"${H - B}\" stroke=\"var(--fg)\" stroke-width=\"1\" opacity=\"0\"/>`;\n  svg += `<rect class=\"hit\" x=\"${L}\" y=\"${T}\" width=\"${W - L - R}\" height=\"${H - T - B}\" fill=\"transparent\"/></svg>`;\n  el.innerHTML = svg;\n  const svgEl = el.querySelector('svg'), hit = el.querySelector('.hit'), xh = el.querySelector('.xh'), tip = ui.tip;\n  hit.addEventListener('mousemove', (e) => {\n    const r = svgEl.getBoundingClientRect();\n    const vx = ((e.clientX - r.left) / r.width) * W;\n    const ts = t0 + ((vx - L) / (W - L - R)) * (t1 - t0);\n    let p = pts[0];\n    for (const q of pts) if (q[0] <= ts) p = q;\n    xh.setAttribute('x1', vx); xh.setAttribute('x2', vx); xh.setAttribute('opacity', '.3');\n    tip.style.display = 'block';\n    tip.innerHTML = ts > now ? `${fmtDate(ts)}<br><span class=\"muted\">forecast</span>` : `<b>${fmtDate(ts)}</b><br>done ${p[2]} · scope ${p[1]}`;\n    const box = ui.card.getBoundingClientRect();\n    tip.style.left = `${Math.min(e.clientX - box.left + 12, box.width - 140)}px`;\n    tip.style.top = `${e.clientY - box.top - 10}px`;\n  });\n  hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; xh.setAttribute('opacity', '0'); });\n  const range = fc.best && fc.worst && fc.worst - fc.best > DAY ? ` (range ${fmtDate(fc.best)} – ${fmtDate(fc.worst)})` : '';\n  setForecast(fc.finished ? `done: ${fc.done} of ${fc.scope} points` : fc.eta\n    ? `${fc.done}/${fc.scope} pts · ETA ${fmtDate(fc.eta)}${range} · ${fc.perDay.toFixed(1)} pts/day`\n    : `${fc.done}/${fc.scope} pts · ETA –`);\n}";
+// each Progress list's rows, as the records they open (decoded), and what a list says when it has none
+const ROWS = `Object.fromEntries(['features', 'stories', 'releases', 'waves'].map((k) => { const el = document.getElementById('w-' + k); const rows = [...el.querySelectorAll('.row')].map((r) => decodeURIComponent(r.dataset.open || '')); return [k, rows.length ? rows : el.textContent.trim()]; }))`;
+// the points a week the Points per week bars stand for, summed from their titles
+const WEEK_POINTS = "[...document.querySelectorAll('#w-throughput span')].reduce((a, s) => a + Number(s.title.split(' ')[0]), 0)";
+// each wave row's goal names (the dim text after it), by wave
+const WAVE_GOALS = "Object.fromEntries([...document.querySelectorAll('#w-waves .row')].map((r) => [decodeURIComponent(r.dataset.open), r.querySelector('.wave-goals')?.textContent.trim() ?? null]))";
+
+test('Progress on the shell: goal and Narrow scope every card, Show filters the rows, the forecast in the burn-up head', { ...CHROME, timeout: 600000 }, async (t) => {
+  const { later, root, env } = boardStart(t);
+  const { patch, ids } = boardFixture();
+  const { p, soon, go } = await openOn(later, root, env, { init: dataPatchInit(patch) });
+  const J = JSON.stringify;
+  const G1 = 'Admins pay alone', G2 = 'Receipts for every payment';
+  // a fresh Progress at a head, nothing remembered
+  const progress = async (head = '#progress') => {
+    await go('#overview');
+    await p.ev('localStorage.clear()');
+    await go(head);
+    await soon(`!!${ctl('show')} && !!document.querySelector('#burnup svg')`, `${head}: the filters and the burn-up`);
+  };
+  // the rows once they read want (the page draws them at once on a change, so this waits on nothing slow)
+  const rowsAre = async (want, what) => {
+    try { await soon(`${J(J(want))} === JSON.stringify(${ROWS})`, what); } catch { /* the assertion says what differs */ }
+    assert.deepEqual(await p.ev(ROWS), want, what);
+  };
+
+  await t.test("burnup() is kit main's, byte for byte", async () => {
+    await progress();
+    assert.equal(await p.ev('burnup.toString()'), BURNUP_MAIN);
+  });
+
+  await t.test('the page is on the shell: no .no-shell, h2 or filter row; a .g12 of the mock cards, each with a card head', async () => {
+    await progress();
+    const m = await p.ev(`(() => {
+      const s = document.getElementById('progress');
+      const g = s.querySelector(':scope > .g12');
+      const col = (c) => g && g.querySelector(':scope > .' + c) ? [...g.querySelector(':scope > .' + c).querySelectorAll(':scope > .card')].map((x) => x.id || x.querySelector('[id^="w-"]')?.id || '') : null;
+      return { fenced: !!s.closest('.no-shell') || s.classList.contains('no-shell'), h2: s.querySelectorAll('h2, .filters').length, c8: col('c8'), c4: col('c4'),
+        heads: [...s.querySelectorAll('.card')].map((c) => c.firstElementChild?.classList.contains('card-head') ? c.firstElementChild.textContent.replace(/\\s+/g, ' ').trim().split(' ')[0] : null) };
+    })()`);
+    assert.deepEqual({ ...m, heads: m.heads.map((x) => x !== null) }, {
+      fenced: false, h2: 0,
+      c8: ['burnup-card', 'w-stories'], c4: ['w-features', 'w-releases', 'w-waves', 'w-throughput'],
+      heads: [true, true, true, true, true, true],
+    });
+  });
+
+  await t.test("the forecast sits in the burn-up card's head, at its right", async () => {
+    await progress();
+    const m = await p.ev(`(() => {
+      const f = document.getElementById('forecast'), h = f && f.closest('.card-head');
+      if (!h) return { inHead: false };
+      const fr = f.getBoundingClientRect(), hr = h.getBoundingClientRect(), pr = parseFloat(getComputedStyle(h).paddingRight);
+      return { inHead: h.parentElement.id === 'burnup-card', text: f.textContent.length > 0, right: Math.abs(hr.right - pr - fr.right) <= 1, pastMiddle: fr.left > hr.left + hr.width / 2 };
+    })()`);
+    assert.deepEqual(m, { inHead: true, text: true, right: true, pastMiddle: true });
+    assert.equal(await p.ev("document.querySelectorAll('#progress .small.muted #forecast, #progress > div > #forecast').length"), 0, 'no forecast line above the cards');
+  });
+
+  await t.test('Show filters the rows: Active the not done, Complete the done (None when empty), Everything both', async () => {
+    await progress();
+    await rowsAre({
+      features: ['feature/pay', 'feature/receipts', 'feature/no-goal-feat'],
+      stories: ['story/PAY-S2', 'story/RECEIPTS-S2'],
+      releases: ['release/v0.3.0'],
+      waves: ['wave/1', 'wave/2'],
+    }, 'Active (the default)');
+    const burn = await p.ev(BURNUP);
+    await pick(p, 'show', 'complete');
+    await soon("location.hash.includes('show=complete')", 'show=complete');
+    await rowsAre({
+      features: 'None',
+      stories: ['story/PAY-S1', 'story/RECEIPTS-S1'],
+      releases: ['release/v0.1.0', 'release/v0.2.0'],
+      waves: 'None',
+    }, 'Complete');
+    assert.equal(await p.ev(BURNUP), burn, "Show doesn't change the burn-up");
+    assert.equal(await p.ev(WEEK_POINTS), 6, "nor Points per week");
+    await pick(p, 'show', 'all');
+    await soon("location.hash.includes('show=all')", 'show=all');
+    await rowsAre({
+      features: ['feature/pay', 'feature/receipts', 'feature/no-goal-feat'],
+      stories: ['story/PAY-S1', 'story/PAY-S2', 'story/RECEIPTS-S1', 'story/RECEIPTS-S2'],
+      releases: ['release/v0.1.0', 'release/v0.2.0', 'release/v0.3.0'],
+      waves: ['wave/1', 'wave/2'],
+    }, 'Everything');
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('the goal and Narrow scope the burn-up, Points per week and every list', async () => {
+    await progress();
+    assert.match(await p.ev(BURNUP), /: 6 of 16 points done/, 'every ticket');
+    assert.equal(await p.ev(WEEK_POINTS), 6, 'every merge in the last 8 weeks');
+    await pick(p, 'goal', ids.goal1);
+    await soon(`/: 3 of 8 points done/.test(${BURNUP})`, "goal1's points in the burn-up");
+    assert.equal(await p.ev(WEEK_POINTS), 3, "goal1's merges");
+    await rowsAre({ features: ['feature/pay'], stories: ['story/PAY-S2'], releases: ['release/v0.3.0'], waves: ['wave/2'] }, 'goal1, Active');
+    await pick(p, 'show', 'all');
+    await soon("location.hash.includes('show=all')", 'show=all');
+    await rowsAre({
+      features: ['feature/pay'], stories: ['story/PAY-S1', 'story/PAY-S2'], releases: ['release/v0.1.0', 'release/v0.3.0'], waves: ['wave/1', 'wave/2'],
+    }, 'goal1, Everything');
+    await pick(p, 'narrow', 'story:PAY-S1');
+    await soon(`/: 3 of 3 points done/.test(${BURNUP})`, 'the narrowed burn-up');
+    await rowsAre({ features: ['feature/pay'], stories: ['story/PAY-S1'], releases: ['release/v0.1.0'], waves: ['wave/1'] }, 'goal1, story PAY-S1, Everything');
+    await pick(p, 'show', '');
+    await soon("!location.hash.includes('show=')", 'Active');
+    await rowsAre({ features: 'None', stories: 'None', releases: 'None', waves: 'None' }, 'goal1, story PAY-S1, Active: all done, so None');
+    // Narrow with no goal
+    await progress(`#progress?narrow=${encodeURIComponent('feature:receipts')}`);
+    await soon(`/: 3 of 7 points done/.test(${BURNUP})`, "receipts' points in the burn-up");
+    await rowsAre({ features: ['feature/receipts'], stories: ['story/RECEIPTS-S2'], releases: ['release/v0.3.0'], waves: ['wave/1', 'wave/2'] }, 'feature receipts, Active');
+    assert.deepEqual(await p.ev(WAVE_GOALS), { 'wave/1': G2, 'wave/2': G2 }, "each wave names the goals of the receipts' tickets in it");
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('with no goal picked each wave row names its goals, dim; with a goal, none', async () => {
+    await progress();
+    assert.deepEqual(await p.ev(WAVE_GOALS), { 'wave/1': `${G1}, ${G2}`, 'wave/2': `${G1}, ${G2}` });
+    assert.equal(await p.ev("[...document.querySelectorAll('#w-waves .wave-goals')].every((x) => x.classList.contains('dim'))"), true, 'dim');
+    await pick(p, 'goal', ids.goal2);
+    await soon(`location.hash.includes(${J(`goal=${ids.goal2}`)})`, 'goal2');
+    await soon(`${J(J({ 'wave/1': null, 'wave/2': null }))} === JSON.stringify(${WAVE_GOALS})`, "goal2's open waves, no goal named");
+  });
+
+  await t.test("the inventory: legend, tooltip, Stories, Features, Releases tagged and ready to tag, Waves, Points per week", async () => {
+    await progress('#progress?show=all');
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#legend > span')].map((s) => s.textContent.trim())"), ['done', 'scope', 'forecast', 'points: S = 1, M = 2']);
+    assert.equal(await p.ev("document.getElementById('legend').hidden"), false, 'the legend shows');
+    const at = await p.at('#burnup .hit');
+    await p.move(at.x, at.y);
+    await soon("getComputedStyle(document.getElementById('tip')).display === 'block' && /done \\d+ · scope \\d+|forecast/.test(document.getElementById('tip').textContent)", 'a hover on the chart shows its tip');
+    await p.move(2, 2);
+    for (const k of ['features', 'stories', 'releases', 'waves']) assert.ok(await p.ev(`document.querySelectorAll('#w-${k} .row').length > 0`), `#w-${k} has rows`);
+    assert.deepEqual(await p.ev("[...document.querySelectorAll('#w-releases .row')].map((r) => [decodeURIComponent(r.dataset.open), r.querySelector('.badge')?.textContent ?? null])"), [
+      ['release/v0.1.0', 'tagged'], ['release/v0.2.0', 'ready to tag'], ['release/v0.3.0', null],
+    ]);
+    assert.equal(await p.ev("document.querySelectorAll('#w-throughput > span').length"), 8, 'eight weeks of bars');
+    assert.match(await p.ev("document.getElementById('w-throughput-note').textContent"), /^8 weeks · this week \d+$/);
+    assert.deepEqual(await p.ev('window.__errors'), []);
+  });
+
+  await t.test('under Features, the No goal line: each feature with no goal, its done of scope points, and the rate', async () => {
+    await progress();
+    const m = await p.ev(`(() => { const n = document.querySelector('#progress .card:has(#w-features) .nogoal'); return n && { text: n.textContent.replace(/\\s+/g, ' ').trim(), links: [...n.querySelectorAll('a')].map((a) => [a.getAttribute('href'), a.textContent]), after: !!(document.getElementById('w-features').compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) }; })()`);
+    assert.deepEqual(m, { text: "No goal: The kit's docs 0 of 1 points · 1.4 points a day", links: [[`#feature/${ids.featNoGoal}`, "The kit's docs"]], after: true });
+    // no feature without a goal: the rate alone
+    await p.ev('DATA.ooda.roadmap.unassigned = []; renderProgress(); void 0');
+    assert.equal(await p.ev("document.querySelector('#progress .nogoal').textContent.replace(/\\s+/g, ' ').trim()"), '1.4 points a day');
+  });
+});
