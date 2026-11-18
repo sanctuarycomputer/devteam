@@ -2,7 +2,7 @@
   "contract": "project-hosts@1",
   "about": "Cases for project-hosts@1, defined in cloud/gateway.mjs's header comment. labelCases give a name, the projects and previews the hub lists (projects defaults to [name]), and what the name's host is: project (its dashboard), shared (no dashboard; its stored pages still answer), preview, unknown (listed nowhere), or refused with a reason. samples are addresses on box, each with what answers it.",
   "reservedLabels": ["term", "public", "www"],
-  "reservedSegments": ["api", "artifact", "c", "healthz", "index.html", "public-manifest", "review", "upload", "view"],
+  "reservedSegments": ["api", "artifact", "c", "healthz", "index.html", "presence", "public-manifest", "review", "upload", "view"],
   "labelCases": [
     { "name": "alpha", "expect": "project" },
     { "name": "beta-app", "expect": "project" },

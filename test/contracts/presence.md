@@ -89,7 +89,7 @@ An artifact's scripts can send the same `pointer`; the name still comes from the
 
 ## 11. The hello's present
 
-Each dashboard's hello (`/api/hello`, read by the hub, `hub: 1`) gains `present: [ { "id", "name", "level" } ]`, the people of §6's `people` in its order, at most 50, and `present_more`, the number of people left out (0 when none). Computed when the hello is read; an older kit's hello has neither. The hello's other keys belong to its own contract and presence says nothing about them. What `present` and `present_more` add, at 50 entries at the field limits, is under 16 KB as encoded bytes, well inside the 64 KB the hub reads (`probeHello` counts characters, so bytes are the stricter bound).
+Each dashboard's hello (`/api/hello`, read by the hub, `hub: 1`) gains `present: [ { "id", "name", "level" } ]`, the people of §6's `people` whose connection said here and is visible (any one of their connections whose last `here` said `visible: true`), in its order, at most 50, and `present_more`, the number of people left out (0 when none). Computed when the hello is read; an older kit's hello has neither. The hello's other keys belong to its own contract and presence says nothing about them. What `present` and `present_more` add, at 50 entries at the field limits, is under 16 KB as encoded bytes, well inside the 64 KB the hub reads (`probeHello` counts characters, so bytes are the stricter bound).
 
 ## 12. The fake
 

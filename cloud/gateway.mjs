@@ -38,7 +38,7 @@
 // project's is not served under it: the name is the project's. A host is known from the hub's list
 // (projects first, then previews) or the gateway's store (published pages).
 // Reserved first segments, the paths the dashboard and the gateway answer on a project's host: `api`,
-// `artifact`, `c`, `healthz`, `index.html`, `public-manifest`, `review`, `upload`, `view`. They are
+// `artifact`, `c`, `healthz`, `index.html`, `presence`, `public-manifest`, `review`, `upload`, `view`. They are
 // checked before the store, so a page stored under one never answers on a project's host, and
 // Publish refuses those names. The path decides first, in this order. A reserved segment is never a
 // published page: it is checked as on today's names (`healthz` is the gateway's own answer, a `c`
