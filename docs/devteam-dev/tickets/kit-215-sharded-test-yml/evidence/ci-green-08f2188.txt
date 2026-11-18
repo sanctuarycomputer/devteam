@@ -1,2 +1,0 @@
-ci-green: test.yml run 43765882591 for 08f2188875976e13839e0cb8fa5dd2078cb2b313: all 17 jobs succeeded
-devteam: gate ci passed in 3.0s
