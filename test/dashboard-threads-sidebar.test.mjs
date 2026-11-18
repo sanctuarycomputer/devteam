@@ -648,6 +648,9 @@ test('reload and Back', { skip: SKIP, timeout: 600000 }, async (t) => {
   await q.close();
   // the first tab in front again: a tab behind another runs no transitions after a reload
   await p.send('Page.bringToFront');
+  await soon(`document.visibilityState === 'visible' && ${AT_REST}`, 'the first tab in front, the panel at rest');
+  await p.ev(FRAMES);
+  await soon(STEADY('#th-pane [data-tl-back]'), 'the back arrow at rest');
 
   // after opening a thread from the list, Back shows the list; Back after the back arrow reopens the thread
   await p.click('#th-pane [data-tl-back]');
