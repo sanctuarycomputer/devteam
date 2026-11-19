@@ -3357,12 +3357,9 @@ function fileParts(text, file) {
   // regions
   const open = new Map();
   const regions = [];
-  // the lines that open or close a place: markers, headings, declaration lines
-  const bounds = new Set();
   for (let i = 1; i <= n; i++) {
     const m = partMark(lines[i - 1], file);
     if (!m) continue;
-    bounds.add(i);
     if (m[2] === 'start') { if (!open.has(m[1])) open.set(m[1], i); }
     else if (open.has(m[1])) { regions.push({ name: m[1], from: open.get(m[1]), to: i }); add(m[1], open.get(m[1]), i); open.delete(m[1]); }
   }
@@ -3378,7 +3375,7 @@ function fileParts(text, file) {
       if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; continue; }
       if (fence) continue;
       const h = l.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
-      if (h) { heads.push({ i, level: h[1].length, name: headingSlug(h[2]) }); bounds.add(i); }
+      if (h) heads.push({ i, level: h[1].length, name: headingSlug(h[2]) });
     }
     const above = [];
     for (let j = 0; j < heads.length; j++) {
@@ -3394,7 +3391,7 @@ function fileParts(text, file) {
   } else {
     const html = /\.html?$/i.test(file);
     const decls = [];
-    if (hasDecls(file)) for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) { decls.push({ i, name: m[1] ?? m[2] }); bounds.add(i); } }
+    if (hasDecls(file)) for (let i = 1; i <= n; i++) { const m = lines[i - 1].match(PART_DECL); if (m) decls.push({ i, name: m[1] ?? m[2] }); }
     // a declaration starts at the comment lines directly above it
     for (const d of decls) { d.from = d.i; while (d.from > 1 && PART_COMMENT.test(lines[d.from - 2]) && !isMark(d.from - 1) && !PART_DECL.test(lines[d.from - 2])) d.from--; }
     for (let j = 0; j < decls.length; j++) {
@@ -3410,7 +3407,7 @@ function fileParts(text, file) {
   // the rest: lines no declaration or heading owns, by innermost region
   const restKey = (i) => { let best = null; for (const r of regions) if (r.from <= i && i <= r.to && (!best || r.from >= best.from)) best = r; return best ? `r:${best.name}` : 'r:'; };
   for (let i = 1; i <= n; i++) if (!owner[i]) owner[i] = restKey(i);
-  return { places, regions, owner, lines, n, bounds };
+  return { places, regions, owner, lines, n };
 }
 // The leaf keys a named part covers in these parts: every leaf with a line inside one of its places.
 function partLeaves(P, name) {
@@ -3449,86 +3446,53 @@ function partsChanged(baseText, headText, file, named) {
     if (!x.added || !B.places.has(x.name)) for (const k of partLeaves(H, x.name)) covH.add(k);
   }
   const gap = new Set([...new Set([...tb.keys(), ...th.keys()])].filter((k) => tb.get(k) !== th.get(k) && !(tb.has(k) ? covB : covH).has(k)));
-  // Diffing base and head places what the leaves miss. A deleted line is its base leaf's, even a
-  // blank one leafTexts drops. A pure insertion lies between two base lines; when both are inside
-  // one place (a declaration, a heading with its sub-headings, a region) it is that place's, and
-  // some place holding it must be named, unless every one holds the whole file (whole-like: naming
-  // it overlaps every part, so no other ticket runs beside it). A new heading or declaration is also
-  // its head ancestors': each one main has must be named or whole-like. With no part named every
-  // changed or new leaf is in the gap already.
-  // The diff's place for an insertion is one of several equal ones when its edge lines equal the
-  // lines beside it (a closing brace, a blank line): it may slide over them, never over a line that
-  // opens or closes a place (a marker, a heading, a declaration line). It is a held place's only
-  // when every placement is.
+  // What the leaves' texts miss is where the leaves are, judged by content, not by a diff. With no
+  // part named every changed or new leaf is in the gap already.
   if (named.length) {
-    const hunks = lineHunks(B.lines, H.lines);
     const names = new Set(named.filter((x) => !x.added).map((x) => x.name));
-    const free = (name) => names.has(name) || wholeLike(B, name);
-    if (!hunks) gap.add('x:');
-    else hunks.forEach(([af, at, bf, bt], hi) => {
-      for (let i = af + 1; i <= at; i++) if (!covB.has(B.owner[i])) gap.add(B.owner[i]);
-      if (af !== at || bf === bt) return;
-      // the placements, as the 0-based base index the block goes before: up while the block's last
-      // line equals the base line above it, down while its first equals the base line below, within
-      // the equal run between the hunks beside it
-      const lo = hi ? hunks[hi - 1][1] : 0, hiA = hi + 1 < hunks.length ? hunks[hi + 1][0] : B.lines.length;
-      const places = [af];
-      for (let j = 1; af - j >= lo && H.lines[bt - j] === B.lines[af - j] && !B.bounds.has(af - j + 1); j++) places.push(af - j);
-      for (let j = 0; af + j < hiA && H.lines[bf + j] === B.lines[af + j] && !B.bounds.has(af + j + 1); j++) places.push(af + j + 1);
-      const held = (p) => { // p, p + 1: 1-based base lines round the insertion
-        const holding = [];
-        for (const [name, pls] of B.places) for (const pl of pls) if (pl.from <= p && p + 1 <= pl.to) holding.push({ name, size: pl.to - pl.from });
-        return holding.length && !holding.some((h) => names.has(h.name)) && !holding.every((h) => wholeLike(B, h.name)) ? holding.sort((x, y) => x.size - y.size)[0].name : null;
-      };
-      const by = places.map(held);
-      if (by.every(Boolean)) gap.add(`p:${by[0]}`);
-    });
-    for (const k of th.keys()) {
-      if (tb.has(k) || !k.startsWith('d:')) continue;
-      for (const anc of k.slice(2).replace(/#\d+$/, '').split('/').slice(0, -1)) if (B.places.has(anc) && !free(anc)) gap.add(`p:${anc}`);
+    // A place's children in order, blank lines skipped: a leaf by kind and name (its path and count
+    // dropped, so a place moved whole reads the same), repeats run together.
+    const children = (P, pl) => {
+      const out = [];
+      for (let i = pl.from; i <= pl.to; i++) {
+        if (!P.lines[i - 1].trim()) continue;
+        const k = P.owner[i], c = k.startsWith('d:') ? `d:${k.slice(2).replace(/#\d+$/, '').split('/').pop()}` : k;
+        if (out[out.length - 1] !== c) out.push(c);
+      }
+      return out.join('\n');
+    };
+    // A place the ticket doesn't name whose children changed: a part added inside it (a region in
+    // another's region, a sub-heading under another's heading), one taken out, or its parts
+    // reordered. Not a place that holds the whole file (whole-like: naming it overlaps every part,
+    // so no other ticket runs beside it); a change inside it is still its parts'.
+    for (const [name, pls] of B.places) {
+      if (names.has(name) || wholeLike(B, name)) continue;
+      const hp = H.places.get(name) ?? [];
+      pls.forEach((pl, i) => { if (hp[i] && children(B, pl) !== children(H, hp[i])) gap.add(`p:${name}`); });
+    }
+    // The order of the leaves no named part covers, through the whole file: moving one's own parts
+    // is free, moving another ticket's is a change to it.
+    const keep = (k) => tb.has(k) && th.has(k) && !covB.has(k) && !covH.has(k);
+    const order = (P) => { const out = []; for (let i = 1; i <= P.n; i++) { const k = P.owner[i]; if (P.lines[i - 1].trim() && keep(k) && out[out.length - 1] !== k) out.push(k); } return out; };
+    const ob = order(B), oh = order(H);
+    if (ob.join('\n') !== oh.join('\n') && ob.length * oh.length > 4e7) {
+      // too many leaves to find which moved (a table's worth): the first one out of place
+      let i = 0;
+      while (ob[i] === oh[i]) i++;
+      gap.add(`m:${ob[i] ?? oh[i]}`);
+    } else if (ob.join('\n') !== oh.join('\n')) {
+      // the base leaves off the longest common order: the ones that moved
+      const L = Array.from({ length: ob.length + 1 }, () => new Int32Array(oh.length + 1));
+      for (let i = ob.length - 1; i >= 0; i--) for (let j = oh.length - 1; j >= 0; j--) L[i][j] = ob[i] === oh[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+      for (let i = 0, j = 0; i < ob.length;) {
+        if (j < oh.length && ob[i] === oh[j]) { i++; j++; } else if (j < oh.length && L[i][j + 1] > L[i + 1][j]) j++; else gap.add(`m:${ob[i++]}`);
+      }
     }
   }
   return [...gap];
 }
-// The runs where two arrays of lines differ (Myers), as [aFrom, aTo, bFrom, bTo], 0-based and end
-// exclusive; null past maxD edits, each line inserted or deleted (the trace grows as their square).
-function lineHunks(a, b, maxD = 4000) {
-  let s = 0;
-  while (s < a.length && s < b.length && a[s] === b[s]) s++;
-  let ea = a.length, eb = b.length;
-  while (ea > s && eb > s && a[ea - 1] === b[eb - 1]) { ea--; eb--; }
-  const N = ea - s, M = eb - s, out = [];
-  if (!N || !M) { if (N || M) out.push([s, ea, s, eb]); return out; }
-  const off = N + M + 1, V = new Int32Array(2 * off + 1), trace = [];
-  let D = -1;
-  outer: for (let d = 0; d <= N + M; d++) {
-    if (d > maxD) return null;
-    trace.push(V.slice(off - d - 1, off + d + 2)); // V before step d: k at k + d + 1
-    for (let k = -d; k <= d; k += 2) {
-      let x = k === -d || (k !== d && V[off + k - 1] < V[off + k + 1]) ? V[off + k + 1] : V[off + k - 1] + 1;
-      let y = x - k;
-      while (x < N && y < M && a[s + x] === b[s + y]) { x++; y++; }
-      V[off + k] = x;
-      if (x >= N && y >= M) { D = d; break outer; }
-    }
-  }
-  const matched = [];
-  let x = N, y = M;
-  for (let d = D; d > 0; d--) {
-    const P = trace[d], at = (k) => P[k + d + 1], k = x - y;
-    const pk = k === -d || (k !== d && at(k - 1) < at(k + 1)) ? k + 1 : k - 1;
-    const px = at(pk), py = px - pk;
-    while (x > px && y > py) { x--; y--; matched.push([x, y]); }
-    x = px; y = py;
-  }
-  while (x > 0 && y > 0) { x--; y--; matched.push([x, y]); }
-  matched.reverse().push([N, M]);
-  let i = 0, j = 0;
-  for (const [mx, my] of matched) { if (mx > i || my > j) out.push([s + i, s + mx, s + j, s + my]); i = mx + 1; j = my + 1; }
-  return out;
-}
 // A leaf key in words: a declaration's or heading's name, or whose rest it is.
-const leafWords = (k) => (k === 'x:' ? 'more than 4000 lines inserted or deleted, too many to place by part (name the whole file)' : k.startsWith('p:') ? `${k.slice(2)} (lines added inside it)` : k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
+const leafWords = (k) => (k.startsWith('p:') ? `${k.slice(2)} (a part added, taken out or reordered inside it)` : k.startsWith('m:') ? `${leafWords(k.slice(2))} (moved)` : k === 'r:' ? "the file's rest" : k.startsWith('r:') ? `region ${k.slice(2)}'s rest` : k.slice(2).replace(/#\d+$/, ''));
 /* parts end */
 // Parts of a file at a repo's main, read once per process and only for a file some entry names a
 // part of, or that a dependency's two tickets both claim (validate's big-file warning): null when this machine can't read the repo or its main has no such file (a folder too).

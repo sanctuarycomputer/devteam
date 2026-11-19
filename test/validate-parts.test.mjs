@@ -18,7 +18,7 @@ function partsFns() {
   const a = SRC.indexOf('/* parts start */'), b = SRC.indexOf('/* parts end */');
   assert.ok(a >= 0 && b > a, 'devteam.mjs has a /* parts */ region');
   const ctx = vm.createContext({});
-  return vm.runInContext(`${SRC.slice(a, b)}\n;({ fileParts, partLeaves, leafTexts, touchPath, touchPart, partsChanged, lineHunks })`, ctx);
+  return vm.runInContext(`${SRC.slice(a, b)}\n;({ fileParts, partLeaves, leafTexts, touchPath, touchPart, partsChanged })`, ctx);
 }
 const range = (P, name) => JSON.parse(JSON.stringify(P.places.get(name) ?? null));
 
@@ -208,7 +208,7 @@ test('the gate judges a leaf the base has by the base: a part widened at the hea
 });
 
 test('the gate: lines inserted inside another part are that part\'s, however the head labels them', () => {
-  const { partsChanged: inVm, lineHunks } = partsFns();
+  const { partsChanged: inVm } = partsFns();
   const partsChanged = (...args) => [...inVm(...args)];
   const named = (...n) => n.map((x) => ({ name: x.replace(/^\+/, ''), added: x.startsWith('+') }));
   const py = ['import os', '# fetch start', 'def fetch():', '    return 1', '# fetch end', '# store start', 'def store(x):', '    db.write(x)', '    return 2', '# store end', ''].join('\n');
@@ -224,31 +224,13 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(py, py.replace('# fetch end\n', '# fetch end\n# audit start\npass\n# audit end\n'), 'tool.py', named('+audit')), []);
   // JS: a new function inside another function's body, or inside a region another ticket names
   const js = ['function a() {', '  x();', '}', '', '/* r start */', 'function b() {}', 'function c() {}', '/* r end */', ''].join('\n');
-  assert.ok(partsChanged(js, js.replace('  x();\n', '  x();\n/* n start */\nfunction n() {}\n/* n end */\n'), 'x.mjs', named('+n')).includes('p:a'), 'inside a: a\'s');
-  assert.deepEqual(partsChanged(js, js.replace('  x();\n', '  x();\n  /* n start */\n  y();\n  /* n end */\n'), 'x.mjs', named('+n')).sort(), ['d:a#1', 'p:a'], 'an indented region inside a: a\'s');
+  assert.ok(partsChanged(js, js.replace('  x();\n', '  x();\n/* n start */\nfunction n() {}\n/* n end */\n'), 'x.mjs', named('+n')).includes('d:a#1'), 'inside a: a\'s');
+  assert.deepEqual(partsChanged(js, js.replace('  x();\n', '  x();\n  /* n start */\n  y();\n  /* n end */\n'), 'x.mjs', named('+n')), ['d:a#1'], 'an indented region inside a: a\'s');
   assert.deepEqual(partsChanged(js, js.replace('function c() {}\n', 'function n() {}\nfunction c() {}\n'), 'x.mjs', named('+n')).sort(), ['p:r'], 'inside region r: r\'s');
   assert.deepEqual(partsChanged(js, js.replace('function c() {}\n', 'function n() {}\nfunction c() {}\n'), 'x.mjs', named('r')), []);
   // after a's closing brace and blank line: diff may place it either side of the blank; either is fine
   assert.deepEqual(partsChanged(js, js.replace('}\n\n', '}\n\nfunction n() {}\n\n'), 'x.mjs', named('+n')), []);
   assert.deepEqual(partsChanged(js, js.replace('}\n\n', '}\n\n\nfunction n() {}\n'), 'x.mjs', named('+n')), []);
-  // diff
-  const h = (a, b) => JSON.parse(JSON.stringify(lineHunks(a.split(''), b.split(''))));
-  assert.deepEqual(h('abc', 'abc'), []);
-  assert.deepEqual(h('abc', 'axbc'), [[1, 1, 1, 2]]);
-  assert.deepEqual(h('abcd', 'acd'), [[1, 2, 1, 1]]);
-  // the runs rebuild b from a, and what lies between them is equal, on random pairs
-  let seed = 7;
-  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
-  for (let t = 0; t < 300; t++) {
-    const a = Array.from({ length: rnd(12) }, () => 'abc'[rnd(3)]), b = Array.from({ length: rnd(12) }, () => 'abc'[rnd(3)]);
-    const runs = lineHunks(a, b);
-    const out = [];
-    let i = 0;
-    for (const [af, at, bf, bt] of runs) { assert.deepEqual(a.slice(i, af), b.slice(out.length, out.length + af - i)); out.push(...a.slice(i, af), ...b.slice(bf, bt)); i = at; }
-    out.push(...a.slice(i));
-    assert.deepEqual(out, b, `${a.join('')} -> ${b.join('')}`);
-  }
-  assert.equal(lineHunks(['a', 'b'], ['c', 'd'], 1), null, 'past maxD');
   assert.deepEqual(partsChanged(py, py.split('\n').reverse().join('\n'), 'tool.py', named('fetch')).includes('r:store'), true, 'a reordered file');
   // review round 2: an inserted block whose edge equals a neighbouring marker; a blank line replaced
   // by a new region or function; a sub-heading added under a heading the ticket doesn't name
@@ -262,8 +244,14 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   assert.deepEqual(partsChanged(nest, nest.replace('    # fetch start\n', `${evil.join('\n')}\n    # fetch start\n`), 'tool.py', named('fetch')), [], 'before it: inside fetch');
   assert.deepEqual(partsChanged(nest, nest.replace('    f()\n', '    g()\n'), 'tool.py', named('fetch')), [], 'inside it');
   const blank = ['/* store start */', 'function s1() {', '  return 1;', '}', '', 'function s2() {', '  return 2;', '}', '/* store end */', ''].join('\n');
-  assert.deepEqual(partsChanged(blank, blank.replace('}\n\n', '}\n/* audit start */\nglobalThis.evil = 1;\n/* audit end */\n'), 'x.mjs', named('+audit')), ['d:store/s1#1']);
-  assert.ok(partsChanged(blank, blank.replace('}\n\n', '}\nfunction evil() {}\n'), 'x.mjs', named('+evil')).length, 'a function for the blank line');
+  // a part's trailing blank lines are no part's text: a new region or function in s1's blank line is
+  // a new part between s1 and s2, inside store; store holds the whole file here, so that is free, and
+  // where it doesn't, store's parts changed
+  assert.deepEqual(partsChanged(blank, blank.replace('}\n\n', '}\n/* audit start */\nglobalThis.evil = 1;\n/* audit end */\n'), 'x.mjs', named('+audit')), []);
+  assert.deepEqual(partsChanged(blank, blank.replace('}\n\n', '}\nfunction evil() {}\n'), 'x.mjs', named('+evil')), []);
+  const blank2 = `${blank}/* other start */\nconst o = 1;\n/* other end */\n`;
+  assert.deepEqual(partsChanged(blank2, blank2.replace('}\n\n', '}\n/* audit start */\nglobalThis.evil = 1;\n/* audit end */\n'), 'x.mjs', named('+audit')), ['p:store']);
+  assert.deepEqual(partsChanged(blank2, blank2.replace('}\n\n', '}\nfunction evil() {}\n'), 'x.mjs', named('+evil')), ['p:store']);
   assert.deepEqual(partsChanged(blank, blank.replace('  return 1;\n}\n\n', '  return 3;\n}\n'), 'x.mjs', named('s1')), [], 'its own blank line is the ticket\'s');
   // review round 3: a region round the whole file exempts nothing inside a part it holds
   const all = ['# all start', 'import os', '# fetch start', 'def fetch():', '    return 1', '# fetch end', '# store start', 'def store(x):', '    db.write(x)', '    return 2', '# store end', '# all end', ''].join('\n');
@@ -285,7 +273,21 @@ test('the gate: lines inserted inside another part are that part\'s, however the
   const sec = ['# Doc', '', '## Alpha', '', 'a', '', '## Beta', '', 'b', '', '## Gamma', '', 'g', ''].join('\n');
   assert.deepEqual(partsChanged(sec, sec.replace('\na\n', '\na2\n').replace('## Gamma', '## New\n\nn\n\n## Gamma'), 'x.md', named('alpha', '+new')), [], '(c) its own section edited and a new one added');
   // still refused: a new function inside parseB's body, with no placement outside it
-  assert.deepEqual(partsChanged(fns, fns.replace('  return b;\n', '  return b;\nfunction n() {}\n'), 'x.mjs', named('+n')).sort(), ['d:parseB#1', 'p:parseB']);
+  assert.deepEqual(partsChanged(fns, fns.replace('  return b;\n', '  return b;\nfunction n() {}\n'), 'x.mjs', named('+n')), ['d:parseB#1']);
+  // review 2 F5: a new part directly under another's last line, no blank line between (#338, #270)
+  assert.deepEqual(partsChanged(fns, fns.replace('}\n\nfunction saveC', '}\n// n\nfunction newN() {\n  return n;\n}\n\nfunction saveC'), 'x.mjs', named('+newN')), []);
+  assert.deepEqual(partsChanged('const k1 = 1;\n\nconst k3 = 3;\n', 'const k1 = 1;\nconst k2 = 2;\n\nconst k3 = 3;\n', 'x.mjs', named('+k2')), []);
+  // review 2 F6: moving one's own function past a shorter one, and deleting one's own whose tail
+  // equals the one above's, are free; moving another's, or reordering inside another's region, is not
+  const fs3 = ['function x() {', '  a();', '  b();', '  c();', '}', '', 'function y() {', '  return v;', '}', '', 'function z() {', '  return v;', '}', ''].join('\n');
+  const yxz = ['function y() {', '  return v;', '}', '', 'function x() {', '  a();', '  b();', '  c();', '}', '', 'function z() {', '  return v;', '}', ''].join('\n');
+  assert.deepEqual(partsChanged(fs3, yxz, 'x.mjs', named('x')), [], 'x moved below the shorter y');
+  assert.deepEqual(partsChanged(fs3, fs3.replace('function z() {\n  return v;\n}\n\n', ''), 'x.mjs', named('z')), [], 'its own z deleted');
+  assert.deepEqual(partsChanged(fs3, yxz, 'x.mjs', named('z')), ['m:d:x#1'], 'another\'s x moved');
+  const inR = `/* r start */\n${fs3}/* r end */\nconst tail = 1;\n`;
+  assert.deepEqual(partsChanged(inR, `/* r start */\n${yxz}/* r end */\nconst tail = 1;\n`, 'x.mjs', named('x')), ['p:r'], 'reordered inside region r');
+  assert.deepEqual(partsChanged(inR, `/* r start */\n${yxz}/* r end */\nconst tail = 1;\n`, 'x.mjs', named('x', 'r')), []);
+
   assert.deepEqual(partsChanged(doc, doc.replace('### A1\n', '### X\nx\n### A1\n'), 'x.md', named('a', '+x')), [], 'naming A');
 });
 
