@@ -310,9 +310,12 @@ function codePoints(s) {
   }
   return n;
 }
+// The control characters free text refuses: every C0 but tab, line feed and carriage return, DEL and every C1 (kit-312).
+const CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/;
 const textOf = (v, max) => {
   if (typeof v !== 'string') return 'not a string';
   if (!wellFormed(v)) return 'a lone surrogate';
+  if (CONTROL_RE.test(v)) return 'a control character';
   if (codePoints(v) > max) return `over ${max} characters`;
   return null;
 };
@@ -493,6 +496,9 @@ const isTokenNode = (v) => isObj(v) && Object.keys(v).some((k) => k.startsWith('
 
 // ---- docErrors ----
 
+// A node key holding a dot: a property is stored nested, never flat (kit-312); only an override's keys are flat.
+const DOTTED_MESSAGE = 'a dotted key (a property is stored nested: "layout": { "mode": … })';
+
 // The way `doc` breaks canvas-doc@1, rule by rule in DOC_RULES order. `images`: the file names under
 // `images/` (a Set), or null to skip the file check; `folderBytes`: every byte of the folder but
 // canvas.json (images and other files), counted with canvas.json as written against the folder limit.
@@ -568,6 +574,7 @@ export function docErrors(doc, { images = null, folderBytes = 0 } = {}) {
         if (k === 'id') add('keys', `${w}.id`, 'a node holds no id key (its key is its id)');
         continue;
       }
+      if (k.includes('.')) { add('keys', `${w}.${k}`, DOTTED_MESSAGE); continue; }
       if (GROUPS[n.type].has(k)) {
         if (!isObj(n[k])) { add('keys', `${w}.${k}`, 'a group that is not an object'); continue; }
         for (const sub of Object.keys(n[k])) if (!own(PROPS[n.type], `${k}.${sub}`)) add('keys', `${w}.${k}.${sub}`, `not a property of a ${n.type}`);
@@ -1277,7 +1284,7 @@ const CHECK = {
   }),
   'image-request': msg('image-request', ['name', 'data'], null, (e, m) => {
     const n = SIMPLE.name(m.name);
-    if (n || m.name.length === 0) e.push('image-request.name: not 1 to 200 characters');
+    if (n || m.name.length === 0) e.push('image-request.name: not 1 to 200 characters of the name class');
     if (typeof m.data !== 'string' || m.data.length === 0 || !base64Ok(m.data)) e.push('image-request.data: not base64');
     else if (Math.floor((m.data.length * 3) / 4) - (m.data.endsWith('==') ? 2 : m.data.endsWith('=') ? 1 : 0) > LIMITS.imageBytes) e.push(`image-request.data: over ${LIMITS.imageBytes} bytes`);
   }),

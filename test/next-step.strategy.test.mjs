@@ -152,7 +152,7 @@ test('the strategy is the owner\'s: no PR changes project/strategy.md without an
   };
   const linked = (ref) => ['--links', JSON.stringify([{ title: 'The strategy', path: REL, ref }])];
   // the same words each time on purpose: past ask's re-ask refusal after the owner's no
-  const answered = (cls, answer = 'yes') => { const q = ok(old, ['ask', '--question', 'Approve this?', '--recommendation', 'yes', '--stake', '3', '--urgency', '2', '--new-because', 'the test asks again', ...(cls ? ['--class', cls, '--reasons', cls === 'release-scope' ? 'below-rung' : 'owner-only'] : []), ...(cls === 'strategy-change' ? linked('chore-strategy-first') : [])], SUP); ok(old, ['answer', q, answer]); return q; };
+  const answered = (cls, answer = 'yes') => { const q = ok(old, ['ask', '--question', 'Approve this?', '--recommendation', 'yes', '--stake', '3', '--urgency', '2', '--new-because', 'the test asks again', ...(cls ? ['--class', cls, ...(cls === 'release-scope' ? ['--reasons', 'below-rung', '--no-default', 'the test waits for the owner'] : ['--reasons', 'owner-only'])] : []), ...(cls === 'strategy-change' ? linked('chore-strategy-first') : [])], SUP); ok(old, ['answer', q, answer]); return q; };
   try {
     assert.match(template, /^# Strategy\n/, 'init wrote the template');
     assert.match(template, /## How it wins, in order\n[\s\S]*## Values\n[\s\S]*## Refusals\n[\s\S]*## Not known yet\n/);
