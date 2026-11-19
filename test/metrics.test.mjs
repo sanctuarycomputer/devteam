@@ -102,6 +102,11 @@ test('ready orders by effective goal priority: work a higher goal waits on goes 
     assert.deepEqual(rows(), [['pr-02-high', 2, null], ['pr-03-fifth', 3, 3], ['pr-01-low', 9, null]]);
     assert.doesNotMatch(F.sup(['ready']), /blocks p2/);
     assert.equal(idle(), 'make workers for: pr-02-high, pr-03-fifth, pr-01-low');
+
+    // a fix ticket (Upkeep's: no priority) still comes first, in ready and in what idle capacity names
+    F.hand('supervisor', { type: 'ticket', id: 'pr-06-fix', title: 'a fix', feature: 'chores', component: 'web', kind: 'fix', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['src/pr-06-fix/**'], done_when: ['it is fixed'] }, 1000);
+    assert.deepEqual(rows()[0], ['pr-06-fix', null, null]);
+    assert.equal(idle(), 'make workers for: pr-06-fix, pr-02-high, pr-03-fifth, pr-01-low');
   } finally { F.done(); }
 });
 
