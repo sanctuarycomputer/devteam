@@ -11169,13 +11169,14 @@ async function cmdObserveMetrics() {
   // the tick's heartbeat: another machine live on this repo stops the tick here
   const hc = hostCheck();
   if (hc.refused) hostRefusedWhileRunning(hc);
-  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes, then each GitHub repo link's open PRs
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
+  const unlisted = await fetchLinkPrs(end);
   const s = observeSpend();
   const learned = writeLearning();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}${unlisted.length ? `; ${unlisted.length} repo link(s) whose open PRs weren't read this tick (time budget): ${unlisted.join(', ')}` : ''}`);
   // finished worktrees go, at most every 30 minutes (one line when any did)
   tidyFinishedWorktrees();
 }
@@ -11207,6 +11208,51 @@ async function fetchLinkMains(end) {
   await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
   for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
   writeJson(FETCH_FILE, state);
+  return skipped;
+}
+// The open PRs on each GitHub repo link that aren't the fleet's own (ticket/, plan/, chore- branches
+// land through merge and their records), read with gh inside the tick's budget, so metrics can say
+// when one waits unreviewed or with findings its author never saw (pr-unreviewed,
+// pr-changes-unanswered) without touching the network. gh missing, logged out or offline: that
+// link's entry is dropped and nothing is raised. Kept per PR: its head, when that head was pushed
+// (its last commit's date, or the PR's creation if later), the forge's reviews of that head, and
+// when it was last commented on.
+const LINK_PRS_FILE = runPath('link-prs.json');
+const FLEET_BRANCH = /^(ticket\/|plan\/|chore-)/;
+const linkPrRepos = (s = loadSettings()) => Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents && LINK_KINDS[l.kind].effectiveSettings(l, s).forge === 'github' && ghSpec(l.remote)).map(([id, l]) => [id, ghSpec(l.remote)]);
+const trimLinkPr = (p) => {
+  const head = p.headRefOid;
+  const pushed = Math.max(Date.parse(p.createdAt) || 0, Date.parse((p.commits ?? []).at(-1)?.committedDate) || 0);
+  const times = (xs, k) => (xs ?? []).map((x) => Date.parse(x?.[k])).filter((t) => !Number.isNaN(t));
+  return {
+    number: p.number, title: String(p.title ?? '').slice(0, 200), url: p.url ?? null, head, branch: p.headRefName ?? null,
+    head_at: pushed ? new Date(pushed).toISOString() : null,
+    forge_reviews: (p.reviews ?? []).filter((r) => r?.commit?.oid === head).map((r) => ({ state: r.state ?? null, at: r.submittedAt ?? null })),
+    last_comment_at: (() => { const t = Math.max(0, ...times(p.comments, 'createdAt'), ...times(p.reviews, 'submittedAt')); return t ? new Date(t).toISOString() : null; })(),
+  };
+};
+async function fetchLinkPrs(end) {
+  const repos = linkPrRepos();
+  let state = {};
+  try { state = readJson(LINK_PRS_FILE); } catch {}
+  const skipped = [];
+  const queue = [...repos];
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, spec] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const r = await runProbe({ cmd: 'gh', args: ['pr', 'list', '-R', spec, '--state', 'open', '--limit', '100', '--json', 'number,title,url,headRefName,headRefOid,isDraft,createdAt,commits,reviews,comments'], cwd: mainRoot, env: { ...process.env, GH_PROMPT_DISABLED: '1' }, judge: (code, text) => {
+        if (code !== 0) return null;
+        try { const list = JSON.parse(text); return Array.isArray(list) ? list : null; } catch { return null; }
+      } }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      if (!r) { delete state[id]; continue; }
+      state[id] = { at: nowIso(), prs: r.filter((p) => p && !p.isDraft && !FLEET_BRANCH.test(p.headRefName ?? '')).map(trimLinkPr) };
+    }
+  };
+  if (repos.length) await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, repos.length) }, one));
+  for (const id of Object.keys(state)) if (!repos.some(([r]) => r === id)) delete state[id];
+  if (repos.length || fs.existsSync(LINK_PRS_FILE)) writeJson(LINK_PRS_FILE, state);
   return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
@@ -13781,6 +13827,80 @@ function efficiencyData(m, now = Date.now()) {
     suggestions: efficiencySuggestions(m, { items, walk, ids: weekIds[11], ids12: weekIds.flat(), start: W12[11].start, end: W12[11].end, POINTS }) };
 }
 
+// A repo link the supervisor maintains: open PRs to review, fix, comment on and merge, and (with
+// its own release: "tag") releases to cut. Nothing else notices when that work stops, so:
+// pr-unreviewed, an open PR (not the fleet's own, not a draft) whose head has had no review for
+// LINK_PR_STALL_HOURS; pr-changes-unanswered, one whose latest review says CHANGES at its head that
+// long, with nothing posted on the PR since, so its author never saw the findings; release-due,
+// merges on the link's main waiting RELEASE_DUE_HOURS since its latest tag. A review is a record
+// under run/reviews/ in a folder or file named for the PR (…pr-<n>/…md, …pr-<n>…md) whose
+// "Verdict: APPROVE|CHANGES <full sha>" names the head, or the forge's own review of that head.
+// The PRs come from the tick's read (fetchLinkPrs); with no read (no gh, offline) nothing is raised.
+const LINK_PR_STALL_HOURS = 24;
+const RELEASE_DUE_HOURS = 6;
+function linkPrReviewRecords() {
+  const root = path.join(runDir, 'reviews');
+  const byPr = new Map();
+  const put = (n, file) => {
+    let text, st;
+    try { st = fs.statSync(file); if (!st.isFile() || st.size > 1e6) return; text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    const v = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+([0-9a-f]{40}(?:[0-9a-f]{24})?)[ \t]*$/gm)].pop();
+    if (v) (byPr.get(n) ?? byPr.set(n, []).get(n)).push({ verdict: v[1], sha: v[2], at: st.mtimeMs, file: path.relative(mainRoot, file) });
+  };
+  const prOf = (name) => /(?:^|[^a-z0-9])pr-(\d+)(?![0-9])/i.exec(name)?.[1];
+  let entries = [];
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return byPr; }
+  for (const e of entries) {
+    const n = prOf(e.name);
+    if (!n) continue;
+    if (e.isDirectory()) { let fs2 = []; try { fs2 = fs.readdirSync(path.join(root, e.name)); } catch {} for (const f of fs2) if (f.endsWith('.md')) put(Number(n), path.join(root, e.name, f)); }
+    else if (e.name.endsWith('.md')) put(Number(n), path.join(root, e.name));
+  }
+  return byPr;
+}
+function linkDutyFindings(settings, now, add) {
+  const stall = LINK_PR_STALL_HOURS * 3600000;
+  let read = {};
+  try { read = readJson(LINK_PRS_FILE); } catch {}
+  const repos = linkPrRepos(settings);
+  const records = repos.some(([id]) => ownEntry(read, id)) ? linkPrReviewRecords() : new Map();
+  const hours = (ms) => Math.floor(ms / 3600000);
+  for (const [id] of repos) {
+    const entry = ownEntry(read, id);
+    if (!entry || !Array.isArray(entry.prs)) continue;
+    for (const pr of entry.prs) {
+      if (!Number.isInteger(pr?.number) || typeof pr.head !== 'string') continue;
+      const subject = `${id}#${pr.number}`;
+      const mine = (records.get(pr.number) ?? []).sort((a, b) => a.at - b.at);
+      const atHead = mine.filter((r) => r.sha === pr.head);
+      const forgeAtHead = pr.forge_reviews ?? [];
+      const latest = mine.at(-1);
+      if (latest && latest.verdict === 'CHANGES' && latest.sha === pr.head) {
+        const since = now - latest.at;
+        const answered = pr.last_comment_at && Date.parse(pr.last_comment_at) > latest.at;
+        if (since > stall && !answered) add('medium', 'pr-changes-unanswered', subject, `review ${latest.file} asked for changes at its head ${pr.head.slice(0, 12)} ${hours(since)} h ago, and nothing has been posted on the PR since: its author hasn't seen the findings`, `fix the PR (push the fixes, then review the new head), or comment the findings to its author on ${pr.url ?? `the PR`} (gh pr comment ${pr.number} --body-file ${latest.file})`);
+        continue;
+      }
+      if (atHead.length || forgeAtHead.length) continue;
+      const waited = now - (Date.parse(pr.head_at) || now);
+      if (waited > stall) add('medium', 'pr-unreviewed', subject, `"${pr.title}" has waited ${hours(waited)} h at head ${pr.head.slice(0, 12)} with no review of that head`, `review it in a fresh session (a record under ${path.relative(mainRoot, path.join(runDir, 'reviews', `${id}-pr-${pr.number}`))}/ ending "Verdict: APPROVE|CHANGES <head>"), then merge it, fix it, or comment the findings to its author`);
+    }
+  }
+  // release-due: only for a repo link that names its own release: "tag" (a release duty the project
+  // declared for it), read from its local main as the tick fetched it, against the nearest tag on it.
+  for (const [id, l] of Object.entries(settings.links ?? {})) {
+    if (!LINK_KINDS[l?.kind]?.hostsComponents || l.release !== 'tag' || !repoReadable(id)) continue;
+    const R = repo(id);
+    const ref = R.mainRef();
+    if (!ref) continue;
+    const tag = R.git(['describe', '--tags', '--abbrev=0', ref]);
+    if (!tag) continue;
+    const rows = (R.git(['log', '--first-parent', '--format=%ct', `refs/tags/${tag}..${ref}`]) ?? '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+    const waited = now - Number(rows.at(-1)) * 1000;
+    if (waited > RELEASE_DUE_HOURS * 3600000) add('medium', 'release-due', id, `${rows.length} commit(s) on ${id}'s main since ${tag}, the oldest waiting ${hours(waited)} h`, `cut a release of ${id} from its main (tag it and publish it), or record why it waits (observe)`);
+  }
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -14320,6 +14440,7 @@ function collectMetrics(since) {
       }
     }
   }
+  linkDutyFindings(settings, now, add);
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
