@@ -45,7 +45,7 @@ test('host claim: a live claim from another machine refuses a start, the same ma
     const no = run(neu, ['prompt', 'supervisor'], MAC);
     assert.equal(no.status, 1);
     assert.match(no.out, /^Do not supervise this repo from this machine\. the-box is supervising this repo \(machine box-0000000001\), last seen (less than a minute|a minute|\d+ minutes) ago/);
-    assert.match(no.out, /park or drain the fleet/);
+    assert.match(no.out, /mark the fleet a move \(fleet park --move or fleet drain --move/);
     assert.match(no.out, /lapses 45 minutes after it was last seen/);
     assert.doesNotMatch(no.out, /You are the supervisor/);
     assert.equal(claimOf(g, org).machine, BOX.DEVTEAM_MACHINE_ID, 'a refusal writes nothing');
@@ -117,8 +117,26 @@ test('host claim: a parked or drained fleet hands the claim to the machine it mo
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
     assert.equal(run(neu, ['prompt', 'supervisor'], MAC).status, 1);
     // park on the box: the claim says so at once
-    ok(old, ['fleet', 'park', '--reason', 'moving to the mac'], { ...SUP, ...BOX });
+    // a park with no --move is a pause: the claim stays this machine's, and the Mac still can't start
+    ok(old, ['fleet', 'park', '--reason', 'throttling spend'], { ...SUP, ...BOX });
+    assert.equal(claimOf(g, org).fleet, null, 'a pause keeps the claim');
+    assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /parked as a pause on this machine, not a move/);
+    assert.match(ok(old, ['prompt', 'supervisor'], { ...SUP, ...BOX }), /a pause on this machine, not a move/);
+    const refused = run(neu, ['prompt', 'supervisor'], MAC);
+    assert.equal(refused.status, 1, 'another machine still may not take a paused fleet');
+    assert.match(refused.out, /fleet park --move or fleet drain --move/, 'the refusal says how to move, not how to pause');
+    const paused = json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet;
+    assert.equal(paused.mode, 'park');
+    assert.equal(paused.moving, false, 'a pause is not a move');
+    assert.equal(paused.goals.run, 0);
+    assert.ok(paused.goals.park >= 1, 'every goal counted as parked');
+    // the paused fleet becomes a move with --move: no unpark, no second round of park rulings
+    const marked = ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX });
+    assert.match(marked, /marked the held fleet a move/);
+    assert.doesNotMatch(marked, /nothing to do|told .* to commit/);
+    assert.match(ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX }), /already held as a move; nothing to do/);
     assert.equal(claimOf(g, org).fleet, 'park');
+    assert.equal(json(ok(old, ['hello', '--json'], { ...SUP, ...BOX })).fleet.moving, true, 'a park with --move is a move');
     assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /supervising machine: the-box \(machine box-0000000001, this machine\), last seen .*its fleet parked for a move/);
     // the Mac starts: it takes the claim over
     const took = run(neu, ['prompt', 'supervisor'], MAC);
@@ -167,5 +185,22 @@ test('host claim: no remote, or no network, never blocks: one warning, then on',
     assert.match(c.err, /this checkout has no origin remote/);
     assert.equal(run(old, ['prompt', 'supervisor'], BOX).err.includes('could not check'), false);
     assert.ok(!fs.existsSync(path.join(old, 'docs/devteam/run/log')) || json(ok(old, ['questions', '--all', '--json'])).length === 0, 'nothing for the owner');
+  } finally { F.done(); }
+});
+
+// A fleet held only by the owner's per-goal holds has no fleet op to mark: --move says so and
+// changes nothing, and fleet status says how to make it a move.
+test('host claim: --move on goals held by their own holds marks nothing, and says what a move needs', () => {
+  const F = fleetFixture('hostownholds');
+  const { org, old, ok, g } = F;
+  try {
+    ok(old, ['prompt', 'supervisor'], BOX);
+    const goals = json(ok(old, ['goal', '--json'], BOX)).filter((x) => !['met', 'abandoned'].includes(x.status)).map((x) => x.id);
+    for (const id of [...goals, 'upkeep']) ok(old, ['goal', 'hold', id, 'park', '--owner'], BOX);
+    const said = ok(old, ['fleet', 'park', '--move'], { ...SUP, ...BOX });
+    assert.match(said, /nothing marked: \d+ goal\(s\) are held by their own holds, not a fleet op/);
+    assert.doesNotMatch(said, /marked the held fleet a move/);
+    assert.equal(claimOf(g, org).fleet, null, 'the claim stays here');
+    assert.match(ok(old, ['fleet', 'status'], { ...SUP, ...BOX }), /make it a fleet op first/);
   } finally { F.done(); }
 });

@@ -1,4 +1,4 @@
-// The dashboard shell (dashboard-shell@1, docs/devteam/dashboard/shell.md): its two blocks are
+// The dashboard shell (dashboard-shell@1, test/contracts/shell.md): its two blocks are
 // byte-identical in index.html and hub.html, scoped so today's pages can't change, and their
 // builders, binders and URL rules do what the contract says (run in vm, over a tiny DOM of their
 // own HTML); and the measure check (test/lib/measure.mjs) passes on the fixture page built only from
@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { canDrive, openChrome } from './lib/chrome.mjs';
+import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { CHECKS, SIZES, measure, measureAt } from './lib/measure.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -18,7 +18,7 @@ const DASH = path.join(here, '..', 'docs', 'devteam', 'dashboard');
 const read = (f) => fs.readFileSync(path.join(DASH, f), 'utf8');
 const INDEX = read('index.html');
 const HUB = read('hub.html');
-const SHELL_MD = read('shell.md');
+const SHELL_MD = fs.readFileSync(path.join(here, 'contracts', 'shell.md'), 'utf8');
 const block = (src, name) => {
   const a = src.indexOf(`/* ${name} start */`), b = src.indexOf(`/* ${name} end */`);
   assert.ok(a >= 0 && b > a, `the ${name} block is in the page`);
@@ -110,7 +110,7 @@ test('both blocks are byte-identical in index.html and hub.html', () => {
   }
 });
 
-test("today's pages can't change: every layout rule is scoped to .shell, and neither page has a .shell", () => {
+test("every layout rule is scoped to .shell: index adopts it with its old regions fenced, the hub has none yet", () => {
   // every selector, inside @media or not, is :root or starts with :where(.shell)
   const css = LAYOUT.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@keyframes[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
   const sels = [];
@@ -124,9 +124,23 @@ test("today's pages can't change: every layout rule is scoped to .shell, and nei
   assert.ok(sels.filter((s) => s.includes(B)).length === sels.filter((s) => s !== ':root').length);
   const frames = [...LAYOUT.matchAll(/@keyframes\s+([\w-]+)/g)].map((m) => m[1]);
   assert.deepEqual(frames, ['shell-ring'], 'its one animation has a name of its own');
+  // index adopts the shell (kit-87): .shell on <body>, every region it doesn't port fenced with .no-shell
+  // the hub has no .shell until its own ticket (kit-94)
+  const IDX = without(INDEX, 'devteam-layout', 'devteam-shell-js');
+  assert.match(IDX, /<body class="shell">/, 'index.html adopts the shell on <body>');
+  // Goals and Overview are ported (kit-90), and the Board and Progress (kit-91), so none is in the fenced list
+  for (const id of ['library', 'loop', 'trust', 'retros', 'health', 'monitoring', 'review-view', 'artifact-view', 'tl']) {
+    const tag = IDX.match(new RegExp(`<[a-z]+\\b[^>]*\\bid="${id}"[^>]*>`))?.[0];
+    assert.ok(tag, `index.html has #${id}`);
+    assert.match(tag, /\bclass="[^"]*(?<![\w-])no-shell(?![\w-])/, `#${id} carries no-shell: ${tag}`);
+  }
+  // the Inbox is ported (kit-100): no #inbox section any more, and the panel's #th-inbox is not fenced
+  assert.doesNotMatch(IDX, /\bid="inbox"/, 'index.html has no #inbox section');
+  assert.doesNotMatch(IDX.match(/<[a-z]+\b[^>]*\bid="th-inbox"[^>]*>/)?.[0] ?? 'missing', /no-shell|missing/, '#th-inbox is there and carries no no-shell');
+  // the hub adopts it too (kit-94): .shell on <body>, its timeline and frames fenced with .no-shell
+  assert.match(without(HUB, 'devteam-layout', 'devteam-shell-js'), /<body class="shell">/, 'hub.html adopts the shell on <body>');
   for (const [name, src] of [['index.html', INDEX], ['hub.html', HUB]]) {
     const rest = without(src, 'devteam-layout', 'devteam-shell-js');
-    assert.doesNotMatch(rest, /class="[^"]*\bshell\b|classList\.(add|toggle)\(\s*['"]shell['"]|className\s*=\s*['"][^'"]*\bshell\b/, `${name} has no .shell yet`);
     for (const f of frames) assert.doesNotMatch(rest, new RegExp(`@keyframes\\s+${f}\\b|animation(-name)?:[^;]*\\b${f}\\b`), `${name} has no animation of the block's name ${f}`);
   }
   // index's own --measure (78ch) still comes after the block, so it still wins there
@@ -148,8 +162,8 @@ test("the JS block's names are its own: neither page declares one outside it", (
     assert.ok(scripts.some((x) => x.includes('/* devteam-shell-js start */')), `${name}: the block is in a script`);
     for (const x of scripts) assert.doesNotThrow(() => new vm.Script(x), `${name}: a script compiles`);
   }
-  // index's own step bar keeps its markup under its new name
-  assert.match(INDEX, /function goalStepper\(g, s, R\)/);
+  // index's own step bar is gone (kit-90): every caller draws the block's goalSteps
+  assert.doesNotMatch(INDEX, /function goalStepper\b/);
   assert.doesNotMatch(without(INDEX, 'devteam-shell-js'), /\bgoalSteps\(g, s, R\)/);
 });
 
@@ -378,7 +392,7 @@ test('pages and Threads tabs register once; a throwing tab shows its error', () 
 });
 
 test("the router's table: page ids and link kinds disjoint, and every legacy head goes to its home page", () => {
-  assert.deepEqual([...R.pages].sort(), ['board', 'goals', 'governance', 'inbox', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
+  assert.deepEqual([...R.pages].sort(), ['board', 'efficiency', 'goals', 'health', 'library', 'loop', 'overview', 'progress', 'retros', 'sensors', 'settings', 'trust']);
   for (const p of R.pages) { assert.doesNotMatch(p, /[/?]/); assert.ok(!Object.hasOwn(R.links, p), `${p} is not a link kind`); }
   // every link kind today's route() reads
   const route = INDEX.slice(INDEX.indexOf('function route()'), INDEX.indexOf('function hideDrawer()'));
@@ -399,15 +413,26 @@ test("the router's table: page ids and link kinds disjoint, and every legacy hea
   assert.equal(S.parseHead('#file?path=docs%2Fdevteam%2Fproject%2Fdesigns%2Fx.md', R).home, 'library');
   assert.equal(S.parseHead('#nothing-here/x', R).home, 'overview', 'anything else over overview');
   // today's section anchors are page heads, and the two that move redirect
-  for (const s of ['overview', 'goals', 'inbox', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
+  for (const s of ['overview', 'goals', 'progress', 'board', 'library', 'loop', 'trust', 'retros']) assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead(`#${s}`, R))), { page: s, state: {} });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#monitoring', R))), { page: 'sensors', state: {}, redirected: true });
-  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#health', R))), { page: 'sensors', state: { st: 'fleet' }, redirected: true });
+  // until kit-93: Health is a page of its own, and Governance has none yet (it is over overview)
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#health', R))), { page: 'health', state: {} });
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#governance', R))), { page: 'overview', state: {} });
+  // the Inbox is the Threads panel's first tab (kit-100): no page, the old heads redirect to it, and `?th=inbox` is a plain state
+  const plain = (x) => JSON.parse(JSON.stringify(x));
+  assert.ok(!R.pages.includes('inbox'));
+  assert.deepEqual(plain(S.parseHead('#inbox', R)), { page: 'overview', state: { th: 'inbox' }, redirected: true });
+  assert.deepEqual(plain(S.parseHead('#questions', R)), { page: 'overview', state: { th: 'inbox' }, redirected: true });
+  for (const p of R.pages) assert.deepEqual(plain(S.parseHead(`#${p}?th=inbox`, R)), { page: p, state: { th: 'inbox' } });
+  assert.ok(!Object.keys(R.redirects).some((k) => k.endsWith('?th=inbox')));
+  // the old Loop tab subjects are permanent redirects
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/orient', R))), { page: 'loop', state: { lt: 'orient' }, redirected: true });
+  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#loop/observe', R))), { page: 'loop', state: {}, redirected: true });
   assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('', R))), { page: 'overview', state: {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(S.parseHead('#questions', R))), { page: 'overview', state: {} }, 'an unknown head is overview');
 });
 
 test('parseHead and headFor round-trip every page head and link head', () => {
-  const heads = ['#overview', '#overview?th=inbox', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#governance', '#retros', '#settings', '#inbox'];
+  const heads = ['#overview', '#overview?th=open&t=t-1', '#board?goal=g-1&feat=f&repo=kit&att=1&th=resolved', '#progress?goal=g-1&narrow=features&show=all', '#library?kind=Mock&goal=g-2', '#goals?gt=met', '#goals?gt=letgo', '#sensors?st=fleet', '#loop?lt=orient&kind=lesson&orient=1', '#trust', '#retros', '#settings', '#overview?th=inbox', '#board?goal=g-1&th=inbox'];
   for (const p of R.pages) heads.push(`#${p}`, `#${p}?th=open&t=t-20261115-1`);
   for (const k of Object.keys(R.links)) heads.push(k === 'review-preview' ? '#review-preview?path=a.html&ref=ticket%2Fx' : `#${k}/an-id`);
   heads.push('#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md&title=Quality&ref=main', '#artifact/main/slug', '#talk/t-1');
@@ -435,7 +460,7 @@ test('stampFor, closeTarget and rememberedFilters', () => {
   const cold2 = S.stampFor({ hash: '#goal/g-1', state: null }, cold1, false, R);
   assert.deepEqual(plain(cold2), { page: '#board', depth: 2, openedHere: false });
   assert.deepEqual(plain(S.closeTarget(cold2)), { replace: '#board' });
-  assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', state: null }, null, true, R)), { page: '#governance', depth: 1, openedHere: false }, 'a cold file link by its path');
+  assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fdevteam%2Fgovernance%2Fquality.md', state: null }, null, true, R)), { page: '#overview', depth: 1, openedHere: false }, 'a cold file link by its path (governance is no page until kit-93, so over overview)');
   assert.deepEqual(plain(S.stampFor({ hash: '#file?path=docs%2Fx.md', state: null }, null, true, R)), { page: '#library', depth: 1, openedHere: false });
   // Threads changing under an open peek: the same entry, its page head updated
   assert.deepEqual(plain(S.withPage(p1, '#progress?goal=g-1&th=open')), { page: '#progress?goal=g-1&th=open', depth: 1, openedHere: true });
@@ -514,14 +539,15 @@ test('measure options: a page adds to prose and ignore', async () => {
 test('the measure: every check passes on the fixture at three sizes and fails on a broken copy', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   assert.deepEqual(Object.keys(BREAK).sort(), [...CHECKS].sort(), 'a break for every check');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shell-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const later = cleanup(t);
+  later(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'dashboard-shell.html');
   fs.writeFileSync(file, filled());
   const url = `file://${file}`;
   const chrome = await openChrome();
-  t.after(() => chrome.close());
+  later(() => chrome.close());
   const p = await chrome.newPage();
-  t.after(() => p.close());
+  later(() => p.close());
   await p.send('Page.enable');
   await p.send('Runtime.enable');
   const res = await measureAt(p, url, { ready: 'window.__ready' });

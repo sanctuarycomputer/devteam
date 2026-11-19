@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { PORTS, bareProject, fleetFixture, json, kit, line, startDashboard, until } from './lib/kit.mjs';
+import { PORTS, bareProject, fleetFixture, freePort, json, kit, line, startDashboard, until } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -264,26 +264,604 @@ test('the box line: the image\'s release, the hub\'s, and the tools; amber when 
   for (const s of texts) { assert.equal(typeof s, 'string'); assert.match(s, /^[\w .,'+?-]+$/, s); assert.ok(!s.includes('http') && !s.includes('<'), s); }
 });
 
-test('the Overview draws the box line from box.json and the latest list', () => {
+test('Settings draws the box line from box.json and the latest list; the Overview draws none', () => {
   const html = hubHtml();
   const body = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); const rest = html.slice(i + start.length); const j = rest.search(/\n(async )?function /); return rest.slice(0, j < 0 ? undefined : j); };
-  assert.match(body('function paintOverview('), /boxLine\(box\?\.image \?\? null, hubSeen\)/, 'paintOverview draws it');
+  assert.match(body('function paintSettings('), /boxLine\(box\?\.image \?\? null, hubSeen\)/, 'Settings draws it');
+  assert.doesNotMatch(body('function paintSettings('), /innerHTML/, 'no markup from the line');
+  assert.doesNotMatch(body('function paintOverview('), /boxLine/, 'the Overview shows no box line (owner, thread t-20261115-204523188-owner)');
   assert.match(body('async function findBox('), /image: b\.image/, 'findBox keeps the image');
   const draw = body('async function draw(');
   assert.match(draw, /hubSeen = data;/, 'draw keeps the list it read');
-  assert.match(draw, /catch \{ hubSeen = null; paintOverview\(\); return; \}/, 'and forgets it, and paints, when it read none');
   assert.match(draw, /if \(!data \|\| typeof data !== 'object'\) throw/, 'JSON that is no list (null, a number) is none');
-  // each part goes in as text, amber by its class, on a row of its own
-  assert.match(body('function paintOverview('), /d\.append\(el\('span', x\.amber \? 'amber' : '', x\.text\)\)/, 'a span per part, its text as text');
-  assert.ok(!/innerHTML/.test(body('function paintOverview(')), 'no markup from the line');
-  assert.match(html, /\.ov-head \.ov-box \{ flex-basis: 100%; order: 1;/, 'its own row under the head');
-  assert.match(html, /\.ov-box \.amber \{ color: var\(--amber-fg\); \}/);
+  assert.doesNotMatch(html, /\.ov-box/, 'nor its styles');
+  assert.ok(html.includes("This browser can't notify from this page"), 'the row says why when the browser cannot notify');
+});
+
+// ----- the Overview's rules: a pure block of hub.html (kit-94), run here in vm -------------------
+// The tab counts, the partly-held pill, the machine switch's mode and the addresses a view keeps.
+// They read T_UNSAFE and tLine, two one-line definitions of the page, which the loader takes too.
+function overviewRules() {
+  const html = hubHtml();
+  const src = html.slice(html.indexOf('/* hub-overview start */'), html.indexOf('/* hub-overview end */'));
+  assert.ok(src.length > 200, 'the hub-overview block is marked in hub.html');
+  const lineOf = (start) => { const i = html.indexOf(start); assert.ok(i > 0, start); return html.slice(i, html.indexOf('\n', i)); };
+  const ctx = vm.createContext({});
+  vm.runInContext(`${lineOf('const T_UNSAFE = ')}\n${lineOf('const tLine = ')}\n${src}\n;globalThis.api = { tabCounts, heldPill, machineMode, hubKey };`, ctx);
+  return ctx.api;
+}
+const plain = (x) => JSON.parse(JSON.stringify(x));
+
+test('the Overview\'s rules: tab counts', () => {
+  const { tabCounts } = overviewRules();
+  assert.deepEqual(plain(tabCounts(3, { you: 1, waiting: 1, ready: 1 })), { q: 3, th: { n: 2, tone: 'ok', title: '1 ready to accept, 1 your move' } });
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 2 })), { q: 0, th: { n: 2, tone: 'ok', title: '2 ready to accept' } });
+  assert.deepEqual(plain(tabCounts(0, { you: 2, waiting: 0, ready: 0 }).th), { n: 2, tone: 'you', title: '2 your move' });
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 2, ready: 0 }).th), { n: 2, tone: 'wait', title: 'all waiting on the supervisor' });
+  assert.deepEqual(plain(tabCounts(0, { you: 1, waiting: 2, ready: 0 }).th), { n: 1, tone: 'you', title: '1 your move' }, 'your move before waiting');
+  assert.deepEqual(plain(tabCounts(0, { you: 0, waiting: 0, ready: 0 })), { q: 0, th: null });
+  assert.deepEqual(plain(tabCounts(1, null)), { q: 1, th: null }, 'an older kit: questions only');
+  assert.deepEqual(plain(tabCounts('x', { you: -1 })), { q: 0, th: null });
+  assert.deepEqual(plain(tabCounts(2.5, { you: 1.5, waiting: '3', ready: null })), { q: 0, th: null }, 'only whole numbers count');
+});
+
+test('the Overview\'s rules: the partly-held pill', () => {
+  const { heldPill } = overviewRules();
+  let p = plain(heldPill({ mode: 'run', goals: { run: 2, drain: 0, park: 9 } }));
+  assert.deepEqual(p, { word: 'Partly parked', running: 2, total: 11, text: 'Partly parked · 2 of 11 goals running', title: '9 parked, 0 draining' });
+  assert.equal(heldPill({ goals: { run: 0, drain: 3, park: 8 } }).text, 'Partly parked · 0 of 11 goals running', 'every goal held, split between parked and draining');
+  assert.equal(heldPill({ goals: { run: 5, drain: 1, park: 0 } }).word, 'Partly draining');
+  for (const f of [{ goals: { run: 11, drain: 0, park: 0 } }, { goals: { run: 0, drain: 0, park: 4 } }, { goals: { run: 0, drain: 4, park: 0 } }, { goals: { run: 0, drain: 0, park: 0 } }, { goals: { run: -1, drain: 2, park: 2 } }, { goals: { run: '2', drain: 0, park: 9 } }, { goals: { run: 1.5, drain: 0, park: 9 } }, { goals: null }, { mode: 'run' }, null, undefined, 'park']) assert.equal(heldPill(f), null, JSON.stringify(f));
+  // the held goals, named: each its title and why (its mode without a why), as plain lines
+  p = heldPill({ goals: { run: 2, drain: 1, park: 1, held: [{ title: 'Recurring checks', mode: 'park', why: 'waits on your approval' }, { title: 'Sense', mode: 'drain' }, { mode: 'park' }, 'x'] } });
+  assert.equal(p.title, 'Recurring checks: waits on your approval\nSense: drain');
+  const many = Array.from({ length: 25 }, (_, i) => ({ title: `g${i}`, mode: 'park', why: 'later' }));
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 25, held: many } }).title.split('\n').length, 20, 'at most 20');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: [{ title: 'a‮b', mode: 'park', why: 'c\nd' }] } }).title, 'a b: c d', 'what a reader\'s eye acts on goes, as tLine does');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: 'nope' } }).title, '1 parked, 0 draining', 'held not a list: the counts');
+  assert.equal(heldPill({ goals: { run: 1, drain: 0, park: 1, held: [{ title: 'Quiet', mode: 7 }] } }).title, 'Quiet: held', 'no why and no mode: held');
+});
+
+test('the Overview\'s rules: the machine switch\'s mode', () => {
+  const { machineMode } = overviewRules();
+  assert.deepEqual(plain(machineMode(['run', 'run'])), { mode: 'run', counts: { running: 2, draining: 0, parked: 0 } });
+  assert.deepEqual(plain(machineMode(['park', 'park'])), { mode: 'park', counts: { running: 0, draining: 0, parked: 2 } });
+  assert.deepEqual(plain(machineMode(['run', 'park', 'drain'])), { mode: 'mixed', counts: { running: 1, draining: 1, parked: 1 } });
+  assert.deepEqual(plain(machineMode([])), { mode: null, counts: { running: 0, draining: 0, parked: 0 } });
+  assert.deepEqual(plain(machineMode(['run', 'nope', null])), { mode: 'run', counts: { running: 1, draining: 0, parked: 0 } }, 'what is no mode is not counted');
+});
+
+test('the Overview\'s rules: addresses a view never loses', () => {
+  const { hubKey } = overviewRules();
+  assert.equal(hubKey('alpha', false, 'abc123'), 'alpha');
+  assert.equal(hubKey('alpha', true, 'abc123'), 'alpha-abc123', 'two of one name');
+  for (const v of ['settings', 'overview', 'terminal']) assert.equal(hubKey(v, false, 'abc123'), `${v}-abc123`, v);
+  assert.match(hubHtml(), /return hubKey\(it\.x\.name, twins, hex6\.get\(it\.x\.root\)\);/, 'keyOf uses it');
+});
+
+// ----- the Overview in Chrome, on hellos the test writes (kit-94) ---------------------------------
+// A hub of the test's own: one server serves hub.html, an instances.json the test changes as it goes
+// and, for a box, a box.json; and on each instance's port a stand-in dashboard that answers the
+// hub's Run, Drain and Park asks (once per nonce, after a delay or with an error when told) and says
+// what its address's hash is, each time it changes.
+function hello(name, port, over = {}) {
+  const { pulse, ...rest } = over;
+  return {
+    devteam: 1, name, root: `/srv/${name}`, port, kit: 'v0.57.0', viewer: 1, inbox: 0, threads: { you: 0, waiting: 0, ready: 0 }, fleet: { mode: 'run', workers: 1 }, ...rest,
+    pulse: pulse === null ? null : { state: 'moving', blocking: null, working: 1, last_activity: new Date().toISOString(), activity: Array(84).fill(0), activity_of: 'commits', attention: [], open_tickets: 2, done_tickets: 1, blocked_tickets: 0, goals_open: 1, goal: { title: `${name}'s goal`, done: 1, total: 3 }, ...(pulse || {}) },
+  };
+}
+const STAND_IN = `<!doctype html><meta charset="utf-8"><title>stand-in</title><script>
+const say = () => fetch('/hash?h=' + encodeURIComponent(location.hash));
+say(); addEventListener('hashchange', say);
+addEventListener('message', async (ev) => {
+  const m = ev.data;
+  if (!m || m.devteam !== 'hub-fleet' || ev.source !== parent) return;
+  const r = await (await fetch('/asked?mode=' + encodeURIComponent(m.mode) + '&all=' + (m.all === true) + '&nonce=' + encodeURIComponent(m.nonce))).json();
+  if (r.answer) parent.postMessage({ devteam: 'hub-fleet-done', nonce: m.nonce, ...r.answer }, ev.origin);
+});
+</script>`;
+async function listenOn(t, srv, port = 0, host = '127.0.0.1') {
+  await new Promise((r) => srv.listen(port, host, r));
+  defer(t, () => new Promise((r) => { srv.closeAllConnections?.(); srv.close(() => r()); }));
+  return srv.address().port;
+}
+async function fixtureHub(t, { ports = [], box = null, kit: hubKit = 'v0.57.0', image } = {}) {
+  const F = { list: [], asks: new Map(), hashes: new Map(), fail: new Map(), delay: new Map() };
+  F.setList = (list) => { F.list = list; };
+  for (const port of ports) {
+    F.asks.set(port, []);
+    F.hashes.set(port, []);
+    const seen = new Set();
+    await listenOn(t, http.createServer(async (q, s) => {
+      const u = new URL(q.url, 'http://x');
+      if (u.pathname === '/hash') { F.hashes.get(port).push(u.searchParams.get('h')); return s.end('{}'); }
+      if (u.pathname === '/asked') {
+        const nonce = u.searchParams.get('nonce');
+        if (seen.has(nonce)) return s.end('{"answer":null}');
+        seen.add(nonce);
+        await new Promise((r) => setTimeout(r, F.delay.get(port) ?? 0));
+        F.asks.get(port).push({ mode: u.searchParams.get('mode'), all: u.searchParams.get('all') === 'true' });
+        const err = F.fail.get(port);
+        return s.end(JSON.stringify({ answer: err ? { ok: false, error: err } : { ok: true } }));
+      }
+      s.writeHead(200, { 'content-type': 'text/html' });
+      s.end(STAND_IN);
+    }), port);
+  }
+  const hubPort = await listenOn(t, http.createServer((q, s) => {
+    const u = new URL(q.url, 'http://x');
+    if (u.pathname === '/') { s.writeHead(200, { 'content-type': 'text/html' }); return s.end(hubHtml()); }
+    if (u.pathname === '/instances.json') { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify({ hub: 1, kit: hubKit, ...(image ? { image: true } : {}), instances: F.list })); }
+    if (u.pathname === '/box.json' && box) { s.writeHead(200, { 'content-type': 'application/json' }); return s.end(JSON.stringify(box(F))); }
+    s.writeHead(404, { 'content-type': 'application/json' });
+    s.end('{}');
+  }));
+  F.port = hubPort;
+  F.url = (at = '/') => `http://127.0.0.1:${hubPort}${at}`;
+  return F;
+}
+async function freePorts(n) { const out = []; while (out.length < n) { const p = await freePort(); if (!out.includes(p)) out.push(p); } return out; }
+// Chrome on the fixture's hub, at a size
+async function hubPage(t, url, { width = 1440, height = 900 } = {}) {
+  const chrome = await openChrome();
+  defer(t, () => chrome.close());
+  const p = await chrome.newPage();
+  defer(t, () => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.navigate', { url });
+  p.until = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
+  return p;
+}
+const CHROME = { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 };
+// in the page: a project's card, its tab
+const cardOf = (name) => `[...document.querySelectorAll('.ov-card')].find((c) => c.querySelector('.ov-name')?.textContent === ${JSON.stringify(name)})`;
+const tabOf = (name) => `[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent.startsWith(${JSON.stringify(name)}))`;
+const selectedTab = `(document.querySelector('#tabs [role=tab][aria-selected=true]')?.textContent ?? null)`;
+
+test('the Overview: a header, then two cards a row with the standard head', CHROME, async (t) => {
+  const [A, B, C] = await freePorts(3);
+  const F = await fixtureHub(t, { ports: [A, B, C] });
+  F.setList([hello('alpha', A, { pulse: { state: 'building' } }), hello('beta', B, { inbox: 1, pulse: { state: 'waiting' } }), hello('gamma', C, { pulse: { state: 'blocked', blocking: 'full', attention: ['Fully blocked: all 2 open tickets wait on your answer to 1 question'] } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('three cards', `document.querySelectorAll('.ov-card').length === 3`);
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head h2').textContent`), 'This machine');
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head [data-pin=headline]').textContent`), 'This machine', 'the headline pin is the heading');
+  assert.equal(await p.ev(`document.querySelector('#ov-body > .ov-head .sum').textContent`), '3 projects · 1 moving · 1 waiting on you · 1 blocked');
+  const cards = await p.ev(`[...document.querySelectorAll('.ov-card')].map((c) => ({ name: c.querySelector('.ov-name').textContent, c6: c.classList.contains('c6') && c.classList.contains('card'), top: Math.round(c.getBoundingClientRect().top), last: c.querySelector('.card-head').lastElementChild.className, pills: [...c.querySelectorAll('.card-head .pill')].map((x) => x.textContent) }))`);
+  assert.deepEqual(cards.map((c) => c.name), ['gamma', 'beta', 'alpha'], 'what needs the owner first');
+  assert.ok(cards.every((c) => c.c6), 'each card .c6 of the 12');
+  assert.equal(cards[0].top, cards[1].top, 'two to a row');
+  assert.notEqual(cards[2].top, cards[0].top);
+  assert.ok(cards.every((c) => /\bmenu-btn\b/.test(c.last) && /\bend\b/.test(c.last)), '⋯ last, pinned right');
+  assert.deepEqual(cards.map((c) => c.pills), [['Fully blocked'], ['Waiting on you'], ['Building']]);
+  assert.equal(await p.ev(`document.querySelectorAll('.ov-goals, .ov-goal').length`), 0, 'no goal list');
+  assert.equal(await p.ev(`document.querySelectorAll('.hub-goal').length`), 3, 'one top goal line a card');
+  assert.deepEqual(await p.ev(`[...${cardOf('alpha')}.querySelectorAll('.ov-stat .k')].map((k) => k.textContent)`), ['Kit', 'Inbox', 'Working', 'Last moved']);
+  assert.equal(await p.ev(`!!${cardOf('alpha')}.querySelector('.ov-mosaic')`), true, 'the activity mosaic');
+  // the menu: the root and port, and opening nothing by itself
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu', `!!document.querySelector('.menu-pop')`);
+  assert.match(await p.ev(`document.querySelector('.menu-pop').textContent`), new RegExp(`/srv/beta.*${B}`));
+  assert.equal(await p.ev(selectedTab), 'Overview');
+  await p.key('Escape');
+  await p.until('the menu closed', `!document.querySelector('.menu-pop')`);
+  assert.equal(await p.ev(`document.activeElement?.dataset.k ?? null`), '/srv/beta:menu', 'Escape gives the keyboard back to ⋯');
+  // a redraw closes it (the spec); the keyboard, inside it, goes back to its ⋯
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu again', `document.querySelector('.menu-pop')?.contains(document.activeElement) ?? false`);
+  await p.ev('paintOverview()');
+  assert.deepEqual(await p.ev(`[!!document.querySelector('.menu-pop'), document.activeElement?.dataset.k ?? null]`), [false, '/srv/beta:menu'], 'closed by the redraw, focus on its ⋯');
+  // the keyboard elsewhere stays where it is
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu once more', `!!document.querySelector('.menu-pop')`);
+  await p.ev(`${cardOf('gamma')}.querySelector('.ov-name').focus()`);
+  await p.ev('paintOverview()');
+  assert.deepEqual(await p.ev(`[!!document.querySelector('.menu-pop'), document.activeElement?.dataset.k ?? null]`), [false, '/srv/gamma:name']);
+  // another view closes it
+  await p.ev(`${cardOf('beta')}.querySelector('.menu-btn').click()`);
+  await p.until('the menu, last time', `!!document.querySelector('.menu-pop')`);
+  await p.ev(`${tabOf('alpha')}.click()`);
+  await p.until("alpha's dashboard, no menu", `${selectedTab}?.startsWith('alpha') && !document.querySelector('.menu-pop')`);
+  await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview').click()`);
+  await p.until('the Overview', `!document.getElementById('overview').hidden`);
+  // the Settings link keeps the keyboard across a redraw
+  await p.ev(`document.querySelector('#ov-body > .ov-head a.set').focus()`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(`document.activeElement?.matches('#ov-body > .ov-head a.set') ?? false`), true, 'Settings link keeps focus');
+  // a click on a card, off its controls, opens that project's dashboard as its tab does
+  await p.ev(`${cardOf('alpha')}.querySelector('.ov-mosaic').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha') && document.querySelectorAll('iframe:not([hidden])').length === 1 && document.getElementById('overview').hidden`);
+});
+
+test('the summary counts stalled and gone as blocked; a starting project shows no Inbox count', CHROME, async (t) => {
+  const [A, B, C, D] = await freePorts(4);
+  const F = await fixtureHub(t, { ports: [A, B, C, D] });
+  const list = [hello('alpha', A, { pulse: { state: 'stalled' } }), hello('beta', B), hello('gamma', C, { inbox: null, pulse: null }), hello('delta', D, { inbox: null })];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('four cards', `document.querySelectorAll('.ov-card').length === 4`);
+  assert.equal(await p.ev(`${cardOf('delta')}.querySelector('[data-pin=inbox] .v').textContent`), '–', 'not 0: it has not said');
+  F.setList(list.filter((x) => x.name !== 'beta'));
+  await p.until('beta gone', `${cardOf('beta')}?.querySelector('.card-head .pill:not(.shrink)')?.textContent === 'Not answering'`);
+  assert.match(await p.ev(`document.querySelector('#ov-body > .ov-head .sum').textContent`), /· 2 blocked/);
+});
+
+test('the tabs: a dot by state, the state word, the Inbox counts', CHROME, async (t) => {
+  const ports = await freePorts(6);
+  const [A, B, C, D, E, Z] = ports;
+  const F = await fixtureHub(t, { ports });
+  const list = [
+    hello('alpha', A, { inbox: 3, threads: { you: 1, waiting: 1, ready: 1 }, pulse: { state: 'building' } }),
+    hello('beta', B, { threads: { you: 2, waiting: 0, ready: 0 }, pulse: { state: 'moving' } }),
+    hello('gamma', C, { threads: { you: 0, waiting: 2, ready: 0 }, pulse: { state: 'waiting' } }),
+    hello('delta', D, { pulse: { state: 'blocked', blocking: 'full' } }),
+    hello('epsilon', E, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }),
+    hello('zeta', Z, { pulse: { state: 'building' } }),
+  ];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('six tabs', `document.querySelectorAll('.ov-card').length === 6`);
+  // zeta's dashboard stops answering: off the list, its tab stays 30 s, Not answering
+  F.setList(list.slice(0, 5));
+  await p.until('zeta not answering', `${tabOf('zeta')}?.title === 'Not answering'`);
+  const tabs = await p.ev(`['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].map((n) => { const x = [...document.querySelectorAll('#tabs [role=tab]')].find((b) => b.textContent.startsWith(n)); const c = x.querySelector('.tab-counts'); return { dot: [...x.querySelector('.dot').classList].join(' '), title: x.title, q: c?.querySelector('.n.q')?.textContent ?? null, th: c?.querySelector('.n.th') ? [...c.querySelector('.n.th').classList].join(' ') + ' ' + c.querySelector('.n.th').textContent : null, counts: !!c }; })`);
+  assert.deepEqual(tabs.map((x) => x.dot), ['dot green', 'dot blue', 'dot amber', 'dot red pulse', 'dot', 'dot red pulse']);
+  assert.deepEqual(tabs.map((x) => x.title), ['Building', 'Moving', 'Waiting on you', 'Fully blocked', 'Parked', 'Not answering']);
+  assert.deepEqual(tabs.slice(0, 3).map((x) => [x.q, x.th]), [['3', 'n th ok 2'], [null, 'n th you 2'], [null, 'n th wait 2']]);
+  assert.deepEqual(tabs.slice(3).map((x) => x.counts), [false, false, false], 'nothing when both are 0');
+  assert.equal(await p.ev(`${tabOf('alpha')}.querySelector('.n.th').title`), '1 ready to accept, 1 your move');
+  assert.equal(await p.ev(`${tabOf('alpha')}.querySelector('.tab-counts').getAttribute('aria-label')`), '3 open questions, 1 ready to accept, 1 your move', 'words for a screen reader');
+  assert.ok(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Overview')`), 'the Overview tab reads Overview, nothing else');
+  // the red dot pulses, except under reduced motion
+  const anim = `getComputedStyle(${tabOf('delta')}.querySelector('.dot')).animationName`;
+  assert.equal(await p.ev(anim), 'shell-ring');
+  await p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  assert.equal(await p.ev(anim), 'none');
+});
+
+test('a fully blocked card: red border, head divider in --line; the Inbox stat as the tab', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A, { inbox: 2, threads: { you: 1, waiting: 0, ready: 0 }, pulse: { state: 'blocked', blocking: 'full' } }), hello('beta', B, { pulse: { state: 'building' } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('two cards', `document.querySelectorAll('.ov-card').length === 2`);
+  const colour = (v) => `(() => { const e = document.createElement('div'); e.style.color = 'var(${v})'; document.body.append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`;
+  const red = await p.ev(colour('--red'));
+  const line = await p.ev(colour('--line'));
+  const a = await p.ev(`(() => { const c = ${cardOf('alpha')}, s = getComputedStyle(c), h = getComputedStyle(c.querySelector('.card-head')); return { cls: c.classList.contains('blocked'), top: s.borderTopColor, style: s.borderTopStyle, width: s.borderTopWidth, head: h.borderBottomColor }; })()`);
+  assert.deepEqual(a, { cls: true, top: red, style: 'solid', width: '1px', head: line });
+  assert.equal(await p.ev(`${cardOf('beta')}.classList.contains('blocked')`), false);
+  // the Inbox stat: the tab's counts, and a click opens the project's dashboard on its Inbox
+  assert.equal(await p.ev(`${cardOf('alpha')}.querySelector('[data-pin=inbox] .tab-counts').innerHTML`), await p.ev(`${tabOf('alpha')}.querySelector('.tab-counts').innerHTML`));
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('[data-pin=inbox] .v').textContent`), '0');
+  await p.ev(`${cardOf('alpha')}.querySelector('[data-pin=inbox] button').click()`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha')`);
+  await until(() => F.hashes.get(A).includes('#overview?th=inbox'), 'the dashboard at #overview?th=inbox');
+});
+
+test('the gap audit rows: top goal +N more and its bar, kit behind in amber, not answering, an old kit', CHROME, async (t) => {
+  const [A, B, C, D] = await freePorts(4);
+  const F = await fixtureHub(t, { ports: [A, B, C, D] });
+  const list = [
+    hello('alpha', A, { kit: 'v0.50.0', pulse: { goals_open: 3, goal: { title: 'Billing', done: 1, total: 4 }, open_tickets: 5, done_tickets: 3, blocked_tickets: 2 } }),
+    hello('beta', B, { pulse: { goals_open: 0, goal: null } }),
+    hello('gamma', C),
+    hello('delta', D, { pulse: null }),
+  ];
+  F.setList(list);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('four cards', `document.querySelectorAll('.ov-card').length === 4`);
+  const g = await p.ev(`(() => { const c = ${cardOf('alpha')}; const b = c.querySelector('.hub-goal .ov-bar'); return { text: c.querySelector('.hub-goal').textContent, now: b.getAttribute('aria-valuenow'), max: b.getAttribute('aria-valuemax') }; })()`);
+  assert.match(g.text, /^Billing\+2 more/);
+  assert.match(g.text, /3 of 8 merged · 2 waiting on you$/);
+  assert.deepEqual([g.now, g.max], ['3', '8']);
+  assert.match(await p.ev(`${cardOf('beta')}.querySelector('.hub-goal').textContent`), /^No goal approved yet/);
+  const kit = await p.ev(`(() => { const v = ${cardOf('alpha')}.querySelector('[data-pin=kit] .v'); return { amber: v.classList.contains('amber'), title: v.closest('[data-pin=kit]').title }; })()`);
+  assert.equal(kit.amber, true);
+  assert.match(kit.title, /v0\.57\.0/, 'the newest kit among the projects');
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('[data-pin=kit] .v').classList.contains('amber')`), false);
+  // an old kit: no pulse, still answering
+  const old = await p.ev(`(() => { const c = ${cardOf('delta')}; return { why: c.querySelector('.hub-why')?.textContent, stats: !!c.querySelector('.ov-stats'), goal: !!c.querySelector('.hub-goal'), sw: !!c.querySelector('.fleet-switch, .seg') }; })()`);
+  assert.deepEqual(old, { why: 'Update its kit to see what it is doing', stats: false, goal: false, sw: false });
+  // gamma stops answering
+  F.setList(list.filter((x) => x.name !== 'gamma'));
+  await p.until('gamma not answering', `${cardOf('gamma')}?.querySelector('.card-head .pill:not(.shrink)')?.textContent === 'Not answering'`);
+  const gone = await p.ev(`(() => { const c = ${cardOf('gamma')}; return { cls: c.classList.contains('blocked'), att: c.querySelector('.ov-att li')?.textContent ?? '', goal: !!c.querySelector('.hub-goal') }; })()`);
+  assert.equal(gone.cls, true);
+  assert.match(gone.att, /^Its dashboard stopped answering at /);
+  assert.equal(gone.goal, false);
+  assert.equal(await p.ev(`${tabOf('gamma')}.title`), 'Not answering');
+});
+
+test('the partly-held pill: words, hover, a click to Goals', CHROME, async (t) => {
+  const [A, B, C] = await freePorts(3);
+  const F = await fixtureHub(t, { ports: [A, B, C] });
+  F.setList([
+    hello('alpha', A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } } }),
+    hello('beta', B, { fleet: { mode: 'run', workers: 1, goals: { run: 1, drain: 1, park: 1, held: [{ title: 'Recurring checks', mode: 'park', why: 'waits on your approval' }, { title: 'Sense the outside world', mode: 'drain' }] } } }),
+    hello('gamma', C),
+  ]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('three cards', `document.querySelectorAll('.ov-card').length === 3`);
+  assert.deepEqual(await p.ev(`(() => { const x = ${cardOf('alpha')}.querySelector('.held-pill'); return [x.textContent, x.title, x.classList.contains('amber')]; })()`), ['Partly parked · 2 of 11 goals running', '9 parked, 0 draining', true]);
+  assert.equal(await p.ev(`${cardOf('beta')}.querySelector('.held-pill').title`), 'Recurring checks: waits on your approval\nSense the outside world: drain');
+  assert.equal(await p.ev(`!!${cardOf('gamma')}.querySelector('.held-pill')`), false, 'no fleet.goals: no pill');
+  await p.ev(`${cardOf('alpha')}.querySelector('.held-pill').focus()`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(`document.activeElement?.classList.contains('held-pill') && document.activeElement.closest('.ov-card') === ${cardOf('alpha')}`), true, 'the pill keeps focus across a redraw');
+  await p.ev(`${cardOf('alpha')}.querySelector('.held-pill').click()`);
+  await p.until("alpha's dashboard", `${selectedTab}?.startsWith('alpha')`);
+  await until(() => F.hashes.get(A).includes('#goals'), 'the dashboard at #goals');
+});
+
+test('720px: two cards a row, the body wraps inside each', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'), { width: 720, height: 800 });
+  await p.until('two cards', `document.querySelectorAll('.ov-card').length === 2`);
+  const r = await p.ev(`(() => { const cs = [...document.querySelectorAll('.ov-card')]; return { tops: cs.map((c) => Math.round(c.getBoundingClientRect().top)), out: cs.flatMap((c) => [...c.querySelectorAll('.hub-body *')].filter((e) => e.getBoundingClientRect().right > c.getBoundingClientRect().right + 0.5).map((e) => e.className)) }; })()`);
+  assert.equal(r.tops[0], r.tops[1], 'two to a row at 720');
+  assert.deepEqual(r.out, []);
+});
+
+test('390px: a long name and three pills stay in the head', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A] });
+  const long = 'a-project-with-a-very-long-name-indeed-xx';
+  F.setList([hello(long, A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } }, pulse: { state: 'building', blocking: 'partial', blocked_tickets: 1, open_tickets: 3 } })]);
+  const p = await hubPage(t, F.url('/'), { width: 390, height: 844 });
+  await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+  const r = await p.ev(`(() => { const h = document.querySelector('.ov-card .card-head'), hr = h.getBoundingClientRect(); const o = document.getElementById('overview'); return { pills: h.querySelectorAll('.pill').length, out: [...h.children].filter((e) => e.getBoundingClientRect().right > hr.right + 0.5 || e.getBoundingClientRect().left < hr.left - 0.5).map((e) => e.className), menuIn: h.lastElementChild.getBoundingClientRect().right <= hr.right, scroll: o.scrollWidth <= o.clientWidth }; })()`);
+  assert.deepEqual(r, { pills: 3, out: [], menuIn: true, scroll: true });
+});
+
+// in the page: the button with that data-k, and the switch around it
+const kBtn = (k) => `[...document.querySelectorAll('#ov-body [data-k]')].find((b) => b.dataset.k === ${JSON.stringify(k)})`;
+const focusK = (p, k) => p.ev(`${kBtn(k)}.focus()`);
+const focusedK = `(document.activeElement?.dataset.k ?? null)`;
+const textK = (k) => `(${kBtn(k)}?.textContent ?? null)`;
+
+test('the machine switch: shared mode, Mixed, Park confirms with the count, Run resumes all, Escape cancels', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the machine switch', `!!document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine]')`);
+  const m = `document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine]')`;
+  assert.equal(await p.ev(`${m}.querySelector('[data-fleet=run]').getAttribute('aria-pressed')`), 'true');
+  assert.equal(await p.ev(`${m}.querySelector('.k').textContent`), 'Every fleet');
+  assert.deepEqual(await p.ev(`(() => { const a = document.querySelector('#ov-body > .ov-head .acts a.set'); return a && [a.getAttribute('href'), a.textContent, a.closest('.acts').contains(${m})]; })()`), ['#settings', 'Settings', true]);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#ov-body button')].some((b) => /^(Park all|Resume all)/.test(b.textContent))`), false, 'no Park all, no Resume all');
+  await focusK(p, 'machine:park');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('machine:park')} === 'Park 2 projects?'`);
+  assert.equal(await p.ev(focusedK), 'machine:park');
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(focusedK), 'machine:park', 'a redraw keeps the keyboard');
+  await p.key('Escape');
+  await p.until('cancelled', `${textK('machine:park')} === 'Park'`);
+  assert.deepEqual([F.asks.get(A), F.asks.get(B)], [[], []], 'nothing asked');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('machine:park')} === 'Park 2 projects?'`);
+  await p.key(' ');
+  await until(() => F.asks.get(A).length && F.asks.get(B).length, 'both asked');
+  assert.deepEqual([F.asks.get(A), F.asks.get(B)], [[{ mode: 'park', all: true }], [{ mode: 'park', all: true }]]);
+  // a new mix: reload, so nothing the hub just set colours it
+  F.setList([hello('alpha', A, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }), hello('beta', B)]);
+  await p.send('Page.reload');
+  await p.until('Mixed', `${m}?.querySelector('.k').textContent === 'Mixed: 1 running, 0 draining, 1 parked'`);
+  assert.equal(await p.ev(`${m}.querySelectorAll('[aria-pressed=true]').length`), 0, 'none pressed');
+  await p.ev(`${kBtn('machine:run')}.click()`);
+  await until(() => F.asks.get(A).length === 2, 'alpha asked to run');
+  assert.deepEqual(F.asks.get(A)[1], { mode: 'run', all: false }, 'Run asks the parked one only');
+  assert.equal(F.asks.get(B).length, 1, 'not the one running');
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  // a dashboard that fails: its name, then its error
+  await p.send('Page.reload');
+  await p.until('running', `${m}?.querySelector('[data-fleet=run]').getAttribute('aria-pressed') === 'true'`);
+  F.fail.set(B, 'no way');
+  await p.ev(`${kBtn('machine:drain')}.click()`);
+  await p.until('the error', `${m}?.querySelector('.err')?.textContent.startsWith('beta: no way') ?? false`);
+});
+
+test("a card's switch: Park confirms, busy, error; pressing the current mode does nothing", CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the switches', `!!${kBtn('/srv/alpha:park')}`);
+  assert.equal(await p.ev(`${cardOf('alpha')}.querySelector('.foot [data-pin=fleet] .fleet-switch[data-scope=row]') !== null`), true, 'the row switch in the foot, pinned');
+  await p.ev(`${kBtn('/srv/alpha:run')}.click()`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.deepEqual(F.asks.get(A), [], 'the pressed mode does nothing');
+  await focusK(p, '/srv/alpha:park');
+  await p.key(' ');
+  await p.until('the confirm', `${textK('/srv/alpha:park')} === 'Confirm park'`);
+  await p.ev('paintOverview()');
+  assert.equal(await p.ev(focusedK), '/srv/alpha:park');
+  F.delay.set(A, 1000);
+  await p.key(' ');
+  await p.until('busy', `${cardOf('alpha')}.querySelector('.fleet-switch .msg')?.textContent === 'Parking…'`);
+  await until(() => F.asks.get(A).length === 1, 'alpha asked');
+  assert.deepEqual(F.asks.get(A), [{ mode: 'park', all: false }]);
+  await p.until('done', `!${cardOf('alpha')}.querySelector('.fleet-switch .msg')`);
+  F.fail.set(B, 'it broke');
+  await p.ev(`${kBtn('/srv/beta:drain')}.click()`);
+  await p.until('the error', `${cardOf('beta')}.querySelector('.fleet-switch .err')?.textContent === 'it broke'`);
+});
+
+test('a machine op: its busy words, the cards disabled while it runs; a confirm with nothing to do clears; a new press clears the error', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the machine switch', `!!${kBtn('machine:drain')}`);
+  F.delay.set(A, 1500);
+  F.delay.set(B, 1500);
+  await p.ev(`${kBtn('machine:drain')}.click()`);
+  await p.until('busy', `document.querySelector('#ov-body > .ov-head .fleet-switch .msg')?.textContent === 'Draining 2 projects…'`);
+  assert.equal(await p.ev(`[...document.querySelectorAll('.ov-card .fleet-switch [data-fleet]')].every((b) => b.disabled)`), true, "the cards' buttons wait for it");
+  assert.equal(await p.ev(`[...document.querySelectorAll('.ov-card .fleet-switch .msg')].map((m) => m.textContent).join()`), 'Draining…,Draining…');
+  await until(() => F.asks.get(A).length && F.asks.get(B).length, 'both asked');
+  await p.until('done', `!document.querySelector('#ov-body .fleet-switch .msg')`);
+  F.delay.clear();
+  // every project parked: the machine's Park is the mode it is in, and pressing it does nothing (spec: the current mode)
+  F.setList([hello('alpha', A, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } }), hello('beta', B, { fleet: { mode: 'park', workers: 0 }, pulse: { state: 'parked' } })]);
+  await p.send('Page.reload');
+  await p.until('parked', `${kBtn('machine:park')}?.getAttribute('aria-pressed') === 'true'`);
+  await p.ev(`${kBtn('machine:park')}.click()`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(textK('machine:park')), 'Park', 'no confirm for the mode it is in');
+  await p.ev(`${kBtn('/srv/alpha:park')}.click()`);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(await p.ev(textK('/srv/alpha:park')), 'Park', 'nor on a parked card');
+  assert.deepEqual([F.asks.get(A).length, F.asks.get(B).length], [1, 1], 'nothing asked');
+  // an error, then a new press: the error goes
+  F.setList([hello('alpha', A), hello('beta', B)]);
+  await p.send('Page.reload');
+  await p.until('running', `!!${kBtn('/srv/alpha:drain')} && ${kBtn('/srv/alpha:run')}.getAttribute('aria-pressed') === 'true'`);
+  F.fail.set(A, 'it broke');
+  await p.ev(`${kBtn('/srv/alpha:drain')}.click()`);
+  await p.until('the error', `${cardOf('alpha')}.querySelector('.fleet-switch .err')?.textContent === 'it broke'`);
+  await p.ev(`${kBtn('/srv/alpha:park')}.click()`);
+  await p.until('the confirm, the error gone', `${textK('/srv/alpha:park')} === 'Confirm park' && !${cardOf('alpha')}.querySelector('.fleet-switch .err')`);
+});
+
+test('a partly held card: Run asks "Run every goal?" in place, posts on the second press, Escape cancels', CHROME, async (t) => {
+  const [A, B] = await freePorts(2);
+  const F = await fixtureHub(t, { ports: [A, B] });
+  F.setList([hello('alpha', A, { fleet: { mode: 'run', workers: 1, goals: { run: 2, drain: 0, park: 9 } } }), hello('beta', B, { fleet: { mode: 'park', workers: 0, goals: { run: 0, drain: 1, park: 3 } }, pulse: { state: 'parked' } })]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the switches', `!!${kBtn('/srv/alpha:run')} && !!${kBtn('/srv/beta:run')}`);
+  for (const [name, port] of [['alpha', A], ['beta', B]]) {
+    const k = `/srv/${name}:run`;
+    await focusK(p, k);
+    await p.key(' ');
+    await p.until('the confirm', `${textK(k)} === 'Run every goal?' && ${cardOf(name)}.querySelector('.fleet-switch[data-confirming="1"]') !== null`);
+    assert.equal(await p.ev(focusedK), k);
+    assert.deepEqual(F.asks.get(port), [], 'nothing asked yet');
+    await p.key('Escape');
+    await p.until('cancelled', `${textK(k)} === 'Run'`);
+    await p.key(' ');
+    await p.until('the confirm', `${textK(k)} === 'Run every goal?'`);
+    await p.key(' ');
+    await until(() => F.asks.get(port).length === 1, `${name} asked`);
+    assert.deepEqual(F.asks.get(port), [{ mode: 'run', all: false }]);
+  }
+});
+
+// in the page: Settings' groups, and a row by its name
+const setGroups = `[...document.querySelectorAll('#hub-settings .sec > .lbl')].map((x) => x.textContent)`;
+const setRow = (name) => `(() => { const r = [...document.querySelectorAll('#hub-settings .set-row')].find((x) => x.querySelector('.t')?.firstChild?.textContent.trim() === ${JSON.stringify(name)}); if (!r) return null; const v = r.querySelector('.r'); return { key: r.querySelector('.set-key')?.textContent ?? null, value: [...v.childNodes].filter((n) => !(n.classList && n.classList.contains('badge'))).map((n) => n.textContent).join('').trim(), yours: !!v.querySelector('.badge.amber'), desc: r.nextElementSibling?.classList.contains('set-desc') ? r.nextElementSibling.textContent : null, link: v.querySelector('a') ? [v.querySelector('a').textContent, v.querySelector('a').getAttribute('href')] : null, amber: !!v.querySelector('.amber:not(.badge)') }; })()`;
+
+test('Settings on a laptop: from the link only, This machine and Notifications', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A], kit: 'v0.57.0' });
+  F.setList([hello('settings', A)]);
+  const p = await hubPage(t, F.url('/'));
+  await p.until('the card', `document.querySelectorAll('.ov-card').length === 1`);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Settings')`), false, 'no Settings tab');
+  await p.ev(`document.querySelector('#ov-body > .ov-head a.set').click()`);
+  await p.until('Settings', `location.hash === '#settings' && !document.getElementById('settings-view').hidden`);
+  assert.deepEqual(await p.ev(`[document.getElementById('overview').hidden, document.querySelectorAll('#tabs [aria-selected=true]').length, document.getElementById('tl').hidden, document.querySelector('#hub-settings h2')?.textContent]`), [true, 0, true, 'Settings']);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Notifications']);
+  const hub = await p.ev(setRow('Hub served by kit'));
+  assert.deepEqual([hub.key, hub.value, hub.yours, hub.desc], ['hub', 'v0.57.0', false, 'the kit whose hub you are reading; each project keeps its own kit']);
+  const ni = await p.ev(setRow('New Inbox items'));
+  assert.deepEqual([ni.key, ni.yours, ni.desc], ['on this device', true, 'a notification on this device when any project asks you something']);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#hub-settings .set-row')].every((r) => r.nextElementSibling?.classList.contains('set-desc'))`), true, 'a description under each row');
+  assert.equal(await p.ev(`!document.querySelector('header #notify, header #box-links')`), true, 'nothing of it left in the header');
+  assert.equal(await p.ev(`!!document.querySelector('.ov-box') || /Box v/.test(document.getElementById('ov-body').textContent)`), false, 'no box line on the Overview');
+  // a cold load at #settings, with a project named settings: Settings shows, the project's key is its own
+  await p.send('Page.navigate', { url: 'about:blank' });
+  await p.send('Page.navigate', { url: F.url('/#settings') });
+  await p.until('Settings again', `!document.getElementById('settings-view')?.hidden && document.querySelectorAll('#tabs [role=tab]').length >= 2`);
+  await p.ev(`${tabOf('settings')}.click()`);
+  await p.until('the project', `/^#settings-[0-9a-f]{6}$/.test(location.hash)`);
+  await p.ev(`location.hash = 'settings'`);
+  await p.until('Settings once more', `!document.getElementById('settings-view').hidden`);
+  await new Promise((r) => setTimeout(r, 11000));
+  assert.equal(await p.ev(`!document.getElementById('settings-view').hidden && location.hash === '#settings'`), true, 'a draw keeps it');
+  // the keyboard gets back: the Overview tab is in the tab order (none selected), and its arrows move on from it
+  const ov = `[...document.querySelectorAll('#tabs [role=tab]')].find((x) => x.textContent === 'Overview')`;
+  assert.deepEqual(await p.ev(`[${ov}.tabIndex, ${ov}.getAttribute('aria-selected')]`), [0, 'false']);
+  await p.ev(`${ov}.focus()`);
+  await p.key('ArrowRight');
+  await p.until('the project after the Overview', `/^#settings-[0-9a-f]{6}$/.test(location.hash)`);
+  await p.ev(`location.hash = 'settings'`);
+  await p.until('Settings again', `!document.getElementById('settings-view').hidden`);
+  await p.ev(`${ov}.focus()`);
+  await p.key(' ');
+  await p.until('the Overview', `!document.getElementById('overview').hidden && document.getElementById('settings-view').hidden`);
+});
+
+test('Settings: the Notify button is the live control, the Test row once notifications are on, focus kept across the repaint', CHROME, async (t) => {
+  const [A] = await freePorts(1);
+  const F = await fixtureHub(t, { ports: [A] });
+  F.setList([hello('alpha', A)]);
+  const p = await hubPage(t, F.url('/#settings'));
+  await p.until('Settings', `!document.getElementById('settings-view').hidden && document.querySelectorAll('#hub-settings .set-row').length >= 2`);
+  const notify = `[...document.querySelectorAll('#hub-settings .set-row')].find((r) => r.querySelector('.t').firstChild.textContent.trim() === 'New Inbox items').querySelector('.r button')`;
+  assert.equal(await p.ev(`${notify}?.textContent ?? null`), 'Notify me of new Inbox items');
+  assert.equal(await p.ev(setRow('Test')), null, 'no Test row while notifications are off');
+  // the button's focus outlives a repaint
+  await p.ev(`${notify}.focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement === ${notify}`), true, 'focus kept');
+  // the row's button is the page's own control: pressed, with notifications allowed, it turns them on
+  await p.send('Browser.grantPermissions', { origin: F.url('/').replace(/\/$/, ''), permissions: ['notifications'] });
+  await p.ev(`${notify}.click()`);
+  await p.until('on', `${setRow('New Inbox items')}?.value === 'Notifying you of new Inbox items'`);
+  const test = await p.ev(setRow('Test'));
+  assert.deepEqual([test?.key, test?.desc], ['on this device', 'send one now, to see that this device gets them']);
+  const send = `[...document.querySelectorAll('#hub-settings .set-row')].find((r) => r.querySelector('.t').firstChild.textContent.trim() === 'Test').querySelector('button')`;
+  await p.ev(`${send}.focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement === ${send}`), true, 'its focus outlives a repaint');
+  await p.ev(`${send}.click()`);
+  await p.until('sent', `${send}.textContent === 'Test sent'`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`${send}.textContent`), 'Test sent', 'its answer outlives a repaint');
+});
+
+test("Settings on a box: Signing in and Serving, boxLine's parts", CHROME, async (t) => {
+  let F;
+  F = await fixtureHub(t, { kit: 'v0.57.0', image: true, box: () => {
+    const at = (h) => `http://${h}.localhost:${F.port}/`;
+    return { box: 2, terminal: at('terminal'), project: `http://{project}.localhost:${F.port}/`, passkeys: at('auth'), previews: at('previews'), image: { release: 'v0.57.0', tools: { 'claude-code': '2.4.1' } } };
+  } });
+  F.setList([]);
+  const p = await hubPage(t, `http://hub.localhost:${F.port}/#settings`);
+  let loaded = false;
+  for (let i = 0; i < 100 && !loaded; i++) { loaded = (await p.ev(`document.title`).catch(() => '')) === 'devteam'; if (!loaded) await new Promise((r) => setTimeout(r, 100)); }
+  if (!loaded) return t.skip("headless Chrome can't load hub.localhost here");
+  await p.until('the box rows', `document.querySelectorAll('#hub-settings .sec').length === 4`);
+  assert.deepEqual(await p.ev(setGroups), ['This machine', 'Signing in', 'Notifications', 'Serving']);
+  const rel = await p.ev(setRow('Box release'));
+  assert.deepEqual([rel.key, rel.value, rel.desc], ['DEVTEAM_KIT_RELEASE', 'v0.57.0', 'the box image this machine runs']);
+  const hub = await p.ev(setRow('Hub'));
+  assert.deepEqual([hub.key, hub.value, hub.amber], ['hub', 'hub v0.57.0', false]);
+  const cc = await p.ev(setRow('Claude Code'));
+  assert.deepEqual([cc.key, cc.value, cc.desc], ['DEVTEAM_BOX_TOOLS', '2.4.1', 'the version on this box']);
+  const pk = await p.ev(setRow('Passkeys'));
+  assert.deepEqual([pk.key, pk.link, pk.yours], ['passkeys', ['Manage', `http://auth.localhost:${F.port}/`], true]);
+  const pv = await p.ev(setRow('Previews'));
+  assert.deepEqual([pv.key, pv.link], ['previews', ['Previews', `http://previews.localhost:${F.port}/`]]);
+  assert.equal(await p.ev(`[...document.querySelectorAll('#tabs [role=tab]')].some((x) => x.textContent === 'Terminal')`), true, 'the Terminal tab stays');
+  // a link keeps the keyboard across the repaint
+  await p.ev(`document.querySelector('#hub-settings a[href^="http://auth."]').focus()`);
+  await p.ev('paintSettings()');
+  assert.equal(await p.ev(`document.activeElement?.textContent === 'Manage' && document.activeElement.closest('#hub-settings') !== null`), true, 'Manage keeps focus');
 });
 
 // The hub can't post an owner action. Its Overview asks the project's dashboard, in its frame, and
 // that page posts to itself: only for its parent, only when that parent is another origin (the hub,
 // by frame-ancestors), never in the viewer, never opened on its own.
-test('the Overview in Chrome: Park by keyboard, Park all and Resume all through each dashboard; nothing but the hub above a dashboard is heard', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+test('the Overview in Chrome: Park by keyboard on a card, the machine switch\'s Park and Run through each dashboard; nothing but the hub above a dashboard is heard', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-ov-'));
   defer(t, () => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const HUB = PORTS + 60;
@@ -309,14 +887,15 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   await p.send('Page.navigate', { url: `http://127.0.0.1:${HUB}/` });
   const page = (what, expr) => until(() => p.ev(expr).catch(() => false), what);
   const card = (name) => `[...document.querySelectorAll('.ov-card')].find((c) => c.querySelector('.ov-name')?.textContent === '${name}')`;
-  const seg = (name, label) => `[...${card(name)}.querySelectorAll('.seg button')].find((x) => x.textContent === '${label}')`;
-  await page('a card each', `document.querySelectorAll('.ov-card').length === 2 && document.querySelectorAll('.seg').length === 2`);
+  const park = (name) => `${card(name)}.querySelector('.fleet-switch [data-fleet=park]')`;
+  const mbtn = (m) => `document.querySelector('#ov-body > .ov-head .fleet-switch[data-scope=machine] [data-fleet=${m}]')`;
+  await page('a card each', `document.querySelectorAll('.ov-card').length === 2 && document.querySelectorAll('.ov-card .fleet-switch').length === 2`);
   assert.equal(await p.ev(`document.querySelector('[role=tab][aria-selected=true]').textContent`), 'Overview', 'the page opens on the Overview');
   assert.equal(await p.ev(`location.hash`), '#overview');
   assert.equal(await p.ev(`document.querySelectorAll('iframe').length`), 0, 'no dashboard is loaded until one is opened or asked');
 
   // Park, by keyboard: two presses of the space bar on one button, across the redraw between them
-  await p.ev(`${seg('alpha', 'Park')}.focus()`);
+  await p.ev(`${park('alpha')}.focus()`);
   await p.key(' ');
   await page('the press asking to be confirmed', `document.activeElement?.textContent === 'Confirm park'`);
   assert.equal(mode(A), 'run', 'one press parks nothing');
@@ -324,19 +903,20 @@ test('the Overview in Chrome: Park by keyboard, Park all and Resume all through 
   await until(() => mode(A) === 'park', 'alpha parked');
   assert.equal(mode(B), 'run', 'and only alpha');
   // the card says so as soon as alpha's dashboard answers, not a hello later
-  await page('the card showing Park pressed', `${seg('alpha', 'Park')}?.getAttribute('aria-pressed') === 'true' && ${card('alpha')}.querySelector('.pill:last-child').textContent === 'Parked'`);
+  await page('the card showing Park pressed', `${card('alpha')}.querySelector('.fleet-switch [data-fleet=park][aria-pressed=true]') !== null && ${card('alpha')}.querySelector('.card-head .pill:not(.shrink)').textContent === 'Parked'`);
   await page('the frame made to ask, gone again', `document.querySelectorAll('iframe').length === 0`);
   const held = spawnSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'fleet', 'status'], { cwd: A, env, encoding: 'utf8' }).stdout;
   assert.match(held, /parked from the hub's Overview/, 'the reason says where it came from');
 
-  // every project at once, and back
-  await page('Park all offered', `[...document.querySelectorAll('.ov-head .acts button')].some((x) => x.textContent === 'Park all' && !x.disabled)`);
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => x.textContent === 'Park all').click()`);
-  assert.equal(mode(B), 'run', 'Park all asks first');
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => /^Confirm: park 1 project$/.test(x.textContent)).click()`);
+  // every project at once, by the machine switch, and back
+  await page('the machine switch offering Park', `${mbtn('park')}?.disabled === false`);
+  await p.ev(`${mbtn('park')}.click()`);
+  await page('the machine asking first', `${mbtn('park')}.textContent === 'Park 1 project?'`);
+  assert.equal(mode(B), 'run', 'the machine switch asks first');
+  await p.ev(`${mbtn('park')}.click()`);
   await until(() => mode(B) === 'park', 'beta parked');
-  await page('Resume all offered for both', `[...document.querySelectorAll('.ov-head .acts button')].some((x) => x.textContent === 'Resume all (2)' && !x.disabled)`);
-  await p.ev(`[...document.querySelectorAll('.ov-head .acts button')].find((x) => x.textContent === 'Resume all (2)').click()`);
+  await page('the machine switch offering Run', `${mbtn('run')}?.disabled === false && ${mbtn('park')}.getAttribute('aria-pressed') === 'true'`);
+  await p.ev(`${mbtn('run')}.click()`);
   await until(() => mode(A) === 'run' && mode(B) === 'run', 'both running again');
 
   // a project's tab after all that: its dashboard, shown

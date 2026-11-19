@@ -1,0 +1,51 @@
+{
+  "next_move": 1,
+  "at": "2026-11-19T01:00:00.000Z",
+  "moves": [
+    {
+      "subject": "goal:g-20261117-050000000-supervisor",
+      "move": "ask-goal-met",
+      "words": "Ask you whether it is met",
+      "holder": "supervisor",
+      "ref": null,
+      "title": "Owners see each goal's next step",
+      "since": "2026-11-18T09:12:40.118Z",
+      "command": "ask --class goal-met --goal g-20261117-050000000-supervisor --recommendation yes",
+      "covered_by": [{ "kind": "goal-work-merged", "subject": "g-20261117-050000000-supervisor" }],
+      "quiet": null,
+      "via": null,
+      "flag": "owed",
+      "rung": 1
+    },
+    {
+      "subject": "goal:g-20261114-101500000-supervisor",
+      "move": "answer-goal-met",
+      "words": "Answer: is it met?",
+      "holder": "owner",
+      "ref": { "kind": "q", "id": "q-20261118-140210554-supervisor" },
+      "title": "Owners answer from their phone",
+      "since": "2026-11-18T14:02:10.554Z",
+      "command": null,
+      "covered_by": [{ "kind": "owner-question-waiting", "subject": "q-20261118-140210554-supervisor" }],
+      "quiet": null,
+      "via": null,
+      "flag": null,
+      "rung": 0
+    },
+    {
+      "subject": "goal:g-20261113-070000000-supervisor",
+      "move": "parked",
+      "words": "Parked by you",
+      "holder": "owner",
+      "ref": null,
+      "title": "Releases on a schedule",
+      "since": "2026-11-17T10:00:00.000Z",
+      "command": null,
+      "covered_by": [],
+      "quiet": "hold",
+      "via": null,
+      "flag": null,
+      "rung": 0
+    }
+  ]
+}

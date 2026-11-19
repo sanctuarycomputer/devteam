@@ -4,6 +4,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { cleanup } from './chrome.mjs';
 import { write } from './kit.mjs';
 
 // A stand-in for the supervisor's agent, drawing what Claude Code draws: in raw mode, so a key
@@ -63,18 +64,6 @@ const heldDirOf = (F, pane) => path.join(F.old, 'docs/devteam/run/held', encodeU
 const heldFor = (F, pane) => { try { return fs.readdirSync(heldDirOf(F, pane)).filter((n) => n.endsWith('.json')).sort(); } catch { return []; } };
 const logLines = (F) => fs.readdirSync(F.logDir).flatMap((f) => fs.readFileSync(path.join(F.logDir, f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)));
 
-// A test's stops, run last-registered first, each on its own: a removal registered first runs
-// after every stop, and one stop that throws skips none of the others (node runs t.after hooks in
-// the order they were registered and stops at the first that throws). The first error is thrown
-// once all have run.
-function cleanup(t) {
-  const fns = [];
-  t.after(async () => {
-    let first = null;
-    for (const f of fns.reverse()) { try { await f(); } catch (e) { first ??= e; } }
-    if (first) throw first;
-  });
-  return (f) => { fns.push(f); };
-}
+// A test's stops: cleanup(t) from lib/chrome.mjs, last registered first, each on its own.
 
 export { cleanup, heldDirOf, heldFor, logLines, menuPane, nap };

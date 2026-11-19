@@ -1,4 +1,4 @@
-// The measure check (dashboard-shell@1, docs/devteam/dashboard/shell.md): one function run in a page
+// The measure check (dashboard-shell@1, test/contracts/shell.md): one function run in a page
 // in headless Chrome, returning what breaks the layout rules, each failure named by its check. The
 // owner's mock carries the same check (artifacts/dashboard-cleanup, measureCheck); this is it with the
 // selectors as options and three checks added (head-h, header-pad, tab-motion).
