@@ -115,7 +115,7 @@ test('ready orders by effective goal priority: work a higher goal waits on goes 
 test('a lower-priority ticket still starts while higher-priority work is blocked or held', () => {
   const { F, ticket, idle, rows } = priorityFixture('ready-backfill');
   try {
-    ticket('bf-01-first', 2, [], { held: 'waits on the owner' });
+    ticket('bf-01-first', 2, [], { held: 'waits on the owner', held_for: ['external:the owner'], held_until: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10) });
     ticket('bf-02-then', 2, ['bf-01-first']);
     ticket('bf-03-low', 9);
     assert.deepEqual(rows(), [['bf-03-low', 9, null]]);
@@ -146,7 +146,7 @@ test('ready: met, parked and drained goals give no priority and pass none on', (
     // the p1 goal met (the owner's word), p3 parked, p5 drained
     F.hand('owner', { type: 'goal', op: 'set', id: F.goal, status: 'met' }, 1000);
     F.owner(['goal', 'hold', g[3], 'park', '--owner', '--reason', 'later']);
-    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused']);
+    F.sup(['goal', 'hold', g[5], 'drain', '--reason', 'paused', '--for', 'external:a pause', '--until', new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10)]);
     assert.deepEqual(rows(), [['lv-01-low', 9, null], ['lv-03-low', 9, null], ['lv-06-low', 9, null], ['lv-08-both', 9, null]]);
     assert.doesNotMatch(F.sup(['ready']), /blocks p/);
   } finally { F.done(); }

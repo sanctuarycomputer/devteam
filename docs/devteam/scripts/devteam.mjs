@@ -3118,7 +3118,7 @@ const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.me
 const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
 const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
-// A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
+// A held ticket is one the supervisor chose not to schedule yet (`ticket hold <id> --reason "why" --for <cause>…`; `ticket release <id>` lifts it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
@@ -4578,11 +4578,12 @@ function restartCommands(filter = () => true) {
   const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
-// Write one goal's hold, creating Upkeep's line the first time it is held.
-function writeHold(g, hold, by) {
+// Write one goal's hold, creating Upkeep's line the first time it is held. extra: top-level fields of
+// the hold line beside hold (a drain's hold_for and hold_until).
+function writeHold(g, hold, by, extra = {}) {
   let target = g;
   if (isUpkeep(g) && !upkeepGoal()) target = appendLog({ type: 'goal', kind: 'upkeep', title: 'Upkeep' }, by);
-  return appendLog({ type: 'goal', op: 'set', id: target.id, hold }, by);
+  return appendLog({ type: 'goal', op: 'set', id: target.id, hold, ...extra }, by);
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
@@ -4721,7 +4722,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
   out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
-  for (const h of held) out(`held       ${h.id}  (${h.held})`);
+  for (const h of held) { const hf = ts.get(h.id).held_for; const hu = ts.get(h.id).held_until; out(`held       ${h.id}  (${h.held}${Array.isArray(hf) && hf.length ? `; for ${hf.join(', ')}` : ''}${hu ? `, until ${hu}` : ''})`); }
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.blocks ? `  (blocks p${r.blocks.priority})` : ''}${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
@@ -4769,13 +4770,146 @@ function cmdStatus() {
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
 
+// Why a hold the supervisor or a planner writes is refused, or null (kit-571; design
+// every-wait-names-its-cause-and-every-put, "Writers"): it names what it waits on (--for), each cause
+// in a known form (waitCause) and in the log, a date (--until) for a cause the kit can't follow, and
+// a date that is a real day from today to 30 days ahead (UTC). kind is ticket or goal, id the held
+// thing's, causes trimmed and de-duplicated, until a date or null, whole the --whole words or null.
+// Never applied to the owner's holds. Holds already in the log are never read through it.
+// A hold may not wait on itself (rule 6): for a ticket, on the ticket, one of its goals or a ticket
+// depending on it (transitively); for a goal, on the goal or one of its tickets; nor on a cause whose
+// own holds in force (a held ticket's held_for, a draining goal's hold_for) reach one of those.
+// A ticket held for a question names why the whole ticket waits (rule 7): whole, else split first.
+// ticket is the held ticket (for ticket add, its body: its feature gives its goals).
+function holdCause({ kind, id, causes, until, whole, ticket }) {
+  const FORMS = 'a q-… question, a ticket id, goal:<g-id>, chore:<slug>, pr:<link>#<n>, run:<link>:<run id> or external:<words>';
+  if (!causes.length) return until ? '--until goes with --for: name what the hold waits on' : `a hold names what it waits on: --for <cause>… (${FORMS})`;
+  const today = new Date().toISOString().slice(0, 10);
+  const dayAfter = (d, n) => new Date(Date.parse(`${d}T00:00:00Z`) + n * 86400000).toISOString().slice(0, 10);
+  const latest = dayAfter(today, 30);
+  for (const c of causes) {
+    const w = waitCause(c);
+    if (!w) return `${c} is in no known form (${FORMS})`;
+    const there = w.form === 'q' ? logGet(w.id)?.type === 'question'
+      : w.form === 'ticket' ? tickets().has(w.id)
+      : w.form === 'goal' ? logGet(w.id)?.type === 'goal'
+      : w.form === 'chore' ? Boolean(resolveCommit(`refs/heads/chore-${w.id}`) || resolveCommit(`refs/remotes/origin/chore-${w.id}`) || logObjects('act').some((a) => (a.refs ?? []).includes(`chore-${w.id}`)))
+      : true;
+    if (!there) return w.form === 'chore' ? `${c} is not in the log (no chore-${w.id} branch here or on origin, and no act refs it)` : `${c} is not in the log`;
+    if (['pr', 'run', 'external'].includes(w.form) && !until) return `the kit can't follow ${c}: give it --until <date> (today to ${latest}) to look at it again`;
+  }
+  if (until !== null && until !== undefined) {
+    const real = /^\d{4}-\d{2}-\d{2}$/.test(until) && !Number.isNaN(Date.parse(`${until}T00:00:00Z`)) && new Date(Date.parse(`${until}T00:00:00Z`)).toISOString().slice(0, 10) === until;
+    if (!real) return `--until ${until} is not a date (YYYY-MM-DD)`;
+    if (until < today) return `--until ${until} is in the past (today is ${today}, UTC)`;
+    if (until > latest) return `--until ${until} is more than 30 days ahead (at most ${latest})`;
+  }
+  // rule 6: the subjects a hold of this thing may not wait on, each with why it is the thing itself
+  const self = new Map();
+  if (kind === 'ticket') {
+    self.set(id, null);
+    for (const g of ticketGoals(ticket)) self.set(`goal:${g.id}`, `goal:${g.id} is one of its goals`);
+    const all = [...tickets().values()];
+    const queue = [id];
+    const seen = new Set(queue);
+    while (queue.length) {
+      const at = queue.shift();
+      for (const t of all) {
+        if (seen.has(t.id) || !(t.depends_on ?? []).includes(at)) continue;
+        seen.add(t.id);
+        // a superseded or merged dependent waits on nothing (kit-572 reads it resolved or failed)
+        if (!isActive(t) || mergeShaFor(t.id)) continue;
+        queue.push(t.id);
+        self.set(t.id, `${t.id} depends on it`);
+      }
+    }
+  } else {
+    self.set(`goal:${id}`, null);
+    for (const t of tickets().values()) if (ticketGoals(t).some((g) => g.id === id)) self.set(t.id, `${t.id} is one of its tickets`);
+  }
+  // a cause as a subject the walk follows: a ticket's id or goal:<id>; anything else ends the walk
+  const subject = (c) => { const w = waitCause(c); return w?.form === 'ticket' ? w.id : w?.form === 'goal' ? `goal:${w.id}` : null; };
+  const next = (s) => {
+    if (s.startsWith('goal:')) { const g = logGet(s.slice(5)); return g?.type === 'goal' && goalMode(g) === 'drain' ? g.hold_for ?? [] : []; }
+    // only a hold in force: a superseded or merged ticket's stale held_for is not followed
+    const t = tickets().get(s);
+    return t && isHeld(t) && isActive(t) && !mergeShaFor(t.id) ? t.held_for ?? [] : [];
+  };
+  for (const c of causes) {
+    const start = subject(c);
+    if (!start) continue;
+    const from = new Map([[start, null]]);
+    const queue = [start];
+    while (queue.length) {
+      const at = queue.shift();
+      if (self.has(at)) {
+        const chain = [];
+        for (let s = at; s !== null; s = from.get(s)) chain.unshift(s);
+        const why = self.get(at);
+        return `${c} waits on ${id} itself${chain.length > 1 ? `, through ${chain.join(' -> ')}` : ''}${why ? ` (${why})` : ''}`;
+      }
+      for (const n of next(at)) {
+        const s = subject(n);
+        if (s && !from.has(s)) { from.set(s, at); queue.push(s); }
+      }
+    }
+  }
+  // rule 7: a question gates only part of a ticket, unless the hold says why it gates the whole
+  if (kind === 'ticket' && !whole) {
+    const q = causes.find((c) => waitCause(c)?.form === 'q');
+    if (q) return `${id} waits on ${q}: hold only the part the answer gates. Split first: ticket add a ticket with the touches and done-whens that don't need the answer, ticket set ${id} to what is left, then hold it; or, if no part can go ahead without the answer, pass --whole "<why>"`;
+  }
+  return null;
+}
+
 // ticket add <id> --json '{…}' | --file f ; ticket set <id> --json '{…}' ; feature add/set likewise.
-function cmdTicket() { graphEdit('ticket', SCHEMA['x-id'].keyed.ticket); }
+// ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole w] ; ticket release <id> [--reason r]:
+// a hold that names what it waits on (holdCause), and its release, each one ticket line.
+function cmdTicket() {
+  const [sub, id] = positional;
+  if (sub !== 'hold' && sub !== 'release') return graphEdit('ticket', SCHEMA['x-id'].keyed.ticket);
+  if (!id) die(sub === 'hold' ? 'usage: ticket hold <id> --reason "<why>" --for <cause>… [--until <YYYY-MM-DD>] [--whole "<why>"]' : 'usage: ticket release <id> [--reason "<why>"]');
+  const by = logWriter();
+  const cls = writerClass(by);
+  if (!['supervisor', 'planner'].includes(cls)) die('tickets are written by the supervisor or a planner (plan-<feature>)');
+  const t = logGet(id);
+  if (t?.type !== 'ticket') die(`no ticket ${id}`);
+  if (cls === 'planner') {
+    const f = planFeature(by);
+    if (t.feature !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+    // the fold ranks a planner's held below the supervisor's and the owner's: once either wrote it, a
+    // planner's line would change nothing (a release with null keeps that rank too)
+    const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+    if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+  }
+  const reason = flagStr('reason')?.trim() || null;
+  if (sub === 'release') {
+    if (!isHeld(t)) die(`${id} is not held`);
+    appendLog({ type: 'ticket', op: 'set', id, held: null, held_for: null, held_until: null }, by);
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `released ticket ${id}${reason ? `: ${reason}` : ''}`, refs: [id], reversible: true }, 'supervisor');
+    return out(`released ${id}`);
+  }
+  if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+  if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+  if (!reason) die('ticket hold needs --reason "<why>"');
+  const causes = [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))];
+  const until = flagStr('until')?.trim() || null;
+  // a bare or blank --until is a date given and lost: refused, as goal hold refuses it
+  if (flags.until !== undefined && until === null) die('--until needs a date (YYYY-MM-DD)');
+  if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+  const whole = flagStr('whole')?.trim() || null;
+  const why = holdCause({ kind: 'ticket', id, causes, until, whole, ticket: t });
+  if (why) die(why);
+  const held = whole ? `${reason} (whole: ${whole})` : reason;
+  appendLog({ type: 'ticket', op: 'set', id, held, held_for: causes, held_until: until }, by);
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'replan-within-feature', what: `held ticket ${id} for ${causes.join(', ')}`, refs: [id], reversible: true }, 'supervisor');
+  out(`held ${id}`);
+}
 function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
 function graphEdit(type, idRe) {
   const [sub, id] = positional;
   const by = logWriter();
-  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'${type === 'ticket' ? ' [--whole "<why>"]' : ''}   |   ${type} show <id>`);
   if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
   if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
   if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
@@ -4800,6 +4934,34 @@ function graphEdit(type, idRe) {
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
   if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
+  // a held body is held to ticket hold's rule (holdCause): a cause, a date in range, no wait on itself
+  if (type === 'ticket') {
+    // the fold ranks a planner's held below the supervisor's and the owner's, as ticket hold refuses
+    if (writerClass(by) === 'planner' && sub === 'set' && 'held' in body) {
+      const over = readLog().lines.find((l) => l.type === 'ticket' && l.id === id && 'held' in l && ['supervisor', 'owner'].includes(writerClass(l.by)));
+      if (over) die(`${id}'s hold was set by the ${writerClass(over.by)}: a planner may not change it`);
+    }
+    if (typeof body.held === 'string' && !body.held.trim()) die('release with null: {"held": null} (a blank held reads released yet keeps its cause)');
+    if (typeof body.held === 'string') {
+      const t = sub === 'add' ? { ...body, id } : { ...logGet(id), ...body };
+      if (!isActive(t)) die(`${id} is superseded: nothing to hold`);
+      if (mergeShaFor(id)) die(`${id} is merged: nothing to hold`);
+      if (body.held_for !== undefined && body.held_for !== null && !Array.isArray(body.held_for)) die('held_for is a list of causes');
+      body.held_for = [...new Set((body.held_for ?? []).map((c) => String(c).trim()).filter(Boolean))];
+      if (typeof body.held_until === 'string' && !body.held_until.trim()) die('--until needs a date (YYYY-MM-DD)');
+      body.held_until = typeof body.held_until === 'string' ? body.held_until.trim() : body.held_until ?? null;
+      if (flags.whole !== undefined && !flagStr('whole')?.trim()) die('--whole needs the reason no part can go ahead');
+      const whole = flagStr('whole')?.trim() || null;
+      const why = holdCause({ kind: 'ticket', id, causes: body.held_for, until: body.held_until, whole, ticket: t });
+      if (why) die(body.held_for.length ? why : `${why}; or ticket hold ${id} --for <cause>… --reason "<why>"`);
+      if (whole) body.held = `${body.held} (whole: ${whole})`;
+    } else if ((body.held_for ?? null) !== null || (body.held_until ?? null) !== null) {
+      die('held_for and held_until go with held: ticket hold <id> --reason "<why>" --for <cause>…');
+    } else if (body.held === null) {
+      body.held_for ??= null;
+      body.held_until ??= null;
+    }
+  }
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
@@ -11204,7 +11366,7 @@ function citeTargets() {
   const [a, b] = positional;
   switch (command) {
     case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
-    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'ticket': return ['add', 'set', 'hold', 'release'].includes(a) ? [b] : null;
     case 'withdraw': return [a];
     case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
@@ -13156,9 +13318,9 @@ function cmdGoal() {
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
   // supervisor drains a running goal (with a reason) and releases only its own drain.
   if (sub === 'hold') {
-    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const mode = positional[2];
-    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--for <cause>…] [--until <YYYY-MM-DD>] [--owner]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal hold'), 'supervisor');
     if (g.status === 'met') die(`${g.id} is met; there is no work to hold`);
     if (g.status === 'abandoned') die(`${g.id} is let go: goal decide ${g.id} restore brings it back, parked`);
@@ -13166,12 +13328,26 @@ function cmdGoal() {
     if (why) die(`goal hold: ${why}`);
     const reason = flagStr('reason')?.trim();
     if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
+    // a drain names what it waits on (holdCause): the supervisor's is checked, the owner's written as given
+    const causes = flags.for !== undefined ? [...new Set(listFlag('for').map((c) => String(c).trim()).filter(Boolean))] : [];
+    // trimmed, as ticket hold reads it; a bare or blank --until is still a date given, for the shape rules
+    const until = flagStr('until')?.trim() || null;
+    const dated = flags.until !== undefined;
+    if (dated && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
+    if ((causes.length || dated || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
+    if ((causes.length || dated || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    if (dated && until === null) die('--until needs a date (YYYY-MM-DD)');
+    if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
+      const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
+      if (refusal) die(refusal);
+    }
+    const extra = { ...(causes.length ? { hold_for: causes } : {}), ...(causes.length || until !== null ? { hold_until: until } : {}) };
     const before = goalMode(g);
-    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by);
+    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by, extra);
     logCache = null;
     const name = isUpkeep(g) ? 'upkeep' : g.id;
     const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
-    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}${causes.length ? ` (for ${causes.join(', ')})` : ''}`, refs: [now.id], reversible: true }, 'supervisor');
     out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
     if (mode === 'park') {
       if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
@@ -22230,7 +22406,14 @@ function fleetUndo(mode) {
   const restored = [];
   for (const g of held.filter((x) => x.hold.fleet === op)) {
     const p = g.hold.prior ?? { mode: 'run' };
-    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by);
+    // a supervisor's own drain comes back with its cause: the line that set it is the latest hold
+    // line before this op's (a park then a park --move writes two)
+    let extra = {};
+    if (p.mode === 'drain' && !p.fleet) {
+      const u = [...(g.updates ?? [])].reverse().find((x) => x.hold && x.hold.fleet !== op);
+      if (u?.hold.mode === 'drain' && !u.hold.fleet && u.hold_for) extra = { hold_for: u.hold_for, hold_until: u.hold_until ?? null };
+    }
+    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by, extra);
     restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
   }
   if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');
@@ -27015,7 +27198,7 @@ const HELP_SETUP = `Setup and roles
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists`;
 const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for; the date is optional, except that a pr:, run: or external: cause needs --until, at most 30 days ahead) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
@@ -27027,6 +27210,8 @@ const HELP_HOLDS = `Holds and the fleet (planning.md §1, holds; supervisor.md �
 const HELP_GRAPH = `The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
+  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor or planner: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
+  ticket release <id> [--reason r]       supervisor or planner: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
