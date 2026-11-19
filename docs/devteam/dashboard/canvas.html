@@ -67,6 +67,9 @@
   .layer { display: flex; align-items: center; gap: 6px; height: 26px; padding-right: 8px; color: var(--fg-2); cursor: pointer; white-space: nowrap; font-size: 12px; }
   .layer:hover { background: var(--hover); }
   .layer[aria-selected="true"] { background: color-mix(in srgb, var(--sel) 14%, transparent); color: var(--fg); }
+  /* the focused row (kit-662: the tree by keyboard) is ringed, not only tinted */
+  .layer:focus { outline: none; }
+  .layer:focus-visible { outline: 2px solid var(--sel); outline-offset: -2px; }
   .layer .ic { width: 14px; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 10px; flex: none; }
   .layer .nm { overflow: hidden; text-overflow: ellipsis; }
   .props { padding: 0 12px 24px; }
@@ -1020,10 +1023,15 @@
     setTimeout(() => { if (propsStale && !holdProps()) buildProps(); }, 0);
   });
 
-  // Select a node of the shown page (its row and its drawn node marked), or nothing (null).
+  // Select a node of the shown page (its row and its drawn node marked), or nothing (null). The tree
+  // keeps one row in the tab order (the ARIA tree pattern): the selected row, else the first.
   function select(id) {
     const next = id !== null && layerRows.has(id) ? id : null;
-    for (const [rid, row] of layerRows) row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+    const stop = next !== null ? next : (layerRows.keys().next().value ?? null);
+    for (const [rid, row] of layerRows) {
+      row.setAttribute('aria-selected', rid === next ? 'true' : 'false');
+      row.tabIndex = rid === stop ? 0 : -1;
+    }
     for (const el of $('surface').querySelectorAll('.sel')) el.classList.remove('sel');
     if (next !== null && drawn.has(next)) drawn.get(next).classList.add('sel');
     if (next !== state.sel) hexChosen.clear();
@@ -1034,6 +1042,27 @@
   $('layers').addEventListener('click', (e) => {
     const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
     if (row) select(row.dataset.node);
+  });
+  // The tree by keyboard: ArrowDown and ArrowUp select the next and previous row, Home and End the first
+  // and last, focus following (they are the tree's: they never nudge); Delete or Backspace deletes the
+  // focused row's node as the Delete key does elsewhere (same guard, same words), at 760 px and over.
+  $('layers').addEventListener('keydown', (e) => {
+    if (!ready() || e.ctrlKey || e.metaKey || e.altKey) return;
+    const row = e.target instanceof Element ? e.target.closest('.layer[data-node]') : null;
+    if (!row || !layerRows.has(row.dataset.node)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      e.stopPropagation(); // the page's own Delete would delete the selection, which may be another row
+      if (editable()) deleteNode(row.dataset.node);
+      return;
+    }
+    const ids = [...layerRows.keys()];
+    const i = ids.indexOf(row.dataset.node);
+    const to = { ArrowDown: ids[Math.min(i + 1, ids.length - 1)], ArrowUp: ids[Math.max(i - 1, 0)], Home: ids[0], End: ids[ids.length - 1] }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    select(to);
+    layerRows.get(to).focus();
   });
   // A click on the stage: the nearest drawn node with a data-id (inside an instance, the instance), or
   // on empty stage nothing. The stage's own controls are not the stage.
@@ -1121,8 +1150,11 @@
   $('zoomOut').addEventListener('click', () => { if (ready()) zoomCentre(view.z / STEP); });
   $('zoomFit').addEventListener('click', () => { if (ready()) fit(); });
   // a resized window (a phone turned, a panel shown or hidden at 760 px) refits, unless the person has moved
+  let wasNarrow = null;
   window.addEventListener('resize', () => {
     if (narrow() && (tool !== 'move' || gesture !== null || pen !== null)) setTool('move'); // under 760 px, watch only
+    // across 760 px the panel's fields are built again, usable or not
+    if (narrow() !== wasNarrow) { wasNarrow = narrow(); if (ready()) renderProps(); }
     if (ready() && !moved) fit();
   });
 
@@ -1593,7 +1625,9 @@
     drawPage(pg.id);
     renderLayers(pg.id);
     select(state.sel);
-    if (focusRow !== null && layerRows.has(focusRow)) layerRows.get(focusRow).focus({ preventScroll: true });
+    // a focused row that is gone (deleted) leaves focus in the tree, on its tab stop
+    const back = focusRow === null ? null : layerRows.get(focusRow) || [...layerRows.values()].find((r) => r.tabIndex === 0);
+    if (back) back.focus({ preventScroll: true });
     if (document.body.dataset.state !== 'error') { if (kidsOf(pg).length === 0) showMsg(TEXT.empty); else hideMsg(); }
     syncBody();
     keepDrag();
@@ -1621,10 +1655,11 @@
     else banner(null);
   }
 
-  // Editing is allowed on a canvas open for editing (a session), until it is closed or refused `view`;
-  // keys only at 760 px and over.
-  const editable = () => state.base !== null && state.session !== null && state.locked === null;
+  // Editing is allowed on a canvas open for editing (a session), until it is closed or refused `view`,
+  // and only at 760 px and over: under that the page is watch-only (no tools, keys or fields; edits
+  // already queued are still sent).
   const narrow = () => window.matchMedia('(max-width: 760px)').matches;
+  const editable = () => state.base !== null && state.session !== null && state.locked === null && !narrow();
   // No more edits: the tools and fields disabled; after `closed`, its banner and no reconnect.
   function lock(kind, text = null) {
     if (state.locked !== 'closed') state.locked = kind;

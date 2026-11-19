@@ -1716,3 +1716,202 @@ test('place an instance and set its variant', { skip: canDrive ? false : 'needs 
   assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
   noExceptions(rec);
 });
+
+// ---- the Layers tree by keyboard (C5), narrow screens and width (C6) ----
+
+// A key as a keyboard sends it, with its own virtual key code (the helper's key() gives these keys a
+// letter's code), and no text.
+const VK = { ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Home: 36, End: 35, Delete: 46, Backspace: 8, Tab: 9 };
+async function press(p, k) {
+  const c = { key: k, code: k, windowsVirtualKeyCode: VK[k], nativeVirtualKeyCode: VK[k] };
+  await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...c });
+  await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...c });
+}
+// The Layers tree as it stands: its rows, the rows in the tab order (tabIndex 0), whether every other
+// row is -1, the selected rows, the focused row and its outline, the Name row, and the drawn selection.
+const tree = (p) => p.ev(`(() => {
+  const rows = [...document.querySelectorAll('#layers .layer[data-node]')];
+  const a = document.activeElement;
+  const inTree = a instanceof Element && a.matches('#layers .layer[data-node]');
+  const sel = [...document.querySelectorAll('#surface .sel')];
+  return {
+    rows: rows.map((r) => r.dataset.node),
+    stops: rows.filter((r) => r.tabIndex === 0).map((r) => r.dataset.node),
+    rest: rows.every((r) => r.tabIndex === 0 || r.tabIndex === -1),
+    selected: rows.filter((r) => r.getAttribute('aria-selected') === 'true').map((r) => r.dataset.node),
+    focused: inTree ? a.dataset.node : null,
+    outline: inTree ? getComputedStyle(a).outlineStyle : null,
+    outlineW: inTree ? parseFloat(getComputedStyle(a).outlineWidth) : 0,
+    name: document.querySelector('#props [data-field="name"]')?.textContent ?? null,
+    drawn: sel.map((e) => e.dataset.id ?? null),
+    drawnOutline: sel.length ? getComputedStyle(sel[0]).outlineStyle : null,
+  };
+})()`);
+// Focus is on `id`'s row, and it is selected, the one tab stop, ringed, named and drawn outlined.
+async function onRow(p, id, what) {
+  await within(async () => (await tree(p)).focused === id, `${what}: focus on ${id}'s row`, async () => JSON.stringify(await tree(p)), 5000);
+  await within(async () => (await tree(p)).name === EVERY.nodes[id].name, `${what}: the Name row shows ${id}'s name`, async () => JSON.stringify(await tree(p)), 5000);
+  const s = await tree(p);
+  assert.deepEqual(s.selected, [id], `${what}: ${id} selected`);
+  assert.deepEqual(s.stops, [id], `${what}: ${id}'s row the one tab stop`);
+  assert.equal(s.rest, true, `${what}: every other row -1`);
+  assert.ok(s.outline !== 'none' && s.outlineW > 0, `${what}: the focused row ringed (${s.outline} ${s.outlineW})`);
+  assert.deepEqual(s.drawn, [id], `${what}: ${id} drawn outlined`);
+  assert.notEqual(s.drawnOutline, 'none', `${what}: the drawn outline shown`);
+}
+
+test('the Layers tree by keyboard', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, fake, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every') });
+  await live(p);
+  const n0 = edits(rec).length;
+  const t0 = await tree(p);
+  const rows = t0.rows;
+  assert.deepEqual(rows, ['card', 'title', 'rule', 'dot', 'icon', 'photo', 'actions', 'buy', 'loose', 'badge', 'tiles'], "Checkout's rows");
+  assert.deepEqual(t0.stops, ['card'], 'nothing selected: the first row the one tab stop');
+  assert.equal(t0.rest, true, 'every other row -1');
+  // Tab from the page's start reaches a row within 20 presses: the first
+  let tabs = 0;
+  while ((await tree(p)).focused === null && tabs < 20) { await press(p, 'Tab'); tabs++; }
+  const s = await tree(p);
+  assert.equal(s.focused, 'card', `Tab reaches card's row (${tabs} presses; focus on ${await p.ev('document.activeElement?.outerHTML.slice(0, 80) ?? null')})`);
+  assert.ok(s.outline !== 'none' && s.outlineW > 0, `the row reached by Tab ringed (${s.outline})`);
+  // ArrowDown, ArrowUp, End, Home
+  await press(p, 'ArrowDown');
+  await onRow(p, 'title', 'ArrowDown');
+  await press(p, 'ArrowUp');
+  await onRow(p, 'card', 'ArrowUp');
+  await press(p, 'ArrowUp');
+  await onRow(p, 'card', 'ArrowUp on the first row');
+  await press(p, 'End');
+  await onRow(p, 'tiles', 'End');
+  await press(p, 'ArrowDown');
+  await onRow(p, 'tiles', 'ArrowDown on the last row');
+  await press(p, 'Home');
+  await onRow(p, 'card', 'Home');
+  // down every row (card, loose and badge are placed by x, y: the arrows never nudge them)
+  for (const id of rows.slice(1)) {
+    await press(p, 'ArrowDown');
+    await onRow(p, id, `ArrowDown to ${id}`);
+  }
+  for (const id of rows.slice(0, -1).reverse()) {
+    await press(p, 'ArrowUp');
+    await onRow(p, id, `ArrowUp to ${id}`);
+  }
+  await sendsNothing(rec, n0, 'the walk');
+  for (const id of ['card', 'loose', 'badge']) {
+    assert.equal(fake.doc('every').nodes[id].x, EVERY.nodes[id].x, `${id}'s x unchanged`);
+    assert.equal(fake.doc('every').nodes[id].y, EVERY.nodes[id].y, `${id}'s y unchanged`);
+  }
+  // a click on the drawn dot makes dot's row the tab stop
+  const dot = await box(p, '#surface [data-id="dot"]');
+  const pt = centre(dot);
+  assert.equal(await hitAt(p, pt), 'dot', 'the point is on dot');
+  await p.clickAt(pt.x, pt.y);
+  await within(async () => (await tree(p)).stops.join(' ') === 'dot', "dot's row the tab stop", async () => JSON.stringify(await tree(p)), 5000);
+  const d = await tree(p);
+  assert.deepEqual(d.selected, ['dot'], 'dot selected');
+  assert.equal(d.rest, true, 'every other row -1');
+  await sendsNothing(rec, n0, 'the click');
+  // back into the tree at dot's row, and Delete on the focused rule row: one del of rule
+  await p.ev(`document.querySelector('#layers .layer[data-node="dot"]').focus()`);
+  await press(p, 'ArrowUp');
+  await onRow(p, 'rule', 'ArrowUp from dot');
+  await press(p, 'Delete');
+  const e = await nextEdit(rec, n0);
+  assert.deepEqual(e.ops, [{ op: 'del', id: 'rule' }], 'one del of rule');
+  await ackOf(rec, e);
+  await sendsNothing(rec, n0 + 1, 'after the del');
+  assert.equal(fake.doc('every').nodes.rule, undefined, 'rule gone from the fake');
+  const after = await tree(p);
+  assert.equal(after.rows.includes('rule'), false, "rule's row gone");
+  assert.equal(after.stops.length, 1, `one tab stop after the delete (${after.stops.join(' ')})`);
+  assert.equal(after.rest, true, 'every other row -1 after the delete');
+  assert.equal(after.focused, after.stops[0], 'focus stays in the tree, on the tab stop');
+  assert.deepEqual(refusedFrames(rec), [], 'nothing refused');
+  noExceptions(rec);
+});
+
+test("a narrow screen doesn't edit", { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec, size } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), size: [390, 844] });
+  await live(p);
+  assert.equal(await p.ev("(() => { const t = document.getElementById('tools'); return getComputedStyle(t).display === 'none' || t.getBoundingClientRect().width === 0; })()"), true, 'the tools bar not shown');
+  const n0 = edits(rec).length;
+  for (const id of ['title', 'badge']) {
+    const pt = centre(await box(p, `#surface [data-id="${id}"]`));
+    assert.equal(await hitAt(p, pt), id, `the point is on ${id}`);
+    await p.clickAt(pt.x, pt.y);
+    await within(async () => (await selectedIds(p)).join(' ') === id, `${id} selected by a click`, async () => selectedIds(p), 5000);
+    for (const k of ['F', 'R']) {
+      await p.key(k);
+      assert.equal(await pressedTool(p), 'move', `${id}: ${k} changes no tool`);
+    }
+    for (const k of ['Delete', 'Backspace', 'ArrowRight', 'ArrowDown']) await press(p, k);
+    await sendsNothing(rec, n0, `${id}: F, R, Delete, Backspace and the arrows`);
+    assert.equal(await count(p, `#surface [data-id="${id}"]`), 1, `${id} still drawn`);
+    // the panel's fields are there for the wide layout, and none of them can be used
+    const ctl = await propControls(p);
+    assert.ok(ctl.length > 0, `${id}: the panel built`);
+    assert.deepEqual(ctl.filter((c) => !c.off).map((c) => c.prop), [], `${id}: every field disabled under 760 px`);
+    assert.equal(await p.ev("[...document.querySelectorAll('#props button')].every((b) => b.disabled)"), true, `${id}: every panel button disabled`);
+  }
+  // wide again: badge still selected, its fields usable, and the keys work
+  await size(1440, 900);
+  await within(async () => (await p.ev('innerWidth')) === 1440, 'the window at 1440');
+  await within(async () => (await propControls(p)).every((c) => !c.off), 'the fields usable at 1440', async () => JSON.stringify(await propControls(p)), 5000);
+  await p.key('F');
+  assert.equal(await pressedTool(p), 'frame', '1440: F presses Frame');
+  await p.key('Escape');
+  noExceptions(rec);
+});
+
+// kit-661's walk (canvas-editor.test.mjs, C4.1), copied: every visible element outside #surface that
+// directly holds a non-blank text node and may wrap: a name for it and its width on screen.
+const RUNNING_TEXT = `(() => {
+  const surface = document.getElementById('surface');
+  const out = [];
+  for (const el of document.body.querySelectorAll('*')) {
+    if (surface.contains(el) || el.closest('script, style')) continue;
+    if (![...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && n.data.trim() !== '')) continue;
+    if (el.getClientRects().length === 0) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility !== 'visible') continue;
+    const wraps = cs.textWrapMode ? cs.textWrapMode !== 'nowrap' : !['nowrap', 'pre'].includes(cs.whiteSpace);
+    if (!wraps) continue;
+    const name = el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + [...el.classList].map((c) => '.' + c).join('');
+    out.push({ name, w: el.getBoundingClientRect().width });
+  }
+  return out;
+})()`;
+
+test('running text within six columns while editing', { skip: canDrive ? false : 'needs Chrome and WebSocket', timeout: 180000 }, async (t) => {
+  const { p, rec } = await open(t, { canvases: { every: EVERY }, images: EVERY_IMAGES('every'), path: '/view/canvas/every#page=p-parts' });
+  await live(p);
+  const capped = (sel) => p.ev(`[...document.querySelectorAll(${JSON.stringify(sel)})].map((e) => getComputedStyle(e).maxWidth)`);
+  const check = async (what, mustHold) => {
+    const found = await p.ev(RUNNING_TEXT);
+    for (const { name, w } of found) assert.ok(w <= 560.5, `${what}: ${name} is ${w} px wide, over the measure`);
+    for (const m of mustHold) assert.ok(found.some((f) => f.name.startsWith(m)), `${what}: the walk reaches ${m} (found ${found.map((f) => f.name).join(', ')})`);
+  };
+  // the refused message of C3.3, then title selected on Checkout while it shows
+  await selectRow(p, 'button-label');
+  const n0 = edits(rec).length;
+  await press(p, 'Delete');
+  const e = await nextEdit(rec, n0);
+  await within(async () => refusedFrames(rec).some((m) => m.seq === e.seq), 'the refused frame', async () => JSON.stringify(rec.got.slice(-3)));
+  await within(async () => (await shownText(p, '#toast')) === SAY.ref, 'the refusal said', async () => shownText(p, '#toast'));
+  await showPg(p, 'p-main');
+  await selectRow(p, 'title');
+  assert.equal(await shownText(p, '#toast'), SAY.ref, 'the refusal still shown');
+  await check('title selected, the refusal shown', ['p#toast', 'span.v']);
+  // a field note shown too: a colour typed as red on card
+  await selectRow(p, 'card');
+  await fieldSet(p, 'stroke#hex', 'red');
+  await within(async () => (await notes(p)).length > 0, 'a field note', async () => JSON.stringify(await notes(p)));
+  await check('card selected, a field note shown', ['p.note.fnote']);
+  // the new running-text elements carry the cap itself (the banner too, while hidden)
+  for (const sel of ['#toast', '#banner', '#props .fnote']) {
+    const mw = await capped(sel);
+    assert.ok(mw.length > 0 && mw.every((v) => /^(min\()?560px\b/.test(v)), `${sel} capped at the measure (${mw.join(', ')})`);
+  }
+  noExceptions(rec);
+});
