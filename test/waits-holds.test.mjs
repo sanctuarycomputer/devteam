@@ -210,6 +210,16 @@ test('waits A3: ticket hold and ticket release write a hold\'s cause and clear i
     const { dir } = fixture('a3-unheld');
     refused(dir, ['ticket', 'release', T], `${T} is not held`);
   });
+
+  await t.test('ticket hold and ticket release take --decision, and their act cites it (final-1 F1)', () => {
+    const { dir } = fixture('a3-decision');
+    const D = ok(dir, ['decide', '--class', 'replan-within-feature', '--refs', T, '--', 'hold the probe until the vendor answers']).trim();
+    ok(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'external:the vendor', '--until', day(3), '--decision', D]);
+    assert.equal(acts(dir).filter((a) => a.class === 'replan-within-feature' && (a.refs ?? []).includes(T)).pop()?.decision, D, 'the hold\'s act cites the decision');
+    ok(dir, ['ticket', 'release', T, '--decision', D]);
+    assert.equal(acts(dir).filter((a) => a.class === 'replan-within-feature' && (a.refs ?? []).includes(T)).pop()?.decision, D, 'the release\'s act cites the decision');
+    assert.equal(show(dir, T).held, null);
+  });
 });
 
 test('waits A4: a hold with no cause, a cause in no known form or not in the log, a bad date, a wait on itself, or a question with no --whole is refused', async (t) => {

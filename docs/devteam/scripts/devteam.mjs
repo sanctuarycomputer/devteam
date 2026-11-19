@@ -3093,7 +3093,7 @@ const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.me
 const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
 const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
-// A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
+// A held ticket is one the supervisor chose not to schedule yet (`ticket hold <id> --reason "why" --for <cause>…`; `ticket release <id>` lifts it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
@@ -11339,7 +11339,7 @@ function citeTargets() {
   const [a, b] = positional;
   switch (command) {
     case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
-    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'ticket': return ['add', 'set', 'hold', 'release'].includes(a) ? [b] : null;
     case 'withdraw': return [a];
     case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
@@ -26992,7 +26992,7 @@ Setup and roles
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
 Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for, the date is optional) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>…] [--until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on; its drain needs --for; the date is optional, except that a pr:, run: or external: cause needs --until, at most 30 days ahead) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
