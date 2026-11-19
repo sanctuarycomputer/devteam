@@ -347,6 +347,7 @@ test("index.html's regions (kit-315): each name is one region over exactly its l
     if (name.startsWith('css-')) assert.ok(style < from && to < styleEnd, `${name}: inside <style>`);
     if (name.startsWith('html-')) assert.ok(styleEnd < from && to < script, `${name}: in the markup`);
   }
+  assert.equal([...P.places.keys()].filter((n) => /^(?:css|html|ooda)-/.test(n)).length, INDEX_REGIONS.length, 'no css-, html- or ooda- region but these');
   // nesting: only the two viewer bars sit inside another region; no other pair overlaps
   const inside = (x, y) => R.get(y).from < R.get(x).from && R.get(x).to < R.get(y).to;
   assert.ok(inside('css-viewer-bar', 'css-viewer') && inside('html-viewer-bar', 'html-viewer'), 'the viewer bars sit inside their viewers');
@@ -370,5 +371,47 @@ test("index.html's regions (kit-315): each name is one region over exactly its l
   for (let i = 1; i < ooda.length; i++) assert.ok(ooda[i - 1].to < ooda[i].from, 'the ooda regions in order');
   const div = L.findIndex((l, k) => k >= fn && l.startsWith('</div>')) + 1;
   const own = P.places.get('renderOoda');
-  assert.ok(own?.length === 1 && own[0].from <= fn && own[0].to === div - 1, "renderOoda's own place is as before");
+  assert.deepEqual(JSON.parse(JSON.stringify(own)), [{ from: fn, to: div - 1 }], "renderOoda's own place is as before");
+});
+
+// kit-315: the measure test's pages, one top-level list per page ticket, so kit-92/93/96/97/99/171 each
+// edit only their own part; its fixtures come through one namespace import, so adding one leaves the line alone
+test("dashboard-measure's per-ticket page lists (kit-315)", () => {
+  const { fileParts } = partsFns();
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'dashboard-measure.test.mjs'), 'utf8');
+  const P = fileParts(src, 'dashboard-measure.test.mjs');
+  for (const name of ['frameOnly', 'LIBRARY_PAGES', 'AUTONOMY_PAGES', 'LOOP_PAGES', 'THREAD_PAGES', 'TRUST_SUGG_PAGES', 'ATTACH_PAGES']) assert.ok(P.places.has(name), `${name} is a part of its own`);
+  assert.ok(src.includes("import * as lib from './lib/kit.mjs';"), 'test/lib/kit.mjs comes in as a namespace');
+  assert.doesNotMatch(src, /import\s*\{[^}]*\}\s*from\s*'\.\/lib\/kit\.mjs'/, 'and by no named import');
+  // a code use of a name the named import gave (a call, a member, an operand, an argument) reads lib.<name>
+  const NAMES = ['PORTS', 'bareProject', 'boardFixture', 'dashboardOnFreePort', 'dataPatchInit', 'dataRewriteInit', 'efficiencyFixture', 'inboxFixture', 'peekFixture', 'threadsFixture'];
+  src.split('\n').forEach((l, i) => {
+    if (/^\s*import\b/.test(l) || l.trim().startsWith('//')) return;
+    for (const n of NAMES) assert.doesNotMatch(l, new RegExp(`(?<![.\\w])${n}(?=\\s*[(.+,)])`), `line ${i + 1}: ${n} without lib.`);
+  });
+  const frame = src.split('\n').find((l) => l.startsWith('const frameOnly = '));
+  assert.ok(frame?.includes('ready: READY') && frame.includes("view: '#no-such-view'"), "frameOnly keeps the frame entries' shape");
+  for (const line of [
+    "const LIBRARY_PAGES = frameOnly(['library']);",
+    "const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);",
+    "const LOOP_PAGES = frameOnly(['loop']);",
+    'const THREAD_PAGES = [];',
+    'const TRUST_SUGG_PAGES = [];',
+    'const ATTACH_PAGES = [];',
+  ]) assert.ok(src.includes(line), `has ${line}`);
+  assert.ok(!src.includes("['library', 'trust', 'sensors', 'health', 'retros', 'loop']"), 'the shared frame row is gone');
+  // PAGES' entries, in today's order
+  const pages = src.slice(src.indexOf('const PAGES = ['), src.indexOf('\n];', src.indexOf('const PAGES = [')));
+  const entries = pages.split('\n').slice(1).filter((l) => /^ {2}\S/.test(l) && !l.trim().startsWith('//'));
+  const want = [
+    "{ hash: '#settings'",
+    '...LIBRARY_PAGES, ...AUTONOMY_PAGES, ...LOOP_PAGES,',
+    '...OVERVIEW_GOALS,',
+    "...['#board', '#board?att=1']",
+    "{ hash: '#progress'",
+    "{ hash: '#efficiency'",
+    '...THREAD_PAGES, ...TRUST_SUGG_PAGES, ...ATTACH_PAGES,',
+  ];
+  assert.equal(entries.length, want.length, `PAGES has ${want.length} entry lines: ${entries.map((l) => l.trim().slice(0, 30)).join(' | ')}`);
+  want.forEach((w, i) => assert.ok(entries[i].trim().startsWith(w), `PAGES entry ${i + 1} starts ${w}`));
 });
