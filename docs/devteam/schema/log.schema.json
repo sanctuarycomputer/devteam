@@ -791,7 +791,7 @@
         ]
       },
       "message": {
-        "description": "A one-line message typed into another session's pane. A reply names the message it answers in re.",
+        "description": "A one-line message typed into another session's pane. A reply names the message it answers in re. responder-1: the responder sends handoff and info messages only, never with re; a handoff names its thread and is open until a supervisor turn in that thread comes after it.",
         "type": "object",
         "properties": {
           "to": {
@@ -799,7 +799,7 @@
             "type": "string"
           },
           "kind": {
-            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, or info.",
+            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, info, or (responder-1) a handoff: the responder passing the supervisor what an owner's thread turn needs that it can't do.",
             "enum": [
               "design-change",
               "merge-request",
@@ -807,7 +807,8 @@
               "blocked",
               "ruling",
               "answer",
-              "info"
+              "info",
+              "handoff"
             ]
           },
           "text": {
@@ -835,6 +836,12 @@
               "string",
               "null"
             ]
+          },
+          "thread": {
+            "description": "responder-1. On a handoff, and required there: the thread whose owner's turn it hands over (send --kind handoff --thread). The supervisor answers in that thread, and its turn there settles the handoff.",
+            "type": "string",
+            "pattern": "^t-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The thread it hands over."
           }
         },
         "additionalProperties": false,
@@ -2346,16 +2353,17 @@
         "properties": {
           "who": {
             "type": "string",
-            "description": "the ticket, planner (plan-<feature>) or supervisor",
-            "x-tip": "The ticket, planner or supervisor that spent it."
+            "description": "the ticket, planner (plan-<feature>), supervisor, or (responder-1) responder",
+            "x-tip": "The ticket, planner, supervisor or responder that spent it."
           },
           "role": {
-            "description": "Worker, planner, reviewer or supervisor.",
+            "description": "Worker, planner, reviewer, supervisor, or (responder-1) responder.",
             "enum": [
               "worker",
               "reviewer",
               "planner",
-              "supervisor"
+              "supervisor",
+              "responder"
             ]
           },
           "phase": {
@@ -2483,7 +2491,7 @@
         "x-set-only": ["status", "outcome", "ready"]
       },
       "turn": {
-        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or the supervisor's reply. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
+        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or a reply by the supervisor or (responder-1) the responder, which answers the owner's turns quickly and hands the rest to the supervisor; a responder turn never asks a question and is never the owner's words. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
         "type": "object",
         "properties": {
           "thread": {
@@ -2511,6 +2519,21 @@
             "type": "string",
             "pattern": "^q-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
             "x-tip": "The question it asks you."
+          },
+          "routed_to": {
+            "description": "responder-1. On the owner's turn only: who owes the reply, decided once when the turn was written and never recomputed: the supervisor, or the responder.",
+            "enum": ["supervisor", "responder"],
+            "x-tip": "Who it went to."
+          },
+          "delivered": {
+            "description": "responder-1. On the owner's turn routed to the responder only: typed into the responder's pane, or queued in the log while it was busy.",
+            "enum": ["typed", "queued"],
+            "x-tip": "Whether it was sent at once or waited its turn."
+          },
+          "pending": {
+            "description": "responder-1. On a reply (never the owner's turn): true when the writer is still doing what the reply says, and a follow-up comes.",
+            "type": "boolean",
+            "x-tip": "More is coming."
           },
           "files": {
             "type": "array",
@@ -2973,7 +2996,8 @@
       "ticket": 0,
       "planner": 1,
       "supervisor": 2,
-      "owner": 3
+      "owner": 3,
+      "responder": 0
     },
     "new": {
       "owner": [
@@ -3014,6 +3038,11 @@
         "gate",
         "observation",
         "message"
+      ],
+      "responder": [
+        "turn",
+        "message",
+        "observation"
       ]
     },
     "set": {
@@ -3280,7 +3309,8 @@
       "retro",
       "worker",
       "planner",
-      "supervisor"
+      "supervisor",
+      "responder"
     ],
     "x-source-words": {
       "sensor": "a production sensor, or a goal's measure",
@@ -3293,7 +3323,8 @@
       "retro": "a retro",
       "worker": "a ticket's worker",
       "planner": "a planner",
-      "supervisor": "the supervisor"
+      "supervisor": "the supervisor",
+      "responder": "the responder"
     }
   }
 }

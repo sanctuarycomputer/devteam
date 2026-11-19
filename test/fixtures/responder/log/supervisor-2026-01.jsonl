@@ -1,0 +1,3 @@
+{"v":1,"id":"u-20260110-110100000-supervisor","at":"2026-01-10T11:01:00.000Z","by":"supervisor","type":"turn","thread":"t-20260110-110000000-owner","text":"Checking the queue; I will reply with a date.","pending":true,"op":"new"}
+{"v":1,"id":"u-20260110-110200000-supervisor","at":"2026-01-10T11:02:00.000Z","by":"supervisor","type":"turn","thread":"t-20260110-100000000-owner","text":"Merged the dashboard draft.","op":"new"}
+{"v":1,"id":"s-20260110-120000000-supervisor","at":"2026-01-10T12:00:00.000Z","by":"supervisor","type":"spend","who":"responder","role":"responder","phase":"responder","through":"2026-01-10T11:59:00.000Z","usd":0.42,"input_tokens":1000,"output_tokens":200,"op":"new"}

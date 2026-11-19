@@ -1,0 +1,676 @@
+{
+ "about": "responder-1 (docs/devteam/schema/log.schema.json): the fake's refused lines. Each case is one hand-written line, otherwise valid, that log-check (and every reader, through integrity) refuses with words matching why (a regex); repaired is the same line in the allowed form, in file, which passes. The accepted fake is log/ beside this file.",
+ "cases": [
+  {
+   "name": "responder turn with question",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-130000000-responder",
+    "at": "2026-01-10T13:00:00.000Z",
+    "by": "responder",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Shall I merge?",
+    "question": "q-20260110-090000000-supervisor",
+    "op": "new"
+   },
+   "why": "the responder's turns ask nothing",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-130000000-responder",
+    "at": "2026-01-10T13:00:00.000Z",
+    "by": "responder",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Shall I merge?",
+    "op": "new"
+   }
+  },
+  {
+   "name": "handoff without thread",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20260110-130100000-responder",
+    "at": "2026-01-10T13:01:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "handoff",
+    "text": "Merge it.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   },
+   "why": "a handoff names its thread",
+   "repaired": {
+    "v": 1,
+    "id": "m-20260110-130100000-responder",
+    "at": "2026-01-10T13:01:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "handoff",
+    "text": "Merge it.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "thread": "t-20260110-100000000-owner",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder message blocked",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20260110-130200000-responder",
+    "at": "2026-01-10T13:02:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "blocked",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   },
+   "why": "the responder sends handoff and info messages only",
+   "repaired": {
+    "v": 1,
+    "id": "m-20260110-130200000-responder",
+    "at": "2026-01-10T13:02:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "info",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder message ruling",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20260110-130210000-responder",
+    "at": "2026-01-10T13:02:10.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "ruling",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   },
+   "why": "the responder sends handoff and info messages only",
+   "repaired": {
+    "v": 1,
+    "id": "m-20260110-130210000-responder",
+    "at": "2026-01-10T13:02:10.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "info",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder message answer",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20260110-130220000-responder",
+    "at": "2026-01-10T13:02:20.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "answer",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   },
+   "why": "the responder sends handoff and info messages only",
+   "repaired": {
+    "v": 1,
+    "id": "m-20260110-130220000-responder",
+    "at": "2026-01-10T13:02:20.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "info",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder info with re",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "m-20260110-130300000-responder",
+    "at": "2026-01-10T13:03:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "info",
+    "text": "A message.",
+    "re": "m-20260110-090000000-kit-9-probe",
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   },
+   "why": "the responder replies to no message \\(re\\)",
+   "repaired": {
+    "v": 1,
+    "id": "m-20260110-130300000-responder",
+    "at": "2026-01-10T13:03:00.000Z",
+    "by": "responder",
+    "type": "message",
+    "to": "supervisor",
+    "kind": "info",
+    "text": "A message.",
+    "re": null,
+    "sha": null,
+    "ticket": null,
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation source supervisor",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130400000-responder",
+    "at": "2026-01-10T13:04:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "supervisor",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder's observations have source responder",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130400000-responder",
+    "at": "2026-01-10T13:04:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation source owner-thread",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130410000-responder",
+    "at": "2026-01-10T13:04:10.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "owner-thread",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder's observations have source responder",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130410000-responder",
+    "at": "2026-01-10T13:04:10.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation no source",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130420000-responder",
+    "at": "2026-01-10T13:04:20.000Z",
+    "by": "responder",
+    "type": "observation",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder's observations have source responder",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130420000-responder",
+    "at": "2026-01-10T13:04:20.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation finding-ack",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130500000-responder",
+    "at": "2026-01-10T13:05:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "finding-ack",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder doesn't write finding-ack observations",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130500000-responder",
+    "at": "2026-01-10T13:05:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation sensor-ignored",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130510000-responder",
+    "at": "2026-01-10T13:05:10.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "sensor-ignored",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder doesn't write sensor-ignored observations",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130510000-responder",
+    "at": "2026-01-10T13:05:10.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation outcome",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130520000-responder",
+    "at": "2026-01-10T13:05:20.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "outcome",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder doesn't write outcome observations",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130520000-responder",
+    "at": "2026-01-10T13:05:20.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder observation escaped-defect",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "o-20260110-130530000-responder",
+    "at": "2026-01-10T13:05:30.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "escaped-defect",
+    "detail": "A note.",
+    "op": "new"
+   },
+   "why": "the responder doesn't write escaped-defect observations",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130530000-responder",
+    "at": "2026-01-10T13:05:30.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder question",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "q-20260110-130600000-responder",
+    "at": "2026-01-10T13:06:00.000Z",
+    "by": "responder",
+    "type": "question",
+    "kind": "owner-decision",
+    "question": "Merge?",
+    "recommendation": "Yes",
+    "stake": 1,
+    "urgency": 1,
+    "op": "new"
+   },
+   "why": "responder may not create question lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130600000-responder",
+    "at": "2026-01-10T13:06:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder decision",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "d-20260110-130610000-responder",
+    "at": "2026-01-10T13:06:10.000Z",
+    "by": "responder",
+    "type": "decision",
+    "class": "merge",
+    "what": "Merge it.",
+    "op": "new"
+   },
+   "why": "responder may not create decision lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130610000-responder",
+    "at": "2026-01-10T13:06:10.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder act",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "a-20260110-130620000-responder",
+    "at": "2026-01-10T13:06:20.000Z",
+    "by": "responder",
+    "type": "act",
+    "class": "merge",
+    "what": "Merged it.",
+    "op": "new"
+   },
+   "why": "responder may not create act lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130620000-responder",
+    "at": "2026-01-10T13:06:20.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder goal",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "g-20260110-130630000-responder",
+    "at": "2026-01-10T13:06:30.000Z",
+    "by": "responder",
+    "type": "goal",
+    "title": "A goal",
+    "status": "draft",
+    "op": "new"
+   },
+   "why": "responder may not create goal lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130630000-responder",
+    "at": "2026-01-10T13:06:30.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder knowledge",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "k-20260110-130640000-responder",
+    "at": "2026-01-10T13:06:40.000Z",
+    "by": "responder",
+    "type": "knowledge",
+    "kind": "lesson",
+    "statement": "A lesson.",
+    "scope": "kit",
+    "confidence": 0.5,
+    "op": "new"
+   },
+   "why": "responder may not create knowledge lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130640000-responder",
+    "at": "2026-01-10T13:06:40.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder ticket",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "kit-99-forged",
+    "at": "2026-01-10T13:07:00.000Z",
+    "by": "responder",
+    "type": "ticket",
+    "title": "A forged ticket",
+    "feature": "fast-threads",
+    "op": "new"
+   },
+   "why": "responder may not create ticket lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130700000-responder",
+    "at": "2026-01-10T13:07:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "responder thread set",
+   "file": "responder.jsonl",
+   "line": {
+    "v": 1,
+    "id": "t-20260110-100000000-owner",
+    "at": "2026-01-10T13:08:00.000Z",
+    "by": "responder",
+    "type": "thread",
+    "status": "resolved",
+    "op": "set"
+   },
+   "why": "responder may not change thread lines",
+   "repaired": {
+    "v": 1,
+    "id": "o-20260110-130800000-responder",
+    "at": "2026-01-10T13:08:00.000Z",
+    "by": "responder",
+    "type": "observation",
+    "source": "responder",
+    "subject": "threads",
+    "kind": "note",
+    "detail": "A note.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "routed_to on a supervisor turn",
+   "file": "supervisor-2026-01.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-130900000-supervisor",
+    "at": "2026-01-10T13:09:00.000Z",
+    "by": "supervisor",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Noted.",
+    "routed_to": "supervisor",
+    "op": "new"
+   },
+   "why": "routed_to and delivered are on the owner's turns",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-130900000-supervisor",
+    "at": "2026-01-10T13:09:00.000Z",
+    "by": "supervisor",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Noted.",
+    "op": "new"
+   }
+  },
+  {
+   "name": "delivered without routed_to responder",
+   "file": "owner-2026-01.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-131000000-owner",
+    "at": "2026-01-10T13:10:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "And the footer?",
+    "routed_to": "supervisor",
+    "delivered": "typed",
+    "op": "new"
+   },
+   "why": "delivered goes with routed_to responder",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-131000000-owner",
+    "at": "2026-01-10T13:10:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "And the footer?",
+    "routed_to": "supervisor",
+    "op": "new"
+   }
+  },
+  {
+   "name": "pending on an owner turn",
+   "file": "owner-2026-01.jsonl",
+   "line": {
+    "v": 1,
+    "id": "u-20260110-131100000-owner",
+    "at": "2026-01-10T13:11:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Also the logo.",
+    "pending": true,
+    "op": "new"
+   },
+   "why": "pending is on a reply, never the owner's turn",
+   "repaired": {
+    "v": 1,
+    "id": "u-20260110-131100000-owner",
+    "at": "2026-01-10T13:11:00.000Z",
+    "by": "owner",
+    "channel": "cli",
+    "type": "turn",
+    "thread": "t-20260110-100000000-owner",
+    "text": "Also the logo.",
+    "op": "new"
+   }
+  }
+ ]
+}
