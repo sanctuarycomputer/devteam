@@ -1446,7 +1446,32 @@ test('the version pill: the versions, an earlier one read-only, Escape closes on
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
-test('a tree opened by a link is the published version', { ...CHROME, timeout: 300000 }, async (t) => {
+test('a list open when the viewer closes holds no Escape', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, soon, go } = await versOn(t);
+  await go('#library');
+  await soon(`!!document.querySelector(${JSON.stringify(cardTitle(VERS))})`, 'the card');
+  await p.click(cardTitle(VERS));
+  await soon(frameIs(`/artifact/wt/${VERS_WT}/${VERS}/`), 'the draft in the viewer');
+  await p.click('#av-ver');
+  await soon(`${LIST_OPEN} && ${OPTS}.length === 4`, 'the list open');
+  await p.ev('history.back()');
+  await soon(`!${VIEWING} && location.hash.startsWith('#library')`, 'the viewer closed by Back');
+  assert.equal(await p.ev(LIST_OPEN), false, 'the list closed with it');
+  // the page's own Escape listeners hear the next Escape
+  await p.ev("window.__esc = 0; document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.__esc++; }); document.activeElement?.blur?.(); true");
+  await p.key('Escape');
+  await soon('window.__esc === 1', 'the page heard Escape');
+  assert.deepEqual(await p.ev('window.__errors'), []);
+});
+
+test('a viewer tab guesses no kind', { ...CHROME, timeout: 300000 }, async (t) => {
+  const { p, at } = await versOn(t);
+  await p.send('Page.navigate', { url: `${at}/view/artifact/${VERS}` });
+  await soonIn(p, 30000)("document.documentElement.classList.contains('viewer') && typeof TS === 'object' && TS.kind === 'artifact' && TS.ready", 'the viewer tab, its lens ready');
+  assert.deepEqual(await p.ev(`[${shown('av-kind')}, document.getElementById('av-where').textContent]`), [false, 'Landed on main'], 'no kind badge: a viewer tab has no Library row to read it from');
+});
+
+test('a tree opened by a link is the published version',{ ...CHROME, timeout: 300000 }, async (t) => {
   const { p, soon, go, made } = await versOn(t);
   const mid = made.versions[2];
   await go('#library');
@@ -1468,7 +1493,8 @@ test('Reload: its stale outline on the pill', { ...CHROME, timeout: 300000 }, as
   putFiles(made.draft, versFiles('d2'));
   await soonIn(p, 60000)("document.getElementById('av-reload').classList.contains('stale')", 'the outline once a newer fingerprint is seen');
   const b = await button();
-  assert.deepEqual([b.color, b.width, b.style, b.h], [await tokenColor(p, '--amber'), '2px', 'solid', 20], 'the --amber outline on the 20px pill');
+  assert.deepEqual([b.color, b.width, b.style, b.h], [await tokenColor(p, '--amber'), '1px', 'solid', 20], 'the --amber outline at the pill\'s border width (1px), on the 20px pill');
+  assert.equal(await p.ev("getComputedStyle(document.getElementById('av-reload')).borderTopWidth"), '1px', 'the pill\'s border width');
   assert.deepEqual(await p.ev('window.__errors'), []);
 });
 
@@ -1541,6 +1567,12 @@ test('a preview\'s Start and Stop', { ...CHROME, timeout: 300000 }, async (t) =>
   await polls(p, soon);
   assert.equal(await p.ev(`document.getElementById('e-preview-${name}').textContent`), 'Not saved: no', 'a poll leaves it');
   assert.deepEqual((await p.ev(RUN)).run, ['Start', 'Stop'], 'Start back as it was');
+  // closed and opened again: the span is emptied (written once per opening, never by a poll)
+  await p.click('#av-close');
+  await soon(`!${VIEWING}`, 'closed');
+  await p.ev(`location.hash = '#preview/${name}'`);
+  await soon(`${VIEWING} && document.querySelectorAll('#av-run button').length === 2`, 'the same preview again');
+  assert.deepEqual(await p.ev(`[document.querySelectorAll('[id="e-preview-${name}"]').length, document.getElementById('e-preview-${name}').textContent]`), [1, ''], 'its error span empty on the new opening');
   // taken: once the preview reads live, Stop alone, within two polls, the viewer still open
   await p.ev('window.__start = 200');
   await p.click(start);

@@ -926,9 +926,9 @@ try {
   .av-bar #av-tab, .av-bar #av-close { height: 20px; width: 24px; padding: 0; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--fg-2); font-size: 14px; }
   .av-bar #av-tab .av-label { display: none; }
   .av-bar #av-tab:hover, .av-bar #av-close:hover { background: var(--hover); color: var(--fg); opacity: 1; }
-  /* the artifact changed since the frame loaded it: today's 2px outline (kit-206), over the pill's own border; a keyboard's
-     focus ring still shows over it */
-  #av-reload.stale:not(:focus-visible) { outline: 2px solid var(--amber); outline-offset: -1px; }
+  /* the artifact changed since the frame loaded it (kit-206): an outline at the pill's border width, over its border; a
+     keyboard's focus ring still shows over it */
+  #av-reload.stale:not(:focus-visible) { outline: 1px solid var(--amber); outline-offset: -1px; }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar .av-pill { padding: 0 6px; } }
 /* css-viewer-bar end */
   #av-frame, #pv-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
@@ -5730,7 +5730,7 @@ function avHeader() {
   const a = rows.find((x) => x.at === AV.at);
   // a picked earlier version has no row (it is a tree): the title it has stays, so a poll never resets it to the slug
   if (!AV.picked?.earlier) $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
-  avKindDraw((a ?? rows[0])?.kind);
+  avKindDraw(rows.length ? (a ?? rows[0]).kind ?? 'mock' : null);
   avVerDraw();
   avPubDraw();
 }
@@ -6743,11 +6743,13 @@ function avVersions(slug) {
   }
   return AV.vers;
 }
-// the kind's icon and badge: an artifact's (R1: anything but diagram or docs reads as Mock), or a preview's
+// the kind's icon and badge: an artifact's (R1: anything but diagram or docs reads as Mock), or a preview's; null when
+// it isn't known (a viewer tab has no Library row): the Library's icon and no badge, never a guess
 function avKindDraw(kind) {
-  const k = LIB_KINDS.find(([v]) => v === kind && ['mock', 'diagram', 'docs', 'preview'].includes(v)) ?? LIB_KINDS[0];
-  document.querySelector('.av-bar > i.av-kind').className = `av-kind icon-${k[2]}`;
-  $('av-kind').textContent = k[1];
+  const k = kind === null ? null : LIB_KINDS.find(([v]) => v === kind && ['mock', 'diagram', 'docs', 'preview'].includes(v)) ?? LIB_KINDS[0];
+  document.querySelector('.av-bar > i.av-kind').className = `av-kind icon-${k ? k[2] : 'library'}`;
+  $('av-kind').textContent = k ? k[1] : '';
+  $('av-kind').hidden = !k;
 }
 // the pill on an artifact: the version shown in full, amber on a draft; pressable in the dashboard only (a viewer tab
 // has no Library to show a pick against)
@@ -6836,11 +6838,11 @@ function avRunDraw() {
   el.innerHTML = h;
 }
 // the span beside Start and Stop that press writes a refusal to (e-preview-<name>, the page's only one): named and
-// emptied once per preview opened, never by a poll, so a refusal stays
+// emptied on every opening (showPreview, showArtifact), the same preview's too, never by a poll, so a refusal stays
+// while that preview is shown
 function avRunErr(name) {
-  const el = document.querySelector('.av-run-err'), id = name ? `e-preview-${name}` : '';
-  if (el.id === id) return;
-  if (id) el.id = id; else el.removeAttribute('id');
+  const el = document.querySelector('.av-run-err');
+  if (name) el.id = `e-preview-${name}`; else el.removeAttribute('id');
   el.textContent = '';
 }
 // each poll: the bar drawn again from the data (renderLibrary calls it)
@@ -6862,15 +6864,18 @@ document.addEventListener('click', (e) => {
   }
   if (!t.closest('.av-pop') || t.closest('#av-pub-menu a')) avPopsClose();
 });
-// Escape with a list open closes only the list, never the viewer: ahead of every other Escape (capture, on window)
+// Escape with a list open over the shown viewer closes only the list, never the viewer: ahead of every other Escape
+// (capture, on window); with the viewer hidden it holds nothing
 window.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
+  if (e.key !== 'Escape' || $('artifact-view').hidden) return;
   const open = ['av-vers', 'av-pub-menu'].map((id) => $(id)).filter((el) => el && !el.hidden);
   if (!open.length) return;
   e.stopImmediatePropagation();
   e.preventDefault();
   for (const el of open) avPop(el, false);
 }, true);
+// the viewer closed (however: X, Back, Escape, a route): its lists close with it
+new MutationObserver(() => { if ($('artifact-view').hidden) avPopsClose(); }).observe($('artifact-view'), { attributes: true, attributeFilter: ['hidden'] });
 /* library-versions end */
 
 /* score-of start */
