@@ -69,7 +69,7 @@ test('every kind of decision has a plain name, and no class id shows', { timeout
   F.sup(['ask', '--class', 'goal-change', '--goal', F.goal, '--change', JSON.stringify({ title: 'Launch the checkout' }), '--question', 'Rename the checkout goal?', '--recommendation', 'Yes', '--stake', '1', '--urgency', '1']);
   F.sup(['act', '--class', 'add-ticket', '--refs', 'x', '--', 'added x']);
   // a rung change: the owner moves new-feature to rung 3
-  const q = firstId(F.sup(['ask', '--class', 'new-feature', '--question', 'Start x?', '--recommendation', 'yes']));
+  const q = firstId(F.sup(['ask', '--class', 'new-feature', '--question', 'Start x?', '--recommendation', 'yes', '--no-default', 'the test waits for the owner']));
   F.owner(['answer', q, 'yes', '--autonomy', '3']);
   // a rule row, which has no class
   F.owner(['knowledge', 'add', '--kind', 'fact', '--statement', 'x builds with make', '--scope', 'project', '--owner']);
@@ -472,7 +472,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
     ...[...sourceBlock(src, 'const OWNER_SETTINGS = {').matchAll(/\b([a-z_]+): '/g)].map((m) => m[1]),
     'sensor_scrub',
   ]);
-  assert.equal(union.size, 48, 'every setting the kit reads, 48 today');
+  assert.equal(union.size, 49, 'every setting the kit reads, 49 today');
   // every direct read names a key in the union (spec §6, F3-3: its reach)
   const reads = [...src.matchAll(/loadSettings\(\)\.([a-z_]+)/g), ...src.matchAll(/settingsAt\([^)]*\)\??\.([a-z_]+)/g)].map((m) => m[1]);
   assert.ok(reads.length > 50, `the read sites found (${reads.length})`);
@@ -529,7 +529,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   const all = data(F).settings_all;
   assert.ok(Array.isArray(all), 'settings_all');
   // keys
-  assert.equal(all.length, 48);
+  assert.equal(all.length, 49);
   assert.deepEqual(new Set(all.map((e) => e.key)), union);
   // order: each group once, in the page's order
   const groups = all.map((e) => e.group).filter((g, i, a) => g !== a[i - 1]);
@@ -537,7 +537,7 @@ test('every kit setting, grouped, named, with no secret shown', { timeout: 30000
   // the show kinds (F3-4)
   const kinds = {};
   for (const e of all) kinds[e.shown] = (kinds[e.shown] ?? 0) + 1;
-  assert.deepEqual(kinds, { value: 31, hidden: 6, names: 8, count: 3 });
+  assert.deepEqual(kinds, { value: 32, hidden: 6, names: 8, count: 3 });
   for (const e of all) {
     for (const f of ['key', 'group', 'name', 'description', 'shown', 'value', 'set', 'default', 'owner_only']) assert.ok(f in e, `${e.key} has ${f}`);
     assert.equal(e.set, mainKeys.has(e.key), `${e.key}: set is whether main's file has it`);

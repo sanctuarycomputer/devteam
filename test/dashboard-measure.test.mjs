@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PORTS, bareProject, boardFixture, dashboardOnFreePort, dataPatchInit, dataRewriteInit, efficiencyFixture, inboxFixture, peekFixture, threadsFixture } from './lib/kit.mjs';
+import * as lib from './lib/kit.mjs';
 import { canDrive, cleanup, openChrome } from './lib/chrome.mjs';
 import { SIZES, measureAt } from './lib/measure.mjs';
 
@@ -38,6 +38,31 @@ const OVERVIEW_GOALS = [
   { hash: '#goal/<seeded>', ready: GOAL_PEEK_READY('Self-serve billing', 'Opened'), opts: { inbox: '#no-such-inbox' } },
   { hash: '#goal/upkeep', ready: GOAL_PEEK_READY('Upkeep', 'What it covers'), opts: { inbox: '#no-such-inbox' } },
 ].map((pg) => ({ ...pg, narrow: { view: '#no-such-view' } }));
+// A page that is only kit-87's frame until its own ticket converts it: its hash, with the view a
+// selector no element has (see PAGES). A page ticket replaces its entries here with its own.
+const frameOnly = (ids) => ids.map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } }));
+// kit-92: the Library
+const LIBRARY_PAGES = [
+  // on the shell, whole, with test/lib/kit.mjs's libraryFixture (every kind, state and publish record exists only
+  // with it); page-top at 1440x900 only, as kit-90's and kit-91's entries
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: "!!document.querySelector('#lib-grid .lib-card')" },
+  // one item's peek over it (the public mock: the most rows), with the peeks' options (PEEK_OPTS, below); its wait
+  // is PEEK_READY's (defined after this list) and the item's own ID in the first row, so not-found never passes
+  { hash: `#lib/${encodeURIComponent(`artifact:${lib.libraryFixture().ids.public}`)}`, init: lib.dataPatchInit(lib.libraryFixture().patch), ready: `!document.getElementById('drawer').hidden && !!document.querySelector('#drawer-body section.attrs') && document.body.classList.contains('peek-open') && getComputedStyle(document.getElementById('drawer')).transform === 'none' && document.querySelector('#drawer-body section.attrs dd')?.textContent.trim() === ${JSON.stringify(`artifact:${lib.libraryFixture().ids.public}`)}`, opts: { view: '#no-such-view', inbox: '#no-such-inbox' } },
+  // a fresh, unpatched document (an init entry loads one; !window.__fx checks it), and it must stay before the goal
+  // pages: those load by a hash change alone (measureAt) and the fixture's data has no seeded goal. The empty Library
+  { hash: '#library', narrow: { view: '#no-such-view' }, init: '/* no patch: a new document */', ready: "!window.__fx && document.querySelector('#lib-grid > .empty')?.textContent.trim() === 'None'" },
+];
+// kit-93: the autonomy pages
+const AUTONOMY_PAGES = frameOnly(['trust', 'sensors', 'health', 'retros']);
+// kit-96: the Loop
+const LOOP_PAGES = frameOnly(['loop']);
+// kit-97: one thread per subject (not THREADS_PAGES, the Threads panel's list below)
+const THREAD_PAGES = [];
+// kit-99: the Trust Score's suggestions
+const TRUST_SUGG_PAGES = [];
+// kit-171: attachments
+const ATTACH_PAGES = [];
 const PAGES = [
   // kit-87: Settings, on the shell, whole
   { hash: '#settings', ready: READY },
@@ -45,18 +70,20 @@ const PAGES = [
   // other checks ignore; with the default view it would be taken for the page's first content, whose
   // page-top is its page ticket's, so the view is a selector no element has. (kit-100 moved the interim
   // Inbox page into the Threads panel: its entry is the panel's, below.)
-  ...['library', 'trust', 'sensors', 'health', 'retros', 'loop'].map((id) => ({ hash: `#${id}`, ready: READY, opts: { view: '#no-such-view' } })),
+  ...LIBRARY_PAGES, ...AUTONOMY_PAGES, ...LOOP_PAGES,
   // kit-90: Overview and Goals, on the shell, whole, with the goal the test seeds (goalArgs, below)
   ...OVERVIEW_GOALS,
   // kit-91: Board (plain and Needs attention) and Progress, on the shell, with test/lib/kit.mjs's boardFixture
   // (every column, the held items, the burn-up and its forecast exist only with it). page-top is judged at
   // 1440x900 only (narrow: its view a selector no element has, as kit-90's entries above; a load at 720x800
   // and 390x844 starts 104px below the bar, o-20261116-110914358); every other check runs at all three sizes.
-  ...['#board', '#board?att=1'].map((hash) => ({ hash, narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#board [data-ticket]')" })),
-  { hash: '#progress', narrow: { view: '#no-such-view' }, init: dataPatchInit(boardFixture().patch), ready: "!!document.querySelector('#burnup svg') && !!document.querySelector('#w-features .row') && !!document.getElementById('forecast').textContent" },
+  ...['#board', '#board?att=1'].map((hash) => ({ hash, narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.boardFixture().patch), ready: "!!document.querySelector('#board [data-ticket]')" })),
+  { hash: '#progress', narrow: { view: '#no-such-view' }, init: lib.dataPatchInit(lib.boardFixture().patch), ready: "!!document.querySelector('#burnup svg') && !!document.querySelector('#w-features .row') && !!document.getElementById('forecast').textContent" },
   // kit-174: Efficiency, on the shell, with test/lib/kit.mjs's fixture (the phase bars and the waste
   // line exist only with it)
-  { hash: '#efficiency', init: dataRewriteInit(efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
+  { hash: '#efficiency', init: lib.dataRewriteInit(lib.efficiencyFixture()), ready: "!!document.querySelector('#efficiency [data-fit] svg rect') && /kit-87/.test(document.querySelector('#efficiency').textContent)" },
+  // kit-97, kit-99, kit-171: their pages, peeks and threads (empty until each adds its own)
+  ...THREAD_PAGES, ...TRUST_SUGG_PAGES, ...ATTACH_PAGES,
 ];
 
 // kit-88: one peek of each kind (spec §2.6), on a second project seeded with test/lib/kit.mjs's
@@ -82,14 +109,14 @@ test('the dashboard measure: every listed page at three sizes', { skip: canDrive
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(lib.PORTS + 2), DEVTEAM_PORT_BASE: String(lib.PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
-  const root = bareProject(base, 'measure');
+  const root = lib.bareProject(base, 'measure');
   // kit-90: one goal, so Goals' Active tab has a goal's card beside Upkeep's and its peek has a goal to open
   const g = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...goalArgs('Self-serve billing', 1)], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
   assert.equal(g.status, 0, g.stderr);
   const goalId = idOf(g.stdout);
-  const { dash, port } = await dashboardOnFreePort(root, env);
+  const { dash, port } = await lib.dashboardOnFreePort(root, env);
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
@@ -137,12 +164,12 @@ test('the dashboard measure: one peek of each kind at three sizes', { skip: canD
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-peeks-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(lib.PORTS + 2), DEVTEAM_PORT_BASE: String(lib.PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
   const t0 = Date.now();
-  const { root, ids } = peekFixture(base, 'measure-peeks');
+  const { root, ids } = lib.peekFixture(base, 'measure-peeks');
   t.diagnostic(`peekFixture took ${Date.now() - t0} ms`);
-  const { dash, port } = await dashboardOnFreePort(root, env);
+  const { dash, port } = await lib.dashboardOnFreePort(root, env);
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
@@ -187,7 +214,7 @@ const THREADS_PAGES = (A, G) => [
 ].map((pg) => ({ ...pg, opts: THREADS_OPTS }));
 
 test('the dashboard measure: the Threads panel and a card at three sizes', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 600000 }, async (t) => {
-  const F = threadsFixture('measure-threads');
+  const F = lib.threadsFixture('measure-threads');
   const later = cleanup(t);
   later(() => F.done());
   F.sup(goalArgs('Self-serve billing', 2));
@@ -196,7 +223,7 @@ test('the dashboard measure: the Threads panel and a card at three sizes', { ski
   F.owner(['thread', 'new', 'Is the build green?']);
   const G = idOf(F.owner(['thread', 'new', 'About this goal', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]));
   F.sup(['thread', 'reply', G, 'On it.']);
-  const { dash, port } = await dashboardOnFreePort(F.old, F.env({}));
+  const { dash, port } = await lib.dashboardOnFreePort(F.old, F.env({}));
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());
@@ -249,14 +276,14 @@ test('the dashboard measure: the Inbox in the panel at three sizes', { skip: can
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-dash-measure-inbox-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
-  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(PORTS + 2), DEVTEAM_PORT_BASE: String(PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  const env = { ...process.env, HOME: base, DEVTEAM_HUB_PORT: String(lib.PORTS + 2), DEVTEAM_PORT_BASE: String(lib.PORTS + 3), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE']) delete env[k];
-  const root = bareProject(base, 'measure-inbox');
-  inboxFixture(root, env);
+  const root = lib.bareProject(base, 'measure-inbox');
+  lib.inboxFixture(root, env);
   const choices = [{ label: 'Keep the link', detail: LONG_LINK }, { label: 'Drop it' }];
   const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', 'Keep the long link?', '--choices', JSON.stringify(choices), '--stake', '1', '--urgency', '1'], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  const { dash, port } = await dashboardOnFreePort(root, env);
+  const { dash, port } = await lib.dashboardOnFreePort(root, env);
   later(() => dash.stop());
   const chrome = await openChrome();
   later(() => chrome.close());

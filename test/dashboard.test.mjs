@@ -269,8 +269,10 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /target="_blank" rel="noopener noreferrer">\$\{label\}<\/a>/);
   assert.match(html, /action: 'artifact-publish', body: \{ op: 'unpublish', slug \}/);
   assert.match(html, /Restore all/);
-  assert.match(html, /Review all/);
-  assert.match(html, /Changed on main since it was published/);
+  // kit-92 (R4): a drifted set is Restore all too, its sentence saying what goes up; no Review on the page; the card's drift words
+  assert.match(html, /changed on main since: what goes up is main's version, not the one recorded\.` : ''\} \$\{tab\(L\.publish\([^`]*'Restore all'\)\}/);
+  assert.doesNotMatch(html, /Review all|Review main's version/);
+  assert.match(html, /<span class="lib-drift">changed on main since<\/span>/);
   assert.match(html, /Publishing happens on the cloud box/);
 });
 
@@ -560,24 +562,47 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 });
 
-// Words with no pick on a question with choices and a recommendation: the card asks which choice
-// they mean before anything is posted, so a door answered in the owner's own words can still be the
-// recommendation. The owner picks; nothing on the kit's side reads the words for a match.
-test('a typed answer on a question with choices asks which choice it means, on the card, before posting', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-which-'));
+// An answer is the option picked plus the words typed, posted on the first press (kit-313): the pick
+// as `choice`, the words as `answer`, never a step asking which choice the words mean. "Something
+// else", or no pick, is the words alone (choice null), which the kit never reads as the recommendation.
+test('an answer posts the pick and the words on the first press, with no which-choice step', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-pick-'));
   const later = cleanup(t);
   later(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 63), DEVTEAM_PORT_BASE: String(PORTS + 64), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
-  const root = bareProject(base, 'which');
+  const root = bareProject(base, 'pick');
   const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const door = (q) => dt(['ask', '--kind', 'one-way-door', '--question', q, '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes'], SUP);
   const D1 = door('Keep the sales data?');
   const D2 = door('Open the box?');
   const D3 = door('Turn it on?');
+  const D4 = door('Paint it blue?');
+  const D6 = door('Lock the door?');
+  const D7 = door('Sweep the floor?');
+  const D8 = door('Water the plants?');
+  const D9 = dt(['ask', '--question', 'Which flag?', '--choices', '[{"label":"--all"},{"label":"none"}]', '--recommendation', 'none'], SUP);
+  // a defaulted question, overruled in words from its answered card
+  const Q5 = dt(['ask', '--question', 'Lights on?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--default', 'No'], SUP);
+  pastDeadline(root, Q5);
+  dt(['answer', Q5, '--defaulted'], SUP);
   const { dash, port } = await dashboardOnFreePort(root, env);
   later(() => dash.stop());
+  // a page loaded before the upgrade posts the old shape, the pick inside the text and no choice key:
+  // still taken, as a line judged by its leading label
+  const old = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: D6, answer: 'Yes — fine' }), signal: AbortSignal.timeout(60000) });
+  assert.equal(old.status, 200, await old.clone().text());
+  const d6 = JSON.parse(dt(['questions', '--id', D6, '--json']))[0];
+  assert.deepEqual([d6.status, d6.answer, d6.choice, d6.matched], ['answered', 'Yes — fine', null, true], 'an old-shaped body still answers');
+  // words, and a label, that start with "--" stay words and a label: never read as a flag (task-3 T3-1, T3-2)
+  const api = async (body) => { const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) }); assert.equal(r.status, 200, await r.clone().text()); return JSON.parse(dt(['questions', '--id', body.id, '--json']))[0]; };
+  const d7 = await api({ id: D7, answer: '-- but only after the release', choice: 'No' });
+  assert.deepEqual([d7.answer, d7.choice], ['No — -- but only after the release', 'No'], 'the words kept');
+  const d8 = await api({ id: D8, answer: '--rule=always yes', choice: 'Yes' });
+  assert.deepEqual([d8.answer, d8.choice, d8.standing_rule ?? null], ['Yes — --rule=always yes', 'Yes', null], 'typed words make no standing rule');
+  const d9 = await api({ id: D9, answer: '', choice: '--all' });
+  assert.deepEqual([d9.answer, d9.choice], ['--all', '--all'], 'a label that starts with "--"');
   const chrome = await openChrome();
   later(() => chrome.close());
   const p = await chrome.newPage();
@@ -591,97 +616,81 @@ test('a typed answer on a question with choices asks which choice it means, on t
   const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
   const still = async (f) => { await p.ev('window.__still()'); try { await f(); await soon('PRESSED === 0', 'the release handled'); } finally { await p.ev('window.__stir()'); } };
   const card = (q) => `#questions [data-qcard="${q}"]`;
-  const ask = (q, where = card(q)) => `document.querySelectorAll('${where} [data-which-for="${q}"]').length`;
+  // any which-choice step, anywhere on the page
+  const asks = () => p.ev(`document.querySelectorAll('[data-which-for]').length`);
   const logged = (q) => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === q);
+  const answered = (q) => until(() => logged(q).status === 'answered' && logged(q), `${q} answered`);
   const write = async (sel, text) => { await p.click(sel); await soon(`document.activeElement === document.querySelector('${sel}')`, 'the note focused'); await p.type(text); };
+  // what the press posted to /api/answer: the body, parsed
+  const posted = async () => { const x = JSON.parse(await p.ev(`JSON.stringify((window.__posts ?? []).filter((x) => x.url === '/api/answer'))`)); assert.equal(x.length, 1, 'one post'); return JSON.parse(x[0].body); };
   // #questions opens the Inbox in the panel (kit-100): the cards, in the panel at rest (a click takes a box's centre once)
   await soon(`!!document.querySelector('${card(D1)}') && !!document.querySelector('${card(D2)}') && !!document.querySelector('${card(D3)}') && document.body.classList.contains('threads-open') && getComputedStyle(document.getElementById('threads')).transform === 'none'`, 'the door cards, in the panel at rest');
 
-  await t.test('Something else and words: the ask, and nothing posted', async () => {
+  await t.test('Something else and words: the words posted at once, no pick, never the recommendation', async () => {
     await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
     await write(`${card(D1)} textarea[data-q]`, 'agreed, keep it');
-    await still(() => p.click(`${card(D1)} [data-answer]`));
-    assert.equal(await p.ev(ask(D1)), 1, 'the ask, on the card');
-    assert.deepEqual(JSON.parse(await p.ev(`JSON.stringify([...document.querySelectorAll('${card(D1)} button[data-which]')].map((b) => b.value))`)), ['Yes', 'No', ''], 'each choice, then None');
-    assert.match(await p.ev(`document.querySelector('${card(D1)} button[data-which][value="Yes"]').textContent`), /Recommended/);
-    assert.match(await p.ev(`document.querySelector('${card(D1)} [data-which-for]').textContent`), /Which choice do your words mean\?[\s\S]*None of them[\s\S]*Post my words as they are\./);
-    assert.equal(await p.ev('SAVING'), 0, 'no post in flight');
-    assert.doesNotMatch(await p.ev(`document.querySelector('${card(D1)}').textContent`), /Answered:/);
-    await polls(2);
-    assert.equal(logged(D1).status, 'open', 'nothing in the log');
-  });
-
-  await t.test('the ask survives a redraw', async () => {
-    await polls(2);
-    assert.equal(await p.ev(ask(D1, '#questions')), 1, 'one ask, still there');
-    assert.equal(await p.ev(`document.querySelector('${card(D1)} textarea[data-q]').value`), 'agreed, keep it', 'the words kept');
-  });
-
-  await t.test('a radio pick takes it away; Answer again brings it back', async () => {
-    await still(() => p.click(`${card(D1)} input[data-pick][value="No"]`));
-    assert.equal(await p.ev(ask(D1, '#questions')), 0, 'gone on a pick');
-    await still(() => p.click(`${card(D1)} input[data-pick][value="__other"]`));
-    await still(() => p.click(`${card(D1)} [data-answer]`));
-    assert.equal(await p.ev(ask(D1)), 1, 'back');
-  });
-
-  await t.test('a choice in the ask posts "<label> — <words>", matched, with the card\'s standing rule and the hash it showed', async () => {
-    await still(() => p.click(`${card(D1)} input[data-rulebox]`));
     await p.ev('window.__posts = []; void 0');
-    await still(() => p.click(`${card(D1)} button[data-which][value="Yes"]`));
-    await until(() => logged(D1).status === 'answered', 'D1 answered');
-    assert.equal(logged(D1).answer, 'Yes — agreed, keep it');
-    assert.equal(logged(D1).matched, true, 'the owner picked the recommendation');
-    assert.equal(logged(D1).standing_rule, 'agreed, keep it', 'the rule box went with it, worded by the note');
-    const sent = JSON.parse(JSON.parse(await p.ev(`JSON.stringify(window.__posts.find((x) => x.url === '/api/answer'))`)).body);
-    assert.equal(sent.seen, logged(D1).hash, 'bound to the question as the page showed it');
-  });
-
-  await t.test('a note with nothing picked asks too; None posts the words alone', async () => {
-    await write(`${card(D2)} textarea[data-q]`, 'not sure yet');
-    await still(() => p.click(`${card(D2)} [data-answer]`));
-    assert.equal(await p.ev(ask(D2)), 1, 'the ask');
-    await still(() => p.click(`${card(D2)} button[data-which][data-which-none]`));
-    await until(() => logged(D2).status === 'answered', 'D2 answered');
-    assert.equal(logged(D2).answer, 'not sure yet', 'the words, unchanged');
-    assert.equal(logged(D2).matched, false);
-  });
-
-  await t.test('the note emptied under the ask: nothing posted', async () => {
-    await write(`${card(D3)} textarea[data-q]`, 'ok');
-    await still(() => p.click(`${card(D3)} [data-answer]`));
-    assert.equal(await p.ev(ask(D3)), 1, 'the ask');
-    await p.ev(`(() => { const n = document.querySelector('${card(D3)} textarea[data-q]'); n.value = ''; n.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-    // read while the page is held still: a redraw draws the card's error line empty, as for every card
-    await still(async () => {
-      await p.click(`${card(D3)} button[data-which][value="Yes"]`);
-      await soon('PRESSED === 0', 'the release handled');
-      assert.equal(await p.ev(ask(D3)), 0, 'the ask goes');
-      assert.equal(await p.ev(`document.getElementById('e-${D3}').textContent`), 'Pick a choice or write an answer.');
-    });
-    assert.equal(await p.ev('SAVING'), 0, 'no post in flight');
+    await still(() => p.click(`${card(D1)} [data-answer]`));
+    assert.equal(await asks(), 0, 'no which-choice step');
+    const q = await answered(D1);
+    assert.deepEqual([q.answer, q.choice, q.matched], ['agreed, keep it', null, false], 'the words alone, which the kit never reads as Yes');
+    const sent = await posted();
+    assert.deepEqual([sent.answer, sent.choice], ['agreed, keep it', null], 'the words, and no pick');
+    assert.equal(sent.seen, q.hash, 'bound to the question as the page showed it');
     await polls(2);
-    assert.equal(logged(D3).status, 'open', 'still open');
+    assert.equal(await asks(), 0, 'none after a redraw either');
+    // the Matched row: words wait for a reading, and a reading is never "you went with it" (final-1 F3)
+    assert.equal(await p.ev(`matchedWords({ matched: false, in_words: true, read_by: null, label: null })`), 'not yet: you answered in your own words, which the supervisor reads');
+    assert.equal(await p.ev(`matchedWords({ matched: true, in_words: true, read_by: 'supervisor', label: 'Yes' })`), 'yes: the supervisor read your words as “Yes”; not counted as your agreement');
+    assert.equal(await p.ev(`matchedWords({ matched: true, in_words: false, read_by: null, label: 'Yes' })`), 'yes: you went with its recommendation');
   });
 
-  await t.test('an ask raised on a thread\'s copy stays on that copy', async () => {
-    await p.ev(`(() => { const q = DATA.questions.find((x) => x.id === '${D3}'); const d = document.createElement('div'); d.dataset.testCopy = ''; d.innerHTML = questionCard(q, DATA.ooda, {}, true); $('tl').appendChild(d); })()`);
+  await t.test('a pick and words: "<label> — <words>", the pick recorded beside them', async () => {
+    await still(() => p.click(`${card(D2)} input[data-pick][value="No"]`));
+    await write(`${card(D2)} textarea[data-q]`, 'not yet');
+    await p.ev('window.__posts = []; void 0');
+    await still(() => p.click(`${card(D2)} [data-answer]`));
+    assert.equal(await asks(), 0, 'no which-choice step');
+    const q = await answered(D2);
+    assert.deepEqual([q.answer, q.choice, q.matched], ['No — not yet', 'No', false]);
+    const sent = await posted();
+    assert.deepEqual([sent.answer, sent.choice], ['not yet', 'No'], 'the words only, and the pick');
+  });
+
+  await t.test('a pick and no words: the pick alone, the recommendation matched', async () => {
+    await still(() => p.click(`${card(D3)} input[data-pick][value="Yes"]`));
+    await p.ev('window.__posts = []; void 0');
+    await still(() => p.click(`${card(D3)} [data-answer]`));
+    assert.equal(await asks(), 0, 'no which-choice step');
+    const q = await answered(D3);
+    assert.deepEqual([q.answer, q.choice, q.matched], ['Yes', 'Yes', true]);
+    const sent = await posted();
+    assert.deepEqual([sent.answer, sent.choice], ['', 'Yes'], 'no words, the pick');
+  });
+
+  await t.test("a thread's copy: words with no pick posted at once, no step on either copy", async () => {
+    await p.ev(`(() => { const q = DATA.questions.find((x) => x.id === '${D4}'); const d = document.createElement('div'); d.dataset.testCopy = ''; d.innerHTML = questionCard(q, DATA.ooda, {}, true); $('tl').appendChild(d); })()`);
     try {
-      await write(`#t-q-${D3} textarea[data-q]`, 'ok then');
-      await still(() => p.click(`#t-q-${D3} button[data-answer]`));
-      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 1, 'on the thread copy');
-      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 0, 'not on the Inbox copy');
+      await write(`#t-q-${D4} textarea[data-q]`, 'fine');
+      await p.ev('window.__posts = []; void 0');
+      await still(() => p.click(`#t-q-${D4} button[data-answer]`));
+      assert.equal(await asks(), 0, 'no which-choice step on the thread copy or the Inbox copy');
+      const q = await answered(D4);
+      assert.deepEqual([q.answer, q.choice, q.matched], ['fine', null, false]);
+      assert.deepEqual([(await posted()).answer, (await posted()).choice], ['fine', null]);
       await polls(2);
-      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 0, 'not on the Inbox copy after a redraw either');
-      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 1, 'still on the thread copy');
-      // then asked on the Inbox's copy: there now, and gone from the thread's
-      await write(`#q-${D3} textarea[data-q]`, 'ok');
-      await still(() => p.click(`#q-${D3} button[data-answer]`));
-      assert.equal(await p.ev(ask(D3, `#q-${D3}`)), 1, 'on the Inbox copy');
-      assert.equal(await p.ev(ask(D3, `#t-q-${D3}`)), 0, 'gone from the thread copy');
-      await polls(2);
-      assert.equal(await p.ev(ask(D3, '#questions')), 1, 'one ask after a redraw');
-    } finally { await p.ev(`document.querySelector('[data-test-copy]')?.remove(); delete ASKS['${D3}']; void 0`); }
+      assert.equal(await asks(), 0, 'none after a redraw');
+    } finally { await p.ev(`document.querySelector('[data-test-copy]')?.remove(); void 0`); }
+  });
+
+  await t.test("Overrule on a defaulted question: the owner's words, no pick, never the recommendation", async () => {
+    await p.ev(`document.getElementById('answered-wrap').open = true; void 0`);
+    await soon(`!!document.querySelector('input[data-overrule="${Q5}"]')`, 'the overrule field');
+    await p.ev(`(() => { const f = document.querySelector('input[data-overrule="${Q5}"]'); f.value = 'Yes'; window.__posts = []; document.querySelector('[data-overrule-send="${Q5}"]').click(); })()`);
+    const sent = await posted();
+    assert.deepEqual([sent.answer, sent.choice], ['Yes', null], 'typed text, no picker');
+    const q = await until(() => { const x = logged(Q5); return x.answer === 'Yes' && x; }, 'overruled on the server');
+    assert.deepEqual([q.status, q.choice, q.matched], ['answered', null, false]);
   });
 });
 
@@ -956,7 +965,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   let r = await get();
   assert.equal(r.status, 200);
   let j = await r.json();
-  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null }], 'no threads, no supervisor pane, and so nothing its terminal asks');
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false, question: null, checked: null, undelivered: [] }], 'no threads, no supervisor pane, and so nothing its terminal asks, no check and no turn missed');
   const heads = [];
   for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
   assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
@@ -1598,7 +1607,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const later = 'Sent; the supervisor will read it when it next checks.';
   assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now, true, true), null, 'the reply is the state');
   assert.equal(A.tCardState(th(['owner', 1]), now, true, true), 'Sent.');
-  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), later);
+  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it has not checked yet.', 'the send said no terminal took it');
   assert.equal(A.tCardState(th(['owner', 1]), now, undefined, true), later, 'after a reload nobody knows: when it next checks');
   assert.equal(A.tCardState(th(['owner', 11]), now, true, true), "The supervisor hasn't replied yet.");
   assert.equal(A.tCardState(th(['owner', 11]), now, true, false), later, 'not running: it will read it later');
@@ -2122,7 +2131,8 @@ test("the viewer's reload button says when a newer version is ready, and the pre
   const soonChecks = soonIn(p, 90000);
   const checksFrom = async (prefix) => { const n0 = await p.ev('window.__reads2.length'); await soonChecks(`window.__reads2.filter((x) => x.n >= ${n0} && x.landed && x.u.startsWith(${JSON.stringify(prefix)})).length >= 2`, `two ${prefix} checks landed`); };
   const said = (title) => p.ev(`window.__titles.filter((x) => x === ${JSON.stringify(title)}).length`);
-  const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle }; })()`);
+  // kit-92: Reload is a pill; its outline sits at the pill's border width (border: what that width is)
+  const button = () => p.ev(`(() => { const b = document.getElementById('av-reload'), s = getComputedStyle(b); return { stale: b.classList.contains('stale'), title: b.title, color: s.outlineColor, width: s.outlineWidth, style: s.outlineStyle, border: s.borderTopWidth }; })()`);
   // the warning token as this scheme resolves it
   const amber = () => p.ev(`(() => { const e = document.createElement('span'); e.style.color = 'var(--amber)'; document.getElementById('artifact-view').append(e); const c = getComputedStyle(e).color; e.remove(); return c; })()`);
   const scheme = (value) => p.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value }] });
@@ -2143,7 +2153,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     await soonData(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
     const light = await amber();
-    assert.deepEqual([b.title, b.color, b.width, b.style], [NEWER, light, '2px', 'solid'], 'the warning colour, light');
+    assert.deepEqual([b.title, b.color, b.width, b.style, b.border], [NEWER, light, '1px', 'solid', '1px'], 'the warning colour, light, at the pill\'s border width');
     assert.equal(await said('v2'), 0, 'nothing reloaded by itself');
     await scheme('dark');
     const dark = await amber();
@@ -2173,7 +2183,7 @@ test("the viewer's reload button says when a newer version is ready, and the pre
     edit('v3');
     await soonView(`document.getElementById('av-reload').classList.contains('stale')`, 'the outline, within a poll');
     b = await button();
-    assert.deepEqual([b.title, b.color, b.width], [NEWER, await amber(), '2px']);
+    assert.deepEqual([b.title, b.color, b.width, b.border], [NEWER, await amber(), '1px', '1px']);
     await checksFrom('/api/view?');
     assert.equal(await said('v3'), 0, 'nothing reloaded by itself');
     await p.click('#av-reload');
@@ -2684,7 +2694,8 @@ test('pins on an artifact: where its lens says, following its scroll, the card b
 test('a popup the dashboard or a viewer opens never needs window.opener: the wrapper\'s opener policy severs it', () => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   assert.doesNotMatch(html, /\bwindow\.opener\b|[^.\w]opener\s*[.=]/, 'nothing reads or sets an opener');
-  const tags = html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? [];
+  // kit-92: and the attributes an <a> built elsewhere is given as one quoted piece (the Library's libGo, a url link's title and thumbnail)
+  const tags = [...(html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? []), ...(html.match(/'[^'<>\n]*target="_blank"[^'<>\n]*'/g) ?? [])];
   assert.ok(tags.length >= 10, `the page's new-tab links: ${tags.length}`);
   assert.equal(tags.length, (html.match(/target="_blank"/g) ?? []).length, 'every target="_blank" in the file is in a tag the check matched');
   for (const a of tags) assert.match(a, /rel="noopener noreferrer"/, a);
@@ -2712,9 +2723,11 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
   const soon = soonIn(p);
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
-  await soon(`!!document.querySelector('[data-subject="artifact:viewer-mock"] a.av-open')`, 'the card\'s Open');
-  assert.deepEqual(await link('[data-subject="artifact:viewer-mock"] a.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open']);
-  assert.match((await link('[data-subject="artifact:viewer-mock"] .art-t > a'))[0], /^#artifact\/main\/viewer-mock$/, 'its title still opens the stage here');
+  // kit-92: the card's Open is its head's ↗ (.lib-tab), an icon named by its aria-label
+  const tab = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.getAttribute('aria-label')]; })()`);
+  await soon(`!!document.querySelector('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-tab.av-open')`, 'the card\'s Open');
+  assert.deepEqual(await tab('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-tab.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in a new tab']);
+  assert.match((await link('.lib-card[data-lib-id="artifact:viewer-mock"] a.lib-title'))[0], /^#artifact\/main\/viewer-mock$/, 'its title still opens the stage here');
   await p.ev(`location.hash = '#inbox'`);
   await soon(`!!document.querySelector('.qref a')`, 'the question\'s [[mock]]');
   assert.deepEqual(await link('.qref a'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'The mock']);
@@ -3154,6 +3167,7 @@ test("a preview's viewer: its route, frame-src naming exactly where its lens is,
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
+const NOT_DELIVERED_37 = 'Not delivered: no supervisor terminal took it. The supervisor sees it only when it next checks; it last checked 37 min ago.';
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
   // dashboard writing into them has stopped, and one cleanup that throws leaves no Chrome running
@@ -3307,6 +3321,8 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('Shift+Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+    // the supervisor last checked 37 minutes ago (and 20 s, for a slow runner: the card rounds)
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
     await p.type('Narrow this to the EU launch');
     // a read of the threads begun before the send, answering after it: the card must stay the thread's
     await p.ev(`window.__threadsRead = false; window.__threadsLanded = false; window.__threadsHold = new Promise((r) => { window.__threadsLet = r; }); tlRefresh(); void 0`);
@@ -3324,7 +3340,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
     assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'still in the composer after the card became the thread');
-    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sent; the supervisor will read it when it next checks.', 'no pane here');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), NOT_DELIVERED_37, 'no pane here: not delivered, and when the supervisor last checked');
+  });
+
+  await t.test("after a reload only the server's record knows the turn missed, and the card still says so", async () => {
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/host-claim.json'), JSON.stringify({ checked: Date.now() - 37 * 60000 - 20000 }));
+    await p.ev(`location.hash = '#talk/${T}'; window.__beforeReload = true`);
+    await p.send('Page.reload');
+    await soon(`!window.__beforeReload && typeof TL !== 'undefined' && TL.have > 0 && ${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card again, after a reload');
+    assert.equal(await p.ev(`TL.typed['${T}'] === undefined`), true, 'a new document: the send is forgotten');
+    await soon(`document.getElementById('tl-c-state').textContent === ${JSON.stringify(NOT_DELIVERED_37)}`, "the server's record and last check");
   });
 
   await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
@@ -3557,32 +3582,36 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     })()`, 'the thread copy answered');
   });
 
-  await t.test("Shift+Enter in a question box presses its Answer: the which-choice step, once, in the Inbox and in the thread", async () => {
+  await t.test("Shift+Enter in a question box presses its Answer: posted once, with no which-choice step, in the Inbox and in the thread", async () => {
     const qOf = (id) => JSON.parse(F.owner(['questions', '--id', id, '--json']))[0];
     const box = (sel) => p.ev(`document.querySelector('${sel} textarea[data-q]').value`);
-    const asks = (id) => p.ev(`document.querySelectorAll('#q-${id} [data-which-for]').length`);
+    const asks = () => p.ev(`document.querySelectorAll('[data-which-for]').length`);
     const Qa = F.sup(['ask', '--question', 'Ship on Friday?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const Qb = F.sup(['ask', '--question', 'Ship on Monday?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
     await p.ev(`location.hash = '#inbox'`);
-    await soon(`!!document.querySelector('#q-${Qa} textarea[data-q]')`, 'its card in the Inbox');
+    await soon(`!!document.querySelector('#q-${Qa} textarea[data-q]') && !!document.querySelector('#q-${Qb} textarea[data-q]')`, 'their cards in the Inbox');
     const sent = await posts();
     await p.ev(`document.querySelector('#q-${Qa} textarea[data-q]').focus()`);
     await p.type('after the demo');
-    // words and no pick: Answer asks which choice they mean, and a second press keeps the one ask
+    // words and no pick: posted at once as the words alone, with no step; held down, the key posts once
     await enter({ shift: true });
-    await soon(`!!document.querySelector('#q-${Qa} [data-which-for]')`, 'the which-choice ask');
-    await enter({ shift: true });
-    assert.deepEqual([await asks(Qa), qOf(Qa).status, await box(`#q-${Qa}`), await posts()], [1, 'open', 'after the demo', sent], 'asked once, nothing posted, no new line');
-    // a pick: now a Shift+Enter would post, so each key that must not post is tried on this card
-    await p.ev(`document.querySelector('#q-${Qa} input[data-pick][value="Yes"]').click()`);
-    await soon(`!document.querySelector('#q-${Qa} [data-which-for]')`, 'the ask gone with the pick');
-    await p.ev(`document.querySelector('#q-${Qa} textarea[data-q]').focus()`);
-    const none = async (what) => { assert.deepEqual([await asks(Qa), await p.ev(`document.getElementById('e-${Qa}').textContent`), await posts()], [0, '', sent], what); };
+    await enter({ shift: true, repeat: true });
+    const qa = await until(() => { const x = qOf(Qa); return x.status === 'answered' && x; }, 'the words\' answer');
+    assert.deepEqual([qa.answer, qa.choice, qa.matched, qa.channel], ['after the demo', null, false, 'dashboard']);
+    assert.equal(await asks(), 0, 'no which-choice step');
+    await ticks();
+    assert.equal(await posts(), sent + 1, 'posted once');
+    // a picked card: a Shift+Enter would post, so each key that must not post is tried on this one
+    await p.ev(`document.querySelector('#q-${Qb} input[data-pick][value="Yes"]').click()`);
+    await p.ev(`document.querySelector('#q-${Qb} textarea[data-q]').focus()`);
+    await p.type('after the demo');
+    const none = async (what) => { assert.deepEqual([await asks(), await p.ev(`document.getElementById('e-${Qb}').textContent`), await posts()], [0, '', sent + 1], what); };
     await enter();
-    assert.equal(await box(`#q-${Qa}`), 'after the demo\n', 'Enter is a new line');
+    assert.equal(await box(`#q-${Qb}`), 'after the demo\n', 'Enter is a new line');
     await none('Enter');
     await enter({ shift: true, repeat: true });
     assert.deepEqual([(await lastKey()).shiftKey, (await lastKey()).repeat], [true, true]);
-    assert.equal(await box(`#q-${Qa}`), 'after the demo\n', 'a repeat adds no line');
+    assert.equal(await box(`#q-${Qb}`), 'after the demo\n', 'a repeat adds no line');
     await none('a repeat');
     await composing();
     assert.equal((await lastKey()).isComposing, true);
@@ -3596,14 +3625,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       await none(`${held} held`);
     }
     await ticks();
-    assert.equal(qOf(Qa).status, 'open', 'still open');
+    assert.equal(qOf(Qb).status, 'open', 'still open');
     await none('after a while');
     await enter({ shift: true });
     await enter({ shift: true, repeat: true });
-    const q = await until(() => { const x = qOf(Qa); return x.status === 'answered' && x; }, 'the answer');
-    assert.deepEqual([q.answer, q.channel], ['Yes — after the demo', 'dashboard']);
+    const q = await until(() => { const x = qOf(Qb); return x.status === 'answered' && x; }, 'the answer');
+    assert.deepEqual([q.answer, q.choice, q.channel], ['Yes — after the demo', 'Yes', 'dashboard']);
     await ticks();
-    assert.equal(await posts(), sent + 1, 'posted once');
+    assert.equal(await posts(), sent + 2, 'posted once');
     // the thread's copy: back to the goal and its thread
     await p.ev(`location.hash = '#goals'`);
     await soon(`!!document.querySelector('${goalSel}') && !!document.querySelector('[data-tl-pin="${T}"]')`, 'the goal and its pin');
@@ -3616,7 +3645,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.type('next week');
     await enter({ shift: true });
     const qt = await until(() => { const x = qOf(Qt); return x.status === 'answered' && x; }, 'the thread copy\'s answer');
-    assert.equal(qt.answer, 'No — next week');
+    assert.deepEqual([qt.answer, qt.choice], ['No — next week', 'No']);
     await p.ev('document.activeElement.blur()');
   });
 
@@ -4245,12 +4274,14 @@ test("the Library's preview card opens the stage here and the viewer in a tab; a
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
   const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
   const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
-  const card = `[data-preview="${name}"]`;
-  await soon(`!!document.querySelector('${card} a.av-open')`, 'the card');
-  const said = await soon(`(() => { const b = document.querySelector('${card} .art-t .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
+  // kit-92: the card is a .lib-card; its state a badge in its head, its Open the head's ↗ (.lib-tab, named by its aria-label)
+  const card = `.lib-card[data-preview="${name}"]`;
+  const tab = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.getAttribute('aria-label')]; })()`);
+  await soon(`!!document.querySelector('${card} a.lib-tab.av-open')`, 'the card');
+  const said = await soon(`(() => { const b = document.querySelector('${card} .card-head .badge'); return !!b && b.textContent !== 'checking' && b.textContent; })()`, "the card's first probe");
   assert.equal(said, 'live', `an app answering on 127.0.0.1 reads live from the dashboard's first probe: ${said}`);
-  assert.deepEqual(await link(`${card} a.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open']);
-  assert.deepEqual(await link(`${card} .art-t > a`), [`#preview/${name}`, '', '', 'Checkout']);
+  assert.deepEqual(await tab(`${card} a.lib-tab.av-open`), [`/view/preview/${name}`, '_blank', 'noopener noreferrer', 'Open in a new tab']);
+  assert.deepEqual(await link(`${card} a.lib-title`), [`#preview/${name}`, '', '', 'Checkout']);
   assert.equal(await p.ev(`document.querySelector('${card} [data-copy]').dataset.copy`), `http://127.0.0.1:${app.port}/`, 'Copy link is still its own link');
   // where the stage was opened from is taken once the preview is known, and not at all for an ask the owner left
   await p.ev(`(() => { const f = window.fetch; window.fetch = (u, ...a) => (String(u).includes('/api/view') ? new Promise((r) => setTimeout(r, 400)).then(() => f(u, ...a)) : f(u, ...a)); return true; })()`);
