@@ -187,6 +187,25 @@ test('waits A3: ticket hold and ticket release write a hold\'s cause and clear i
     assert.equal(show(dir, T).held, null);
   });
 
+  await t.test('ready prints the causes and the date; an old-style hold prints no for; --json stays { id, held }', () => {
+    const { dir } = fixture('a3-ready', { 'kit-02-other': { held: 'old reason' } });
+    const until = day(6);
+    accepted(dir, ['ticket', 'hold', T, '--reason', 'r', '--for', 'external:x', '--until', until]);
+    const text = ok(dir, ['ready']);
+    assert.match(text, new RegExp(`held\\s+kit-01-probe\\s+\\(r; for external:x, until ${until}\\)`));
+    assert.match(text, /held\s+kit-02-other\s+\(old reason\)/);
+    const j = JSON.parse(ok(dir, ['ready', '--json']));
+    assert.deepEqual(j.held.find((h) => h.id === T), { id: T, held: 'r' });
+    assert.deepEqual(j.held.find((h) => h.id === 'kit-02-other'), { id: 'kit-02-other', held: 'old reason' });
+  });
+
+  await t.test('help lists ticket hold, ticket release and goal hold\'s --for and --until', () => {
+    const h = ok(project('a3-help'), ['help']);
+    assert.match(h, /^ {2}ticket hold /m);
+    assert.match(h, /^ {2}ticket release /m);
+    assert.match(h, /^ {2}goal hold .*--for .*--until /m);
+  });
+
   await t.test('a ticket that is not held is not released', () => {
     const { dir } = fixture('a3-unheld');
     refused(dir, ['ticket', 'release', T], `${T} is not held`);
@@ -434,6 +453,10 @@ test('waits A4: a hold with no cause, a cause in no known form or not in the log
     goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', T], `${T} waits on ${G} itself (${T} is one of its tickets)`);
     logLine(dir, 'supervisor', { type: 'ticket', op: 'set', id: 'kit-09-elsewhere', held: 'e', held_for: [`goal:${G}`], held_until: null });
     goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'kit-09-elsewhere'], `kit-09-elsewhere waits on ${G} itself, through kit-09-elsewhere -> goal:${G}`);
+    // a bare or blank --until is refused for every writer, the owner too
+    goalRefused(['goal', 'hold', G, 'drain', '--owner', '--until'], '--until needs a date (YYYY-MM-DD)', OWNER);
+    goalRefused(['goal', 'hold', G, 'drain', '--owner', '--until', ' '], '--until needs a date (YYYY-MM-DD)', OWNER);
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'kit-09-elsewhere', '--until'], '--until needs a date (YYYY-MM-DD)');
     // the owner's date with no cause is written as given, hold_until alone
     const before = linesFor(dir, 'goal', G);
     const until = atDay(() => { ok(dir, ['goal', 'hold', G, 'drain', '--owner', '--until', day(1)], OWNER); return day(1); });
@@ -536,7 +559,7 @@ test('waits A5: a supervisor\'s goal drain names its cause (goal hold <g> drain 
       goalRefused(['goal', 'hold', 'upkeep', 'drain', '--reason', 'r', ...until], '--until goes with --for');
       goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', ...until], '--until goes with --for');
     }
-    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--until', ' ', '--for', 'external:x'], 'the kit can\'t follow external:x: give it --until <date>');
+    goalRefused(['goal', 'hold', G, 'drain', '--reason', 'r', '--until', ' ', '--for', 'external:x'], '--until needs a date (YYYY-MM-DD)');
     const until = atDay(() => { ok(dir, ['goal', 'hold', G, 'drain', '--reason', 'r', '--for', 'external:x', '--until', ` ${day(5)} `]); return day(5); });
     assert.equal(lastFor(dir, 'goal', G).hold_until, until, 'the date is trimmed');
   });
@@ -589,4 +612,23 @@ test('waits A5: a supervisor\'s goal drain names its cause (goal hold <g> drain 
       }
     } finally { F.done(); }
   });
+});
+
+test('waits: each check name this ticket adds is one real test', () => {
+  const self = fs.readFileSync(new URL(import.meta.url), 'utf8');
+  const tag = ['waits', ' A'].join('');
+  const found = [...self.matchAll(new RegExp(`${tag}(\\d+):`, 'g'))];
+  assert.deepEqual(found.map((m) => Number(m[1])).sort(), [3, 4, 5], 'the checks this ticket adds, once each');
+  for (const m of found) {
+    const start = self.lastIndexOf('\n', m.index) + 1;
+    assert.equal(self.slice(start, m.index), "test('", `${m[0]} is a top-level test's own name`);
+    const close = self.indexOf("', ", m.index);
+    assert.match(self.slice(close, close + 20), /^', (async )?\((t)?\) => \{/, `${m[0]} has no options: neither skipped nor todo`);
+  }
+  const no = ['.sk', 'ip(', '|.to', 'do(', '|sk', 'ip:', '|to', 'do:'].join('').split('|');
+  for (const x of no) assert.ok(!self.includes(x), `the file has no ${x}`);
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const DT = path.join(here, '..', 'docs/devteam/scripts/devteam.mjs');
+  const fixtures = (d) => (fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? fixtures(path.join(d, e.name)) : [path.join(d, e.name)])) : []);
+  for (const f of [...fixtures(path.join(here, 'fixtures', 'waits-holds')), DT]) assert.ok(!new RegExp(`${tag}\\d+:`).test(fs.readFileSync(f, 'utf8')), `no check name in ${path.relative(here, f)}`);
 });

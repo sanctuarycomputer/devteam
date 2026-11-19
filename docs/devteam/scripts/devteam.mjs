@@ -4697,7 +4697,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component, incident_slots: s.incident_slots } });
   out(`active workers: ${active.length}/${capWords(s.max_active_tickets)}${s.incident_slots && incidentList().some((p) => p.status !== 'resolved') ? ` (+${s.incident_slots} for fix tickets)` : ''}`);
   for (const r of rows.filter((x) => x.incident)) out(`fix first  ${r.id}  (incident ${r.incident}, severity ${r.severity})`);
-  for (const h of held) out(`held       ${h.id}  (${h.held})`);
+  for (const h of held) { const hf = ts.get(h.id).held_for; const hu = ts.get(h.id).held_until; out(`held       ${h.id}  (${h.held}${Array.isArray(hf) && hf.length ? `; for ${hf.join(', ')}` : ''}${hu ? `, until ${hu}` : ''})`); }
   for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${r.blocks ? `  (blocks p${r.blocks.priority})` : ''}${r.overlaps_active ? `  (touches overlap ${r.overlaps_active.join(', ')}: start it once that merges)` : ''}${capped(r) ? '  (component at cap)' : ''}`);
@@ -13306,6 +13306,7 @@ function cmdGoal() {
     if (dated && !causes.length && by === 'supervisor') die('--until goes with --for: name what the hold waits on');
     if ((causes.length || dated || flags.for !== undefined) && isUpkeep(g)) die("Upkeep's hold takes no cause (--for, --until)");
     if ((causes.length || dated || flags.for !== undefined) && mode !== 'drain') die('--for goes with a drain');
+    if (dated && until === null) die('--until needs a date (YYYY-MM-DD)');
     if (by === 'supervisor' && mode === 'drain' && !isUpkeep(g)) {
       const refusal = holdCause({ kind: 'goal', id: g.id, causes, until, whole: null });
       if (refusal) die(refusal);
@@ -26988,7 +26989,7 @@ Setup and roles
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
 Holds and the fleet (planning.md §1, holds; supervisor.md §12)
-  goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--for <cause>… --until <date>] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason and --for, the cause it waits on) and releases only its own drain
   goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
   goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
   fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
@@ -27001,6 +27002,8 @@ Holds and the fleet (planning.md §1, holds; supervisor.md §12)
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
+  ticket hold <id> --reason r --for <cause>… [--until <date>] [--whole "<why>"]   supervisor: hold a ticket, naming what it waits on (q-…, a ticket, chore:<slug>, goal:<g-id>, pr:<link>#<n>, run:<link>:<id>, external:<words>; the last three need --until, at most 30 days ahead)
+  ticket release <id> [--reason r]       supervisor: lift a ticket's hold
   validate [--strict] [--plan <feature>]  graph rules D1-D11, reviews, goals, log health (--plan: the feature a detached plan head plans)
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
   moves [--json] [--holder owner|supervisor|planner|worker|nobody]   every running goal's, active ticket's, planner's and open chore's next move: what, who holds it, since when, owed or stalled marked (next-move@1)
